@@ -8,6 +8,34 @@ importers:
 
   .: {}
 
+  packages/flowgraph-blocks:
+    dependencies:
+      '@ferrite/flowgraph-runtime':
+        specifier: workspace:*
+        version: link:../flowgraph-runtime
+    devDependencies:
+      prettier:
+        specifier: ^3.4.2
+        version: 3.8.3
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.17)(jsdom@29.0.2)(lightningcss@1.32.0)
+
+  packages/flowgraph-runtime:
+    devDependencies:
+      prettier:
+        specifier: ^3.4.2
+        version: 3.8.3
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.17)(jsdom@29.0.2)(lightningcss@1.32.0)
+
   web:
     dependencies:
       bits-ui:

@@ -1,0 +1,25 @@
+{
+  "name": "@ferrite/flowgraph-blocks",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "WASM-block wrappers — hosts the ferrite-blocks WASM module as flowgraph blocks.",
+  "license": "MIT OR Apache-2.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "prettier --check src",
+    "check": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "build": "tsc --emitDeclarationOnly"
+  },
+  "dependencies": {
+    "@ferrite/flowgraph-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
