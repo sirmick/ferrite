@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build",
+    "wasm:build": "wasm-pack build --release --target web ../blocks --out-dir ../web/src/lib/wasm/blocks -- --features wasm",
+    "build": "pnpm wasm:build && vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
