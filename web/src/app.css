@@ -16,4 +16,12 @@ body {
   background: var(--color-bg);
   color: var(--color-fg);
   font-family: var(--font-sans);
+  margin: 0;
+  height: 100%;
+}
+
+html,
+body,
+:global(#svelte) {
+  height: 100dvh;
 }
