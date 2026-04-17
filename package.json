@@ -14,5 +14,8 @@
     "check": "pnpm -r check",
     "test": "pnpm -r test",
     "build": "pnpm -r build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
   }
 }
