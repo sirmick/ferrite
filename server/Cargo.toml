@@ -1,0 +1,14 @@
+[package]
+name        = "ferrited"
+version     = "0.0.1"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "Ferrite SDR daemon — device I/O, wideband FFT, channelizer, WS transport."
+
+[lints]
+workspace = true
+
+[dependencies]

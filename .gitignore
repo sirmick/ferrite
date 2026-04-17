@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Node / pnpm (lands in later commits)
+node_modules/
+.pnpm-store/
+.svelte-kit/
+build/
+dist/
+
+# Environment
+.env
+.env.*
+!.env.example

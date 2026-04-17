@@ -1,0 +1,21 @@
+[package]
+name        = "ferrite-blocks"
+version     = "0.0.1"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "Ferrite DSP blocks — dual-compile Rust crate (native + WebAssembly)."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+wasm    = []
+
+[dependencies]
