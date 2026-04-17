@@ -1,16 +1,18 @@
 //! `ferrited` — Ferrite SDR daemon.
 //!
-//! Phase A skeleton: binds to 0.0.0.0:8088 and serves `GET /api/hello`.
-//! Device I/O, FFT, channelizer, WS streams all land in later commits
-//! per `docs/10-commits.md`.
+//! Phase A skeleton. Binds to `0.0.0.0:8088`, serves `GET /api/hello`,
+//! and accepts a WebSocket upgrade on `/ws` that echoes text frames.
+//! Device I/O, FFT, channelizer, and the real binary WS protocol all
+//! land in later commits per `docs/10-commits.md`.
 
 use std::net::SocketAddr;
 
 use anyhow::Result;
-use axum::{routing::get, Json, Router};
-use serde::Serialize;
+use axum::{routing::get, Router};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+mod routes;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,7 +22,8 @@ async fn main() -> Result<()> {
         .init();
 
     let app = Router::new()
-        .route("/api/hello", get(hello))
+        .route("/api/hello", get(routes::hello))
+        .route("/ws", get(routes::ws_upgrade))
         .layer(TraceLayer::new_for_http());
 
     let addr: SocketAddr = "0.0.0.0:8088".parse()?;
@@ -29,19 +32,4 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-#[derive(Serialize)]
-struct Hello {
-    app: &'static str,
-    version: &'static str,
-    status: &'static str,
-}
-
-async fn hello() -> Json<Hello> {
-    Json(Hello {
-        app: "ferrited",
-        version: env!("CARGO_PKG_VERSION"),
-        status: "ok",
-    })
 }
