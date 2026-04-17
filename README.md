@@ -33,11 +33,14 @@ Orient here, roughly in order:
 - [09 — Decision log](docs/09-decisions.md)
 - [10 — Commit-level implementation plan](docs/10-commits.md)
 
-## Target hardware
+## Target platform
 
-Developed and validated against RTL-SDR (RTL2832U) and SDRPlay RSPduo via
-SoapySDR. Design keeps the door open for HackRF, Airspy, and anything else
-Soapy supports.
+- **OS:** Ubuntu 24.04 LTS (Noble) or newer, on the SBC and on dev machines.
+  Other Linux distros probably work but are not tested. Non-Linux hosts are
+  out of scope.
+- **Hardware:** developed and validated against RTL-SDR (RTL2832U) and
+  SDRPlay RSPduo via SoapySDR. Design keeps the door open for HackRF,
+  Airspy, and anything else Soapy supports.
 
 ## License
 
