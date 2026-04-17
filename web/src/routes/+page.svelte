@@ -1,20 +1,6 @@
-<script lang="ts">
-  const version = '0.0.1';
-</script>
-
-<main>
-  <h1>Ferrite</h1>
-  <p>Pre-alpha — app shell only. v{version}</p>
+<main class="mx-auto max-w-2xl p-8">
+  <h1 class="text-3xl font-semibold">Ferrite</h1>
+  <p class="mt-2 text-[color:var(--color-muted)]">
+    Pre-alpha — app shell only.
+  </p>
 </main>
-
-<style>
-  main {
-    font-family: system-ui, sans-serif;
-    padding: 2rem;
-    max-width: 42rem;
-    margin: 0 auto;
-  }
-  h1 {
-    margin: 0 0 0.5rem;
-  }
-</style>
