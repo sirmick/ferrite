@@ -8,11 +8,13 @@
 use wasm_bindgen::prelude::*;
 
 pub mod block;
+pub mod sine;
 
 pub use block::{
     Block, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort, ParamKind, ParamSpec,
     Placement, PortMeta, PortSpec, PortType, Work, MAX_PORTS,
 };
+pub use sine::{SineSource, SineSourceParams};
 
 #[must_use]
 pub const fn version() -> &'static str {
