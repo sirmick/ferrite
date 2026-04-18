@@ -90,6 +90,82 @@ async fn open_then_stream_fft_frames() {
     let _ = http_post_json(&close_url, "").await;
 }
 
+/// End-to-end DSP round trip: open a session with a sine tone at a known
+/// offset, read a handful of `FftU8` frames over the WebSocket, and assert
+/// the peak bin lands exactly where the pipeline math says it should.
+///
+/// Expected peak bin:  `N/2 + round(offset_hz * N / fs)`
+/// after the fftshift in `FftBlock::process`. With alpha=1.0 the first
+/// frame already reflects the steady-state spectrum (no smoothing lag).
+#[tokio::test]
+async fn ws_round_trip_peak_bin() {
+    let addr = spawn_app().await;
+    // Tone at +100 kHz, 2 MS/s, N=1024  →  bin offset = 51  →  peak bin 563.
+    let sample_rate = 2_000_000.0_f64;
+    let center = 100_000_000.0_f64;
+    let offset = 100_000.0_f64;
+    let fft_size = 1024_usize;
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation
+    )]
+    let expected_bin = fft_size / 2 + (offset * fft_size as f64 / sample_rate).round() as usize;
+
+    let body = format!(
+        r#"{{"sample_rate_hz": {sample_rate}, "center_freq_hz": {center}, "tone_freq_abs_hz": {tone}, "amplitude": 0.5, "fft_size": {fft_size}, "fft_rate_hz": 500, "floor_dbfs": -100, "ceil_dbfs": 0, "alpha": 1.0}}"#,
+        tone = center + offset,
+    );
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), &body).await;
+    let session_id = json_str(&resp, "session_id").expect("session_id");
+    let ws_url = json_str(&resp, "ws_url").expect("ws_url");
+    let url = format!("ws://{addr}{ws_url}");
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    // Pull a few frames — the very first may race with the subscribe
+    // setup, but by frame three the pipeline is in steady state.
+    let mut last_payload: Option<Vec<u8>> = None;
+    for _ in 0..3 {
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("frame within 2s")
+            .expect("ws stream open")
+            .expect("ws ok");
+        if let Message::Binary(bytes) = msg {
+            let (_hdr, payload) = ws_frame::decode(&bytes).expect("decode");
+            last_payload = Some(payload.to_vec());
+        }
+    }
+    let payload = last_payload.expect("at least one binary frame");
+    assert_eq!(payload.len(), fft_size);
+
+    let (peak_bin, peak_val) = payload
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, v)| **v)
+        .map(|(i, v)| (i, *v))
+        .expect("non-empty payload");
+
+    // The Hann window spreads a non-integer-bin tone across a few cells,
+    // but 51.2 rounds cleanly to 51 so the peak should sit exactly there.
+    assert_eq!(
+        peak_bin, expected_bin,
+        "expected peak at bin {expected_bin}, got {peak_bin} (val {peak_val})"
+    );
+    // Sanity: at ceil=0 dBFS with amplitude 0.5 the tone should light up
+    // a meaningful chunk of the 0..=255 range, not sit near the floor.
+    assert!(
+        peak_val > 128,
+        "peak value too low: {peak_val} — pipeline is producing bins but \
+         they're below mid-scale, which usually means amplitude or window \
+         gain is miscomputed"
+    );
+
+    let close_url = format!("http://{addr}/api/device/{session_id}/close");
+    let _ = http_post_json(&close_url, "").await;
+}
+
 /// Tiny HTTP GET helper — avoids pulling reqwest into dev-deps just for
 /// a couple of assertions.
 async fn http_get(url: &str) -> String {
