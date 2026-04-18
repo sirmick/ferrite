@@ -1,15 +1,27 @@
-// WASM-block wrappers.
+// @ferrite/flowgraph-blocks — catalog of block modules for flowgraph runtimes.
 //
-// Each block in the ferrite-blocks Rust crate gets a thin TS wrapper
-// implementing the runtime's Block interface. The concrete wrappers
-// land alongside their Rust counterparts starting Phase B.
+// Contract: every block lives in `src/blocks/<kebab-name>/` and default-exports
+// a `BlockModule` (see `registry.ts`). This file re-exports the registry
+// primitives plus a `registerAll(registry)` helper that wires up every known
+// block in one call. The list is hand-maintained until enough blocks land to
+// justify a codegen barrel.
 
-import type { PortType } from '@ferrite/flowgraph-runtime/types';
+import { BlockRegistry, type BlockModule } from "./registry.js";
+import passthru from "./blocks/passthru/index.js";
 
-export const BLOCKS_PACKAGE_VERSION = '0.0.1';
+export const BLOCKS_PACKAGE_VERSION = "0.0.1";
 
-export interface BlockWrapperSpec {
-  readonly typeName: string;
-  readonly inputs: ReadonlyArray<{ name: string; type: PortType }>;
-  readonly outputs: ReadonlyArray<{ name: string; type: PortType }>;
+export { BlockRegistry, defineBlock } from "./registry.js";
+export type { BlockModule, BlockWidget, InstallCtx } from "./registry.js";
+
+/** All blocks shipped by this package, keyed by `spec.typeName`. */
+export const blocks: Readonly<Record<string, BlockModule>> = {
+  Passthru: passthru,
+};
+
+/** Register every block in this package into `registry`. */
+export function registerAll(registry: BlockRegistry): void {
+  for (const mod of Object.values(blocks)) {
+    registry.add(mod);
+  }
 }

@@ -1,0 +1,21 @@
+{
+  "typeName": "Passthru",
+  "placement": "either",
+  "inputs": [{ "name": "in", "portType": "real_f32" }],
+  "outputs": [{ "name": "out", "portType": "real_f32" }],
+  "params": [
+    {
+      "key": "gain",
+      "label": "Gain",
+      "kind": {
+        "kind": "range",
+        "min": 0.0,
+        "max": 2.0,
+        "step": 0.01,
+        "default": 1.0,
+        "unit": ""
+      },
+      "mutableWhileStreaming": true
+    }
+  ]
+}
