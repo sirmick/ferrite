@@ -1,0 +1,27 @@
+# Lefthook — git hook runner.
+#
+# Installed by `pnpm install` via the root `prepare` script. Hooks live
+# in `.git/hooks/` and run on commit. CI re-runs the same checks, so the
+# hook is a fast-feedback layer, not a gate of last resort.
+#
+# Budget: the whole pre-commit should finish in a few seconds. If a
+# check gets too slow for that, move it to pre-push instead of
+# disabling it.
+
+pre-commit:
+  parallel: true
+  commands:
+    cargo-fmt:
+      glob: "*.rs"
+      run: cargo fmt --all -- --check
+      stage_fixed: false
+    pnpm-lint:
+      glob: "*.{ts,tsx,js,mjs,cjs,json,md,svelte,yml,yaml,css}"
+      run: pnpm -r lint
+    pnpm-check:
+      glob: "*.{ts,tsx,svelte}"
+      run: pnpm -r check
+
+# pre-push: cargo clippy + workspace tests are CI's job. Uncomment if
+# the round-trip to GitHub Actions ever becomes painful enough to pay
+# the minute-plus local cost.

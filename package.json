@@ -13,9 +13,13 @@
     "lint": "pnpm -r lint",
     "check": "pnpm -r check",
     "test": "pnpm -r test",
-    "build": "pnpm -r build"
+    "build": "pnpm -r build",
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "lefthook": "^1.8.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "@swc/core"]
+    "onlyBuiltDependencies": ["esbuild", "@swc/core", "lefthook"]
   }
 }
