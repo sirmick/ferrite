@@ -75,10 +75,19 @@
 
     <label class="grid gap-1 text-xs">
       <div class="flex justify-between">
-        <span class="text-[color:var(--color-muted)]">Tone offset</span>
-        <span class="font-mono">{toneOffsetKHz.toFixed(0)} kHz</span>
+        <span class="text-[color:var(--color-muted)]">Tone frequency</span>
+        <span class="font-mono">
+          {(CENTER_FREQ_HZ / 1e6).toFixed(3)} MHz
+          {toneOffsetKHz >= 0 ? '+' : '−'}
+          {Math.abs(toneOffsetKHz)} kHz
+        </span>
       </div>
       <input type="range" min="-900" max="900" step="1" bind:value={toneOffsetKHz} />
+      <div class="flex justify-between text-[10px] text-[color:var(--color-muted)]">
+        <span>−900 kHz</span>
+        <span>centre ({(CENTER_FREQ_HZ / 1e6).toFixed(0)} MHz, fixed)</span>
+        <span>+900 kHz</span>
+      </div>
     </label>
 
     <label class="grid gap-1 text-xs">
