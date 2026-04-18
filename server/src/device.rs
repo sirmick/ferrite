@@ -373,4 +373,91 @@ mod tests {
         assert_eq!(RangeSpec::from(zero_step).step, None);
         assert_eq!(RangeSpec::from(stepped).step, Some(0.5));
     }
+
+    /// Lock the wire shape of the capability schema. The web option
+    /// dialog (#64) parses this JSON, so any rename or restructure here
+    /// is a breaking change that must update the frontend in lockstep.
+    #[test]
+    fn capability_schema_json_shape_is_stable() {
+        let caps = DeviceCapabilities {
+            info: DeviceInfo {
+                driver: "rtlsdr".into(),
+                label: "Generic RTL2832U".into(),
+                serial: Some("00000001".into()),
+                args: BTreeMap::from([
+                    ("driver".to_string(), "rtlsdr".to_string()),
+                    ("serial".to_string(), "00000001".to_string()),
+                ]),
+            },
+            driver_key: "rtlsdr".into(),
+            hardware_key: "RTL2832U".into(),
+            hardware_info: BTreeMap::from([("tuner".to_string(), "R820T2".to_string())]),
+            rx_channels: vec![RxChannelCapabilities {
+                index: 0,
+                antennas: vec!["RX".into()],
+                sample_rate_ranges_hz: vec![RangeSpec {
+                    min: 225_000.0,
+                    max: 3_200_000.0,
+                    step: None,
+                }],
+                bandwidth_ranges_hz: vec![],
+                frequency_ranges_hz: vec![RangeSpec {
+                    min: 24_000_000.0,
+                    max: 1_766_000_000.0,
+                    step: None,
+                }],
+                frequency_components: vec![FrequencyComponent {
+                    name: "RF".into(),
+                    ranges_hz: vec![RangeSpec {
+                        min: 24_000_000.0,
+                        max: 1_766_000_000.0,
+                        step: None,
+                    }],
+                }],
+                gains: vec![GainElement {
+                    name: "TUNER".into(),
+                    range_db: RangeSpec {
+                        min: 0.0,
+                        max: 49.6,
+                        step: Some(0.1),
+                    },
+                }],
+                overall_gain_range_db: Some(RangeSpec {
+                    min: 0.0,
+                    max: 49.6,
+                    step: Some(0.1),
+                }),
+                has_agc: true,
+            }],
+        };
+        let json = serde_json::to_value(&caps).expect("serialize");
+        // Top-level keys
+        for key in [
+            "info",
+            "driver_key",
+            "hardware_key",
+            "hardware_info",
+            "rx_channels",
+        ] {
+            assert!(json.get(key).is_some(), "missing top-level key: {key}");
+        }
+        let chan = &json["rx_channels"][0];
+        for key in [
+            "index",
+            "antennas",
+            "sample_rate_ranges_hz",
+            "bandwidth_ranges_hz",
+            "frequency_ranges_hz",
+            "frequency_components",
+            "gains",
+            "overall_gain_range_db",
+            "has_agc",
+        ] {
+            assert!(chan.get(key).is_some(), "missing channel key: {key}");
+        }
+        // Range step uses `null` for "continuous" (driven by `Option<f64>`).
+        assert!(chan["sample_rate_ranges_hz"][0]["step"].is_null());
+        assert_eq!(chan["gains"][0]["range_db"]["step"].as_f64(), Some(0.1));
+        assert_eq!(chan["has_agc"], true);
+    }
 }

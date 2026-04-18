@@ -237,9 +237,9 @@ async fn close_emits_session_closed_event() {
     // Give the close path a moment to reach the broadcast.
     let mut saw_close = false;
     for _ in 0..16 {
-        let frame = match tokio::time::timeout(Duration::from_secs(1), ws.next()).await {
-            Ok(Some(Ok(f))) => f,
-            _ => break,
+        let Ok(Some(Ok(frame))) = tokio::time::timeout(Duration::from_secs(1), ws.next()).await
+        else {
+            break;
         };
         if let Message::Binary(bytes) = frame {
             let (hdr, payload) = ws_frame::decode(&bytes).expect("decode");
