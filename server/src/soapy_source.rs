@@ -1,0 +1,224 @@
+//! Live `SoapySDR` IQ source — reads `Complex<f32>` samples off a real
+//! device (RTL-SDR, RSP1A, …) and feeds them into the pipeline.
+//!
+//! ## Architecture
+//!
+//! The pipeline ticks at `fft_rate_hz` and consumes exactly `fft_size`
+//! samples per tick. Hardware produces samples at the much higher
+//! `sample_rate_hz`. The naive "read N then return" model overruns the
+//! driver's internal buffer almost immediately (we'd consume 4096
+//! samples every 33 ms while the device produces them every 2 ms at
+//! 2 MS/s).
+//!
+//! The stopgap used here: a dedicated **OS thread** calls `read()` in a
+//! tight loop, always overwriting a single `Mutex<Option<Vec<…>>>` slot
+//! with the most recent `fft_size` samples. The pipeline's `process()`
+//! swaps that slot on each tick. Dropped samples are fine for the
+//! waterfall display — we only need the **latest** spectrum, not every
+//! sample. Phase D will replace this with a proper ring-buffer + VFO
+//! channelizer that keeps every sample.
+//!
+//! ## Lifetime
+//!
+//! `Drop` flips a stop flag and joins the reader thread, then drops the
+//! `RxStream` (which deactivates and closes itself). `Device` is held
+//! by the stream so the handle stays valid for the read loop.
+
+#![cfg(feature = "soapysdr")]
+
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+use anyhow::{anyhow, Context, Result};
+use ferrite_blocks::{BlockIo, OutputPort};
+use num_complex::Complex;
+use soapysdr::{Device, Direction, RxStream};
+
+#[derive(Debug, Clone)]
+pub struct SoapyIqSourceParams {
+    pub args: String,
+    pub sample_rate_hz: f64,
+    pub center_freq_hz: f64,
+    pub fft_size: usize,
+    pub channel: usize,
+    pub bandwidth_hz: Option<f64>,
+    pub antenna: Option<String>,
+    pub gain_db: Option<f64>,
+    pub agc: Option<bool>,
+}
+
+type LatestSlot = Arc<Mutex<Option<Vec<Complex<f32>>>>>;
+
+pub struct SoapyIqSource {
+    sample_rate_hz: f64,
+    center_freq_hz: f64,
+    latest: LatestSlot,
+    stop: Arc<AtomicBool>,
+    reader: Option<JoinHandle<()>>,
+}
+
+impl SoapyIqSource {
+    /// Open the device, configure it, activate the Rx stream, and spawn
+    /// the reader thread. All Soapy calls are blocking; the caller should
+    /// invoke this from `tokio::task::spawn_blocking`.
+    pub fn new(params: &SoapyIqSourceParams) -> Result<Self> {
+        let device = Device::new(params.args.as_str())
+            .with_context(|| format!("open SoapySDR device with args {:?}", params.args))?;
+        let dir = Direction::Rx;
+        let ch = params.channel;
+
+        device
+            .set_sample_rate(dir, ch, params.sample_rate_hz)
+            .with_context(|| format!("set sample_rate={}", params.sample_rate_hz))?;
+        device
+            .set_frequency(dir, ch, params.center_freq_hz, ())
+            .with_context(|| format!("set center_freq={}", params.center_freq_hz))?;
+        if let Some(bw) = params.bandwidth_hz {
+            device
+                .set_bandwidth(dir, ch, bw)
+                .with_context(|| format!("set bandwidth={bw}"))?;
+        }
+        if let Some(ant) = &params.antenna {
+            device
+                .set_antenna(dir, ch, ant.as_bytes())
+                .with_context(|| format!("set antenna={ant}"))?;
+        }
+        if let Some(agc) = params.agc {
+            // `set_gain_mode` may not exist on every driver; ignore the
+            // error and continue with manual gain.
+            let _ = device.set_gain_mode(dir, ch, agc);
+        }
+        if let Some(g) = params.gain_db {
+            device
+                .set_gain(dir, ch, g)
+                .with_context(|| format!("set gain={g}"))?;
+        }
+
+        let actual_rate = device.sample_rate(dir, ch).unwrap_or(params.sample_rate_hz);
+        let actual_freq = device.frequency(dir, ch).unwrap_or(params.center_freq_hz);
+
+        let mut stream: RxStream<Complex<f32>> = device
+            .rx_stream::<Complex<f32>>(&[ch])
+            .context("create Rx stream")?;
+        stream.activate(None).context("activate Rx stream")?;
+
+        if params.fft_size == 0 {
+            return Err(anyhow!("fft_size must be > 0"));
+        }
+
+        let latest: LatestSlot = Arc::new(Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let reader_latest = latest.clone();
+        let reader_stop = stop.clone();
+        let block_size = params.fft_size;
+        let reader = thread::Builder::new()
+            .name("soapy-rx".into())
+            .spawn(move || run_reader(stream, block_size, &reader_latest, &reader_stop))
+            .context("spawn soapy reader thread")?;
+
+        Ok(Self {
+            sample_rate_hz: actual_rate,
+            center_freq_hz: actual_freq,
+            latest,
+            stop,
+            reader: Some(reader),
+        })
+    }
+
+    #[must_use]
+    pub fn rate_hz(&self) -> f64 {
+        self.sample_rate_hz
+    }
+
+    #[must_use]
+    pub fn center_freq_hz(&self) -> f64 {
+        self.center_freq_hz
+    }
+
+    /// Copy the most recent block of samples into the `out` port. If the
+    /// reader has not produced its first block yet, fills with zeros so
+    /// the rest of the pipeline still runs (the next FFT just shows a
+    /// quiet noise floor for one tick).
+    pub fn process(&mut self, io: &mut BlockIo<'_>) -> Result<()> {
+        let Some(out) = io
+            .outputs
+            .iter_mut()
+            .find(|p| p.name == "out")
+            .and_then(OutputPort::as_iq_f32_mut)
+        else {
+            return Ok(());
+        };
+        let snapshot = self
+            .latest
+            .lock()
+            .map_err(|_| anyhow!("soapy latest mutex poisoned"))?
+            .take();
+        match snapshot {
+            Some(samples) => {
+                let n = out.len().min(samples.len());
+                out[..n].copy_from_slice(&samples[..n]);
+                if n < out.len() {
+                    out[n..].fill(Complex::new(0.0, 0.0));
+                }
+            }
+            None => out.fill(Complex::new(0.0, 0.0)),
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SoapyIqSource {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.reader.take() {
+            // Best-effort join — we hold no async runtime guarantees here.
+            let _ = handle.join();
+        }
+    }
+}
+
+fn run_reader(
+    mut stream: RxStream<Complex<f32>>,
+    block_size: usize,
+    latest: &LatestSlot,
+    stop: &Arc<AtomicBool>,
+) {
+    let mut buf = vec![Complex::new(0.0_f32, 0.0); block_size];
+    let read_timeout_us: i64 = 100_000;
+    while !stop.load(Ordering::Relaxed) {
+        let mut filled = 0;
+        while filled < block_size && !stop.load(Ordering::Relaxed) {
+            let result = {
+                let dst: &mut [Complex<f32>] = &mut buf[filled..];
+                let mut buffers: [&mut [Complex<f32>]; 1] = [dst];
+                stream.read(&mut buffers, read_timeout_us)
+            };
+            match result {
+                Ok(0) => {
+                    // Timeout with no samples: brief backoff so we
+                    // don't pin the core if the device went away.
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Ok(n) => filled += n,
+                Err(err) => {
+                    tracing::warn!(?err, "soapy read error; ending reader");
+                    let _ = stream.deactivate(None);
+                    return;
+                }
+            }
+        }
+        if filled == block_size {
+            if let Ok(mut slot) = latest.lock() {
+                *slot = Some(buf.clone());
+            }
+        }
+    }
+    let _ = stream.deactivate(None);
+}

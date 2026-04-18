@@ -12,7 +12,7 @@ use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::session::{AppState, OpenSpec};
+use crate::session::{AppState, OpenSpec, SourceKind};
 
 #[derive(Serialize)]
 pub struct Hello {
@@ -76,6 +76,14 @@ pub struct OpenRequest {
     pub floor_dbfs: Option<f32>,
     pub ceil_dbfs: Option<f32>,
     pub alpha: Option<f32>,
+    /// `SoapySDR` device args (e.g. `driver=rtlsdr,serial=00000001`).
+    /// When set, this session opens that device instead of the CLI
+    /// default source. Requires the `soapysdr` feature on the server.
+    pub device_args: Option<String>,
+    pub antenna: Option<String>,
+    pub gain_db: Option<f64>,
+    pub agc: Option<bool>,
+    pub bandwidth_hz: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -197,7 +205,18 @@ pub async fn open_session(
         ceil_dbfs: req.ceil_dbfs.unwrap_or(d.ceil_dbfs),
         alpha: req.alpha.unwrap_or(d.alpha),
     };
-    let opened = state.open(spec).await.map_err(|e| {
+    let override_kind = source_override(&req).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "FEATURE_DISABLED",
+                    message: e,
+                },
+            }),
+        )
+    })?;
+    let opened = state.open(spec, override_kind).await.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ApiError {
@@ -219,6 +238,44 @@ pub async fn open_session(
             rate_hz: opened.fft_rate_hz,
         },
     }))
+}
+
+/// Translate the request's `device_args` (and friends) into a per-session
+/// [`SourceKind`] override. Returns `Ok(None)` when the request keeps the
+/// CLI default; returns `Err` when the user asked for a Soapy device but
+/// the server was built without the feature.
+//
+// The `Result` is structurally needed by the feature-disabled stub but
+// is never an error in this build; clippy correctly notices that and we
+// suppress it here so the call site stays uniform across configs.
+#[cfg(feature = "soapysdr")]
+#[allow(clippy::unnecessary_wraps)]
+fn source_override(req: &OpenRequest) -> Result<Option<SourceKind>, String> {
+    let Some(args) = req.device_args.clone().filter(|s| !s.trim().is_empty()) else {
+        return Ok(None);
+    };
+    Ok(Some(SourceKind::Soapy {
+        args,
+        antenna: req.antenna.clone(),
+        gain_db: req.gain_db,
+        agc: req.agc,
+        bandwidth_hz: req.bandwidth_hz,
+    }))
+}
+
+/// Feature-disabled stub: any non-empty `device_args` is rejected up front.
+#[cfg(not(feature = "soapysdr"))]
+fn source_override(req: &OpenRequest) -> Result<Option<SourceKind>, String> {
+    if req
+        .device_args
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Err("ferrited was built without the `soapysdr` feature; \
+                    rebuild with `--features soapysdr` to open hardware devices"
+            .into());
+    }
+    Ok(None)
 }
 
 pub async fn close_session(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {

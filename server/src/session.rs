@@ -29,8 +29,11 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use crate::ws_frame::{encode_into, FrameHeader, PayloadType, FFT_STREAM};
 
 /// Server-wide source selection. Set once at startup via CLI; every session
-/// opened afterwards uses this kind. (A future commit will let the UI pick
-/// between registered sources per session.)
+/// opened afterwards uses this kind, unless the open request explicitly
+/// names a `SoapySDR` device — in which case the per-session [`Soapy`]
+/// kind takes precedence (see [`AppState::open`]).
+///
+/// [`Soapy`]: SourceKind::Soapy
 #[derive(Debug, Clone, Default)]
 pub enum SourceKind {
     #[default]
@@ -38,6 +41,16 @@ pub enum SourceKind {
     File {
         path: PathBuf,
         loop_playback: bool,
+    },
+    /// Live `SoapySDR` device. Constructed per session from the
+    /// `device_args` field of the open request.
+    #[cfg(feature = "soapysdr")]
+    Soapy {
+        args: String,
+        antenna: Option<String>,
+        gain_db: Option<f64>,
+        agc: Option<bool>,
+        bandwidth_hz: Option<f64>,
     },
 }
 
@@ -147,20 +160,40 @@ impl AppState {
 
     /// Start a new pipeline task. If a session is already active it is
     /// closed atomically (last-connect-wins, per `docs/02-protocol.md`).
-    pub async fn open(&self, spec: OpenSpec) -> Result<OpenedSession> {
+    ///
+    /// `override_kind` lets the caller (a request handler) override the
+    /// CLI-default source — used so `POST /api/device/open` can target a
+    /// specific `SoapySDR` device per session.
+    pub async fn open(
+        &self,
+        spec: OpenSpec,
+        override_kind: Option<SourceKind>,
+    ) -> Result<OpenedSession> {
         let fft = FftBlock::new(FftBlockParams {
             size: spec.fft_size,
             window: FftWindow::Hann,
         })?;
-        let source = build_source(&self.cli.source, &spec)?;
+        let kind = override_kind.unwrap_or_else(|| self.cli.source.clone());
+        // Soapy device construction is blocking (USB enumeration, control
+        // transfers); offload so the runtime worker stays responsive.
+        let source = tokio::task::spawn_blocking(move || build_source(&kind, &spec))
+            .await
+            .map_err(|e| anyhow!("source build task panicked: {e}"))??;
         // For file sources, honour the file's own sample rate rather than
         // whatever the request carries — the FFT bin spacing must match the
-        // samples we're actually consuming.
+        // samples we're actually consuming. Same story for Soapy devices
+        // that round to a supported rate.
         let effective_spec = match &source {
             PipelineSource::Sine(_) => spec,
             PipelineSource::File(f) => OpenSpec {
                 sample_rate_hz: f.rate_hz(),
                 center_freq_hz: f.center_freq_hz(),
+                ..spec
+            },
+            #[cfg(feature = "soapysdr")]
+            PipelineSource::Soapy(d) => OpenSpec {
+                sample_rate_hz: d.rate_hz(),
+                center_freq_hz: d.center_freq_hz(),
                 ..spec
             },
         };
@@ -231,10 +264,13 @@ fn now_ns() -> u64 {
 }
 
 /// Runtime union of the supported IQ sources. Construction is fallible
-/// (file open, WAV parse); the pipeline driver only sees [`process`].
+/// (file open, WAV parse, Soapy device open); the pipeline driver only
+/// sees [`process`].
 pub enum PipelineSource {
     Sine(SineSource),
     File(FileIqSource),
+    #[cfg(feature = "soapysdr")]
+    Soapy(crate::soapy_source::SoapyIqSource),
 }
 
 impl PipelineSource {
@@ -242,6 +278,8 @@ impl PipelineSource {
         match self {
             Self::Sine(s) => s.process(io).map(|_| ()).map_err(|e| anyhow!("sine: {e}")),
             Self::File(f) => f.process(io).map(|_| ()).map_err(|e| anyhow!("file: {e}")),
+            #[cfg(feature = "soapysdr")]
+            Self::Soapy(d) => d.process(io).map_err(|e| anyhow!("soapy: {e}")),
         }
     }
 
@@ -249,6 +287,8 @@ impl PipelineSource {
         match self {
             Self::Sine(_) => f64::NAN,
             Self::File(f) => f.rate_hz(),
+            #[cfg(feature = "soapysdr")]
+            Self::Soapy(d) => d.rate_hz(),
         }
     }
 
@@ -256,6 +296,8 @@ impl PipelineSource {
         match self {
             Self::Sine(_) => f64::NAN,
             Self::File(f) => f.center_freq_hz(),
+            #[cfg(feature = "soapysdr")]
+            Self::Soapy(d) => d.center_freq_hz(),
         }
     }
 }
@@ -286,6 +328,35 @@ fn build_source(kind: &SourceKind, spec: &OpenSpec) -> Result<PipelineSource> {
                 "file source opened"
             );
             Ok(PipelineSource::File(f))
+        }
+        #[cfg(feature = "soapysdr")]
+        SourceKind::Soapy {
+            args,
+            antenna,
+            gain_db,
+            agc,
+            bandwidth_hz,
+        } => {
+            let d = crate::soapy_source::SoapyIqSource::new(
+                &crate::soapy_source::SoapyIqSourceParams {
+                    args: args.clone(),
+                    sample_rate_hz: spec.sample_rate_hz,
+                    center_freq_hz: spec.center_freq_hz,
+                    fft_size: spec.fft_size,
+                    channel: 0,
+                    bandwidth_hz: *bandwidth_hz,
+                    antenna: antenna.clone(),
+                    gain_db: *gain_db,
+                    agc: *agc,
+                },
+            )?;
+            tracing::info!(
+                args = %args,
+                rate_hz = d.rate_hz(),
+                center_hz = d.center_freq_hz(),
+                "soapy source opened"
+            );
+            Ok(PipelineSource::Soapy(d))
         }
     }
 }
@@ -422,7 +493,7 @@ mod tests {
             fft_rate_hz: 200.0,
             ..OpenSpec::default()
         };
-        let opened = state.open(spec).await.unwrap();
+        let opened = state.open(spec, None).await.unwrap();
         let mut rx = state.subscribe(&opened.id).await.expect("subscribe");
         let bytes = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -438,8 +509,8 @@ mod tests {
     #[tokio::test]
     async fn second_open_evicts_first() {
         let state = AppState::new(CliConfig::default());
-        let a = state.open(OpenSpec::default()).await.unwrap();
-        let b = state.open(OpenSpec::default()).await.unwrap();
+        let a = state.open(OpenSpec::default(), None).await.unwrap();
+        let b = state.open(OpenSpec::default(), None).await.unwrap();
         assert_ne!(a.id, b.id);
         assert!(state.subscribe(&a.id).await.is_none());
         assert!(state.subscribe(&b.id).await.is_some());

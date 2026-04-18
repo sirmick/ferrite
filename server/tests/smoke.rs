@@ -23,6 +23,11 @@ mod session;
 #[allow(dead_code)]
 mod device;
 
+#[cfg(feature = "soapysdr")]
+#[path = "../src/soapy_source.rs"]
+#[allow(dead_code)]
+mod soapy_source;
+
 #[path = "../src/routes.rs"]
 mod routes;
 
@@ -170,6 +175,33 @@ async fn ws_round_trip_peak_bin() {
 
     let close_url = format!("http://{addr}/api/device/{session_id}/close");
     let _ = http_post_json(&close_url, "").await;
+}
+
+/// `device_args` in `POST /api/device/open` must produce a clean error
+/// in **both** build configurations:
+/// - no `soapysdr` feature → `FEATURE_DISABLED` (config error, surfaced
+///   before any device call)
+/// - with feature, bogus driver name → `INVALID_SETTINGS` (real Soapy
+///   error wrapped from `Device::new`)
+///
+/// Either way the server stays up and the response body says what went
+/// wrong; this test just protects the contract, not the success path
+/// (that needs hardware).
+#[tokio::test]
+async fn open_with_bogus_device_args_returns_clean_error() {
+    let addr = spawn_app().await;
+    let body = r#"{"device_args": "driver=ferrite-no-such-driver"}"#;
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), body).await;
+    #[cfg(not(feature = "soapysdr"))]
+    assert!(
+        resp.contains("FEATURE_DISABLED"),
+        "expected FEATURE_DISABLED, got: {resp}"
+    );
+    #[cfg(feature = "soapysdr")]
+    assert!(
+        resp.contains("INVALID_SETTINGS"),
+        "expected INVALID_SETTINGS from a bogus driver name, got: {resp}"
+    );
 }
 
 /// `GET /api/devices` shape depends on build configuration:
