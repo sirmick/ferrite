@@ -9,7 +9,10 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::Result;
-use axum::{routing::get, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use http::{HeaderName, HeaderValue};
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -19,6 +22,7 @@ use tower_http::{
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod routes;
+mod session;
 mod ws_frame;
 
 #[tokio::main]
@@ -31,9 +35,15 @@ async fn main() -> Result<()> {
     let static_root: PathBuf = std::env::var_os("FERRITE_STATIC_ROOT")
         .map_or_else(|| PathBuf::from("./web-dist"), PathBuf::from);
 
+    let state = session::AppState::new();
+
     let mut app = Router::new()
         .route("/api/hello", get(routes::hello))
-        .route("/ws", get(routes::ws_upgrade));
+        .route("/api/device/open", post(routes::open_session))
+        .route("/api/device/:id/close", post(routes::close_session))
+        .route("/ws", get(routes::ws_upgrade))
+        .route("/ws/:id", get(routes::ws_session))
+        .with_state(state);
 
     if static_root.is_dir() {
         let index = static_root.join("index.html");

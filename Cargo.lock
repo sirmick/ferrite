@@ -216,8 +216,10 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
+ "ferrite-blocks",
  "futures-util",
  "http",
+ "num-complex",
  "serde",
  "serde_json",
  "tokio",
