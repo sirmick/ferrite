@@ -19,6 +19,7 @@ use tower_http::{
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod routes;
+mod ws_frame;
 
 #[tokio::main]
 async fn main() -> Result<()> {
