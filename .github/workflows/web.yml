@@ -1,0 +1,40 @@
+name: pnpm
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: pnpm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm -r lint
+        run: pnpm -r lint
+
+      - name: pnpm -r check
+        run: pnpm -r check
+
+      - name: pnpm -r test
+        run: pnpm -r test
