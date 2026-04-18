@@ -21,4 +21,5 @@ wasm    = ["dep:wasm-bindgen"]
 [dependencies]
 anyhow       = "1"
 num-complex  = { version = "0.4", default-features = false, features = ["std"] }
+rustfft      = { version = "6", default-features = false }
 wasm-bindgen = { version = "0.2", optional = true }
