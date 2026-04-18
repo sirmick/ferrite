@@ -1,0 +1,20 @@
+{
+  "name": "APRS — 144.390 MHz packet activity (European allocation at 144.800)",
+  "file": "aprs_145.070mhz_iq-s16.wav",
+  "format": "wav-pcm-s16-stereo-iq",
+  "sample_rate_hz": 39062,
+  "center_freq_hz": 145070000,
+  "duration_s": 18.8,
+  "modulation": "AFSK 1200 baud over FM (Bell 202)",
+  "source": {
+    "origin": "sigidwiki",
+    "url": "https://www.sigidwiki.com/wiki/Automatic_Packet_Reporting_System_(APRS)",
+    "uploader": "Cartoonman",
+    "uploaded": "2015-08-20",
+    "original_filename": "SDRSharp_20150819_190253Z_145070kHz_IQ.wav"
+  },
+  "license": {
+    "name": "CC-BY-SA 3.0",
+    "url": "https://creativecommons.org/licenses/by-sa/3.0/"
+  }
+}
