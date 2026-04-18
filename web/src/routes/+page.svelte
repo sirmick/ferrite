@@ -10,6 +10,7 @@
   let wsStatus = $state<ClientStatus | 'idle' | string>('idle');
   let frameRate = $state(0);
   let lastFrameSize = $state(0);
+  let client = $state<FrameClient | undefined>(undefined);
 
   async function runDemo() {
     try {
@@ -21,7 +22,6 @@
   }
 
   onMount(() => {
-    let client: FrameClient | undefined;
     let sessionId: string | undefined;
     let counter = 0;
     let windowStart = performance.now();
@@ -65,6 +65,7 @@
       cancelled = true;
       if (rateTimer !== undefined) clearInterval(rateTimer);
       client?.close();
+      client = undefined;
       if (sessionId) void closeDevice(sessionId).catch(() => {});
     };
   });
@@ -91,6 +92,12 @@
     </div>
   </header>
   <div class="min-h-0 flex-1">
-    <Workspace />
+    {#if client}
+      <Workspace {client} />
+    {:else}
+      <div class="flex h-full items-center justify-center text-sm text-[color:var(--color-muted)]">
+        waiting for session…
+      </div>
+    {/if}
   </div>
 </div>
