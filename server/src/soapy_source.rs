@@ -56,6 +56,12 @@ pub struct SoapyIqSourceParams {
 type LatestSlot = Arc<Mutex<Option<Vec<Complex<f32>>>>>;
 
 pub struct SoapyIqSource {
+    /// Held so we can issue retunes / gain changes from any thread while
+    /// the reader thread holds the `RxStream`. Soapy's `Device` is an
+    /// `Arc<DeviceInner>` internally, so cloning it is cheap and the
+    /// underlying handle is reference-counted.
+    device: Device,
+    channel: usize,
     sample_rate_hz: f64,
     center_freq_hz: f64,
     latest: LatestSlot,
@@ -124,6 +130,8 @@ impl SoapyIqSource {
             .context("spawn soapy reader thread")?;
 
         Ok(Self {
+            device,
+            channel: ch,
             sample_rate_hz: actual_rate,
             center_freq_hz: actual_freq,
             latest,
@@ -140,6 +148,32 @@ impl SoapyIqSource {
     #[must_use]
     pub fn center_freq_hz(&self) -> f64 {
         self.center_freq_hz
+    }
+
+    /// Retune the device to a new RF center frequency. Re-reads the
+    /// hardware's actual setting (some drivers snap to a step).
+    pub fn set_center_freq(&mut self, hz: f64) -> Result<()> {
+        self.device
+            .set_frequency(Direction::Rx, self.channel, hz, ())
+            .with_context(|| format!("set center_freq={hz}"))?;
+        if let Ok(actual) = self.device.frequency(Direction::Rx, self.channel) {
+            self.center_freq_hz = actual;
+        }
+        Ok(())
+    }
+
+    pub fn set_gain(&mut self, db: f64) -> Result<()> {
+        self.device
+            .set_gain(Direction::Rx, self.channel, db)
+            .with_context(|| format!("set gain={db}"))?;
+        Ok(())
+    }
+
+    pub fn set_agc(&mut self, on: bool) -> Result<()> {
+        self.device
+            .set_gain_mode(Direction::Rx, self.channel, on)
+            .with_context(|| format!("set agc={on}"))?;
+        Ok(())
     }
 
     /// Copy the most recent block of samples into the `out` port. If the

@@ -10,7 +10,7 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result};
 use axum::{
-    routing::{get, post},
+    routing::{get, patch, post},
     Router,
 };
 use clap::Parser;
@@ -119,6 +119,8 @@ async fn main() -> Result<()> {
         .route("/api/devices", get(routes::list_devices))
         .route("/api/device/open", post(routes::open_session))
         .route("/api/device/:id/close", post(routes::close_session))
+        .route("/api/device/:id/state", get(routes::session_state))
+        .route("/api/device/:id/settings", patch(routes::patch_settings))
         .route("/ws", get(routes::ws_upgrade))
         .route("/ws/:id", get(routes::ws_session))
         .with_state(state);

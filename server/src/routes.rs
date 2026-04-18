@@ -12,7 +12,7 @@ use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::session::{AppState, OpenSpec, SourceKind};
+use crate::session::{AppState, OpenSpec, PatchRequest, SessionState, SourceKind};
 
 #[derive(Serialize)]
 pub struct Hello {
@@ -284,6 +284,35 @@ pub async fn close_session(State(state): State<AppState>, Path(id): Path<String>
     } else {
         StatusCode::NOT_FOUND
     }
+}
+
+/// `GET /api/device/:id/state` — current session settings snapshot.
+/// Returns 404 if the id does not match the active session.
+pub async fn session_state(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionState>, StatusCode> {
+    state
+        .state(&id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// `PATCH /api/device/:id/settings` — apply a partial settings update.
+/// Returns the post-apply state snapshot (200), or 404 if the id is
+/// stale. Hardware errors are logged and surfaced via the next snapshot
+/// reflecting whatever the device actually accepted.
+pub async fn patch_settings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PatchRequest>,
+) -> Result<Json<SessionState>, StatusCode> {
+    state
+        .patch(&id, req)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 pub async fn ws_session(

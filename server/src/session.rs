@@ -12,7 +12,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -24,9 +24,10 @@ use ferrite_blocks::{
     SineSourceParams,
 };
 use num_complex::Complex;
-use tokio::sync::{broadcast, oneshot, RwLock};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 
-use crate::ws_frame::{encode_into, FrameHeader, PayloadType, FFT_STREAM};
+use crate::ws_frame::{encode_into, FrameHeader, PayloadType, CONTROL_STREAM, FFT_STREAM};
 
 /// Server-wide source selection. Set once at startup via CLI; every session
 /// opened afterwards uses this kind, unless the open request explicitly
@@ -106,11 +107,71 @@ pub struct OpenedSession {
     pub fft_rate_hz: f32,
 }
 
+/// JSON-shape snapshot of the active session — what `GET /api/device/{id}/state`
+/// returns. Optional fields are populated only when the field is meaningful
+/// for the current source (e.g. `gain_db` is `None` for a sine source).
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionState {
+    pub id: String,
+    pub source_kind: &'static str,
+    pub sample_rate_hz: f64,
+    pub center_freq_hz: f64,
+    pub fft_size: usize,
+    pub fft_rate_hz: f32,
+    pub floor_dbfs: f32,
+    pub ceil_dbfs: f32,
+    pub alpha: f32,
+    pub tone_freq_abs_hz: Option<f64>,
+    pub amplitude: Option<f32>,
+    pub gain_db: Option<f64>,
+    pub antenna: Option<String>,
+    pub agc: Option<bool>,
+}
+
+/// Field-update spec for `PATCH /api/device/{id}/settings`. Every field is
+/// optional — only set fields are applied. Per `docs/02-protocol.md` the
+/// listed knobs are mutable while streaming; the request silently no-ops
+/// fields that the active source does not support (e.g. `gain_db` on a
+/// sine source) rather than failing.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PatchRequest {
+    pub center_freq_hz: Option<f64>,
+    pub tone_freq_abs_hz: Option<f64>,
+    pub amplitude: Option<f32>,
+    pub gain_db: Option<f64>,
+    pub agc: Option<bool>,
+    pub floor_dbfs: Option<f32>,
+    pub ceil_dbfs: Option<f32>,
+    pub alpha: Option<f32>,
+}
+
+impl PatchRequest {
+    fn is_noop(&self) -> bool {
+        self.center_freq_hz.is_none()
+            && self.tone_freq_abs_hz.is_none()
+            && self.amplitude.is_none()
+            && self.gain_db.is_none()
+            && self.agc.is_none()
+            && self.floor_dbfs.is_none()
+            && self.ceil_dbfs.is_none()
+            && self.alpha.is_none()
+    }
+}
+
+enum ControlCmd {
+    Patch(PatchRequest),
+}
+
 struct Session {
     id: String,
     frames: FrameTx,
     /// Taken-and-fired by `close()`; the pipeline task watches this.
     shutdown: Option<oneshot::Sender<()>>,
+    control: mpsc::UnboundedSender<ControlCmd>,
+    /// Last-known snapshot, refreshed by the pipeline task as it applies
+    /// patches and reads back hardware values.
+    state: Arc<Mutex<SessionState>>,
 }
 
 struct Inner {
@@ -198,21 +259,26 @@ impl AppState {
             },
         };
         let mut inner = self.inner.write().await;
-        if let Some(mut prev) = inner.session.take() {
-            if let Some(tx) = prev.shutdown.take() {
-                let _ = tx.send(());
-            }
+        if let Some(prev) = inner.session.take() {
+            evict(prev, "evicted");
         }
         let id = format!("{:016x}", inner.next_id.fetch_add(1, Ordering::Relaxed));
         let (frames, _) = broadcast::channel(32);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
         let frames_for_task = frames.clone();
+        let initial_state =
+            build_session_state(&id, &source, &effective_spec, kind_for_state(&source));
+        let state = Arc::new(Mutex::new(initial_state));
+        let state_for_task = state.clone();
         tokio::spawn(run_pipeline(
             effective_spec,
             source,
             fft,
             frames_for_task,
             shutdown_rx,
+            control_rx,
+            state_for_task,
         ));
         let opened = OpenedSession {
             id: id.clone(),
@@ -223,22 +289,62 @@ impl AppState {
             id,
             frames,
             shutdown: Some(shutdown_tx),
+            control: control_tx,
+            state,
         });
         Ok(opened)
     }
 
-    /// Close the session if `id` matches the active one.
+    /// Close the session if `id` matches the active one. Sends a
+    /// `session_closed` JSON event to subscribers before tearing down the
+    /// pipeline so the client can distinguish a deliberate close from
+    /// network breakage.
     pub async fn close(&self, id: &str) -> bool {
         let mut inner = self.inner.write().await;
         if inner.session.as_ref().is_some_and(|s| s.id == id) {
-            let mut s = inner.session.take().expect("checked above");
-            if let Some(tx) = s.shutdown.take() {
-                let _ = tx.send(());
-            }
+            let s = inner.session.take().expect("checked above");
+            evict(s, "closed");
             true
         } else {
             false
         }
+    }
+
+    /// Snapshot the named session's settings. Returns `None` if no session
+    /// or the id doesn't match.
+    pub async fn state(&self, id: &str) -> Option<SessionState> {
+        let inner = self.inner.read().await;
+        let s = inner.session.as_ref()?;
+        if s.id != id {
+            return None;
+        }
+        s.state.lock().ok().map(|g| g.clone())
+    }
+
+    /// Apply a settings patch to the active session. Returns `None` if no
+    /// session matches the id, `Some(SessionState)` with the post-apply
+    /// snapshot otherwise. The pipeline task picks up the command on its
+    /// next tick — there's no synchronous error path for hardware errors;
+    /// those are logged and the snapshot reflects what the device actually
+    /// accepted.
+    pub async fn patch(&self, id: &str, req: PatchRequest) -> Option<SessionState> {
+        if req.is_noop() {
+            return self.state(id).await;
+        }
+        let inner = self.inner.read().await;
+        let s = inner.session.as_ref()?;
+        if s.id != id {
+            return None;
+        }
+        if s.control.send(ControlCmd::Patch(req)).is_err() {
+            tracing::warn!(session = %id, "patch dropped — pipeline closed");
+        }
+        // Brief drop the lock + yield so the pipeline can apply before we
+        // snapshot. This is best-effort; `state()` reads whatever the
+        // pipeline has written so far.
+        drop(inner);
+        tokio::task::yield_now().await;
+        self.state(id).await
     }
 
     /// Get a fresh frame subscription for `id`. Returns `None` if there is
@@ -250,6 +356,73 @@ impl AppState {
             return None;
         }
         Some(session.frames.subscribe())
+    }
+}
+
+/// Tear down a session, sending a final `session_closed` JSON event to
+/// subscribers so the client can react before the WebSocket closes.
+fn evict(mut s: Session, reason: &str) {
+    let body = format!(
+        r#"{{"type":"session_closed","session_id":"{id}","reason":"{reason}"}}"#,
+        id = s.id,
+    );
+    let header = FrameHeader {
+        version: crate::ws_frame::PROTOCOL_VERSION,
+        payload_type: PayloadType::JsonEvent,
+        stream_id: CONTROL_STREAM,
+        seq: 0,
+        timestamp_ns: now_ns(),
+    };
+    let mut buf = Vec::with_capacity(crate::ws_frame::HEADER_LEN + body.len());
+    encode_into(&header, body.as_bytes(), &mut buf);
+    let _ = s.frames.send(Arc::new(buf));
+    if let Some(tx) = s.shutdown.take() {
+        let _ = tx.send(());
+    }
+}
+
+fn kind_for_state(source: &PipelineSource) -> &'static str {
+    match source {
+        PipelineSource::Sine(_) => "sine",
+        PipelineSource::File(_) => "file",
+        #[cfg(feature = "soapysdr")]
+        PipelineSource::Soapy(_) => "soapy",
+    }
+}
+
+fn build_session_state(
+    id: &str,
+    source: &PipelineSource,
+    spec: &OpenSpec,
+    kind: &'static str,
+) -> SessionState {
+    let (tone, amp, gain, ant, agc) = match source {
+        PipelineSource::Sine(_) => (
+            Some(spec.tone_freq_abs_hz),
+            Some(spec.amplitude),
+            None,
+            None,
+            None,
+        ),
+        PipelineSource::File(_) => (None, None, None, None, None),
+        #[cfg(feature = "soapysdr")]
+        PipelineSource::Soapy(_) => (None, None, None, None, None),
+    };
+    SessionState {
+        id: id.to_string(),
+        source_kind: kind,
+        sample_rate_hz: spec.sample_rate_hz,
+        center_freq_hz: spec.center_freq_hz,
+        fft_size: spec.fft_size,
+        fft_rate_hz: spec.fft_rate_hz,
+        floor_dbfs: spec.floor_dbfs,
+        ceil_dbfs: spec.ceil_dbfs,
+        alpha: spec.alpha,
+        tone_freq_abs_hz: tone,
+        amplitude: amp,
+        gain_db: gain,
+        antenna: ant,
+        agc,
     }
 }
 
@@ -361,12 +534,15 @@ fn build_source(kind: &SourceKind, spec: &OpenSpec) -> Result<PipelineSource> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
     spec: OpenSpec,
     mut source: PipelineSource,
     mut fft: FftBlock,
     tx: FrameTx,
     shutdown: oneshot::Receiver<()>,
+    mut control: mpsc::UnboundedReceiver<ControlCmd>,
+    state: Arc<Mutex<SessionState>>,
 ) {
     if spec.fft_rate_hz <= 0.0 {
         tracing::error!(rate = spec.fft_rate_hz, "non-positive fft rate");
@@ -398,6 +574,15 @@ async fn run_pipeline(
                 tracing::debug!("pipeline shutdown");
                 return;
             }
+            cmd = control.recv() => {
+                match cmd {
+                    Some(ControlCmd::Patch(req)) => apply_patch(&req, &mut source, &mut log, &state),
+                    None => {
+                        tracing::debug!("control channel closed");
+                        return;
+                    }
+                }
+            }
             _ = interval.tick() => {
                 if let Err(err) = tick(&mut source, &mut fft, &mut log, &mut iq_a, &mut iq_b, &mut bins) {
                     tracing::error!(?err, "pipeline tick failed");
@@ -418,6 +603,85 @@ async fn run_pipeline(
                 let _ = tx.send(Arc::new(frame_buf.clone()));
                 seq = seq.wrapping_add(1);
             }
+        }
+    }
+}
+
+fn apply_patch(
+    req: &PatchRequest,
+    source: &mut PipelineSource,
+    log: &mut LogMagU8,
+    state: &Arc<Mutex<SessionState>>,
+) {
+    if let Some(v) = req.floor_dbfs {
+        log.set_floor_dbfs(v);
+    }
+    if let Some(v) = req.ceil_dbfs {
+        log.set_ceil_dbfs(v);
+    }
+    if let Some(v) = req.alpha {
+        log.set_alpha(v);
+    }
+    match source {
+        PipelineSource::Sine(s) => {
+            if let Some(v) = req.center_freq_hz {
+                s.set_center_freq(v);
+            }
+            if let Some(v) = req.tone_freq_abs_hz {
+                s.set_tone_freq_abs(v);
+            }
+            if let Some(v) = req.amplitude {
+                s.set_amplitude(v);
+            }
+        }
+        PipelineSource::File(_) => { /* file replay is immutable */ }
+        #[cfg(feature = "soapysdr")]
+        PipelineSource::Soapy(d) => {
+            if let Some(v) = req.center_freq_hz {
+                if let Err(err) = d.set_center_freq(v) {
+                    tracing::warn!(?err, "soapy set_center_freq failed");
+                }
+            }
+            if let Some(v) = req.gain_db {
+                if let Err(err) = d.set_gain(v) {
+                    tracing::warn!(?err, "soapy set_gain failed");
+                }
+            }
+            if let Some(v) = req.agc {
+                if let Err(err) = d.set_agc(v) {
+                    tracing::warn!(?err, "soapy set_agc failed");
+                }
+            }
+        }
+    }
+    if let Ok(mut s) = state.lock() {
+        if let Some(v) = req.center_freq_hz {
+            s.center_freq_hz = match source {
+                #[cfg(feature = "soapysdr")]
+                PipelineSource::Soapy(d) => d.center_freq_hz(),
+                _ => v,
+            };
+        }
+        if let Some(v) = req.tone_freq_abs_hz {
+            s.tone_freq_abs_hz = Some(v);
+        }
+        if let Some(v) = req.amplitude {
+            s.amplitude = Some(v);
+        }
+        if let Some(v) = req.gain_db {
+            s.gain_db = Some(v);
+        }
+        if let Some(v) = req.agc {
+            s.agc = Some(v);
+        }
+        if let Some(v) = req.floor_dbfs {
+            s.floor_dbfs = v;
+        }
+        if let Some(v) = req.ceil_dbfs {
+            s.ceil_dbfs = v;
+        }
+        if let Some(v) = req.alpha {
+            s.alpha = v;
         }
     }
 }

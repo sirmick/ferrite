@@ -4,7 +4,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use axum::{
-    routing::{get, post},
+    routing::{get, patch, post},
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -38,6 +38,8 @@ async fn spawn_app() -> SocketAddr {
         .route("/api/devices", get(routes::list_devices))
         .route("/api/device/open", post(routes::open_session))
         .route("/api/device/:id/close", post(routes::close_session))
+        .route("/api/device/:id/state", get(routes::session_state))
+        .route("/api/device/:id/settings", patch(routes::patch_settings))
         .route("/ws", get(routes::ws_upgrade))
         .route("/ws/:id", get(routes::ws_session))
         .with_state(state);
@@ -175,6 +177,83 @@ async fn ws_round_trip_peak_bin() {
 
     let close_url = format!("http://{addr}/api/device/{session_id}/close");
     let _ = http_post_json(&close_url, "").await;
+}
+
+/// Open a sine session, GET /state, PATCH the tone freq, GET /state again,
+/// and verify the snapshot reflects the change.
+#[tokio::test]
+async fn state_and_patch_roundtrip() {
+    let addr = spawn_app().await;
+    let body = r#"{"fft_size": 128, "fft_rate_hz": 200.0}"#;
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), body).await;
+    let session_id = json_str(&resp, "session_id").expect("session_id");
+
+    let s1 = http_get(&format!("http://{addr}/api/device/{session_id}/state")).await;
+    assert!(s1.contains("\"source_kind\":\"sine\""), "state body: {s1}");
+
+    let new_tone = 100_005_000.0_f64;
+    let patch_body = format!(r#"{{"tone_freq_abs_hz": {new_tone}}}"#);
+    let p = raw_request(
+        &format!("http://{addr}/api/device/{session_id}/settings"),
+        "PATCH",
+        &patch_body,
+    )
+    .await;
+    assert!(
+        p.contains(&format!("\"tone_freq_abs_hz\":{new_tone}")),
+        "patch reply: {p}"
+    );
+
+    let s2 = http_get(&format!("http://{addr}/api/device/{session_id}/state")).await;
+    assert!(
+        s2.contains(&format!("\"tone_freq_abs_hz\":{new_tone}")),
+        "post-patch state: {s2}"
+    );
+
+    let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
+}
+
+/// Closing a session sends a final `session_closed` JSON event over the
+/// WebSocket before the broadcast channel drops, so clients can render
+/// "session ended" rather than a generic disconnect.
+#[tokio::test]
+async fn close_emits_session_closed_event() {
+    let addr = spawn_app().await;
+    let body = r#"{"fft_size": 128, "fft_rate_hz": 200.0}"#;
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), body).await;
+    let session_id = json_str(&resp, "session_id").expect("session_id");
+    let ws_url = json_str(&resp, "ws_url").expect("ws_url");
+    let url = format!("ws://{addr}{ws_url}");
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    // Drain a couple of FFT frames first so we know the session is hot.
+    for _ in 0..2 {
+        let _ = tokio::time::timeout(Duration::from_secs(1), ws.next())
+            .await
+            .expect("frame within 1s");
+    }
+    let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
+
+    // Give the close path a moment to reach the broadcast.
+    let mut saw_close = false;
+    for _ in 0..16 {
+        let frame = match tokio::time::timeout(Duration::from_secs(1), ws.next()).await {
+            Ok(Some(Ok(f))) => f,
+            _ => break,
+        };
+        if let Message::Binary(bytes) = frame {
+            let (hdr, payload) = ws_frame::decode(&bytes).expect("decode");
+            if hdr.payload_type == ws_frame::PayloadType::JsonEvent
+                && std::str::from_utf8(payload)
+                    .map(|s| s.contains("session_closed"))
+                    .unwrap_or(false)
+            {
+                saw_close = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_close, "expected a session_closed JsonEvent frame");
 }
 
 /// `device_args` in `POST /api/device/open` must produce a clean error
