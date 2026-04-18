@@ -22,7 +22,7 @@ mod session;
 mod routes;
 
 async fn spawn_app() -> SocketAddr {
-    let state = session::AppState::new();
+    let state = session::AppState::new(session::CliConfig::default());
     let app = Router::new()
         .route("/api/hello", get(routes::hello))
         .route("/api/device/open", post(routes::open_session))

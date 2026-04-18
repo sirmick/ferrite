@@ -108,7 +108,7 @@ pub async fn open_session(
     State(state): State<AppState>,
     Json(req): Json<OpenRequest>,
 ) -> Result<Json<OpenResponse>, (StatusCode, Json<ApiError>)> {
-    let d = OpenSpec::default();
+    let d = state.default_spec();
     let spec = OpenSpec {
         sample_rate_hz: req.sample_rate_hz.unwrap_or(d.sample_rate_hz),
         center_freq_hz: req.center_freq_hz.unwrap_or(d.center_freq_hz),

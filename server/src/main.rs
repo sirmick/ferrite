@@ -8,11 +8,12 @@
 
 use std::{net::SocketAddr, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     routing::{get, post},
     Router,
 };
+use clap::Parser;
 use http::{HeaderName, HeaderValue};
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -25,6 +26,50 @@ mod routes;
 mod session;
 mod ws_frame;
 
+use session::{CliConfig, SourceKind};
+
+/// Ferrite SDR daemon.
+#[derive(Parser, Debug)]
+#[command(name = "ferrited", version)]
+struct Args {
+    /// Address to bind the HTTP/WS server to.
+    #[arg(long, default_value = "0.0.0.0:8088")]
+    bind: String,
+
+    /// Sample source URI. Supported:
+    ///   `sine` (built-in synthetic tone, default),
+    ///   `file:///absolute/path.wav` or `file:///path.cf32` (replay capture).
+    #[arg(long, default_value = "sine", verbatim_doc_comment)]
+    source: String,
+
+    /// Sample rate override (Hz). Required for raw `cf32` replay; ignored
+    /// for WAV (the header wins) and sine (the session request wins).
+    #[arg(long)]
+    rate: Option<f64>,
+
+    /// Center frequency override (Hz). IQ files do not carry this; set it
+    /// here so the display axes and any downstream tuner are correct.
+    #[arg(long)]
+    freq: Option<f64>,
+
+    /// Loop the file on EOF (replay mode only).
+    #[arg(long = "loop", default_value_t = false)]
+    loop_playback: bool,
+}
+
+fn parse_source(arg: &str, loop_playback: bool) -> Result<SourceKind> {
+    if arg == "sine" {
+        return Ok(SourceKind::Sine);
+    }
+    let path = arg
+        .strip_prefix("file://")
+        .with_context(|| format!("unknown --source scheme: {arg}"))?;
+    Ok(SourceKind::File {
+        path: PathBuf::from(path),
+        loop_playback,
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
@@ -32,10 +77,19 @@ async fn main() -> Result<()> {
         .with(fmt::layer().with_target(false))
         .init();
 
+    let args = Args::parse();
+    let source = parse_source(&args.source, args.loop_playback)?;
+    let cli = CliConfig {
+        source,
+        rate_override_hz: args.rate,
+        center_override_hz: args.freq,
+    };
+    tracing::info!(?cli, "ferrited starting");
+
     let static_root: PathBuf = std::env::var_os("FERRITE_STATIC_ROOT")
         .map_or_else(|| PathBuf::from("./web-dist"), PathBuf::from);
 
-    let state = session::AppState::new();
+    let state = session::AppState::new(cli);
 
     let mut app = Router::new()
         .route("/api/hello", get(routes::hello))
@@ -62,7 +116,7 @@ async fn main() -> Result<()> {
         .layer(header_layer("cross-origin-embedder-policy", "require-corp"))
         .layer(TraceLayer::new_for_http());
 
-    let addr: SocketAddr = "0.0.0.0:8088".parse()?;
+    let addr: SocketAddr = args.bind.parse().context("parse --bind")?;
     tracing::info!(%addr, "ferrited listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

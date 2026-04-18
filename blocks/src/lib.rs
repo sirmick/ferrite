@@ -9,6 +9,7 @@ use wasm_bindgen::prelude::*;
 
 pub mod block;
 pub mod fft;
+pub mod file_source;
 pub mod log_mag_u8;
 pub mod sine;
 
@@ -17,6 +18,7 @@ pub use block::{
     Placement, PortMeta, PortSpec, PortType, Work, MAX_PORTS,
 };
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
+pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 pub use sine::{SineSource, SineSourceParams};
 
