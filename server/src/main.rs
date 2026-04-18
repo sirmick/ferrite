@@ -22,6 +22,7 @@ use tower_http::{
 };
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+mod device;
 mod routes;
 mod session;
 mod ws_frame;
@@ -55,6 +56,11 @@ struct Args {
     /// Loop the file on EOF (replay mode only).
     #[arg(long = "loop", default_value_t = false)]
     loop_playback: bool,
+
+    /// Enumerate `SoapySDR` devices and exit. Requires the `soapysdr`
+    /// feature at build time; prints a guidance message otherwise.
+    #[arg(long = "list-devices", default_value_t = false)]
+    list_devices: bool,
 }
 
 fn parse_source(arg: &str, loop_playback: bool) -> Result<SourceKind> {
@@ -78,6 +84,11 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+
+    if args.list_devices {
+        return run_list_devices();
+    }
+
     let source = parse_source(&args.source, args.loop_playback)?;
     let cli = CliConfig {
         source,
@@ -122,6 +133,22 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(feature = "soapysdr")]
+fn run_list_devices() -> Result<()> {
+    let devices = device::list_devices()?;
+    device::print_devices(&devices);
+    Ok(())
+}
+
+#[cfg(not(feature = "soapysdr"))]
+fn run_list_devices() -> Result<()> {
+    anyhow::bail!(
+        "ferrited was built without the `soapysdr` feature; rebuild with \
+         `cargo run -p ferrited --features soapysdr -- --list-devices` \
+         (see CONTRIBUTING.md for the SoapySDR dev setup)"
+    )
 }
 
 fn header_layer(name: &'static str, value: &'static str) -> SetResponseHeaderLayer<HeaderValue> {
