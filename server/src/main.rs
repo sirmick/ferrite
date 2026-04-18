@@ -61,6 +61,12 @@ struct Args {
     /// feature at build time; prints a guidance message otherwise.
     #[arg(long = "list-devices", default_value_t = false)]
     list_devices: bool,
+
+    /// Probe one device's capabilities and exit. Takes a Soapy args
+    /// string (e.g. `driver=rtlsdr,serial=0000001`). Requires the
+    /// `soapysdr` feature at build time.
+    #[arg(long = "probe-device", value_name = "ARGS")]
+    probe_device: Option<String>,
 }
 
 fn parse_source(arg: &str, loop_playback: bool) -> Result<SourceKind> {
@@ -87,6 +93,10 @@ async fn main() -> Result<()> {
 
     if args.list_devices {
         return run_list_devices();
+    }
+
+    if let Some(probe_args) = args.probe_device.as_deref() {
+        return run_probe_device(probe_args);
     }
 
     let source = parse_source(&args.source, args.loop_playback)?;
@@ -147,6 +157,22 @@ fn run_list_devices() -> Result<()> {
     anyhow::bail!(
         "ferrited was built without the `soapysdr` feature; rebuild with \
          `cargo run -p ferrited --features soapysdr -- --list-devices` \
+         (see CONTRIBUTING.md for the SoapySDR dev setup)"
+    )
+}
+
+#[cfg(feature = "soapysdr")]
+fn run_probe_device(args: &str) -> Result<()> {
+    let caps = device::probe(args)?;
+    device::print_capabilities(&caps);
+    Ok(())
+}
+
+#[cfg(not(feature = "soapysdr"))]
+fn run_probe_device(_args: &str) -> Result<()> {
+    anyhow::bail!(
+        "ferrited was built without the `soapysdr` feature; rebuild with \
+         `cargo run -p ferrited --features soapysdr -- --probe-device …` \
          (see CONTRIBUTING.md for the SoapySDR dev setup)"
     )
 }
