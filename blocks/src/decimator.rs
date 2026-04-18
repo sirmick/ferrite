@@ -135,6 +135,7 @@ impl Decimator {
     }
 }
 
+#[ferrite_blocks_macros::ferrite_block]
 impl Block for Decimator {
     fn spec() -> BlockSpec {
         BlockSpec {

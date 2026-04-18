@@ -112,6 +112,7 @@ impl SineSource {
     }
 }
 
+#[ferrite_blocks_macros::ferrite_block]
 impl Block for SineSource {
     fn spec() -> BlockSpec {
         BlockSpec {

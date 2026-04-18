@@ -1,0 +1,20 @@
+[package]
+name        = "ferrite-blocks-macros"
+version     = "0.0.1"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "Proc macros for Ferrite DSP blocks — #[ferrite_block] registry attribute."
+
+[lints]
+workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote       = "1"
+syn         = { version = "2", features = ["full"] }

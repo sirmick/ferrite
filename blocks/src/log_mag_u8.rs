@@ -69,6 +69,7 @@ impl LogMagU8 {
     }
 }
 
+#[ferrite_blocks_macros::ferrite_block]
 impl Block for LogMagU8 {
     fn spec() -> BlockSpec {
         BlockSpec {

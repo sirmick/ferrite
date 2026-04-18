@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "server",
     "blocks",
+    "blocks-macros",
 ]
 
 [workspace.package]

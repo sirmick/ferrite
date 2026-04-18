@@ -19,7 +19,9 @@ default = []
 wasm    = ["dep:wasm-bindgen"]
 
 [dependencies]
-anyhow       = "1"
-num-complex  = { version = "0.4", default-features = false, features = ["std"] }
-rustfft      = { version = "6", default-features = false }
-wasm-bindgen = { version = "0.2", optional = true }
+anyhow                = "1"
+ferrite-blocks-macros = { path = "../blocks-macros", version = "0.0.1" }
+inventory             = "0.3"
+num-complex           = { version = "0.4", default-features = false, features = ["std"] }
+rustfft               = { version = "6", default-features = false }
+wasm-bindgen          = { version = "0.2", optional = true }

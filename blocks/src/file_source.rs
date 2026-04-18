@@ -184,6 +184,7 @@ impl FileIqSource {
     }
 }
 
+#[ferrite_blocks_macros::ferrite_block]
 impl Block for FileIqSource {
     fn spec() -> BlockSpec {
         BlockSpec {

@@ -108,6 +108,7 @@ fn build_window(kind: FftWindow, size: usize) -> Vec<f32> {
         .collect()
 }
 
+#[ferrite_blocks_macros::ferrite_block]
 impl Block for FftBlock {
     fn spec() -> BlockSpec {
         BlockSpec {
