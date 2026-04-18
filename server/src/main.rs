@@ -114,6 +114,7 @@ async fn main() -> Result<()> {
 
     let mut app = Router::new()
         .route("/api/hello", get(routes::hello))
+        .route("/api/devices", get(routes::list_devices))
         .route("/api/device/open", post(routes::open_session))
         .route("/api/device/:id/close", post(routes::close_session))
         .route("/ws", get(routes::ws_upgrade))

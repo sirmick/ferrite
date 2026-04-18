@@ -18,6 +18,11 @@ mod ws_frame;
 #[allow(dead_code)]
 mod session;
 
+#[cfg(feature = "soapysdr")]
+#[path = "../src/device.rs"]
+#[allow(dead_code)]
+mod device;
+
 #[path = "../src/routes.rs"]
 mod routes;
 
@@ -25,6 +30,7 @@ async fn spawn_app() -> SocketAddr {
     let state = session::AppState::new(session::CliConfig::default());
     let app = Router::new()
         .route("/api/hello", get(routes::hello))
+        .route("/api/devices", get(routes::list_devices))
         .route("/api/device/open", post(routes::open_session))
         .route("/api/device/:id/close", post(routes::close_session))
         .route("/ws", get(routes::ws_upgrade))
@@ -164,6 +170,26 @@ async fn ws_round_trip_peak_bin() {
 
     let close_url = format!("http://{addr}/api/device/{session_id}/close");
     let _ = http_post_json(&close_url, "").await;
+}
+
+/// `GET /api/devices` shape depends on build configuration:
+/// - no `soapysdr` feature → 501 with a `SOAPYSDR_FEATURE_DISABLED` body
+/// - with feature, no hardware plugged in → 200 + `[]`
+/// Asserting on body content keeps the helper dumb (no status parsing).
+#[tokio::test]
+async fn devices_endpoint_shape_matches_build() {
+    let addr = spawn_app().await;
+    let body = http_get(&format!("http://{addr}/api/devices")).await;
+    #[cfg(not(feature = "soapysdr"))]
+    assert!(
+        body.contains("SOAPYSDR_FEATURE_DISABLED"),
+        "expected the feature-disabled error body, got: {body}"
+    );
+    #[cfg(feature = "soapysdr")]
+    assert!(
+        body.trim() == "[]" || body.contains("\"status\":"),
+        "expected empty array or tagged DeviceEntry list, got: {body}"
+    );
 }
 
 /// Tiny HTTP GET helper — avoids pulling reqwest into dev-deps just for

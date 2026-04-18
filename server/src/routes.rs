@@ -104,6 +104,83 @@ pub struct ApiErrorBody {
     pub message: String,
 }
 
+/// One row in the `GET /api/devices` response. Probing can fail per-device
+/// (e.g. driver loaded but hardware already held by another process), so
+/// each entry is either `Available` with the full capability schema or
+/// `Unavailable` with the enumerate-time info plus the probe error.
+#[cfg(feature = "soapysdr")]
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DeviceEntry {
+    Available(Box<crate::device::DeviceCapabilities>),
+    Unavailable {
+        info: crate::device::DeviceInfo,
+        error: String,
+    },
+}
+
+/// `GET /api/devices` — enumerate every `SoapySDR` device and probe each
+/// one for its full capability schema. Returns 501 on builds without the
+/// `soapysdr` feature so the web UI can render a clear "server built
+/// without hardware support" state instead of hitting a 404.
+///
+/// Probing opens + closes every device in turn. Soapy serialises device
+/// access, so an in-use device's entry will be `Unavailable` rather than
+/// failing the whole response.
+#[cfg(feature = "soapysdr")]
+pub async fn list_devices() -> Result<Json<Vec<DeviceEntry>>, (StatusCode, Json<ApiError>)> {
+    let entries = tokio::task::spawn_blocking(probe_all_devices)
+        .await
+        .map_err(|e| internal(format!("device probe task panicked: {e}")))?
+        .map_err(|e| internal(format!("{e:#}")))?;
+    Ok(Json(entries))
+}
+
+#[cfg(feature = "soapysdr")]
+fn probe_all_devices() -> anyhow::Result<Vec<DeviceEntry>> {
+    let devices = crate::device::list_devices()?;
+    let mut entries = Vec::with_capacity(devices.len());
+    for info in devices {
+        let args = info.args_string();
+        match crate::device::probe(&args) {
+            Ok(caps) => entries.push(DeviceEntry::Available(Box::new(caps))),
+            Err(err) => entries.push(DeviceEntry::Unavailable {
+                info,
+                error: format!("{err:#}"),
+            }),
+        }
+    }
+    Ok(entries)
+}
+
+#[cfg(feature = "soapysdr")]
+fn internal(message: String) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiError {
+            error: ApiErrorBody {
+                code: "DEVICE_PROBE_FAILED",
+                message,
+            },
+        }),
+    )
+}
+
+#[cfg(not(feature = "soapysdr"))]
+pub async fn list_devices() -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ApiError {
+            error: ApiErrorBody {
+                code: "SOAPYSDR_FEATURE_DISABLED",
+                message: "ferrited was built without the `soapysdr` feature; \
+                          rebuild with `--features soapysdr`"
+                    .to_string(),
+            },
+        }),
+    )
+}
+
 pub async fn open_session(
     State(state): State<AppState>,
     Json(req): Json<OpenRequest>,
