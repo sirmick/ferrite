@@ -1,20 +1,26 @@
-//! Ferrite DSP blocks — skeleton.
+//! Ferrite DSP blocks — dual-compile crate (native + WebAssembly).
 //!
-//! The Block trait, port types, param schemas, and initial blocks land
-//! in Phase B (see `docs/10-commits.md`). For now this crate exists so
-//! the workspace compiles from the first commit and so the WASM build
-//! path is exercised end-to-end by a trivial demo block.
+//! The [`block`] module defines the trait and static descriptors every
+//! block implements; concrete blocks (`SineSource`, `FFT`, …) land in
+//! sibling modules as Phase B progresses.
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+
+pub mod block;
+
+pub use block::{
+    Block, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort, ParamKind, ParamSpec,
+    Placement, PortMeta, PortSpec, PortType, Work, MAX_PORTS,
+};
 
 #[must_use]
 pub const fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Trivial placeholder block — proves the Rust→WASM→Worker path.
-/// Replaced by real DSP blocks in Phase B.
+/// Trivial placeholder — proves the Rust→WASM→Worker path. Replaced by
+/// real DSP blocks as Phase B progresses.
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[must_use]
 pub fn demo_add(a: f32, b: f32) -> f32 {
