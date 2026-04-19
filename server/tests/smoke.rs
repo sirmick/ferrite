@@ -453,6 +453,88 @@ async fn delete_unknown_vfo_returns_vfo_not_found() {
     let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
 }
 
+/// Two sequential VFOs must get distinct `stream_id`s starting at
+/// `VFO_STREAM_BASE` (2). Pins the allocator rule from
+/// `docs/02-protocol.md` §"Stream IDs".
+#[tokio::test]
+async fn two_vfos_get_distinct_sequential_stream_ids() {
+    let addr = spawn_app().await;
+    let body = r#"{"sample_rate_hz": 2000000, "fft_size": 512, "fft_rate_hz": 200.0}"#;
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), body).await;
+    let session_id = json_str(&resp, "session_id").expect("session_id");
+
+    let first = http_post_json(
+        &format!("http://{addr}/api/device/{session_id}/vfo"),
+        r#"{"offset_hz": 100000, "rate_hz": 50000, "filter_bw_hz": 20000}"#,
+    )
+    .await;
+    let second = http_post_json(
+        &format!("http://{addr}/api/device/{session_id}/vfo"),
+        r#"{"offset_hz": -100000, "rate_hz": 50000, "filter_bw_hz": 20000}"#,
+    )
+    .await;
+
+    assert!(first.contains("\"stream_id\":2"), "first: {first}");
+    assert!(second.contains("\"stream_id\":3"), "second: {second}");
+
+    let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
+}
+
+/// The `iq_f32` wire payload must decode as interleaved little-endian
+/// `f32` pairs — 8 bytes per sample, all finite for a well-behaved
+/// sine source. Protects against any future encoder change that would
+/// quietly break the documented payload shape.
+#[tokio::test]
+async fn iq_f32_payload_decodes_as_le_f32_pairs() {
+    let addr = spawn_app().await;
+    let body = r#"{"sample_rate_hz": 2000000, "fft_size": 512, "fft_rate_hz": 200.0}"#;
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), body).await;
+    let session_id = json_str(&resp, "session_id").expect("session_id");
+    let ws_url = json_str(&resp, "ws_url").expect("ws_url");
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}{ws_url}"))
+        .await
+        .unwrap();
+
+    let _ = http_post_json(
+        &format!("http://{addr}/api/device/{session_id}/vfo"),
+        r#"{"offset_hz": 100000, "rate_hz": 50000, "filter_bw_hz": 20000}"#,
+    )
+    .await;
+
+    let mut checked = false;
+    for _ in 0..64 {
+        let Ok(Some(Ok(Message::Binary(bytes)))) =
+            tokio::time::timeout(Duration::from_secs(2), ws.next()).await
+        else {
+            break;
+        };
+        let (hdr, payload) = ws_frame::decode(&bytes).expect("decode");
+        if hdr.payload_type != ws_frame::PayloadType::IqF32 || hdr.stream_id < 2 {
+            continue;
+        }
+        assert_eq!(
+            payload.len() % 8,
+            0,
+            "iq_f32 payload must be 8-byte-aligned"
+        );
+        assert!(!payload.is_empty(), "iq_f32 payload must be non-empty");
+        for sample in payload.chunks_exact(8) {
+            let i = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+            let q = f32::from_le_bytes([sample[4], sample[5], sample[6], sample[7]]);
+            assert!(
+                i.is_finite() && q.is_finite(),
+                "non-finite sample: ({i}, {q})"
+            );
+        }
+        checked = true;
+        break;
+    }
+    assert!(checked, "never saw an IqF32 frame to decode");
+
+    let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
+}
+
 /// `device_args` in `POST /api/device/open` must produce a clean error
 /// in **both** build configurations:
 /// - no `soapysdr` feature → `FEATURE_DISABLED` (config error, surfaced

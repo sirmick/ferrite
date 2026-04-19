@@ -29,6 +29,9 @@ pub const HEADER_LEN: usize = 16;
 pub const CONTROL_STREAM: u16 = 0;
 /// Conventional `stream_id` for the session's waterfall FFT output.
 pub const FFT_STREAM: u16 = 1;
+/// First `stream_id` the server will allocate for a VFO. Pinned by
+/// `docs/02-protocol.md` §"Stream IDs": VFOs are `>= 2`.
+pub const VFO_STREAM_BASE: u16 = FFT_STREAM + 1;
 
 /// Payload-type enum. Numeric values match the wire encoding — do not
 /// reorder or reassign without bumping [`PROTOCOL_VERSION`].

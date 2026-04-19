@@ -27,7 +27,9 @@ use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 
-use crate::ws_frame::{encode_into, FrameHeader, PayloadType, CONTROL_STREAM, FFT_STREAM};
+use crate::ws_frame::{
+    encode_into, FrameHeader, PayloadType, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE,
+};
 
 /// Server-wide source selection. Set once at startup via CLI; every session
 /// opened afterwards uses this kind, unless the open request explicitly
@@ -758,11 +760,12 @@ async fn run_pipeline(
     let mut bins = vec![0_u8; n];
     let mut frame_buf = Vec::with_capacity(crate::ws_frame::HEADER_LEN + n);
 
-    // VFO book-keeping. `next_stream_id` is 2 on first allocation (per
-    // `docs/02-protocol.md` §"Stream IDs"); wraps to 2 after 0xFFFF which
-    // we never realistically hit (practical cap is a few dozen VFOs).
+    // VFO book-keeping. `next_stream_id` starts at `VFO_STREAM_BASE` (2)
+    // per `docs/02-protocol.md` §"Stream IDs"; wraps back there after
+    // 0xFFFF, which we never realistically hit (practical cap is a few
+    // dozen VFOs).
     let mut vfos: Vec<ActiveVfo> = Vec::new();
-    let mut next_stream_id: u16 = FFT_STREAM + 1;
+    let mut next_stream_id: u16 = VFO_STREAM_BASE;
     let mut next_vfo_seq: u64 = 0;
     let mut control_seq: u32 = 0;
 
@@ -947,7 +950,7 @@ fn build_active_vfo(
     let channelizer = Channelizer::new(params)?;
 
     let stream_id = *next_stream_id;
-    *next_stream_id = next_stream_id.checked_add(1).unwrap_or(FFT_STREAM + 1);
+    *next_stream_id = next_stream_id.checked_add(1).unwrap_or(VFO_STREAM_BASE);
     let vfo_id = format!("vfo-{:016x}", *next_vfo_seq);
     *next_vfo_seq = next_vfo_seq.wrapping_add(1);
 
@@ -998,6 +1001,10 @@ fn apply_patch_vfo(
 }
 
 fn emit_vfo_frame(vfo: &mut ActiveVfo, iq_in: &[Complex<f32>], tx: &FrameTx) -> Result<()> {
+    debug_assert!(
+        vfo.descriptor.stream_id >= VFO_STREAM_BASE,
+        "VFO stream_id must be >= VFO_STREAM_BASE"
+    );
     let max_out = iq_in.len() / vfo.channelizer.factor() + 1;
     if vfo.scratch.len() < max_out {
         vfo.scratch.resize(max_out, Complex::new(0.0, 0.0));
