@@ -5,17 +5,14 @@
   import DeviceOptions from '$lib/controls/DeviceOptions.svelte';
   import type { DeviceCapabilities } from '$lib/api/devices';
   import { demoAddInWorker } from '$lib/workers/demo-client';
-  import { closeDevice, openDevice, wsUrlFor, type OpenDeviceRequest } from '$lib/api/device';
-  import { FrameClient, type ClientStatus } from '$lib/ws/client';
+  import type { OpenDeviceRequest } from '$lib/api/device';
   import { FFT_STREAM } from '$lib/ws/frame';
+  import { session } from '$lib/session.svelte';
   import { onMount } from 'svelte';
 
   let wasmStatus = $state<'pending' | 'ok' | string>('pending');
-  let wsStatus = $state<ClientStatus | 'idle' | string>('idle');
   let frameRate = $state(0);
   let lastFrameSize = $state(0);
-  let client = $state<FrameClient | undefined>(undefined);
-  let sessionId: string | undefined;
   let showSource = $state(false);
   let showDevices = $state(false);
   let devicesDialog: HTMLDialogElement | undefined = $state();
@@ -28,6 +25,9 @@
   let showOptions = $state(false);
   let optionsCaps = $state<DeviceCapabilities | null>(null);
 
+  // Initial sine-source defaults the SourceModal seeds from. The session
+  // store carries the live spec once a device is open; this is just the
+  // first-load form state.
   let params = $state<OpenDeviceRequest>({
     sample_rate_hz: 2_000_000,
     center_freq_hz: 100_000_000,
@@ -46,47 +46,17 @@
     }
   }
 
-  async function teardown() {
-    const c = client;
-    const s = sessionId;
-    client = undefined;
-    sessionId = undefined;
-    if (c) c.close();
-    if (s) await closeDevice(s).catch(() => {});
-  }
-
-  async function connect(next: OpenDeviceRequest) {
-    await teardown();
-    wsStatus = 'connecting';
-    try {
-      const opened = await openDevice(next);
-      sessionId = opened.session_id;
-      client = new FrameClient({
-        url: wsUrlFor(opened.ws_url),
-        onStatus: (s) => {
-          wsStatus = s;
-        },
-        onDecodeError: (err) => {
-          wsStatus = `decode error: ${err.message}`;
-        },
-      });
-      params = next;
-    } catch (err) {
-      wsStatus = `error: ${err instanceof Error ? err.message : String(err)}`;
-    }
-  }
-
   onMount(() => {
-    void connect($state.snapshot(params));
+    void session.open($state.snapshot(params));
     return () => {
-      void teardown();
+      void session.teardown();
     };
   });
 
   // Count frames per second against whichever client is current; a re-open
-  // swaps `client`, this effect re-subscribes automatically.
+  // swaps `session.client`, this effect re-subscribes automatically.
   $effect(() => {
-    const c = client;
+    const c = session.client;
     if (!c) {
       frameRate = 0;
       return;
@@ -113,6 +83,15 @@
   $effect(() => {
     void runDemo();
   });
+
+  // Pretty-print the active source for the header chip.
+  let sourceLabel = $derived.by(() => {
+    const s = session.state;
+    if (!s) return '';
+    if (s.source_kind === 'soapy') return `soapy ${(s.center_freq_hz / 1e6).toFixed(3)} MHz`;
+    if (s.source_kind === 'file') return 'file';
+    return `sine ${(s.center_freq_hz / 1e6).toFixed(3)} MHz`;
+  });
 </script>
 
 <div class="flex h-dvh w-dvw flex-col">
@@ -124,11 +103,17 @@
     <div class="flex items-center gap-4 text-xs text-[color:var(--color-muted)]">
       <span>wasm: {wasmStatus}</span>
       <span>
-        ws: {wsStatus}
-        {#if wsStatus === 'open' && frameRate > 0}
+        ws: {session.wsStatus}
+        {#if session.wsStatus === 'open' && frameRate > 0}
           ({frameRate.toFixed(1)} fps, {lastFrameSize} B)
         {/if}
       </span>
+      {#if sourceLabel}
+        <span class="font-mono text-[11px]">{sourceLabel}</span>
+      {/if}
+      {#if session.errorMessage}
+        <span class="text-rose-400" title={session.errorMessage}>error</span>
+      {/if}
       <button
         type="button"
         class="rounded border border-slate-700 px-2 py-0.5 text-xs text-[color:var(--color-fg)] hover:border-slate-600"
@@ -146,8 +131,8 @@
     </div>
   </header>
   <div class="min-h-0 flex-1">
-    {#if client}
-      <Workspace {client} />
+    {#if session.client}
+      <Workspace client={session.client} />
     {:else}
       <div class="flex h-full items-center justify-center text-sm text-[color:var(--color-muted)]">
         waiting for session…
@@ -160,7 +145,10 @@
   open={showSource}
   {params}
   onClose={() => (showSource = false)}
-  onApply={(p) => void connect(p)}
+  onApply={(p) => {
+    params = p;
+    void session.open(p);
+  }}
 />
 
 <dialog
@@ -191,11 +179,7 @@
 <DeviceOptions
   bind:open={showOptions}
   capabilities={optionsCaps}
-  onApply={(req) => {
-    // Open flow lands in #65; log the composed request so the form is
-    // exercised end-to-end (validate + serialise).
-    console.info('open device with', req);
-  }}
+  onApply={(req) => void session.open(req)}
   onClose={() => (showOptions = false)}
 />
 
