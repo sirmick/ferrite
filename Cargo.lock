@@ -325,6 +325,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "ferrite-blocks",
+ "num-complex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

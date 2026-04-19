@@ -24,7 +24,7 @@ pub struct InventorySpecRegistry;
 
 impl SpecRegistry for InventorySpecRegistry {
     fn get(&self, type_name: &str) -> Option<BlockSpec> {
-        registry::find(type_name).map(|e| e.spec())
+        registry::find(type_name).map(registry::BlockEntry::spec)
     }
 }
 
