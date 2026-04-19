@@ -83,6 +83,7 @@ mod tests {
     use super::*;
 
     const WBFM: &[u8] = include_bytes!("../../flowgraphs/wbfm.json");
+    const WBFM_NODE: &[u8] = include_bytes!("../../flowgraphs/wbfm-node.json");
 
     #[test]
     fn parses_shipped_wbfm_preset() {
@@ -117,6 +118,23 @@ mod tests {
     fn rejects_garbage() {
         assert!(FlowgraphDoc::from_json(b"not json at all").is_err());
         assert!(FlowgraphDoc::from_json(b"{}").is_err()); // missing required fields
+    }
+
+    #[test]
+    fn parses_shipped_wbfm_node_preset() {
+        let doc = FlowgraphDoc::from_json(WBFM_NODE).expect("wbfm-node.json parses");
+        assert_eq!(doc.name, "wbfm-node");
+        assert_eq!(doc.environments, vec![Environment::Node]);
+        assert_eq!(
+            doc.blocks.keys().cloned().collect::<Vec<_>>(),
+            vec!["bridge", "chan", "src"],
+        );
+        // Bridge carries stream_id=2 so the browser's WsIqSource finds it
+        // on the existing VFO stream (see docs/02-protocol.md).
+        let bridge = doc.blocks.get("bridge").expect("bridge block present");
+        assert_eq!(bridge.type_name, "WsBridgeTx");
+        let bridge_params = bridge.params.as_ref().expect("bridge has params");
+        assert_eq!(bridge_params["stream_id"].as_u64(), Some(2));
     }
 
     #[test]
