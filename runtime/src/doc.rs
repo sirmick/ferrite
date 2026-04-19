@@ -33,6 +33,14 @@ pub struct BlockInstanceDecl {
     /// Raw params blob — deserialised per-block at instantiation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+    /// Per-instance environment override. Pins a block with
+    /// [`Placement::Either`](ferrite_blocks::Placement::Either) to one
+    /// side of a cross-env split; required for such blocks in any doc
+    /// that [`split_for_environment`](crate::env_split::split_for_environment)
+    /// will carve. Omitted for hardware-pinned blocks (their
+    /// `BlockSpec::placement` already decides).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<Environment>,
 }
 
 /// Wire endpoints are `"instance_id.port_name"` strings. Encoded as a

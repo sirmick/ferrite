@@ -384,6 +384,7 @@ mod tests {
             crate::doc::BlockInstanceDecl {
                 type_name: "Z".into(),
                 params: None,
+                placement: None,
             },
         );
         d.wires.push(["c.out".into(), "b.in".into()]);
@@ -407,6 +408,7 @@ mod tests {
             crate::doc::BlockInstanceDecl {
                 type_name: "Z".into(),
                 params: None,
+                placement: None,
             },
         );
         let v = validate_doc(&d).unwrap();
