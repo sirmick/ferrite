@@ -19,6 +19,9 @@ pub mod runtime;
 pub mod schedule;
 pub mod validate;
 
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
 pub use block_registry::{instantiate_blocks, BlockMap, InventorySpecRegistry};
 pub use doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
 pub use env_split::{split_for_environment, SplitError, CROSS_ENV_STREAM_BASE};

@@ -3,3 +3,4 @@ build
 node_modules
 pnpm-lock.yaml
 src/lib/wasm/blocks
+src/lib/wasm/runtime

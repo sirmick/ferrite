@@ -27,6 +27,6 @@ export default ts.config(
     },
   },
   {
-    ignores: ['build/', '.svelte-kit/', 'dist/', 'src/lib/wasm/blocks/'],
+    ignores: ['build/', '.svelte-kit/', 'dist/', 'src/lib/wasm/blocks/', 'src/lib/wasm/runtime/'],
   },
 );
