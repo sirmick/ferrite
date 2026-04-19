@@ -12,10 +12,6 @@
 //! IqF32`, interleaved I,Q little-endian floats (LE is asserted on the
 //! wire for IQ — see §"Endianness"). Per-stream `seq` wraps at `u32`.
 
-// The preset-driven pipeline that instantiates this sink lands in the
-// next commit; until then only the module's tests exercise it.
-#![allow(dead_code)]
-
 use std::{
     collections::HashMap,
     sync::Mutex,

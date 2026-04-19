@@ -342,6 +342,7 @@ dependencies = [
  "axum",
  "clap",
  "ferrite-blocks",
+ "ferrite-runtime",
  "futures-util",
  "http",
  "num-complex",

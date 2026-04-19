@@ -33,6 +33,7 @@ serde_json  = "1"
 anyhow      = "1"
 clap        = { version = "4", features = ["derive"] }
 ferrite-blocks = { path = "../blocks" }
+ferrite-runtime = { path = "../runtime" }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 soapysdr    = { version = "0.5", optional = true }
 
