@@ -19,6 +19,7 @@ pub mod channelizer;
 pub mod decimator;
 pub mod fft;
 pub mod file_source;
+pub mod fm_demod;
 pub mod log_mag_u8;
 pub mod registry;
 pub mod sine;
@@ -31,6 +32,7 @@ pub use channelizer::{Channelizer, ChannelizerParams};
 pub use decimator::{Decimator, DecimatorParams};
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
+pub use fm_demod::{FmDemod, FmDemodParams};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 pub use sine::{SineSource, SineSourceParams};
 
@@ -84,6 +86,7 @@ mod tests {
             "LogMagU8",
             "Decimator",
             "Channelizer",
+            "FmDemod",
         ] {
             assert!(
                 names.contains(expected),
