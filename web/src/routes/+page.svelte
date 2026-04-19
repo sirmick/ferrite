@@ -2,6 +2,7 @@
   import Workspace from '$lib/layout/Workspace.svelte';
   import LogPanel from '$lib/layout/LogPanel.svelte';
   import BandsPanel from '$lib/presets/BandsPanel.svelte';
+  import SignalCatalog from '$lib/presets/SignalCatalog.svelte';
   import SourceDialog from '$lib/controls/SourceDialog.svelte';
   import DeviceOptions from '$lib/controls/DeviceOptions.svelte';
   import SessionSettings from '$lib/controls/SessionSettings.svelte';
@@ -21,6 +22,7 @@
   let showOptions = $state(false);
   let optionsCaps = $state<DeviceCapabilities | null>(null);
   let showSettings = $state(false);
+  let leftTab = $state<'bands' | 'catalog'>('bands');
 
   // Initial sine-source defaults the SourceModal seeds from. The session
   // store carries the live spec once a device is open; this is just the
@@ -133,8 +135,28 @@
   </header>
   <div class="flex min-h-0 flex-1">
     <aside class="flex w-80 shrink-0 flex-col">
-      <div class="h-1/2 min-h-0 border-b border-slate-800">
-        <BandsPanel />
+      <div class="flex h-1/2 min-h-0 flex-col border-b border-slate-800">
+        <div class="flex border-b border-slate-800 text-[11px]">
+          <button
+            type="button"
+            class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+            class:tab-active={leftTab === 'bands'}
+            onclick={() => (leftTab = 'bands')}>Bands</button
+          >
+          <button
+            type="button"
+            class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+            class:tab-active={leftTab === 'catalog'}
+            onclick={() => (leftTab = 'catalog')}>Catalog</button
+          >
+        </div>
+        <div class="min-h-0 flex-1">
+          {#if leftTab === 'bands'}
+            <BandsPanel />
+          {:else}
+            <SignalCatalog />
+          {/if}
+        </div>
       </div>
       <div class="h-1/2 min-h-0">
         <LogPanel />
@@ -176,3 +198,11 @@
 />
 
 <SessionSettings bind:open={showSettings} onClose={() => (showSettings = false)} />
+
+<style>
+  .tab-active {
+    color: var(--color-fg);
+    background: rgba(125, 211, 252, 0.08);
+    border-bottom: 1px solid #7dd3fc;
+  }
+</style>
