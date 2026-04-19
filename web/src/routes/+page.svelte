@@ -1,6 +1,7 @@
 <script lang="ts">
   import Workspace from '$lib/layout/Workspace.svelte';
   import SourceModal from '$lib/controls/SourceModal.svelte';
+  import DevicePicker from '$lib/controls/DevicePicker.svelte';
   import { demoAddInWorker } from '$lib/workers/demo-client';
   import { closeDevice, openDevice, wsUrlFor, type OpenDeviceRequest } from '$lib/api/device';
   import { FrameClient, type ClientStatus } from '$lib/ws/client';
@@ -14,6 +15,14 @@
   let client = $state<FrameClient | undefined>(undefined);
   let sessionId: string | undefined;
   let showSource = $state(false);
+  let showDevices = $state(false);
+  let devicesDialog: HTMLDialogElement | undefined = $state();
+  $effect(() => {
+    const d = devicesDialog;
+    if (!d) return;
+    if (showDevices && !d.open) d.showModal();
+    else if (!showDevices && d.open) d.close();
+  });
 
   let params = $state<OpenDeviceRequest>({
     sample_rate_hz: 2_000_000,
@@ -119,6 +128,13 @@
       <button
         type="button"
         class="rounded border border-slate-700 px-2 py-0.5 text-xs text-[color:var(--color-fg)] hover:border-slate-600"
+        onclick={() => (showDevices = true)}
+      >
+        Devices…
+      </button>
+      <button
+        type="button"
+        class="rounded border border-slate-700 px-2 py-0.5 text-xs text-[color:var(--color-fg)] hover:border-slate-600"
         onclick={() => (showSource = true)}
       >
         Source…
@@ -142,3 +158,34 @@
   onClose={() => (showSource = false)}
   onApply={(p) => void connect(p)}
 />
+
+<dialog
+  bind:this={devicesDialog}
+  onclose={() => (showDevices = false)}
+  class="w-[28rem] rounded-md border border-slate-800 bg-[color:var(--color-bg)] p-0 text-[color:var(--color-fg)]"
+>
+  <div class="flex flex-col gap-3 p-4">
+    <DevicePicker
+      onSelect={(info, args) => {
+        // Open flow lands in #65; for now log so the picker is exercised.
+        console.info('device selected', { info, args });
+        showDevices = false;
+      }}
+    />
+    <div class="flex justify-end">
+      <button
+        type="button"
+        class="rounded border border-slate-700 px-3 py-1 text-sm"
+        onclick={() => (showDevices = false)}
+      >
+        Close
+      </button>
+    </div>
+  </div>
+</dialog>
+
+<style>
+  dialog::backdrop {
+    background: rgba(0, 0, 0, 0.5);
+  }
+</style>
