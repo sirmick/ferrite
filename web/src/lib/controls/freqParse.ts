@@ -77,3 +77,26 @@ export function digitsOfHz(hz: number): number[] {
   }
   return out;
 }
+
+export const NIXIE_DIGITS = 10;
+
+/**
+ * Place value (Hz) of the digit at display index `i`. Index 0 is the
+ * GHz digit (10^9), index 9 is the 1 Hz digit (10^0).
+ */
+export function placeValueAt(i: number): number {
+  return 10 ** (NIXIE_DIGITS - 1 - i);
+}
+
+/**
+ * Increment or decrement the digit at display index `i` by `delta`,
+ * returning a new Hz value clamped to [0, 9_999_999_999]. `delta`
+ * of +1 / -1 matches a single detent of a mouse wheel or arrow key.
+ */
+export function bumpDigit(hz: number, i: number, delta: number): number {
+  const step = placeValueAt(i) * delta;
+  const next = Math.round(hz) + step;
+  if (next < 0) return 0;
+  if (next > 9_999_999_999) return 9_999_999_999;
+  return next;
+}

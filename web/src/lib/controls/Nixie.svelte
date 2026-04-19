@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { digitsOfHz, parseFreq } from './freqParse';
+  import { bumpDigit, digitsOfHz, NIXIE_DIGITS, parseFreq } from './freqParse';
 
   interface Props {
     /** Current frequency in Hz. */
     hz: number;
     /** Called with a new Hz value when the user commits a valid edit. */
     onCommit: (hz: number) => void;
-    /** Disable interaction (no click-to-edit, no wheel). */
+    /** Disable interaction (no click, no wheel, no keyboard). */
     disabled?: boolean;
   }
 
@@ -23,6 +23,9 @@
   let draft = $state('');
   let error = $state<string | null>(null);
   let inputEl: HTMLInputElement | undefined = $state();
+  const digitEls: (HTMLButtonElement | null)[] = $state(
+    Array.from({ length: NIXIE_DIGITS }, () => null),
+  );
 
   function startEdit() {
     if (disabled) return;
@@ -47,9 +50,53 @@
     error = null;
   }
 
-  function onKey(ev: KeyboardEvent) {
+  function onEditKey(ev: KeyboardEvent) {
     if (ev.key === 'Enter') commit();
     else if (ev.key === 'Escape') cancel();
+  }
+
+  function bump(i: number, delta: number) {
+    if (disabled) return;
+    const next = bumpDigit(hz, i, delta);
+    if (next !== hz) onCommit(next);
+  }
+
+  function focusDigit(i: number) {
+    const clamped = Math.max(0, Math.min(NIXIE_DIGITS - 1, i));
+    digitEls[clamped]?.focus();
+  }
+
+  function onDigitWheel(i: number, ev: WheelEvent) {
+    if (disabled) return;
+    ev.preventDefault();
+    bump(i, ev.deltaY < 0 ? +1 : -1);
+  }
+
+  function onDigitKey(i: number, ev: KeyboardEvent) {
+    if (disabled) return;
+    switch (ev.key) {
+      case 'ArrowUp':
+        ev.preventDefault();
+        bump(i, +1);
+        return;
+      case 'ArrowDown':
+        ev.preventDefault();
+        bump(i, -1);
+        return;
+      case 'ArrowLeft':
+        ev.preventDefault();
+        focusDigit(i - 1);
+        return;
+      case 'ArrowRight':
+        ev.preventDefault();
+        focusDigit(i + 1);
+        return;
+      case 'Enter':
+      case 'F2':
+        ev.preventDefault();
+        startEdit();
+        return;
+    }
   }
 
   // Digit positions 0..9 = GHz..Hz. Group separators after positions 0,3,6.
@@ -62,7 +109,7 @@
     <input
       bind:this={inputEl}
       bind:value={draft}
-      onkeydown={onKey}
+      onkeydown={onEditKey}
       onblur={commit}
       class="nixie-input"
       placeholder="e.g. 1.25m, 2.54g, 446.0, 88100000"
@@ -74,22 +121,27 @@
       <span class="nixie-hint">m=MHz · g=GHz · k=kHz · h=Hz</span>
     {/if}
   {:else}
-    <button
-      type="button"
-      class="nixie-btn"
-      onclick={startEdit}
-      aria-label="edit frequency"
-      title={disabled ? undefined : 'click to enter frequency'}
-      {disabled}
-    >
+    <div class="nixie-frame" role="group" aria-label="frequency" ondblclick={startEdit}>
       {#each digits as d, i (i)}
-        <span class="nixie-digit" class:dim={i < firstNonZero}>{d}</span>
+        <button
+          type="button"
+          bind:this={digitEls[i]}
+          class="nixie-digit"
+          class:dim={i < firstNonZero}
+          onwheel={(ev) => onDigitWheel(i, ev)}
+          onkeydown={(ev) => onDigitKey(i, ev)}
+          aria-label={`digit ${i}`}
+          tabindex={disabled ? -1 : 0}
+          {disabled}
+        >
+          {d}
+        </button>
         {#if GROUP_AFTER.has(i)}
           <span class="nixie-sep" class:dim={i < firstNonZero}>.</span>
         {/if}
       {/each}
       <span class="nixie-unit">Hz</span>
-    </button>
+    </div>
   {/if}
 </div>
 
@@ -99,7 +151,7 @@
     align-items: center;
     gap: 0.5rem;
   }
-  .nixie-btn {
+  .nixie-frame {
     display: inline-flex;
     align-items: baseline;
     gap: 0.05em;
@@ -110,7 +162,6 @@
     box-shadow:
       inset 0 0 12px rgba(0, 0, 0, 0.8),
       0 0 1px rgba(255, 140, 60, 0.2);
-    cursor: text;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 1.4rem;
     font-weight: 600;
@@ -118,21 +169,37 @@
     letter-spacing: 0.02em;
     color: #ffa94d;
   }
-  .nixie-btn:hover:not(:disabled) {
+  .nixie-frame:hover {
     border-color: #4a2a18;
   }
-  .nixie-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
   .nixie-digit {
+    appearance: none;
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 0 0.08em;
+    margin: 0;
+    font: inherit;
+    cursor: ns-resize;
     color: #ff9d3a;
     text-shadow:
       0 0 2px #ff9d3a,
       0 0 6px rgba(255, 140, 40, 0.8),
       0 0 14px rgba(255, 100, 20, 0.5),
       0 0 22px rgba(255, 80, 0, 0.3);
-    padding: 0 0.03em;
+    border-radius: 2px;
+    line-height: 1;
+  }
+  .nixie-digit:hover:not(:disabled) {
+    background: rgba(255, 140, 40, 0.08);
+  }
+  .nixie-digit:focus-visible {
+    outline: none;
+    border-color: #ff9d3a;
+    background: rgba(255, 140, 40, 0.15);
+  }
+  .nixie-digit:disabled {
+    cursor: default;
+    opacity: 0.5;
   }
   .nixie-sep {
     color: #ff9d3a;

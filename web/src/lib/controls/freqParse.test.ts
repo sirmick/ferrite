@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { digitsOfHz, parseFreq } from './freqParse';
+import { bumpDigit, digitsOfHz, parseFreq, placeValueAt } from './freqParse';
 
 describe('parseFreq', () => {
   it('parses MHz suffix', () => {
@@ -60,5 +60,44 @@ describe('digitsOfHz', () => {
 
   it('saturates at 9.999 GHz', () => {
     expect(digitsOfHz(99_999_999_999)).toEqual([9, 9, 9, 9, 9, 9, 9, 9, 9, 9]);
+  });
+});
+
+describe('placeValueAt', () => {
+  it('maps index 0 to 1 GHz and index 9 to 1 Hz', () => {
+    expect(placeValueAt(0)).toBe(1_000_000_000);
+    expect(placeValueAt(3)).toBe(1_000_000);
+    expect(placeValueAt(6)).toBe(1_000);
+    expect(placeValueAt(9)).toBe(1);
+  });
+});
+
+describe('bumpDigit', () => {
+  it('adds the place value of the target digit', () => {
+    // 100.100 MHz → +1 at the 100-kHz position (index 4) → 100.200 MHz
+    expect(bumpDigit(100_100_000, 4, +1)).toBe(100_200_000);
+    // −1 at the MHz position (index 3)
+    expect(bumpDigit(100_100_000, 3, -1)).toBe(99_100_000);
+  });
+
+  it('carries across higher digits', () => {
+    // 99 + 1 at the tens digit (index 8) rolls to 109
+    expect(bumpDigit(99, 8, +1)).toBe(109);
+  });
+
+  it('clamps at zero', () => {
+    expect(bumpDigit(500, 7, -1)).toBe(400);
+    expect(bumpDigit(50, 7, -1)).toBe(0);
+  });
+
+  it('clamps at 9_999_999_999', () => {
+    expect(bumpDigit(9_999_999_990, 9, +1)).toBe(9_999_999_991);
+    expect(bumpDigit(9_999_999_999, 9, +1)).toBe(9_999_999_999);
+    expect(bumpDigit(9_000_000_000, 0, +1)).toBe(9_999_999_999);
+  });
+
+  it('accepts multi-step deltas', () => {
+    // +5 at the 10-kHz position (index 5) → +50 000 Hz
+    expect(bumpDigit(0, 5, +5)).toBe(50_000);
   });
 });
