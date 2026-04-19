@@ -19,6 +19,7 @@ import {
 } from '$lib/api/device';
 import type { DeviceCapabilities } from '$lib/api/devices';
 import { FrameClient, type ClientStatus } from '$lib/ws/client';
+import { logs } from '$lib/logs/store.svelte';
 
 export type SessionPhase = 'idle' | 'connecting' | 'open' | 'error';
 
@@ -48,15 +49,19 @@ class SessionStore {
     this.request = req;
     this.caps = caps;
     try {
+      logs.push('client', 'info', `opening session ${JSON.stringify(req)}`);
       const opened = await openDevice(req);
       this.sessionId = opened.session_id;
+      logs.push('client', 'info', `session ${opened.session_id} opened, ws=${opened.ws_url}`);
       this.client = new FrameClient({
         url: wsUrlFor(opened.ws_url),
         onStatus: (s) => {
           this.wsStatus = s;
+          logs.push('client', 'info', `ws ${s}`);
         },
         onDecodeError: (err) => {
           this.errorMessage = `decode error: ${err.message}`;
+          logs.push('client', 'error', `ws decode: ${err.message}`);
         },
       });
       this.phase = 'open';
@@ -64,6 +69,7 @@ class SessionStore {
     } catch (err) {
       this.phase = 'error';
       this.errorMessage = err instanceof Error ? err.message : String(err);
+      logs.push('client', 'error', `open failed: ${this.errorMessage}`);
       this.client = undefined;
       this.sessionId = undefined;
     }

@@ -1,0 +1,181 @@
+<script lang="ts">
+  import { digitsOfHz, parseFreq } from './freqParse';
+
+  interface Props {
+    /** Current frequency in Hz. */
+    hz: number;
+    /** Called with a new Hz value when the user commits a valid edit. */
+    onCommit: (hz: number) => void;
+    /** Disable interaction (no click-to-edit, no wheel). */
+    disabled?: boolean;
+  }
+
+  let { hz, onCommit, disabled = false }: Props = $props();
+
+  let digits = $derived(digitsOfHz(hz));
+  // Leading-zero dimming stops at the first non-zero digit.
+  let firstNonZero = $derived.by(() => {
+    const idx = digits.findIndex((d) => d !== 0);
+    return idx === -1 ? digits.length - 1 : idx;
+  });
+
+  let editing = $state(false);
+  let draft = $state('');
+  let error = $state<string | null>(null);
+  let inputEl: HTMLInputElement | undefined = $state();
+
+  function startEdit() {
+    if (disabled) return;
+    draft = (hz / 1e6).toFixed(6).replace(/\.?0+$/, '');
+    error = null;
+    editing = true;
+    queueMicrotask(() => inputEl?.select());
+  }
+
+  function commit() {
+    const parsed = parseFreq(draft);
+    if (!parsed) {
+      error = 'invalid frequency';
+      return;
+    }
+    onCommit(parsed.hz);
+    editing = false;
+  }
+
+  function cancel() {
+    editing = false;
+    error = null;
+  }
+
+  function onKey(ev: KeyboardEvent) {
+    if (ev.key === 'Enter') commit();
+    else if (ev.key === 'Escape') cancel();
+  }
+
+  // Digit positions 0..9 = GHz..Hz. Group separators after positions 0,3,6.
+  // Example: 1.234.567.890
+  const GROUP_AFTER = new Set([0, 3, 6]);
+</script>
+
+<div class="nixie-wrap">
+  {#if editing}
+    <input
+      bind:this={inputEl}
+      bind:value={draft}
+      onkeydown={onKey}
+      onblur={commit}
+      class="nixie-input"
+      placeholder="e.g. 1.25m, 2.54g, 446.0, 88100000"
+      aria-label="frequency entry"
+    />
+    {#if error}
+      <span class="nixie-error">{error}</span>
+    {:else}
+      <span class="nixie-hint">m=MHz · g=GHz · k=kHz · h=Hz</span>
+    {/if}
+  {:else}
+    <button
+      type="button"
+      class="nixie-btn"
+      onclick={startEdit}
+      aria-label="edit frequency"
+      title={disabled ? undefined : 'click to enter frequency'}
+      {disabled}
+    >
+      {#each digits as d, i (i)}
+        <span class="nixie-digit" class:dim={i < firstNonZero}>{d}</span>
+        {#if GROUP_AFTER.has(i)}
+          <span class="nixie-sep" class:dim={i < firstNonZero}>.</span>
+        {/if}
+      {/each}
+      <span class="nixie-unit">Hz</span>
+    </button>
+  {/if}
+</div>
+
+<style>
+  .nixie-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .nixie-btn {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.05em;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    background: radial-gradient(ellipse at center, #1a0d05 0%, #0a0504 100%);
+    border: 1px solid #2a1a10;
+    box-shadow:
+      inset 0 0 12px rgba(0, 0, 0, 0.8),
+      0 0 1px rgba(255, 140, 60, 0.2);
+    cursor: text;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 1.4rem;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    color: #ffa94d;
+  }
+  .nixie-btn:hover:not(:disabled) {
+    border-color: #4a2a18;
+  }
+  .nixie-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .nixie-digit {
+    color: #ff9d3a;
+    text-shadow:
+      0 0 2px #ff9d3a,
+      0 0 6px rgba(255, 140, 40, 0.8),
+      0 0 14px rgba(255, 100, 20, 0.5),
+      0 0 22px rgba(255, 80, 0, 0.3);
+    padding: 0 0.03em;
+  }
+  .nixie-sep {
+    color: #ff9d3a;
+    text-shadow:
+      0 0 3px rgba(255, 140, 40, 0.9),
+      0 0 8px rgba(255, 100, 20, 0.5);
+    transform: translateY(-0.15em);
+    margin: 0 0.02em;
+  }
+  .dim {
+    color: #3a1f10;
+    text-shadow: none;
+    opacity: 0.55;
+  }
+  .nixie-unit {
+    font-size: 0.55em;
+    margin-left: 0.4em;
+    color: #a15a2a;
+    text-shadow: 0 0 2px rgba(180, 80, 20, 0.6);
+    letter-spacing: 0.1em;
+    font-weight: 500;
+  }
+  .nixie-input {
+    background: #0a0504;
+    border: 1px solid #4a2a18;
+    color: #ff9d3a;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 1rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    width: 14rem;
+    outline: none;
+  }
+  .nixie-input:focus {
+    border-color: #ff9d3a;
+    box-shadow: 0 0 0 2px rgba(255, 140, 40, 0.2);
+  }
+  .nixie-hint {
+    font-size: 0.65rem;
+    color: rgba(255, 180, 120, 0.5);
+  }
+  .nixie-error {
+    font-size: 0.7rem;
+    color: #f87171;
+  }
+</style>

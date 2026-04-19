@@ -81,5 +81,14 @@
   .dockview-root {
     --dv-background-color: var(--color-bg);
     --dv-paneview-active-outline-color: var(--color-accent);
+    --dv-tabs-and-actions-container-height: 18px;
+    --dv-tabs-and-actions-container-font-size: 9px;
+  }
+  .dockview-root :global(.tab) {
+    font-size: 9px;
+    padding: 0 6px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
 </style>

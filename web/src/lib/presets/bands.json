@@ -1,0 +1,69 @@
+{
+  "$comment": "Frequency presets surfaced in the Bands panel. Each group renders as a collapsible section. `hz` is centre; `mode` is advisory until demod lands. Expand freely — this file is user-editable.",
+  "groups": [
+    {
+      "name": "FM broadcast",
+      "entries": [
+        { "label": "87.9 (band low)", "hz": 87900000, "mode": "WFM" },
+        { "label": "93.3", "hz": 93300000, "mode": "WFM" },
+        { "label": "96.9", "hz": 96900000, "mode": "WFM" },
+        { "label": "100.1", "hz": 100100000, "mode": "WFM" },
+        { "label": "105.7", "hz": 105700000, "mode": "WFM" },
+        { "label": "107.9 (band high)", "hz": 107900000, "mode": "WFM" }
+      ]
+    },
+    {
+      "name": "AM broadcast",
+      "entries": [
+        { "label": "540 (band low)", "hz": 540000, "mode": "AM" },
+        { "label": "1040", "hz": 1040000, "mode": "AM" },
+        { "label": "1610 (band high)", "hz": 1610000, "mode": "AM" }
+      ]
+    },
+    {
+      "name": "Ham 2m (144–148 MHz)",
+      "entries": [
+        { "label": "SSB calling", "hz": 144200000, "mode": "USB" },
+        { "label": "FM simplex calling", "hz": 146520000, "mode": "FM" },
+        { "label": "APRS", "hz": 144390000, "mode": "FM" }
+      ]
+    },
+    {
+      "name": "Ham 70cm (420–450 MHz)",
+      "entries": [
+        { "label": "SSB calling", "hz": 432100000, "mode": "USB" },
+        { "label": "FM simplex calling", "hz": 446000000, "mode": "FM" }
+      ]
+    },
+    {
+      "name": "Ham 20m (14.0–14.35 MHz)",
+      "entries": [
+        { "label": "SSB DX", "hz": 14200000, "mode": "USB" },
+        { "label": "FT8", "hz": 14074000, "mode": "USB" }
+      ]
+    },
+    {
+      "name": "Ham 40m (7.0–7.3 MHz)",
+      "entries": [
+        { "label": "SSB", "hz": 7200000, "mode": "LSB" },
+        { "label": "FT8", "hz": 7074000, "mode": "USB" }
+      ]
+    },
+    {
+      "name": "Aviation (118–137 MHz)",
+      "entries": [
+        { "label": "Emergency (guard)", "hz": 121500000, "mode": "AM" },
+        { "label": "UNICOM", "hz": 122800000, "mode": "AM" },
+        { "label": "Air-to-air", "hz": 123450000, "mode": "AM" }
+      ]
+    },
+    {
+      "name": "NOAA weather",
+      "entries": [
+        { "label": "WX1", "hz": 162550000, "mode": "FM" },
+        { "label": "WX2", "hz": 162400000, "mode": "FM" },
+        { "label": "WX3", "hz": 162475000, "mode": "FM" }
+      ]
+    }
+  ]
+}

@@ -1,7 +1,8 @@
 <script lang="ts">
   import Workspace from '$lib/layout/Workspace.svelte';
-  import SourceModal from '$lib/controls/SourceModal.svelte';
-  import DevicePicker from '$lib/controls/DevicePicker.svelte';
+  import LogPanel from '$lib/layout/LogPanel.svelte';
+  import BandsPanel from '$lib/presets/BandsPanel.svelte';
+  import SourceDialog from '$lib/controls/SourceDialog.svelte';
   import DeviceOptions from '$lib/controls/DeviceOptions.svelte';
   import SessionSettings from '$lib/controls/SessionSettings.svelte';
   import type { DeviceCapabilities } from '$lib/api/devices';
@@ -9,20 +10,14 @@
   import type { OpenDeviceRequest } from '$lib/api/device';
   import { FFT_STREAM } from '$lib/ws/frame';
   import { session } from '$lib/session.svelte';
+  import { patchConsole } from '$lib/logs/store.svelte';
+  import { connectServerLogs } from '$lib/logs/client';
   import { onMount } from 'svelte';
 
   let wasmStatus = $state<'pending' | 'ok' | string>('pending');
   let frameRate = $state(0);
   let lastFrameSize = $state(0);
   let showSource = $state(false);
-  let showDevices = $state(false);
-  let devicesDialog: HTMLDialogElement | undefined = $state();
-  $effect(() => {
-    const d = devicesDialog;
-    if (!d) return;
-    if (showDevices && !d.open) d.showModal();
-    else if (!showDevices && d.open) d.close();
-  });
   let showOptions = $state(false);
   let optionsCaps = $state<DeviceCapabilities | null>(null);
   let showSettings = $state(false);
@@ -49,8 +44,11 @@
   }
 
   onMount(() => {
+    patchConsole();
+    const disconnectLogs = connectServerLogs();
     void session.open($state.snapshot(params));
     return () => {
+      disconnectLogs();
       void session.teardown();
     };
   });
@@ -118,13 +116,6 @@
       {/if}
       <button
         type="button"
-        class="rounded border border-slate-700 px-2 py-0.5 text-xs text-[color:var(--color-fg)] hover:border-slate-600"
-        onclick={() => (showDevices = true)}
-      >
-        Devices…
-      </button>
-      <button
-        type="button"
         class="rounded border border-slate-700 px-2 py-0.5 text-xs text-[color:var(--color-fg)] hover:border-slate-600 disabled:opacity-50"
         disabled={!session.state}
         onclick={() => (showSettings = true)}
@@ -140,51 +131,42 @@
       </button>
     </div>
   </header>
-  <div class="min-h-0 flex-1">
-    {#if session.client}
-      <Workspace client={session.client} />
-    {:else}
-      <div class="flex h-full items-center justify-center text-sm text-[color:var(--color-muted)]">
-        waiting for session…
+  <div class="flex min-h-0 flex-1">
+    <aside class="flex w-80 shrink-0 flex-col">
+      <div class="h-1/2 min-h-0 border-b border-slate-800">
+        <BandsPanel />
       </div>
-    {/if}
+      <div class="h-1/2 min-h-0">
+        <LogPanel />
+      </div>
+    </aside>
+    <div class="min-w-0 flex-1">
+      {#if session.client}
+        <Workspace client={session.client} />
+      {:else}
+        <div
+          class="flex h-full items-center justify-center text-sm text-[color:var(--color-muted)]"
+        >
+          waiting for session…
+        </div>
+      {/if}
+    </div>
   </div>
 </div>
 
-<SourceModal
-  open={showSource}
+<SourceDialog
+  bind:open={showSource}
   {params}
   onClose={() => (showSource = false)}
-  onApply={(p) => {
+  onPickDevice={(caps) => {
+    optionsCaps = caps;
+    showOptions = true;
+  }}
+  onApplyTone={(p) => {
     params = p;
     void session.open(p);
   }}
 />
-
-<dialog
-  bind:this={devicesDialog}
-  onclose={() => (showDevices = false)}
-  class="w-[28rem] rounded-md border border-slate-800 bg-[color:var(--color-bg)] p-0 text-[color:var(--color-fg)]"
->
-  <div class="flex flex-col gap-3 p-4">
-    <DevicePicker
-      onSelect={(caps) => {
-        showDevices = false;
-        optionsCaps = caps;
-        showOptions = true;
-      }}
-    />
-    <div class="flex justify-end">
-      <button
-        type="button"
-        class="rounded border border-slate-700 px-3 py-1 text-sm"
-        onclick={() => (showDevices = false)}
-      >
-        Close
-      </button>
-    </div>
-  </div>
-</dialog>
 
 <DeviceOptions
   bind:open={showOptions}
@@ -194,9 +176,3 @@
 />
 
 <SessionSettings bind:open={showSettings} onClose={() => (showSettings = false)} />
-
-<style>
-  dialog::backdrop {
-    background: rgba(0, 0, 0, 0.5);
-  }
-</style>
