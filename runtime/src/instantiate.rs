@@ -10,11 +10,10 @@
 //!                        registry)
 //!   * `wire_type_match`— `PortType` on both ends of a wire agrees
 //!
-//! Block **construction** (actually producing `Box<dyn Block>` instances
-//! from declared params) lands in a later commit — the spec registry and
-//! the factory registry can be the same thing, but they don't have to be
-//! and keeping them separate lets tests supply specs without implementing
-//! whole blocks.
+//! Block **construction** (producing `Box<dyn Block>` instances from
+//! declared params) lives in [`crate::block_registry::instantiate_blocks`]
+//! — it keys off the same registry but is called separately so tests can
+//! exercise validation without also pulling in every block crate.
 
 use std::collections::BTreeMap;
 
@@ -34,15 +33,18 @@ use crate::validate::{
 /// thin adapter in a later commit; tests supply a hand-rolled stub so the
 /// runtime crate can be tested without depending on concrete blocks.
 pub trait SpecRegistry {
-    fn get(&self, type_name: &str) -> Option<&'static BlockSpec>;
+    fn get(&self, type_name: &str) -> Option<BlockSpec>;
     fn has(&self, type_name: &str) -> bool {
         self.get(type_name).is_some()
     }
 }
 
-/// Resolved per-id `BlockSpec` map. Produced by
-/// [`resolve_specs`] once registry-dependent validation has passed.
-pub type SpecMap = BTreeMap<String, &'static BlockSpec>;
+/// Resolved per-id `BlockSpec` map. Produced by [`instantiate_flowgraph`]
+/// once registry-dependent validation has passed. `BlockSpec` is `Copy`
+/// with all-static fields, so owning rather than borrowing here keeps the
+/// trait implementable without `Lazy` caches — see the comment on
+/// [`SpecRegistry::get`].
+pub type SpecMap = BTreeMap<String, BlockSpec>;
 
 /// Run every registry-dependent validation phase. On success, returns a
 /// [`Schedule`] whose `InputSource.port_type` is populated and a per-id
@@ -297,22 +299,23 @@ mod tests {
     use crate::validate::validate_doc;
     use ferrite_blocks::{ParamKind, ParamSpec, PortSpec};
 
-    /// Test-local stub registry. Real usage comes later via an adapter in
-    /// `ferrite_blocks` — see commit TODO for the real `SpecRegistry`
-    /// over the inventory-based static registry.
+    /// Test-local stub registry. The real `SpecRegistry` adapter over
+    /// `ferrite_blocks::registry` lives in `crate::block_registry`; this
+    /// stub exists so runtime tests can pin arbitrary block shapes
+    /// without depending on any concrete block impls.
     struct StubRegistry(Vec<(&'static str, &'static BlockSpec)>);
 
     impl SpecRegistry for StubRegistry {
-        fn get(&self, type_name: &str) -> Option<&'static BlockSpec> {
+        fn get(&self, type_name: &str) -> Option<BlockSpec> {
             self.0
                 .iter()
                 .find(|(n, _)| *n == type_name)
-                .map(|(_, s)| *s)
+                .map(|(_, s)| **s)
         }
     }
 
-    // Reusable static specs — lifetime 'static so the registry can hand
-    // them out by reference.
+    // Reusable static specs — stored as `&'static BlockSpec` internally;
+    // the trait surface hands out owned copies (`BlockSpec: Copy`).
     const SRC_PORTS_OUT: &[PortSpec] = &[PortSpec {
         name: "out",
         port_type: PortType::IqF32,
