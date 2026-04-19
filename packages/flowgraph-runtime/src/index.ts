@@ -9,5 +9,11 @@ export {
   validateFlowgraph,
 } from "./validate.js";
 export type { ParsedFlowgraph } from "./validate.js";
+export { instantiateFlowgraph } from "./instantiate.js";
+export type {
+  BlockRegistryLike,
+  InstantiatedGraph,
+  RegisteredBlock,
+} from "./instantiate.js";
 
 export const RUNTIME_VERSION = "0.0.1";
