@@ -17,5 +17,7 @@ export type {
 } from "./instantiate.js";
 export { Scheduler, buildWirePlan, topologicalOrder } from "./schedule.js";
 export type { InputSource, WirePlan } from "./schedule.js";
+export { Runtime } from "./runtime.js";
+export type { RuntimeOptions, RuntimeState } from "./runtime.js";
 
 export const RUNTIME_VERSION = "0.0.1";
