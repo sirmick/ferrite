@@ -41,6 +41,7 @@
     "vitest": "^2.1.8"
   },
   "dependencies": {
+    "@ferrite/flowgraph-runtime": "workspace:*",
     "bits-ui": "^2.18.0",
     "dockview-core": "^5.2.0"
   }
