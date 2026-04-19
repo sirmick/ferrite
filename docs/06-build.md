@@ -96,7 +96,6 @@ ferrite/
 │   ├── flowgraph-runtime/        # env-agnostic TS runtime
 │   └── flowgraph-blocks/         # WASM-block wrappers
 ├── web/                          # SvelteKit app (adapter-static)
-├── headless/                     # ferrite-headless Node sidecar (optional)
 ├── flowgraphs/                   # shipped JSON flowgraph presets
 ├── fixtures/                     # test IQ recordings + sidecars
 ├── tools/                        # scrape-sigidwiki, etc.
@@ -231,9 +230,8 @@ covered by parity tests — see `05-testing.md`).
 
 - **Rust:** current stable. CI tracks stable + MSRV (Minimum Supported Rust
   Version) pinned one release back. MSRV bumps are a flagged PR.
-- **Node:** 20.x LTS or newer. The `headless/` sidecar imports the same
-  WASM modules the browser does, which requires `--experimental-vm-modules`
-  on older Node; 20 LTS needs no flag.
+- **Node:** 20.x LTS or newer. Used only for the SvelteKit build and
+  tooling — there is no Node runtime component shipped in v0.1.
 - **pnpm:** 9.x. `packageManager` field in root `package.json` pins exactly.
 
 ## Troubleshooting

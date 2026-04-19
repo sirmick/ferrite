@@ -290,7 +290,7 @@ choreography.
 
 **Decision.** One git repo. `Cargo.toml` workspace at the root for
 `server/`, `blocks/`. `pnpm-workspace.yaml` at the root for `web/`,
-`packages/*`, `headless/`. Shared CI.
+`packages/*`, `tools/*`. Shared CI.
 
 **Consequence.** One clone, one `pnpm install`, one `cargo fetch`.
 Cross-package refactors land in one PR.

@@ -130,7 +130,6 @@ Channelizer, flowgraph runtime, FmDemod, audio out.
 88. `feat(web): drag VFO cursor on waterfall to retune`
 89. `feat(web): "Signal Catalog" panel shell (presets list)`
 90. `test: golden-fixture WBFM end-to-end (replay → audio RMS + pilot tone)`
-91. `chore: headless/ package skeleton (runtime only, no sinks yet)`
 
 **Phase D done when:** WBFM smoke works on RTL-SDR and SDRPlay, golden-
 fixture test is green, VFO drag retunes without reconnecting.

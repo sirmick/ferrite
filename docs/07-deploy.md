@@ -164,89 +164,13 @@ Cross-Origin-Embedder-Policy: require-corp
 These are mandatory — without them, the browser does not expose
 `SharedArrayBuffer` and the audio path does not work. See `06-build.md`.
 
-## Optional: `ferrite-headless` sidecar
+## Headless flowgraph runs
 
-`ferrite-headless` is a Node process that runs flowgraphs headlessly on the
-same host — no browser attached. It connects to `ferrited` over loopback
-WebSocket (same wire format the browser uses) and runs the same TS flowgraph
-runtime + WASM blocks.
-
-Use cases: long-running ADS-B ingest to MQTT, APRS to syslog, FT8 to SQLite.
-
-```
-┌──────────┐     loopback WS       ┌──────────────────┐
-│ ferrited │◄─────────────────────►│ ferrite-headless │
-└──────────┘                       └──────────────────┘
-                                            │
-                                            ├─► MqttSink
-                                            ├─► SyslogSink
-                                            └─► SqliteSink
-```
-
-### Install
-
-```bash
-sudo apt install -y nodejs     # 20 LTS or newer
-sudo install -d /opt/ferrite-headless
-sudo tar -C /opt/ferrite-headless -xzf ferrite-headless-*.tgz
-sudo install -m 0640 -o ferrite -g ferrite \
-     ferrite-headless.toml.example /etc/ferrite/ferrite-headless.toml
-sudo -e /etc/ferrite/ferrite-headless.toml
-sudo cp packaging/systemd/ferrite-headless.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now ferrite-headless
-```
-
-### Configuration (`/etc/ferrite/ferrite-headless.toml`)
-
-```toml
-# Where ferrited lives (loopback by default)
-ferrited_url = "ws://127.0.0.1:8088/ws"
-
-# Which flowgraphs to run, and their per-deployment sink overrides
-[[run]]
-preset   = "adsb"
-override = "adsb-headless"      # refers to flowgraphs/adsb-headless.json
-
-[[run]]
-preset = "aprs"
-
-# Sink-specific config, referenced by flowgraph blocks via param lookup
-[sinks.mqtt]
-broker   = "mqtt://home.lan:1883"
-username = "ferrite"
-password_file = "/etc/ferrite/mqtt.password"
-
-[sinks.syslog]
-host     = "127.0.0.1:514"
-facility = "local3"
-
-[sinks.sqlite]
-path = "/var/lib/ferrite/decoded.db"
-```
-
-### systemd unit
-
-```ini
-[Unit]
-Description=Ferrite headless flowgraph runner
-After=ferrited.service
-Requires=ferrited.service
-
-[Service]
-Type=simple
-User=ferrite
-Group=ferrite
-ExecStart=/usr/bin/node /opt/ferrite-headless/main.mjs \
-          --config /etc/ferrite/ferrite-headless.toml
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-The sidecar is **optional** in v0.1. Don't install it, don't pay for it.
+`ferrited --flowgraph <path.json>` loads a preset and runs its node
+half through the same Rust runtime the GUI uses. Long-running headless
+decoders (ADS-B → MQTT, APRS → syslog, FT8 → SQLite) run by launching
+a second `ferrited` instance on a different port with a preset whose
+sinks are wired for the deployment. No separate sidecar binary.
 
 ## Upgrading
 
@@ -278,7 +202,6 @@ Nginx, Caddy, and Traefik all handle this with a trivial config.
 
 - `ferrited` logs to stdout; systemd captures to the journal.
   - `journalctl -u ferrited -f`.
-- `ferrite-headless` same.
 - `--debug-stats` enables `/api/debug/stats` (see `05-testing.md`).
 - No metrics exporter in v0.1. A Prometheus endpoint is a
   straightforward addition later.
@@ -286,12 +209,10 @@ Nginx, Caddy, and Traefik all handle this with a trivial config.
 ## Uninstall
 
 ```bash
-sudo systemctl disable --now ferrited ferrite-headless
+sudo systemctl disable --now ferrited
 sudo rm /etc/systemd/system/ferrited.service
-sudo rm /etc/systemd/system/ferrite-headless.service
 sudo rm /usr/local/bin/ferrited
 sudo rm -rf /usr/local/share/ferrite
-sudo rm -rf /opt/ferrite-headless
 sudo rm -rf /etc/ferrite
 sudo userdel -r ferrite
 sudo rm /etc/udev/rules.d/20-rtlsdr.rules

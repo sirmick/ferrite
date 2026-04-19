@@ -128,8 +128,8 @@ runtime, FM demod, audio out.
 - Drag VFO cursor on the waterfall to retune mid-stream.
 - Golden-fixture CI test: replay-mode `ferrited` + the WBFM flowgraph
   → audio RMS and a known pilot tone match within tolerance.
-- (Optional) `headless/` skeleton that can run the same flowgraph
-  headlessly — no sinks wired yet, just "it compiles and instantiates."
+- `ferrited --flowgraph <path>` loads the same preset and runs its
+  node half through the Rust runtime, with no browser attached.
 
 **Demo:** open the page, tune to a local FM broadcast, hear music. Drag
 the VFO down the band, listen to other stations.
@@ -221,10 +221,9 @@ logged in `docs/09-decisions.md`.
   this is an extension, not a rewrite. Still out for v0.1.
 - **Server-side long-form recording.** OPFS (browser) covers short;
   replay mode covers "test against what I captured."
-- **`ferrite-headless` as a v0.1 deliverable.** The architecture admits
-  it from day one; whether it *ships* in v0.1 is a separate call.
-  Default: follow-up. The runtime crate (`runtime/`, Rust) ships in
-  v0.1 either way — see D19.
+- **Dedicated headless binary.** Not needed — `ferrited --flowgraph
+  <path>` launched as a second instance covers the "headless decoder
+  feeding MQTT/syslog/SQLite" use cases. See D19.
 - **Additional decoders** (APRS, FT8, M17+codec2) — land alongside
   their respective blocks post-v0.1. Candidate list is frozen; DMR is
   ruled out (AMBE licensing).

@@ -7,8 +7,8 @@ Two surfaces:
 - **WebSocket (`/ws/…`)** — binary frames, multiplexed. Streaming data and
   server-pushed events.
 
-A client (browser or `ferrite-headless`) always does REST to set up state,
-then opens a WS to receive streams.
+A client (browser, or a second `ferrited --flowgraph` consumer) always
+does REST to set up state, then opens a WS to receive streams.
 
 ## Session lifecycle
 

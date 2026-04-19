@@ -4,8 +4,8 @@
 
 **A thin realtime Rust daemon handles the radio and the wire; a fat browser
 frontend handles everything downstream; the same DSP blocks compile to both
-sides; an optional Node sidecar runs decoders headlessly when no browser is
-attached.**
+sides. Headless decoders run as a second `ferrited` instance with
+`--flowgraph <path>` — no browser, no Node sidecar.**
 
 ## Diagram
 
@@ -50,14 +50,12 @@ attached.**
                 │  │ WS transport +         │  │
                 │  │ REST control           │  │
                 │  └────────────────────────┘  │
-                └──────────────▲────────────────┘
-                               │ loopback WS (optional)
-                ┌──────────────┴────────────────┐
-                │  ferrite-headless (Node)      │
-                │  (same flowgraph runtime,     │
-                │   node-side sinks: fs, mqtt)  │
                 └───────────────────────────────┘
 ```
+
+A second `ferrited` with `--flowgraph <preset.json>` covers the
+headless case: same runtime, same blocks, node-side sinks (fs, mqtt)
+wired into the preset.
 
 ## Backend: `ferrited` (Rust + SoapySDR)
 
@@ -245,39 +243,21 @@ control, and static file serving. Stateless aside from the current device
 session. Configured via a small TOML file (Soapy prefs, LLM API key for the
 identify feature).
 
-### `ferrite-headless` (Node) — optional
+### Headless flowgraph runs
 
-A small Node application that behaves as a WebSocket client of `ferrited` on
-loopback. It reads flowgraph JSONs from a configured directory, instantiates
-them using the shared flowgraph runtime, and routes output to node-side sinks
-(file, MQTT, etc.).
-
-Does not serve HTTP. Does not touch devices. Starting or not starting the
-headless sidecar is purely a deployment choice.
-
-Why a sidecar, not a second Rust runtime:
-
-- The flowgraph runtime already exists in TypeScript (for the browser). A Rust
-  reimplementation would be duplicate surface that drifts.
-- Node runs WASM modules and has Worker Threads. Same block binaries, same
-  runtime package, same tests.
-- Node GC pauses are a non-issue here: realtime audio never touches Node;
-  decoder CPU lives inside WASM (outside the V8 heap); narrowband streams
-  (tens to hundreds of kS/s) are far below any GC-pause risk.
-- Optional process — if you don't run it, you don't pay for it.
-
-### Why not embed a JS runtime in Rust
-
-Considered and rejected: `rquickjs`, `deno_core`, V8 via `rusty_v8`. Nice on
-paper (one process); in practice the Rust↔JS boundary for stack traces,
-debugging, and build plumbing is painful. Node-as-sidecar is boring and works.
+Launch `ferrited --flowgraph <preset.json>` and the daemon skips the
+interactive per-session REST path, loads the preset through the Rust
+runtime, and publishes the bridged IQ stream on `/ws/preset`. A
+second instance on a different port covers "run ADS-B to MQTT with no
+browser" — same binary, same blocks, same wire format.
 
 ## Transport
 
 ### WebSocket
 
-One connection per browser tab (or headless sidecar instance). Binary frames,
-multiplexed. Header:
+One connection per browser tab (or second `ferrited --flowgraph`
+instance acting as a headless consumer). Binary frames, multiplexed.
+Header:
 
 ```
  0               1               2               3
@@ -334,7 +314,6 @@ ferrite/
     flowgraph-runtime/         # env-agnostic TS runtime
     flowgraph-blocks/          # TS wrappers around WASM blocks
   web/                         # SvelteKit app (pnpm workspace member)
-  headless/                    # Node sidecar (pnpm workspace member)
   flowgraphs/                  # shipped preset flowgraph JSON
   data/                        # generated: sigidwiki.json, band plans
   tools/                       # scrapers, codegen

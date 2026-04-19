@@ -59,8 +59,8 @@ LAN-trust posture is a conscious choice for v0.1 — see `09-decisions.md`.
 - **Runs on an ARM SBC.** The backend fits on a Pi next to the antenna.
   Deployment is `systemctl start ferrited` and open a browser.
 - **Portable blocks.** The same block runs server-side (native, linked into
-  `ferrited`), browser-side (WASM, in a Worker), and optionally server-side
-  again in a small Node sidecar for headless decoding.
+  `ferrited`) and browser-side (WASM, in a Worker). Headless decoding is
+  a second `ferrited --flowgraph` instance — no sidecar binary.
 - **Testable without hardware.** A first-class IQ replay mode means every
   decoder has a golden fixture in CI. You can develop the full stack on a
   laptop with no radio attached.
@@ -98,4 +98,4 @@ toggle AGC; gain behavior updates without reconnecting. The experience feels
 quick and purposeful on a 2020s laptop.
 
 Everything else — decoders, identify feature, spectrum explorer, headless
-sidecar — slots on top of that foundation without touching it.
+preset runs — slots on top of that foundation without touching it.
