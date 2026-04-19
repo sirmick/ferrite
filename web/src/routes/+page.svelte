@@ -2,6 +2,8 @@
   import Workspace from '$lib/layout/Workspace.svelte';
   import SourceModal from '$lib/controls/SourceModal.svelte';
   import DevicePicker from '$lib/controls/DevicePicker.svelte';
+  import DeviceOptions from '$lib/controls/DeviceOptions.svelte';
+  import type { DeviceCapabilities } from '$lib/api/devices';
   import { demoAddInWorker } from '$lib/workers/demo-client';
   import { closeDevice, openDevice, wsUrlFor, type OpenDeviceRequest } from '$lib/api/device';
   import { FrameClient, type ClientStatus } from '$lib/ws/client';
@@ -23,6 +25,8 @@
     if (showDevices && !d.open) d.showModal();
     else if (!showDevices && d.open) d.close();
   });
+  let showOptions = $state(false);
+  let optionsCaps = $state<DeviceCapabilities | null>(null);
 
   let params = $state<OpenDeviceRequest>({
     sample_rate_hz: 2_000_000,
@@ -166,10 +170,10 @@
 >
   <div class="flex flex-col gap-3 p-4">
     <DevicePicker
-      onSelect={(info, args) => {
-        // Open flow lands in #65; for now log so the picker is exercised.
-        console.info('device selected', { info, args });
+      onSelect={(caps) => {
         showDevices = false;
+        optionsCaps = caps;
+        showOptions = true;
       }}
     />
     <div class="flex justify-end">
@@ -183,6 +187,17 @@
     </div>
   </div>
 </dialog>
+
+<DeviceOptions
+  bind:open={showOptions}
+  capabilities={optionsCaps}
+  onApply={(req) => {
+    // Open flow lands in #65; log the composed request so the form is
+    // exercised end-to-end (validate + serialise).
+    console.info('open device with', req);
+  }}
+  onClose={() => (showOptions = false)}
+/>
 
 <style>
   dialog::backdrop {

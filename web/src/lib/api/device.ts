@@ -13,6 +13,12 @@ export interface OpenDeviceRequest {
   floor_dbfs?: number;
   ceil_dbfs?: number;
   alpha?: number;
+  /** SoapySDR device args (e.g. `driver=rtlsdr,serial=00000001`). */
+  device_args?: string;
+  antenna?: string;
+  gain_db?: number;
+  agc?: boolean;
+  bandwidth_hz?: number;
 }
 
 export interface StreamDescriptor {

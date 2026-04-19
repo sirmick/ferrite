@@ -4,13 +4,13 @@
     deviceLabel,
     fetchDevices,
     normaliseEntries,
+    type DeviceCapabilities,
     type DeviceEntry,
-    type DeviceInfo,
   } from '$lib/api/devices';
 
   interface Props {
     /** Fired when the user clicks "Open" on an available device. */
-    onSelect: (info: DeviceInfo, args: string) => void;
+    onSelect: (capabilities: DeviceCapabilities) => void;
   }
 
   let { onSelect }: Props = $props();
@@ -90,10 +90,7 @@
               <button
                 type="button"
                 class="rounded bg-[color:var(--color-accent)] px-3 py-1 text-xs font-semibold text-slate-900"
-                onclick={() => {
-                  const info = entry.capabilities.info;
-                  onSelect(info, deviceArgsString(info));
-                }}
+                onclick={() => onSelect(entry.capabilities)}
               >
                 Open
               </button>
