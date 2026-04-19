@@ -42,6 +42,9 @@ importers:
 
   web:
     dependencies:
+      '@ferrite/flowgraph-blocks':
+        specifier: workspace:*
+        version: link:../packages/flowgraph-blocks
       '@ferrite/flowgraph-runtime':
         specifier: workspace:*
         version: link:../packages/flowgraph-runtime
