@@ -260,6 +260,11 @@ struct Inner {
     /// Single-listener: at most one session is active. A second `open()`
     /// closes the first.
     session: Option<Session>,
+    /// Preset-mode pipeline, populated at startup when `ferrited` is
+    /// launched with `--flowgraph <path>`. Mutually exclusive with
+    /// `session`: while `preset` is `Some`, `open()` returns a 409 so
+    /// the legacy single-session path can't trample the preset task.
+    preset: Option<crate::preset_pipeline::PresetMount>,
 }
 
 #[derive(Clone)]
@@ -282,6 +287,24 @@ impl AppState {
             inner: Arc::new(RwLock::new(Inner {
                 next_id: AtomicU64::new(0),
                 session: None,
+                preset: None,
+            })),
+            cli: Arc::new(cli),
+            logs: None,
+        }
+    }
+
+    /// Construct an `AppState` that starts life with a running preset
+    /// pipeline. Used by `main` when `--flowgraph <path>` is set. The
+    /// legacy `/api/device/open` route returns 409 in this mode — WS
+    /// subscribers use `/ws/preset` instead.
+    #[must_use]
+    pub fn new_with_preset(cli: CliConfig, mount: crate::preset_pipeline::PresetMount) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Inner {
+                next_id: AtomicU64::new(0),
+                session: None,
+                preset: Some(mount),
             })),
             cli: Arc::new(cli),
             logs: None,
@@ -553,6 +576,19 @@ impl AppState {
             return None;
         }
         Some(session.frames.subscribe())
+    }
+
+    /// Whether this server was started in `--flowgraph` preset mode.
+    /// While true, `open()` is refused with a 409 at the route layer.
+    pub async fn has_preset(&self) -> bool {
+        self.inner.read().await.preset.is_some()
+    }
+
+    /// Subscribe to the preset pipeline's broadcast channel. Returns
+    /// `None` when the server is not in preset mode.
+    pub async fn preset_subscribe(&self) -> Option<broadcast::Receiver<FrameBytes>> {
+        let inner = self.inner.read().await;
+        Some(inner.preset.as_ref()?.frames.subscribe())
     }
 }
 

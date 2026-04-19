@@ -6,7 +6,7 @@
 //! Every response carries COOP/COEP so the browser grants
 //! `SharedArrayBuffer` access.
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -14,7 +14,9 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use ferrite_runtime::FlowgraphDoc;
 use http::{HeaderName, HeaderValue};
+use tokio::sync::broadcast;
 use tower_http::{
     services::{ServeDir, ServeFile},
     set_header::SetResponseHeaderLayer,
@@ -72,6 +74,19 @@ struct Args {
     /// `soapysdr` feature at build time.
     #[arg(long = "probe-device", value_name = "ARGS")]
     probe_device: Option<String>,
+
+    /// Run in preset mode: load the flowgraph JSON at `<path>`, spawn
+    /// the Rust runtime for its node half, and expose the resulting IQ
+    /// stream on `/ws/preset`. Mutually exclusive with the legacy
+    /// `--source` path (`--source` is ignored in this mode).
+    #[arg(long = "flowgraph", value_name = "PATH")]
+    flowgraph: Option<PathBuf>,
+
+    /// Runtime tick period, in microseconds, for preset mode. Defaults
+    /// to 400µs (2.5kHz) which is fine for any source running at 2MHz
+    /// or below given `DEFAULT_FRAMES_HINT` of 1024 samples per tick.
+    #[arg(long = "tick-period-us", default_value_t = 400)]
+    tick_period_us: u64,
 }
 
 fn parse_source(arg: &str, loop_playback: bool) -> Result<SourceKind> {
@@ -117,7 +132,17 @@ async fn main() -> Result<()> {
     let static_root: PathBuf = std::env::var_os("FERRITE_STATIC_ROOT")
         .map_or_else(|| PathBuf::from("./web-dist"), PathBuf::from);
 
-    let state = session::AppState::new(cli).with_logs(log_broadcast);
+    let state = if let Some(flowgraph_path) = args.flowgraph.as_deref() {
+        let mount = spawn_preset_mount(flowgraph_path, args.tick_period_us)?;
+        tracing::info!(
+            path = %flowgraph_path.display(),
+            tick_period_us = args.tick_period_us,
+            "preset pipeline mounted"
+        );
+        session::AppState::new_with_preset(cli, mount).with_logs(log_broadcast)
+    } else {
+        session::AppState::new(cli).with_logs(log_broadcast)
+    };
 
     let mut app = Router::new()
         .route("/api/hello", get(routes::hello))
@@ -133,6 +158,7 @@ async fn main() -> Result<()> {
         )
         .route("/ws", get(routes::ws_upgrade))
         .route("/ws/logs", get(routes::ws_logs))
+        .route("/ws/preset", get(routes::ws_preset))
         .route("/ws/:id", get(routes::ws_session))
         .with_state(state);
 
@@ -198,4 +224,21 @@ fn header_layer(name: &'static str, value: &'static str) -> SetResponseHeaderLay
         HeaderName::from_static(name),
         HeaderValue::from_static(value),
     )
+}
+
+/// Read `path`, parse as a `FlowgraphDoc`, spawn the preset pipeline,
+/// and hand back the `PresetMount` the `AppState` will own.
+fn spawn_preset_mount(
+    path: &std::path::Path,
+    tick_period_us: u64,
+) -> Result<preset_pipeline::PresetMount> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading flowgraph {}", path.display()))?;
+    let doc: FlowgraphDoc = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing flowgraph {}", path.display()))?;
+    let (frames, _) = broadcast::channel(32);
+    let handle =
+        preset_pipeline::spawn_preset(&doc, frames.clone(), Duration::from_micros(tick_period_us))
+            .context("spawn preset pipeline")?;
+    Ok(preset_pipeline::PresetMount { frames, handle })
 }

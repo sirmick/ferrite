@@ -227,6 +227,19 @@ pub async fn open_session(
     State(state): State<AppState>,
     Json(req): Json<OpenRequest>,
 ) -> Result<Json<OpenResponse>, (StatusCode, Json<ApiError>)> {
+    if state.has_preset().await {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "PRESET_MODE",
+                    message: "ferrited was started with --flowgraph; open/close \
+                              endpoints are disabled — subscribe to /ws/preset"
+                        .into(),
+                },
+            }),
+        ));
+    }
     let d = state.default_spec();
     let spec = OpenSpec {
         sample_rate_hz: req.sample_rate_hz.unwrap_or(d.sample_rate_hz),
@@ -484,6 +497,51 @@ pub async fn ws_session(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_session(socket, id, state))
+}
+
+/// `GET /ws/preset` — single WebSocket endpoint exposed when `ferrited`
+/// is started with `--flowgraph <path>`. Subscribes to the preset
+/// pipeline's broadcast channel and forwards every frame as a binary
+/// message. Closes immediately with no payload if the server is not in
+/// preset mode.
+pub async fn ws_preset(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_preset(socket, state))
+}
+
+async fn handle_preset(mut socket: WebSocket, state: AppState) {
+    let Some(mut rx) = state.preset_subscribe().await else {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    };
+    tracing::debug!("ws preset subscribed");
+    loop {
+        tokio::select! {
+            client = socket.recv() => {
+                match client {
+                    None | Some(Ok(Message::Close(_))) => return,
+                    Some(Err(err)) => {
+                        tracing::debug!(?err, "ws preset recv");
+                        return;
+                    }
+                    Some(Ok(Message::Ping(p))) => {
+                        if socket.send(Message::Pong(p)).await.is_err() { return; }
+                    }
+                    _ => {}
+                }
+            }
+            frame = rx.recv() => match frame {
+                Ok(bytes) => {
+                    if socket.send(Message::Binary((*bytes).clone())).await.is_err() {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "ws preset subscriber lagged");
+                }
+            }
+        }
+    }
 }
 
 async fn handle_session(mut socket: WebSocket, id: String, state: AppState) {

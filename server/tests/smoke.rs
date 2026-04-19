@@ -18,6 +18,14 @@ mod ws_frame;
 #[allow(dead_code)]
 mod log_stream;
 
+#[path = "../src/bridge_sink.rs"]
+#[allow(dead_code)]
+mod bridge_sink;
+
+#[path = "../src/preset_pipeline.rs"]
+#[allow(dead_code)]
+mod preset_pipeline;
+
 #[path = "../src/session.rs"]
 #[allow(dead_code)]
 mod session;

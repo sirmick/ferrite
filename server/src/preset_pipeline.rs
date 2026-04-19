@@ -9,14 +9,12 @@
 //! `env_split` from `CROSS_ENV_STREAM_BASE` (1000+); the node half
 //! and browser half agree on those ids without any negotiation.
 //!
-//! The CLI wiring (`--flowgraph <path>`) that instantiates this module
-//! from `main.rs` lands in the next commit — this module stays
-//! focused on the runtime-driving core so it can be exercised in
-//! isolation.
-
-// CLI hook (`--flowgraph <path>` in `main.rs`) lands in the next
-// commit; until then the module's tests are the only live callers.
-#![allow(dead_code)]
+//! [`PresetMount`] bundles the preset's broadcast `FrameTx` with the
+//! [`PresetHandle`] so [`AppState`] can own both in one slot — the
+//! handle keeps the runtime alive, the tx is what `/ws/preset`
+//! subscribes to.
+//!
+//! [`AppState`]: crate::session::AppState
 
 use std::{sync::Arc, time::Duration};
 
@@ -30,17 +28,35 @@ use tokio::{sync::oneshot, task::JoinHandle};
 
 use crate::{bridge_sink::BroadcastIqSink, session::FrameTx};
 
-/// Handle to a running preset pipeline. Drop-to-shut-down is
-/// intentionally *not* wired — callers must call [`PresetHandle::shutdown`]
-/// and await it to join the task cleanly.
+/// Handle to a running preset pipeline. Callers can either drop the
+/// handle (which cancels the runtime task via the `oneshot` sender
+/// closing) or call [`PresetHandle::shutdown`] for a graceful signal
+/// and join that surfaces any tick error. The binary today relies on
+/// the drop path via `PresetMount`; the explicit `shutdown` is
+/// reserved for an axum graceful-shutdown hook.
+#[allow(dead_code)] // fields held for drop semantics
 pub struct PresetHandle {
     shutdown: Option<oneshot::Sender<()>>,
     join: JoinHandle<Result<()>>,
 }
 
+/// Preset-mode slot stored inside [`AppState`]. Bundles the broadcast
+/// `FrameTx` that [`BroadcastIqSink`] publishes to with the
+/// [`PresetHandle`] that keeps the runtime task alive. Dropping the
+/// mount closes the broadcast channel and cancels the runtime task
+/// (the `oneshot` on `shutdown` fires via drop).
+///
+/// [`AppState`]: crate::session::AppState
+pub struct PresetMount {
+    pub frames: FrameTx,
+    #[allow(dead_code)] // held so the runtime task stays alive
+    pub handle: PresetHandle,
+}
+
 impl PresetHandle {
     /// Signal the pipeline task to stop, then await its join. Returns
     /// the task's final `Result` so tick errors surface to the caller.
+    #[allow(dead_code)] // public API reserved for graceful shutdown hook
     pub async fn shutdown(mut self) -> Result<()> {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
