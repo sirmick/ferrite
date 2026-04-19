@@ -22,6 +22,7 @@ use tower_http::{
 };
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+mod bridge_sink;
 mod device;
 mod log_stream;
 mod routes;
