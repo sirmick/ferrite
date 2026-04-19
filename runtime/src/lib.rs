@@ -12,5 +12,9 @@
 //! on either side. The TS package will be deleted at milestone M4.
 
 pub mod doc;
+pub mod schedule;
+pub mod validate;
 
 pub use doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
+pub use schedule::{build_wire_plan, topological_order, InputSource, Schedule, WirePlan};
+pub use validate::{validate_doc, FlowgraphValidationError, Phase, ValidatedDoc, ValidationError};
