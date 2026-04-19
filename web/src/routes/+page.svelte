@@ -3,6 +3,7 @@
   import SourceModal from '$lib/controls/SourceModal.svelte';
   import DevicePicker from '$lib/controls/DevicePicker.svelte';
   import DeviceOptions from '$lib/controls/DeviceOptions.svelte';
+  import SessionSettings from '$lib/controls/SessionSettings.svelte';
   import type { DeviceCapabilities } from '$lib/api/devices';
   import { demoAddInWorker } from '$lib/workers/demo-client';
   import type { OpenDeviceRequest } from '$lib/api/device';
@@ -24,6 +25,7 @@
   });
   let showOptions = $state(false);
   let optionsCaps = $state<DeviceCapabilities | null>(null);
+  let showSettings = $state(false);
 
   // Initial sine-source defaults the SourceModal seeds from. The session
   // store carries the live spec once a device is open; this is just the
@@ -123,6 +125,14 @@
       </button>
       <button
         type="button"
+        class="rounded border border-slate-700 px-2 py-0.5 text-xs text-[color:var(--color-fg)] hover:border-slate-600 disabled:opacity-50"
+        disabled={!session.state}
+        onclick={() => (showSettings = true)}
+      >
+        Settings…
+      </button>
+      <button
+        type="button"
         class="rounded border border-slate-700 px-2 py-0.5 text-xs text-[color:var(--color-fg)] hover:border-slate-600"
         onclick={() => (showSource = true)}
       >
@@ -182,6 +192,8 @@
   onApply={(req) => void session.open(req)}
   onClose={() => (showOptions = false)}
 />
+
+<SessionSettings bind:open={showSettings} onClose={() => (showSettings = false)} />
 
 <style>
   dialog::backdrop {
