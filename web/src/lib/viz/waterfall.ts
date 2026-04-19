@@ -68,6 +68,24 @@ function link(gl: WebGL2RenderingContext, vs: WebGLShader, fs: WebGLShader): Web
   return prog;
 }
 
+/**
+ * Map a CSS pixel X-coordinate on the waterfall canvas back to an RF
+ * frequency in Hz. The canvas is drawn edge-to-edge (no axis margins),
+ * so the conversion is a straight linear blend across the sample-rate
+ * span. Returns `null` if `cssX` lies outside `[0, widthCss]`.
+ */
+export function pixelToFreqLinear(
+  cssX: number,
+  widthCss: number,
+  centerHz: number,
+  rateHz: number,
+): number | null {
+  if (!(widthCss > 0)) return null;
+  const frac = cssX / widthCss;
+  if (!(frac >= 0 && frac <= 1)) return null;
+  return centerHz - rateHz / 2 + frac * rateHz;
+}
+
 export class WaterfallRenderer {
   private readonly gl: WebGL2RenderingContext;
   private readonly program: WebGLProgram;
