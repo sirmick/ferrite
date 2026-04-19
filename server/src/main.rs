@@ -125,7 +125,10 @@ async fn main() -> Result<()> {
         .route("/api/device/:id/state", get(routes::session_state))
         .route("/api/device/:id/settings", patch(routes::patch_settings))
         .route("/api/device/:id/vfo", post(routes::add_vfo))
-        .route("/api/device/:id/vfo/:vfo_id", patch(routes::patch_vfo))
+        .route(
+            "/api/device/:id/vfo/:vfo_id",
+            patch(routes::patch_vfo).delete(routes::delete_vfo),
+        )
         .route("/ws", get(routes::ws_upgrade))
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/:id", get(routes::ws_session))

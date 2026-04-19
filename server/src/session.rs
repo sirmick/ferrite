@@ -201,6 +201,10 @@ enum ControlCmd {
         req: PatchVfoRequest,
         respond: oneshot::Sender<Result<VfoDescriptor, VfoError>>,
     },
+    RemoveVfo {
+        vfo_id: String,
+        respond: oneshot::Sender<Result<(), VfoError>>,
+    },
 }
 
 /// Failure modes for VFO lookups. `NotFound` separates "the session id
@@ -509,6 +513,35 @@ impl AppState {
         }
     }
 
+    /// Tear down a VFO. Returns the same 3-way shape as [`patch_vfo`]:
+    /// `None` for session-id mismatch, `Some(Err(NotFound))` for vfo-id
+    /// mismatch, `Some(Ok(()))` on success. The corresponding `stream_id`
+    /// is released; any further frames bearing it would be a bug.
+    pub async fn remove_vfo(&self, id: &str, vfo_id: &str) -> Option<Result<(), VfoError>> {
+        let inner = self.inner.read().await;
+        let s = inner.session.as_ref()?;
+        if s.id != id {
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        if s.control
+            .send(ControlCmd::RemoveVfo {
+                vfo_id: vfo_id.to_string(),
+                respond: tx,
+            })
+            .is_err()
+        {
+            return Some(Err(VfoError::Invalid(anyhow!("pipeline shutting down"))));
+        }
+        drop(inner);
+        match rx.await {
+            Ok(result) => Some(result),
+            Err(_) => Some(Err(VfoError::Invalid(anyhow!(
+                "pipeline dropped RemoveVfo response channel"
+            )))),
+        }
+    }
+
     /// Get a fresh frame subscription for `id`. Returns `None` if there is
     /// no matching active session.
     pub async fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<FrameBytes>> {
@@ -748,36 +781,16 @@ async fn run_pipeline(
             cmd = control.recv() => {
                 match cmd {
                     Some(ControlCmd::Patch(req)) => apply_patch(&req, &mut source, &mut log, &state),
-                    Some(ControlCmd::AddVfo { spec: vspec, respond }) => {
-                        let result = build_active_vfo(
-                            &vspec,
-                            spec.sample_rate_hz,
-                            &mut next_stream_id,
-                            &mut next_vfo_seq,
-                        );
-                        match result {
-                            Ok(active) => {
-                                let desc = active.descriptor.clone();
-                                vfos.push(active);
-                                if let Ok(mut s) = state.lock() {
-                                    s.vfos.push(desc.clone());
-                                }
-                                emit_json_event(
-                                    &tx,
-                                    &vfo_added_event(&desc),
-                                    &mut control_seq,
-                                );
-                                let _ = respond.send(Ok(desc));
-                            }
-                            Err(err) => {
-                                let _ = respond.send(Err(err));
-                            }
-                        }
-                    }
-                    Some(ControlCmd::PatchVfo { vfo_id, req, respond }) => {
-                        let result = apply_patch_vfo(&mut vfos, &vfo_id, &req, &state);
-                        let _ = respond.send(result);
-                    }
+                    Some(other) => handle_vfo_cmd(
+                        other,
+                        &mut vfos,
+                        &tx,
+                        &state,
+                        spec.sample_rate_hz,
+                        &mut next_stream_id,
+                        &mut next_vfo_seq,
+                        &mut control_seq,
+                    ),
                     None => {
                         tracing::debug!("control channel closed");
                         return;
@@ -825,6 +838,64 @@ struct ActiveVfo {
     iq_bytes: Vec<u8>,
     frame_buf: Vec<u8>,
     seq: u32,
+}
+
+/// Dispatches the three VFO `ControlCmd` variants off the main `select!`
+/// loop so `run_pipeline` stays readable. `Patch` is handled inline above
+/// because it needs `&mut source` and `&mut log` too.
+#[allow(clippy::too_many_arguments)]
+fn handle_vfo_cmd(
+    cmd: ControlCmd,
+    vfos: &mut Vec<ActiveVfo>,
+    tx: &FrameTx,
+    state: &Arc<Mutex<SessionState>>,
+    input_rate_hz: f64,
+    next_stream_id: &mut u16,
+    next_vfo_seq: &mut u64,
+    control_seq: &mut u32,
+) {
+    match cmd {
+        ControlCmd::Patch(_) => unreachable!("Patch handled inline in run_pipeline"),
+        ControlCmd::AddVfo { spec, respond } => {
+            let result = build_active_vfo(&spec, input_rate_hz, next_stream_id, next_vfo_seq);
+            match result {
+                Ok(active) => {
+                    let desc = active.descriptor.clone();
+                    vfos.push(active);
+                    if let Ok(mut s) = state.lock() {
+                        s.vfos.push(desc.clone());
+                    }
+                    emit_json_event(tx, &vfo_added_event(&desc), control_seq);
+                    let _ = respond.send(Ok(desc));
+                }
+                Err(err) => {
+                    let _ = respond.send(Err(err));
+                }
+            }
+        }
+        ControlCmd::PatchVfo {
+            vfo_id,
+            req,
+            respond,
+        } => {
+            let result = apply_patch_vfo(vfos, &vfo_id, &req, state);
+            let _ = respond.send(result);
+        }
+        ControlCmd::RemoveVfo { vfo_id, respond } => {
+            let result = match vfos.iter().position(|v| v.descriptor.vfo_id == vfo_id) {
+                None => Err(VfoError::NotFound),
+                Some(i) => {
+                    let removed = vfos.remove(i);
+                    if let Ok(mut s) = state.lock() {
+                        s.vfos.retain(|v| v.vfo_id != removed.descriptor.vfo_id);
+                    }
+                    emit_json_event(tx, &vfo_removed_event(&removed.descriptor), control_seq);
+                    Ok(())
+                }
+            };
+            let _ = respond.send(result);
+        }
+    }
 }
 
 /// Build a [`Channelizer`] sized for the session's input rate. Picks the
@@ -984,6 +1055,14 @@ fn vfo_added_event(desc: &VfoDescriptor) -> String {
         rate = desc.rate_hz,
         bw = desc.filter_bw_hz,
         pt = desc.payload_type,
+    )
+}
+
+fn vfo_removed_event(desc: &VfoDescriptor) -> String {
+    format!(
+        r#"{{"type":"vfo_removed","vfo_id":"{vfo}","stream_id":{sid}}}"#,
+        vfo = desc.vfo_id,
+        sid = desc.stream_id,
     )
 }
 

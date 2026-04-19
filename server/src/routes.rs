@@ -398,6 +398,45 @@ pub async fn add_vfo(
     }
 }
 
+/// `DELETE /api/device/:id/vfo/:vfo_id` — tear down a VFO. Emits a
+/// `vfo_removed` JSON event on the control stream so clients can clean
+/// up without polling.
+pub async fn delete_vfo(
+    State(state): State<AppState>,
+    Path((id, vfo_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    match state.remove_vfo(&id, &vfo_id).await {
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "SESSION_NOT_FOUND",
+                    message: format!("no active session with id {id}"),
+                },
+            }),
+        )),
+        Some(Err(VfoError::NotFound)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "VFO_NOT_FOUND",
+                    message: format!("no vfo {vfo_id} on session {id}"),
+                },
+            }),
+        )),
+        Some(Err(VfoError::Invalid(err))) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "INTERNAL",
+                    message: err.to_string(),
+                },
+            }),
+        )),
+        Some(Ok(())) => Ok(StatusCode::NO_CONTENT),
+    }
+}
+
 /// `PATCH /api/device/:id/vfo/:vfo_id` — retune (and eventually resize)
 /// an existing VFO mid-stream. Today only `offset_hz` is honoured; the
 /// channelizer's mixer phase stays continuous across the change so the

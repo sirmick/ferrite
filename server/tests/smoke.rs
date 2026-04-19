@@ -46,7 +46,10 @@ async fn spawn_app() -> SocketAddr {
         .route("/api/device/:id/state", get(routes::session_state))
         .route("/api/device/:id/settings", patch(routes::patch_settings))
         .route("/api/device/:id/vfo", post(routes::add_vfo))
-        .route("/api/device/:id/vfo/:vfo_id", patch(routes::patch_vfo))
+        .route(
+            "/api/device/:id/vfo/:vfo_id",
+            patch(routes::patch_vfo).delete(routes::delete_vfo),
+        )
         .route("/ws", get(routes::ws_upgrade))
         .route("/ws/:id", get(routes::ws_session))
         .with_state(state);
@@ -366,6 +369,83 @@ async fn patch_vfo_unknown_returns_vfo_not_found() {
         &format!("http://{addr}/api/device/{session_id}/vfo/vfo-nope"),
         "PATCH",
         r#"{"offset_hz": 1.0}"#,
+    )
+    .await;
+    assert!(r.contains("VFO_NOT_FOUND"), "reply: {r}");
+
+    let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
+}
+
+/// DELETE tears a VFO down: the descriptor leaves `GET /state`, a
+/// `vfo_removed` JSON event lands on stream 0, and no further `IqF32`
+/// frames are emitted on that `stream_id`.
+#[tokio::test]
+async fn delete_vfo_removes_descriptor_and_emits_event() {
+    let addr = spawn_app().await;
+    let body = r#"{"sample_rate_hz": 2000000, "fft_size": 512, "fft_rate_hz": 200.0}"#;
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), body).await;
+    let session_id = json_str(&resp, "session_id").expect("session_id");
+    let ws_url = json_str(&resp, "ws_url").expect("ws_url");
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}{ws_url}"))
+        .await
+        .unwrap();
+
+    let vfo_resp = http_post_json(
+        &format!("http://{addr}/api/device/{session_id}/vfo"),
+        r#"{"offset_hz": 100000, "rate_hz": 50000, "filter_bw_hz": 20000}"#,
+    )
+    .await;
+    let vfo_id = json_str(&vfo_resp, "vfo_id").expect("vfo_id");
+
+    let _ = raw_request(
+        &format!("http://{addr}/api/device/{session_id}/vfo/{vfo_id}"),
+        "DELETE",
+        "",
+    )
+    .await;
+
+    let state = http_get(&format!("http://{addr}/api/device/{session_id}/state")).await;
+    assert!(
+        !state.contains(&format!("\"vfo_id\":\"{vfo_id}\"")),
+        "vfo still in state after DELETE: {state}"
+    );
+
+    // Drain a few frames looking for the vfo_removed event on stream 0.
+    let mut saw_removed = false;
+    for _ in 0..32 {
+        let Ok(Some(Ok(Message::Binary(bytes)))) =
+            tokio::time::timeout(Duration::from_secs(2), ws.next()).await
+        else {
+            break;
+        };
+        let (hdr, payload) = ws_frame::decode(&bytes).expect("decode");
+        if hdr.payload_type == ws_frame::PayloadType::JsonEvent {
+            if let Ok(text) = std::str::from_utf8(payload) {
+                if text.contains("vfo_removed") && text.contains(&vfo_id) {
+                    saw_removed = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(saw_removed, "expected a vfo_removed JsonEvent");
+
+    let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
+}
+
+/// DELETE against a nonexistent `vfo_id` must 404 with `VFO_NOT_FOUND`.
+#[tokio::test]
+async fn delete_unknown_vfo_returns_vfo_not_found() {
+    let addr = spawn_app().await;
+    let body = r#"{"fft_size": 128, "fft_rate_hz": 200.0}"#;
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), body).await;
+    let session_id = json_str(&resp, "session_id").expect("session_id");
+
+    let r = raw_request(
+        &format!("http://{addr}/api/device/{session_id}/vfo/vfo-missing"),
+        "DELETE",
+        "",
     )
     .await;
     assert!(r.contains("VFO_NOT_FOUND"), "reply: {r}");
