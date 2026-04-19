@@ -12,9 +12,28 @@
 
 use wasm_bindgen::prelude::*;
 
+use crate::doc::FlowgraphDoc;
+use crate::validate::validate_doc;
+
 /// Crate version, exposed so the browser can log "runtime vX.Y.Z loaded"
 /// and any protocol-level version checks have something to key off of.
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Parse a flowgraph JSON string and run the registry-independent
+/// validation passes (shape / fan / dag / wire_endpoints). Returns the
+/// doc's `name` on success; throws a `JsError` carrying the validation
+/// summary otherwise.
+///
+/// Registry-dependent phases (env_match, wire_type_match, params) still
+/// require a block registry; a later commit exposes that path once the
+/// wasm-side registry shape is designed.
+#[wasm_bindgen(js_name = parseAndValidateDoc)]
+pub fn parse_and_validate_doc(json: &str) -> Result<String, JsError> {
+    let doc: FlowgraphDoc = serde_json::from_str(json)
+        .map_err(|e| JsError::new(&format!("flowgraph JSON parse error: {e}")))?;
+    validate_doc(&doc).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(doc.name)
 }

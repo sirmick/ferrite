@@ -11,7 +11,7 @@
 // Instantiation is idempotent — the first caller awaits `init()`; later
 // callers get the already-resolved module instantly.
 
-import initWasm, { version } from '../wasm/runtime/runtime.js';
+import initWasm, { parseAndValidateDoc, version } from '../wasm/runtime/runtime.js';
 
 let initPromise: Promise<void> | undefined;
 
@@ -27,4 +27,14 @@ async function ensureInit(): Promise<void> {
 export async function rustRuntimeVersion(): Promise<string> {
   await ensureInit();
   return version();
+}
+
+/**
+ * Parse a flowgraph JSON string and run the registry-independent
+ * validation passes. Returns the doc's `name` on success; throws the
+ * underlying Rust error if validation fails.
+ */
+export async function validateFlowgraphJson(json: string): Promise<string> {
+  await ensureInit();
+  return parseAndValidateDoc(json);
 }

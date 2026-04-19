@@ -8,17 +8,40 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 
-import { initSync, version } from '../wasm/runtime/runtime.js';
+import wbfmJson from '../../../../flowgraphs/wbfm.json';
+import { initSync, parseAndValidateDoc, version } from '../wasm/runtime/runtime.js';
 
 const WASM_PATH = resolve(__dirname, '../wasm/runtime/runtime_bg.wasm');
 const EXPECTED_VERSION = '0.0.1';
 
 describe('rust runtime wasm shim', () => {
-  it('instantiates the wasm-pack module and returns the crate version', () => {
+  beforeAll(() => {
     const bytes = readFileSync(WASM_PATH);
     initSync({ module: bytes });
+  });
+
+  it('returns the crate version string', () => {
     expect(version()).toBe(EXPECTED_VERSION);
+  });
+
+  it('parses and validates the shipped wbfm preset', () => {
+    const name = parseAndValidateDoc(JSON.stringify(wbfmJson));
+    expect(name).toBe('wbfm');
+  });
+
+  it('throws on malformed flowgraph JSON', () => {
+    expect(() => parseAndValidateDoc('{"not":"a flowgraph"}')).toThrow();
+  });
+
+  it('throws with a structured error on a wire endpoint referring to an unknown block', () => {
+    const bad = {
+      name: 'bad',
+      environments: ['browser'],
+      blocks: { a: { type: 'Src' } },
+      wires: [['a.out', 'ghost.in']],
+    };
+    expect(() => parseAndValidateDoc(JSON.stringify(bad))).toThrow(/ghost/);
   });
 });
