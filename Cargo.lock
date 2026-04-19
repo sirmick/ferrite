@@ -307,6 +307,8 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
+ "soapysdr",
+ "tracing",
  "wasm-bindgen",
 ]
 

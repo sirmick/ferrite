@@ -15,8 +15,10 @@ workspace = true
 default  = []
 # Links SoapySDR at build time. Requires libSoapySDR and its pkg-config
 # metadata on PKG_CONFIG_PATH — see scripts/build-soapysdr.sh and the
-# `source soapysdr/env.sh` line in docs/06-build.md.
-soapysdr = ["dep:soapysdr"]
+# `source soapysdr/env.sh` line in docs/06-build.md. Propagates to the
+# blocks crate so the `SoapySource` flowgraph block appears in the
+# registry whenever the server has Soapy linked in.
+soapysdr = ["dep:soapysdr", "ferrite-blocks/soapysdr"]
 
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }

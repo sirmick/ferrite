@@ -23,6 +23,8 @@ pub mod fm_demod;
 pub mod log_mag_u8;
 pub mod registry;
 pub mod sine;
+#[cfg(feature = "soapysdr")]
+pub mod soapy_source;
 pub mod ws_bridge;
 
 pub use block::{
@@ -36,6 +38,8 @@ pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 pub use sine::{SineSource, SineSourceParams};
+#[cfg(feature = "soapysdr")]
+pub use soapy_source::{SoapySource, SoapySourceParams};
 pub use ws_bridge::{WsBridgeParams, WsBridgeRx, WsBridgeTx};
 
 /// Marks an `impl Block for T` so `T` is added to [`registry`].
@@ -97,6 +101,11 @@ mod tests {
                 "{expected} missing from registry (found: {names:?})",
             );
         }
+        #[cfg(feature = "soapysdr")]
+        assert!(
+            names.contains("SoapySource"),
+            "SoapySource missing from registry under `soapysdr` feature (found: {names:?})",
+        );
     }
 
     #[test]
