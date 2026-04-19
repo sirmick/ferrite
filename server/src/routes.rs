@@ -32,12 +32,6 @@ pub async fn hello() -> Json<Hello> {
     })
 }
 
-/// Legacy `/ws` echo — kept so the Phase A smoke test still passes. The
-/// real per-session stream upgrades on `/ws/:session_id` (see [`ws_session`]).
-pub async fn ws_upgrade(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(ws_echo)
-}
-
 /// Streams every `tracing` log line as a text WS message. Lets the UI
 /// show server-side logs alongside its own client-side ones.
 pub async fn ws_logs(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -65,35 +59,6 @@ async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroa
                     .await;
             }
             Err(broadcast::error::RecvError::Closed) => return,
-        }
-    }
-}
-
-async fn ws_echo(mut socket: WebSocket) {
-    tracing::debug!("ws connected");
-    while let Some(msg) = socket.recv().await {
-        let msg = match msg {
-            Ok(m) => m,
-            Err(err) => {
-                tracing::debug!(?err, "ws recv error");
-                return;
-            }
-        };
-        match msg {
-            Message::Text(text) => {
-                if socket.send(Message::Text(text)).await.is_err() {
-                    return;
-                }
-            }
-            Message::Binary(bytes) => {
-                if socket.send(Message::Binary(bytes)).await.is_err() {
-                    return;
-                }
-            }
-            Message::Ping(p) => {
-                let _ = socket.send(Message::Pong(p)).await;
-            }
-            Message::Close(_) | Message::Pong(_) => return,
         }
     }
 }

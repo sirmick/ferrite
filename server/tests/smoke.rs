@@ -7,7 +7,7 @@ use axum::{
     routing::{get, patch, post},
     Router,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -58,7 +58,6 @@ async fn spawn_app() -> SocketAddr {
             "/api/device/:id/vfo/:vfo_id",
             patch(routes::patch_vfo).delete(routes::delete_vfo),
         )
-        .route("/ws", get(routes::ws_upgrade))
         .route("/ws/:id", get(routes::ws_session))
         .with_state(state);
 
@@ -76,19 +75,6 @@ async fn hello_returns_ok_json() {
     let body = http_get(&format!("http://{addr}/api/hello")).await;
     assert!(body.contains("\"status\":\"ok\""), "body: {body}");
     assert!(body.contains("\"app\":\"ferrited\""), "body: {body}");
-}
-
-#[tokio::test]
-async fn ws_echoes_text_frames() {
-    let addr = spawn_app().await;
-    let url = format!("ws://{addr}/ws");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-    ws.send(Message::text("hello")).await.unwrap();
-    let reply = ws.next().await.unwrap().unwrap();
-    match reply {
-        Message::Text(t) => assert_eq!(t.as_str(), "hello"),
-        other => panic!("unexpected reply: {other:?}"),
-    }
 }
 
 #[tokio::test]

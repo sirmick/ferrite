@@ -1,10 +1,10 @@
 //! `ferrited` — Ferrite SDR daemon.
 //!
-//! Phase A skeleton. Binds to `0.0.0.0:8088`, serves `GET /api/hello`,
-//! accepts a WebSocket upgrade on `/ws`, and serves the `SvelteKit`
-//! static bundle from `FERRITE_STATIC_ROOT` (defaults to `./web-dist`).
-//! Every response carries COOP/COEP so the browser grants
-//! `SharedArrayBuffer` access.
+//! Binds to `0.0.0.0:8088`, serves the REST API under `/api`, the
+//! per-session and preset WebSocket streams under `/ws/*`, and the
+//! `SvelteKit` static bundle from `FERRITE_STATIC_ROOT` (defaults to
+//! `./web-dist`). Every response carries COOP/COEP so the browser
+//! grants `SharedArrayBuffer` access.
 
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -156,7 +156,6 @@ async fn main() -> Result<()> {
             "/api/device/:id/vfo/:vfo_id",
             patch(routes::patch_vfo).delete(routes::delete_vfo),
         )
-        .route("/ws", get(routes::ws_upgrade))
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
         .route("/ws/:id", get(routes::ws_session))
