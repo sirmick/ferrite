@@ -316,7 +316,7 @@ fn omega_for(freq_shift_hz: f64, input_rate_hz: f64) -> f32 {
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 mod tests {
     use super::{Channelizer, ChannelizerParams};
     use crate::block::{Block, BlockIo, InBuf, InputPort, OutBuf, OutputPort, PortMeta};
