@@ -9,16 +9,17 @@
 //!
 //! ### Scope of this commit
 //!
-//! This is the **block-type placeholder only**. `Placement::WasmOnly`
-//! means `env_split` carves it out of the node-side doc entirely, so
-//! `ferrited` never instantiates it. The `process` impl is a no-op
-//! guard that consumes the input without producing anything. The real
-//! Web Audio glue lands at M4 when the browser loads the Rust runtime
-//! as WASM and we wire the SAB ring through `wasm-bindgen`.
+//! `Placement::WasmOnly` means `env_split` carves this block out of the
+//! node-side doc entirely, so `ferrited` never instantiates it. The
+//! `process` impl now writes into an internal [`AudioRing`] and tracks
+//! overflow via `dropped_samples` — byte-compatible with the TS
+//! `AudioSink`. The SAB/`AudioWorklet` hand-off still needs a
+//! wasm-bindgen bridge; that lands in the next M4 slice.
 
 use anyhow::Result;
 use serde::Deserialize;
 
+use crate::audio_ring::AudioRing;
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, ParamKind, ParamSpec, Placement, PortSpec,
     PortType, Work,
@@ -64,13 +65,40 @@ const BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
 };
 
 pub struct AudioSink {
-    _params: AudioSinkParams,
+    params: AudioSinkParams,
+    ring: AudioRing,
+    dropped_samples: u64,
 }
 
 impl AudioSink {
     #[must_use]
-    pub const fn new(params: AudioSinkParams) -> Self {
-        Self { _params: params }
+    pub fn new(params: AudioSinkParams) -> Self {
+        let ring = AudioRing::new(params.buffer_samples);
+        Self {
+            params,
+            ring,
+            dropped_samples: 0,
+        }
+    }
+
+    /// Cumulative count of samples dropped because the ring was full.
+    /// Matches the TS `droppedSamples` getter. Consumer-facing in tests
+    /// and eventually in a diagnostics pane.
+    #[must_use]
+    pub fn dropped_samples(&self) -> u64 {
+        self.dropped_samples
+    }
+
+    /// Mutable view of the internal ring. Pulled by the runtime host
+    /// (native tests, or the browser tick loop) to drain audio samples
+    /// out of the block after each `process` pass.
+    pub fn ring_mut(&mut self) -> &mut AudioRing {
+        &mut self.ring
+    }
+
+    #[must_use]
+    pub fn params(&self) -> &AudioSinkParams {
+        &self.params
     }
 }
 
@@ -90,20 +118,34 @@ impl Block for AudioSink {
     }
 
     fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
+        self.ring.reset();
+        self.dropped_samples = 0;
         Ok(())
     }
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
-        // Placeholder: no Web Audio in the native build, so just drain
-        // the input so upstream doesn't back-pressure in lock-step
-        // tests. Real SAB write lands in M4.
         let mut w = Work::new();
-        if let Some(port) = io.inputs.iter().find(|p| p.name == "in") {
-            if let crate::block::InBuf::RealF32(slice) = &port.buf {
-                w.consumed[0] = slice.len();
-            }
+        let Some(port) = io.inputs.iter().find(|p| p.name == "in") else {
+            return Ok(w);
+        };
+        let crate::block::InBuf::RealF32(slice) = &port.buf else {
+            return Ok(w);
+        };
+        let written = self.ring.write(slice);
+        if written < slice.len() {
+            // Report full input as consumed even on overflow. Reporting
+            // `written` would make the scheduler re-present the same
+            // samples, back-pressuring the radio pipeline on the audio
+            // clock — bad for live listening. Drop and move on.
+            self.dropped_samples += (slice.len() - written) as u64;
         }
+        w.consumed[0] = slice.len();
         Ok(w)
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        self.ring.reset();
+        Ok(())
     }
 }
 
@@ -117,7 +159,26 @@ impl BlockFactory for AudioSink {
 #[cfg(test)]
 mod tests {
     use super::{AudioSink, AudioSinkParams, DEFAULT_BUFFER_SAMPLES};
-    use crate::block::{Block, Placement};
+    use crate::block::{Block, BlockIo, InBuf, InitCtx, InputPort, Placement, PortMeta};
+
+    fn make_port(buf: &[f32]) -> InputPort<'_> {
+        InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::RealF32(buf),
+        }
+    }
+
+    fn run_process(sink: &mut AudioSink, samples: &[f32]) {
+        let mut inputs = vec![make_port(samples)];
+        let mut outputs: Vec<crate::block::OutputPort<'_>> = Vec::new();
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut outputs,
+        };
+        let work = sink.process(&mut io).unwrap();
+        assert_eq!(work.consumed[0], samples.len(), "must report full consume");
+    }
 
     #[test]
     fn spec_is_wasm_only_real_in() {
@@ -140,5 +201,50 @@ mod tests {
         let value = serde_json::json!({ "buffer_samples": 4096 });
         let p: AudioSinkParams = serde_json::from_value(value).unwrap();
         assert_eq!(p.buffer_samples, 4096);
+    }
+
+    #[test]
+    fn process_writes_samples_into_the_ring() {
+        let mut sink = AudioSink::new(AudioSinkParams { buffer_samples: 8 });
+        run_process(&mut sink, &[0.1, 0.2, 0.3]);
+        assert_eq!(sink.ring_mut().available_read(), 3);
+
+        let mut drained = [0.0; 3];
+        let got = sink.ring_mut().read(&mut drained);
+        assert_eq!(got, 3);
+        assert_eq!(drained, [0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn process_tallies_overflow_dropped_samples() {
+        // Ring holds 4, we push 6 — two samples drop.
+        let mut sink = AudioSink::new(AudioSinkParams { buffer_samples: 4 });
+        run_process(&mut sink, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(sink.dropped_samples(), 2);
+        assert_eq!(sink.ring_mut().available_read(), 4);
+    }
+
+    #[test]
+    fn init_resets_ring_and_dropped_count() {
+        let mut sink = AudioSink::new(AudioSinkParams { buffer_samples: 4 });
+        run_process(&mut sink, &[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(sink.dropped_samples(), 1);
+
+        let mut ctx = InitCtx {
+            input_meta: &[],
+            output_meta: &[],
+            frames_hint: 1024,
+        };
+        sink.init(&mut ctx).unwrap();
+        assert_eq!(sink.dropped_samples(), 0);
+        assert_eq!(sink.ring_mut().available_read(), 0);
+    }
+
+    #[test]
+    fn stop_resets_ring() {
+        let mut sink = AudioSink::new(AudioSinkParams { buffer_samples: 4 });
+        run_process(&mut sink, &[1.0, 2.0]);
+        sink.stop().unwrap();
+        assert_eq!(sink.ring_mut().available_read(), 0);
     }
 }
