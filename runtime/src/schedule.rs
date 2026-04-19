@@ -20,18 +20,21 @@
 
 use std::collections::BTreeMap;
 
+use ferrite_blocks::PortType;
+
 use crate::doc::FlowgraphDoc;
 use crate::validate::{split_endpoint, ValidatedDoc};
 
 /// Where one consumer input port's samples come from. `port_type` is
-/// filled in once the registry-dependent pass lands — for now the field
-/// is reserved and always `None`.
+/// populated by [`instantiate_flowgraph`](crate::instantiate::instantiate_flowgraph);
+/// callers that build a [`Schedule`] directly (without registry lookup)
+/// leave it as `None` — that path is for tests and graph-shape
+/// inspection only, not for live execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputSource {
     pub source_block: String,
     pub source_port: String,
-    /// Reserved for the registry-dependent pass. `None` today.
-    pub port_type: Option<&'static str>,
+    pub port_type: Option<PortType>,
 }
 
 /// Per block id → (input port name → producer). Every block in the doc

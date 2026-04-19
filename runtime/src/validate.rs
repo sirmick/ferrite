@@ -69,7 +69,7 @@ pub struct FlowgraphValidationError {
 }
 
 impl FlowgraphValidationError {
-    fn new(errors: Vec<ValidationError>) -> Self {
+    pub(crate) fn new(errors: Vec<ValidationError>) -> Self {
         let summary = errors
             .iter()
             .map(|e| format!("[{:?}] {}", e.phase, e.error))
