@@ -22,13 +22,33 @@
 //! `FmDemod.in`). `RealF32`, `FftU8`, etc. land as siblings when a
 //! preset needs them.
 
+use std::sync::Arc;
+
 use anyhow::Result;
+use num_complex::Complex;
 use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, ParamKind, ParamSpec, Placement, PortSpec,
     PortType, Work,
 };
+
+/// Transport contract for [`WsBridgeTx`]. The runtime constructs a sink
+/// on the session side (today that's the WS frame encoder + broadcast
+/// channel in `ferrited::session`) and hands it to the block via
+/// [`WsBridgeTx::attach_sink`] after construction but before `init`
+/// runs. Every [`WsBridgeTx::process`] call then forwards its input
+/// slice through this handle.
+///
+/// Framing, `seq` counters, payload-type tagging, and the actual WS
+/// send all live on the implementation side — the block stays ignorant
+/// of the protocol so wire-format changes don't touch the DSP crate.
+pub trait IqBridgeSink: Send + Sync {
+    /// Push one block of `IqF32` samples tagged with a bridge-pair
+    /// `stream_id`. Implementations are expected to be lossy-latest or
+    /// backpressure-free — the block itself does not await.
+    fn push_iq_f32(&self, stream_id: u32, samples: &[Complex<f32>]);
+}
 
 /// Stream identifier carried on both ends of a bridge pair. Unique
 /// within a graph; the server allocates it at preset-load time.
@@ -61,17 +81,25 @@ const STREAM_ID_PARAM: ParamSpec = ParamSpec {
 
 pub struct WsBridgeTx {
     params: WsBridgeParams,
+    sink: Option<Arc<dyn IqBridgeSink>>,
 }
 
 impl WsBridgeTx {
     #[must_use]
     pub const fn new(params: WsBridgeParams) -> Self {
-        Self { params }
+        Self { params, sink: None }
     }
 
     #[must_use]
     pub const fn stream_id(&self) -> u32 {
         self.params.stream_id
+    }
+
+    /// Wire a transport sink. The runtime calls this after constructing
+    /// the block but before `init`; `process` pushes every arriving IQ
+    /// block through the sink. Called once — later calls overwrite.
+    pub fn attach_sink(&mut self, sink: Arc<dyn IqBridgeSink>) {
+        self.sink = Some(sink);
     }
 }
 
@@ -95,11 +123,16 @@ impl Block for WsBridgeTx {
     }
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
-        // Placeholder: consume whatever arrived so upstream sees back-
-        // pressure relief, then drop it. Real transport lands in M2.
         let mut w = Work::new();
         if let Some(port) = io.inputs.iter().find(|p| p.name == "in") {
             if let Some(slice) = port.as_iq_f32() {
+                if let Some(sink) = &self.sink {
+                    sink.push_iq_f32(self.params.stream_id, slice);
+                }
+                // Consume whatever arrived regardless of sink presence:
+                // an unwired bridge still needs to relieve upstream
+                // back-pressure, and tests without a sink must not
+                // deadlock the scheduler.
                 w.consumed[0] = slice.len();
             }
         }
@@ -170,9 +203,10 @@ impl BlockFactory for WsBridgeRx {
 
 #[cfg(test)]
 mod tests {
-    use super::{WsBridgeParams, WsBridgeRx, WsBridgeTx};
+    use super::{IqBridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx};
     use crate::block::{Block, BlockIo, InBuf, InputPort, OutBuf, OutputPort, PortMeta, Work};
     use num_complex::Complex;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn tx_spec_is_native_only_iq_in() {
@@ -225,5 +259,58 @@ mod tests {
         };
         let w: Work = rx.process(&mut io).unwrap();
         assert_eq!(w.produced[0], 0);
+    }
+
+    /// Captures every `push_iq_f32` call so the test can assert the
+    /// block forwarded the right `(stream_id, sample_count)` tuples.
+    #[derive(Default)]
+    struct CapturingSink {
+        calls: Mutex<Vec<(u32, usize)>>,
+    }
+
+    impl IqBridgeSink for CapturingSink {
+        fn push_iq_f32(&self, stream_id: u32, samples: &[Complex<f32>]) {
+            self.calls.lock().unwrap().push((stream_id, samples.len()));
+        }
+    }
+
+    #[test]
+    fn tx_forwards_samples_to_attached_sink() {
+        let sink = Arc::new(CapturingSink::default());
+        let mut tx = WsBridgeTx::new(WsBridgeParams { stream_id: 1234 });
+        tx.attach_sink(sink.clone());
+
+        let input = vec![Complex::new(0.5_f32, -0.25); 48];
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::IqF32(&input),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut [],
+        };
+        let w: Work = tx.process(&mut io).unwrap();
+        assert_eq!(w.consumed[0], 48);
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], (1234, 48));
+    }
+
+    #[test]
+    fn tx_without_sink_still_drains_upstream() {
+        let mut tx = WsBridgeTx::new(WsBridgeParams { stream_id: 9 });
+        let input = vec![Complex::new(1.0_f32, 0.0); 16];
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::IqF32(&input),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut [],
+        };
+        let w: Work = tx.process(&mut io).unwrap();
+        assert_eq!(w.consumed[0], 16);
     }
 }
