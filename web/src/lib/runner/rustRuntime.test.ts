@@ -14,6 +14,7 @@ import wbfmJson from '../../../../flowgraphs/wbfm.json';
 import {
   initSync,
   parseAndValidateDoc,
+  RuntimeHandle,
   splitDocForEnvironment,
   version,
 } from '../wasm/runtime/runtime.js';
@@ -77,5 +78,82 @@ describe('rust runtime wasm shim', () => {
     expect(() => splitDocForEnvironment(JSON.stringify(doc), 'mainframe')).toThrow(
       /unknown environment/,
     );
+  });
+
+  // Browser-only fixture — SineSource (IqF32) → FmDemod (→ RealF32) →
+  // AudioSink. AudioSink is a no-op stub today (real SAB glue lands in
+  // a later M4 slice), but the graph type-checks and exercises the full
+  // Created → Initialized → Running → Stopped lifecycle under the Rust
+  // runtime without any JS-side block bridge.
+  const sineToSinkDoc = JSON.stringify({
+    name: 'sine-audio',
+    environments: ['browser'],
+    blocks: {
+      src: { type: 'SineSource', placement: 'browser', params: { rate_hz: 240000 } },
+      demod: {
+        type: 'FmDemod',
+        placement: 'browser',
+        params: { sample_rate_hz: 240000, max_deviation_hz: 75000 },
+      },
+      sink: { type: 'AudioSink', placement: 'browser' },
+    },
+    wires: [
+      ['src.out', 'demod.in'],
+      ['demod.out', 'sink.in'],
+    ],
+  });
+
+  describe('RuntimeHandle', () => {
+    it('walks Created → Initialized → Running → Stopped', () => {
+      const rt = new RuntimeHandle(sineToSinkDoc, 'browser');
+      try {
+        expect(rt.state).toBe('Created');
+        rt.init();
+        expect(rt.state).toBe('Initialized');
+        rt.start();
+        expect(rt.state).toBe('Running');
+        rt.tick();
+        rt.tick();
+        rt.stop();
+        expect(rt.state).toBe('Stopped');
+      } finally {
+        rt.free();
+      }
+    });
+
+    it('honours a custom frames_hint', () => {
+      const rt = new RuntimeHandle(sineToSinkDoc, 'browser', 256);
+      try {
+        expect(rt.framesHint).toBe(256);
+      } finally {
+        rt.free();
+      }
+    });
+
+    it('defaults frames_hint when omitted', () => {
+      const rt = new RuntimeHandle(sineToSinkDoc, 'browser');
+      try {
+        expect(rt.framesHint).toBe(1024);
+      } finally {
+        rt.free();
+      }
+    });
+
+    it('rejects tick before init', () => {
+      const rt = new RuntimeHandle(sineToSinkDoc, 'browser');
+      try {
+        expect(() => rt.tick()).toThrow(/Created/);
+      } finally {
+        rt.free();
+      }
+    });
+
+    it('throws on malformed JSON at construction', () => {
+      expect(() => new RuntimeHandle('{"not":"a flowgraph"}', 'browser')).toThrow();
+    });
+
+    it('throws on unknown environment at construction', () => {
+      expect(() => new RuntimeHandle(sineToSinkDoc, 'mainframe')).toThrow(/unknown environment/);
+    });
   });
 });

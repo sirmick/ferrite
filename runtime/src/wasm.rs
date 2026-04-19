@@ -15,7 +15,21 @@ use wasm_bindgen::prelude::*;
 use crate::block_registry::InventorySpecRegistry;
 use crate::doc::{Environment, FlowgraphDoc};
 use crate::env_split::split_for_environment;
+use crate::runtime::{Runtime, DEFAULT_FRAMES_HINT};
 use crate::validate::validate_doc;
+
+fn parse_environment(env: &str) -> Result<Environment, JsError> {
+    match env {
+        "node" => Ok(Environment::Node),
+        "browser" => Ok(Environment::Browser),
+        other => Err(JsError::new(&format!("unknown environment {other:?}"))),
+    }
+}
+
+fn parse_doc(json: &str) -> Result<FlowgraphDoc, JsError> {
+    serde_json::from_str(json)
+        .map_err(|e| JsError::new(&format!("flowgraph JSON parse error: {e}")))
+}
 
 /// Crate version, exposed so the browser can log "runtime vX.Y.Z loaded"
 /// and any protocol-level version checks have something to key off of.
@@ -34,8 +48,7 @@ pub fn version() -> String {
 /// wasm-side registry shape is designed.
 #[wasm_bindgen(js_name = parseAndValidateDoc)]
 pub fn parse_and_validate_doc(json: &str) -> Result<String, JsError> {
-    let doc: FlowgraphDoc = serde_json::from_str(json)
-        .map_err(|e| JsError::new(&format!("flowgraph JSON parse error: {e}")))?;
+    let doc = parse_doc(json)?;
     validate_doc(&doc).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(doc.name)
 }
@@ -50,16 +63,82 @@ pub fn parse_and_validate_doc(json: &str) -> Result<String, JsError> {
 /// compiled into this crate is available for placement resolution.
 #[wasm_bindgen(js_name = splitDocForEnvironment)]
 pub fn split_doc_for_environment(json: &str, env: &str) -> Result<String, JsError> {
-    let target = match env {
-        "node" => Environment::Node,
-        "browser" => Environment::Browser,
-        other => return Err(JsError::new(&format!("unknown environment {other:?}"))),
-    };
-    let doc: FlowgraphDoc = serde_json::from_str(json)
-        .map_err(|e| JsError::new(&format!("flowgraph JSON parse error: {e}")))?;
+    let target = parse_environment(env)?;
+    let doc = parse_doc(json)?;
     let registry = InventorySpecRegistry;
     let out =
         split_for_environment(&doc, target, &registry).map_err(|e| JsError::new(&e.to_string()))?;
     serde_json::to_string(&out)
         .map_err(|e| JsError::new(&format!("split result serialization failed: {e}")))
+}
+
+/// Browser-side handle over a [`Runtime`]. Constructing it parses, validates,
+/// instantiates, and assembles the graph — the result is a fully-wired tick
+/// pump sitting in `Created` state. From there the JS runner drives
+/// `init` → `tick*` → `stop` explicitly; the cadence lives on the JS side.
+///
+/// The wrapper is a thin shim over [`Runtime`]'s methods: each call
+/// forwards directly, converting `anyhow::Error` into a `JsError` the JS
+/// wrapper can surface as a thrown `Error`.
+#[wasm_bindgen(js_name = RuntimeHandle)]
+pub struct RuntimeHandle {
+    rt: Runtime,
+}
+
+#[wasm_bindgen(js_class = RuntimeHandle)]
+impl RuntimeHandle {
+    /// Build a runtime from a flowgraph JSON doc targeting the given
+    /// environment (typically `"browser"`). `frames_hint` overrides the
+    /// per-call frame budget; pass `None` (or `undefined` from JS) to
+    /// use [`DEFAULT_FRAMES_HINT`].
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        doc_json: &str,
+        env: &str,
+        frames_hint: Option<usize>,
+    ) -> Result<RuntimeHandle, JsError> {
+        let target = parse_environment(env)?;
+        let doc = parse_doc(doc_json)?;
+        let rt = Runtime::load_doc(&doc, target, frames_hint.unwrap_or(DEFAULT_FRAMES_HINT))
+            .map_err(|e| JsError::new(&format!("{e:#}")))?;
+        Ok(Self { rt })
+    }
+
+    /// Call `init` on every block. Required before the first `tick`.
+    pub fn init(&mut self) -> Result<(), JsError> {
+        self.rt.init().map_err(|e| JsError::new(&format!("{e:#}")))
+    }
+
+    /// Transition `Initialized → Running`. Optional — `tick` works from
+    /// `Initialized` too; calling `start` is only needed if a later
+    /// feature keys off the `Running` state.
+    pub fn start(&mut self) -> Result<(), JsError> {
+        self.rt.start().map_err(|e| JsError::new(&format!("{e:#}")))
+    }
+
+    /// Run one tick of the graph. Legal from `Initialized` or `Running`.
+    pub fn tick(&mut self) -> Result<(), JsError> {
+        self.rt.tick().map_err(|e| JsError::new(&format!("{e:#}")))
+    }
+
+    /// Drain every block in reverse topological order. Terminal — the
+    /// handle cannot be re-used afterwards; the JS side should drop its
+    /// reference.
+    pub fn stop(&mut self) -> Result<(), JsError> {
+        self.rt.stop().map_err(|e| JsError::new(&format!("{e:#}")))
+    }
+
+    /// Current lifecycle state as a string: `"Created"`, `"Initialized"`,
+    /// `"Running"`, or `"Stopped"`. Handy for tests and dev-console
+    /// inspection; the JS runner usually tracks state itself.
+    #[wasm_bindgen(getter)]
+    pub fn state(&self) -> String {
+        format!("{:?}", self.rt.state())
+    }
+
+    /// Per-call frame budget this runtime was built with.
+    #[wasm_bindgen(getter, js_name = framesHint)]
+    pub fn frames_hint(&self) -> usize {
+        self.rt.frames_hint()
+    }
 }
