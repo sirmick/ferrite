@@ -1,0 +1,26 @@
+{
+  "name": "@ferrite/headless",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Headless flowgraph runner — loads a FlowgraphDoc and drives the runtime lifecycle in Node. Node-safe blocks only; no AudioSink, no WebSocket source.",
+  "license": "MIT OR Apache-2.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "prettier --check src",
+    "check": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "build": "tsc --emitDeclarationOnly"
+  },
+  "dependencies": {
+    "@ferrite/flowgraph-blocks": "workspace:*",
+    "@ferrite/flowgraph-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
