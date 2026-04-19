@@ -318,6 +318,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-runtime"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "ferrited"
 version = "0.0.1"
 dependencies = [

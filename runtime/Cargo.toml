@@ -1,0 +1,27 @@
+[package]
+name        = "ferrite-runtime"
+version     = "0.0.1"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "Ferrite flowgraph runtime — doc parser, scheduler, lifecycle. Dual-compile (native + WebAssembly)."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+wasm    = ["dep:wasm-bindgen"]
+
+[dependencies]
+anyhow       = "1"
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+wasm-bindgen = { version = "0.2", optional = true }
+
+[dev-dependencies]
