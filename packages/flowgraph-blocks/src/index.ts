@@ -7,6 +7,7 @@
 // justify a codegen barrel.
 
 import { BlockRegistry, type BlockModule } from "./registry.js";
+import fmDemod from "./blocks/fm-demod/index.js";
 import passthru from "./blocks/passthru/index.js";
 
 export const BLOCKS_PACKAGE_VERSION = "0.0.1";
@@ -16,6 +17,7 @@ export type { BlockModule, BlockWidget, InstallCtx } from "./registry.js";
 
 /** All blocks shipped by this package, keyed by `spec.typeName`. */
 export const blocks: Readonly<Record<string, BlockModule>> = {
+  FmDemod: fmDemod,
   Passthru: passthru,
 };
 
