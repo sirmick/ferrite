@@ -19,10 +19,11 @@ server code.
   "name": "wbfm",
   "label": "FM broadcast receiver",
   "description": "Wideband FM demod to audio",
-  "environments": ["browser"],
+  "environments": ["node", "browser"],
   "blocks": {
     "<instance_id>": {
       "type": "<BlockTypeName>",
+      "placement": "node" | "browser",
       "params": { ... }
     }
   },
@@ -39,13 +40,19 @@ server code.
 | `name`         | string (slug)     | machine identifier; filename matches              |
 | `label`        | string            | human-readable name for UI                        |
 | `description`  | string            | one-sentence summary                              |
-| `environments` | string[]          | which runtimes can host this graph                |
+| `environments` | string[]          | which runtimes this graph lives on                |
 | `blocks`       | object            | instance_id → block declaration                   |
 | `wires`        | array of [a, b]   | connections, `a` is output, `b` is input          |
 
-`environments` values: `"browser"`, `"node"`. A graph that only makes sense
-in one environment (e.g. needs an `AudioSink`, only available in `browser`)
-declares that here. The runtime refuses to instantiate in a mismatched env.
+`environments` values: `"browser"`, `"node"`. A single-env graph declares
+one side; a cross-env graph declares both. Block types with
+`Placement::NativeOnly` (e.g. `SoapySource`) or `Placement::WasmOnly` (e.g.
+`AudioSink`) pin themselves to the matching environment; blocks with
+`Placement::Either` (most DSP — `Decimator`, `FmDemod`, `Channelizer`)
+accept a per-instance `placement` field in the doc that pins them to one
+side. On load, `split_for_environment` carves the doc into an env-local
+subgraph and auto-inserts a `WsBridgeTx`/`WsBridgeRx` pair on every wire
+that crossed the boundary. Authors do **not** hand-wire those bridges.
 
 ### Instance IDs
 
@@ -56,34 +63,36 @@ messages). Convention: lower_snake_case nouns.
 ## Sources and sinks
 
 Sources and sinks are **blocks** from the runtime's perspective (they implement
-the same trait), but they are environment-specific:
+the same trait). Placement is declared by the block's `BlockSpec::placement`:
 
-### Browser sources/sinks
-
-| type              | direction | notes                                                   |
-|-------------------|-----------|---------------------------------------------------------|
-| `WsIqSource`      | source    | subscribes to a VFO stream on the ferrited WS           |
-| `WsFftSource`     | source    | subscribes to the waterfall FFT stream                  |
-| `AudioSink`       | sink      | feeds the AudioWorklet ring buffer                      |
-| `OpfsFileSink`    | sink      | writes to Origin Private File System                    |
-| `EventBusSink`    | sink      | publishes `events` payload to a Svelte store / bus      |
-
-### Node sources/sinks
+### Node-side (`Placement::NativeOnly`)
 
 | type              | direction | notes                                                   |
 |-------------------|-----------|---------------------------------------------------------|
-| `WsIqSource`      | source    | same WS subscription, loopback                          |
-| `WsFftSource`     | source    | same                                                    |
-| `FsFileSink`      | sink      | `fs.createWriteStream` to a path                        |
-| `MqttSink`        | sink      | publishes to an MQTT topic                              |
-| `SyslogSink`      | sink      | RFC 5424 syslog                                         |
-| `SqliteSink`      | sink      | insert into a SQLite table                              |
+| `SoapySource`     | source    | RTL-SDR / SDRPlay / any Soapy device                    |
+| `FileIqSource`    | source    | reads IQ from a local file                              |
 
-### Sinks/sources are listed per-environment
+### Browser-side (`Placement::WasmOnly`)
 
-The runtime's block registry is keyed not only by type name but by the
-environment it supports. A flowgraph that references `AudioSink` in its
-blocks with `"environments": ["node"]` fails validation.
+| type              | direction | notes                                                   |
+|-------------------|-----------|---------------------------------------------------------|
+| `AudioSink`       | sink      | feeds the AudioWorklet ring buffer (SAB)                |
+
+### Either (DSP; pin with per-instance `placement`)
+
+DSP blocks (`Channelizer`, `Decimator`, `FmDemod`, `FFT`, `LogMagU8`,
+`SineSource`) default to `Placement::Either`. In a cross-env doc they
+carry a `placement: "node" | "browser"` field that chooses which side they
+land on.
+
+### Cross-env bridges are automatic
+
+`WsBridgeTx` and `WsBridgeRx` exist in the registry but are **not**
+hand-authored. The loader inspects each wire; wires that cross the
+node/browser boundary are rewritten to insert a `WsBridgeTx` on the node
+side and a `WsBridgeRx` on the browser side, sharing a freshly allocated
+`stream_id` starting at `CROSS_ENV_STREAM_BASE` (1000). See
+[02-protocol.md](02-protocol.md#stream-ids) for the id allocation story.
 
 ## Wires
 
@@ -157,52 +166,48 @@ runtime.update("demod", { bandwidth: 15000 });
 
 Non-updatable param changes require restarting the flowgraph.
 
-## Example: WBFM
+## Example: WBFM (cross-env)
+
+The shipped `flowgraphs/wbfm.json`: node half reads 2.4 MS/s IQ off the
+RTL-SDR and channelizes to 240 kS/s; the `chan.out → decim.in` wire crosses
+the boundary and `env_split` inserts a bridge pair carrying stream_id 1000.
+The browser half decimates 5× to 48 kHz, demodulates, and feeds the audio
+ring.
 
 ```json
 {
   "name": "wbfm",
-  "label": "WBFM broadcast",
-  "description": "Wideband FM broadcast demodulator with de-emphasis.",
-  "environments": ["browser"],
+  "environments": ["node", "browser"],
   "blocks": {
-    "src":   { "type": "WsIqSource", "params": { "stream": "vfo.primary" } },
-    "demod": { "type": "FmDemod",    "params": { "bandwidth": 200000,
-                                                  "deemphasis_us": 75 } },
-    "decim": { "type": "Decimator",  "params": { "out_rate": 48000 } },
-    "audio": { "type": "AudioSink",  "params": { "rate": 48000 } }
+    "src":   { "type": "SoapySource",
+               "params": { "args": "driver=rtlsdr",
+                           "sample_rate_hz": 2400000,
+                           "center_freq_hz": 100100000,
+                           "bandwidth_hz": 2000000 } },
+    "chan":  { "type": "Channelizer", "placement": "node",
+               "params": { "input_rate_hz": 2400000, "factor": 10,
+                           "num_taps": 81, "cutoff_normalized": 0.03125 } },
+    "decim": { "type": "Decimator",   "placement": "browser",
+               "params": { "factor": 5, "num_taps": 41,
+                           "cutoff_normalized": 0.08 } },
+    "demod": { "type": "FmDemod",     "placement": "browser",
+               "params": { "sample_rate_hz": 48000,
+                           "max_deviation_hz": 75000 } },
+    "audio": { "type": "AudioSink",
+               "params": { "buffer_samples": 8192 } }
   },
   "wires": [
-    ["src.out",   "demod.in"],
-    ["demod.out", "decim.in"],
-    ["decim.out", "audio.in"]
+    ["src.out",   "chan.in"],
+    ["chan.out",  "decim.in"],
+    ["decim.out", "demod.in"],
+    ["demod.out", "audio.in"]
   ]
 }
 ```
 
-## Example: ADS-B
-
-```json
-{
-  "name": "adsb",
-  "label": "ADS-B (Mode S)",
-  "description": "Aircraft position/velocity decoding on 1090 MHz.",
-  "environments": ["browser", "node"],
-  "blocks": {
-    "src":     { "type": "WsIqSource", "params": { "stream": "vfo.adsb" } },
-    "decoder": { "type": "AdsbDecoder", "params": {} },
-    "out":     { "type": "EventBusSink", "params": { "topic": "adsb" } }
-  },
-  "wires": [
-    ["src.out",     "decoder.in"],
-    ["decoder.frames", "out.in"]
-  ]
-}
-```
-
-Note `environments` includes `node` — this flowgraph runs equally well in
-the browser (EventBusSink → map panel) and in the headless sidecar
-(EventBusSink → MqttSink swap, via a deployment-specific override layer).
+`src` and `audio` omit `placement` because their `BlockSpec` pins them
+(NativeOnly / WasmOnly). `chan`, `decim`, `demod` are `Placement::Either`
+and must declare a side.
 
 ### Deployment overrides
 

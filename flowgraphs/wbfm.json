@@ -2,18 +2,33 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "wbfm",
   "label": "FM broadcast (mono)",
-  "description": "Wideband FM receiver — 5× IQ decimation to 48 kHz baseband, phase-discriminator demod, mono audio. Stereo pilot + L-R + RDS need wider baseband (future chain).",
-  "environments": ["browser"],
+  "description": "Wideband FM receiver authored as one cross-env doc. The node half reads 2.4 MS/s IQ off an RTL-SDR (or any Soapy device with a matching `args` string) and a Channelizer pulls a 240 kS/s VFO to baseband. The `chan.out → decim.in` wire crosses the environment boundary; `env_split` auto-inserts a `WsBridgeTx`/`WsBridgeRx` pair at load time and deterministically allocates a `stream_id` starting at `CROSS_ENV_STREAM_BASE` (1000). The browser half does a 5× decimation to 48 kHz, runs a phase-discriminator FM demod, and feeds the AudioSink ring. Stereo pilot + L-R + RDS would widen the baseband and land as a separate preset.",
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
-      "type": "WsIqSource",
+      "type": "SoapySource",
       "params": {
-        "streamId": 2,
-        "bufferFloats": 131072
+        "args": "driver=rtlsdr",
+        "sample_rate_hz": 2400000.0,
+        "center_freq_hz": 100100000.0,
+        "bandwidth_hz": 2000000.0,
+        "channel": 0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "freq_shift_hz": 0.0,
+        "factor": 10,
+        "num_taps": 81,
+        "cutoff_normalized": 0.03125
       }
     },
     "decim": {
       "type": "Decimator",
+      "placement": "browser",
       "params": {
         "factor": 5,
         "num_taps": 41,
@@ -22,6 +37,7 @@
     },
     "demod": {
       "type": "FmDemod",
+      "placement": "browser",
       "params": {
         "sample_rate_hz": 48000,
         "max_deviation_hz": 75000
@@ -30,12 +46,13 @@
     "audio": {
       "type": "AudioSink",
       "params": {
-        "bufferSamples": 8192
+        "buffer_samples": 8192
       }
     }
   },
   "wires": [
-    ["src.out", "decim.in"],
+    ["src.out", "chan.in"],
+    ["chan.out", "decim.in"],
     ["decim.out", "demod.in"],
     ["demod.out", "audio.in"]
   ]

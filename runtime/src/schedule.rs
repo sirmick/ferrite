@@ -155,10 +155,10 @@ mod tests {
         let doc = FlowgraphDoc::from_json(WBFM).unwrap();
         let v = validate_doc(&doc).unwrap();
         let s = Schedule::from_validated(&v).unwrap();
-        // wbfm.json: src → decim → demod → audio. The block map is
-        // alphabetically sorted, but the scheduler must still emit
-        // source-before-sink because of the data-flow constraints.
-        assert_eq!(s.order, vec!["src", "decim", "demod", "audio"]);
+        // wbfm.json: src → chan → decim → demod → audio. The block
+        // map is alphabetically sorted, but the scheduler must still
+        // emit source-before-sink because of the data-flow constraints.
+        assert_eq!(s.order, vec!["src", "chan", "decim", "demod", "audio"]);
     }
 
     #[test]

@@ -83,24 +83,35 @@ mod tests {
     use super::*;
 
     const WBFM: &[u8] = include_bytes!("../../flowgraphs/wbfm.json");
-    const WBFM_NODE: &[u8] = include_bytes!("../../flowgraphs/wbfm-node.json");
 
     #[test]
     fn parses_shipped_wbfm_preset() {
         let doc = FlowgraphDoc::from_json(WBFM).expect("wbfm.json parses");
         assert_eq!(doc.name, "wbfm");
-        assert_eq!(doc.environments, vec![Environment::Browser]);
+        // wbfm.json is authored cross-env: SoapySource on node, FM
+        // demod + AudioSink on browser. `env_split` carves at load.
+        assert_eq!(
+            doc.environments,
+            vec![Environment::Node, Environment::Browser]
+        );
         assert_eq!(
             doc.blocks.keys().cloned().collect::<Vec<_>>(),
-            vec!["audio", "decim", "demod", "src"],
+            vec!["audio", "chan", "decim", "demod", "src"],
         );
-        assert_eq!(doc.wires.len(), 3);
+        assert_eq!(doc.wires.len(), 4);
         // Spot-check one block's params survived the round-trip.
         let demod = doc.blocks.get("demod").expect("demod block present");
         assert_eq!(demod.type_name, "FmDemod");
         let params = demod.params.as_ref().expect("demod has params");
         assert_eq!(params["sample_rate_hz"].as_f64(), Some(48_000.0));
         assert_eq!(params["max_deviation_hz"].as_f64(), Some(75_000.0));
+        // Spot-check placements: chan pinned to node, audio inherits
+        // browser from its WasmOnly spec (placement omitted in JSON).
+        assert_eq!(
+            doc.blocks.get("chan").unwrap().placement,
+            Some(Environment::Node)
+        );
+        assert_eq!(doc.blocks.get("audio").unwrap().placement, None);
     }
 
     #[test]
@@ -118,23 +129,6 @@ mod tests {
     fn rejects_garbage() {
         assert!(FlowgraphDoc::from_json(b"not json at all").is_err());
         assert!(FlowgraphDoc::from_json(b"{}").is_err()); // missing required fields
-    }
-
-    #[test]
-    fn parses_shipped_wbfm_node_preset() {
-        let doc = FlowgraphDoc::from_json(WBFM_NODE).expect("wbfm-node.json parses");
-        assert_eq!(doc.name, "wbfm-node");
-        assert_eq!(doc.environments, vec![Environment::Node]);
-        assert_eq!(
-            doc.blocks.keys().cloned().collect::<Vec<_>>(),
-            vec!["bridge", "chan", "src"],
-        );
-        // Bridge carries stream_id=2 so the browser's WsIqSource finds it
-        // on the existing VFO stream (see docs/02-protocol.md).
-        let bridge = doc.blocks.get("bridge").expect("bridge block present");
-        assert_eq!(bridge.type_name, "WsBridgeTx");
-        let bridge_params = bridge.params.as_ref().expect("bridge has params");
-        assert_eq!(bridge_params["stream_id"].as_u64(), Some(2));
     }
 
     #[test]

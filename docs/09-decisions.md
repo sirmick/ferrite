@@ -316,9 +316,12 @@ one runtime on both ends, not two runtimes with a wire-format contract.
 validation, scheduler, block instantiation, tick pump, and lifecycle.
 `ferrited` links it as a library; the browser imports it as a WASM
 module. A preset is one cross-environment doc with per-block
-placement; the scheduler splits it and auto-inserts `WsBridge` pairs
-on wires that cross the boundary. Browser-only blocks (AudioSink,
-WsIqSource) stay as JS, registered into the Rust runtime via bindings.
+placement; `env_split` carves the doc to one env and auto-inserts
+`WsBridgeTx`/`WsBridgeRx` pairs on wires that cross the boundary,
+allocating `stream_id` deterministically from `CROSS_ENV_STREAM_BASE`
+(1000). Every block — sources, sinks, DSP, bridges — is Rust/WASM;
+there is no TS `WsIqSource` in the destination architecture, the
+browser half's "source" is simply the auto-inserted `WsBridgeRx`.
 
 **Rejected.** Keep the TS runtime and add a second Rust runtime on the
 server — the split we're trying to escape. Port TS runtime semantics

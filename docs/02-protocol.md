@@ -340,8 +340,15 @@ byte-swap overhead. Non-LE clients must swap.
   frames here (state changes, warnings, errors).
 - `stream_id = 1` (convention) is the **waterfall FFT** stream (allocated
   implicitly at `POST /api/device/open`).
-- `stream_id >= 2` are assigned by the server when VFOs are created. Clients
-  receive the mapping via the `POST /api/device/.../vfo` response.
+- `stream_id` 2..999 are assigned by the server when VFOs are created via
+  the REST API. Clients receive the mapping via the `POST /api/device/.../vfo`
+  response.
+- `stream_id >= 1000` (`CROSS_ENV_STREAM_BASE`) are allocated automatically
+  by the runtime's `env_split` pass when a flowgraph crosses the node/browser
+  boundary. Each cross-env wire gets its own id, assigned in wire-declaration
+  order, carried on an auto-inserted `WsBridgeTx`/`WsBridgeRx` pair. The
+  allocation is deterministic for a given doc, so the browser side and the
+  node side resolve to the same numbers without any negotiation round-trip.
 
 ### JSON event schema (stream 0)
 

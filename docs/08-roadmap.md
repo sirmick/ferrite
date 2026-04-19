@@ -146,8 +146,9 @@ decoded output in the UI. The likely candidate is **dump1090** for ADS-B
 - Native build via `cc` crate; WASM build via
   `clang --target=wasm32-unknown-unknown` + wasi-libc.
 - Thin Rust `Block` wrapper implements the block trait on both targets.
-- `flowgraphs/adsb.json` loads and runs: WsIqSource → AdsbDecoder →
-  EventBusSink → UI.
+- `flowgraphs/adsb.json` loads and runs: `SoapySource` (node) →
+  `Channelizer` (node) → auto-inserted `WsBridgeTx`/`Rx` → `AdsbDecoder`
+  (browser) → `EventBusSink` (browser) → UI.
 - A message list panel renders decoded frames (Bits UI, virtualized).
 - Golden-fixture CI test: known ADS-B burst decodes to known hex.
 - Map panel (MapLibre or similar) plots aircraft from decoded position

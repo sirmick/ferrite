@@ -216,19 +216,25 @@ Flowgraphs are JSON:
 ```json
 {
   "name": "wbfm",
+  "environments": ["node", "browser"],
   "blocks": {
-    "src":  { "type": "WsIqSource",  "params": { "stream": "vfo.0" } },
-    "demod": { "type": "FmDemod",    "params": { "bandwidth": 200000 } },
-    "audio": { "type": "AudioSink",  "params": { "rate": 48000 } }
+    "src":   { "type": "SoapySource", "params": { "args": "driver=rtlsdr" } },
+    "chan":  { "type": "Channelizer", "placement": "node",    "params": { ... } },
+    "demod": { "type": "FmDemod",     "placement": "browser", "params": { ... } },
+    "audio": { "type": "AudioSink",   "params": { "buffer_samples": 8192 } }
   },
   "wires": [
-    ["src.out",   "demod.in"],
+    ["src.out",   "chan.in"],
+    ["chan.out",  "demod.in"],
     ["demod.out", "audio.in"]
   ]
 }
 ```
 
-See `04-flowgraphs.md` for the full schema.
+Cross-env wires are rewritten at load time: `env_split` inserts a
+`WsBridgeTx` / `WsBridgeRx` pair and allocates a `stream_id` from the
+`CROSS_ENV_STREAM_BASE` (1000) range. Authors never hand-wire bridges or
+pick ids. See `04-flowgraphs.md` for the full schema.
 
 ## Process model
 
