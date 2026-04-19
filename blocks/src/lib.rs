@@ -23,6 +23,7 @@ pub mod fm_demod;
 pub mod log_mag_u8;
 pub mod registry;
 pub mod sine;
+pub mod ws_bridge;
 
 pub use block::{
     Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort,
@@ -35,6 +36,7 @@ pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 pub use sine::{SineSource, SineSourceParams};
+pub use ws_bridge::{WsBridgeParams, WsBridgeRx, WsBridgeTx};
 
 /// Marks an `impl Block for T` so `T` is added to [`registry`].
 ///
@@ -87,6 +89,8 @@ mod tests {
             "Decimator",
             "Channelizer",
             "FmDemod",
+            "WsBridgeTx",
+            "WsBridgeRx",
         ] {
             assert!(
                 names.contains(expected),
