@@ -9,7 +9,6 @@
 import { BlockRegistry, type BlockModule } from "./registry.js";
 import decimator from "./blocks/decimator/index.js";
 import fmDemod from "./blocks/fm-demod/index.js";
-import passthru from "./blocks/passthru/index.js";
 
 export const BLOCKS_PACKAGE_VERSION = "0.0.1";
 
@@ -20,7 +19,6 @@ export type { BlockModule, BlockWidget, InstallCtx } from "./registry.js";
 export const blocks: Readonly<Record<string, BlockModule>> = {
   Decimator: decimator,
   FmDemod: fmDemod,
-  Passthru: passthru,
 };
 
 /** Register every block in this package into `registry`. */

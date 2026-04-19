@@ -88,8 +88,8 @@ implementations? Are new files in the right workspace?
 
 A DSP block is a folder in `packages/flowgraph-blocks/src/blocks/`
 with a fixed contract (`spec.json`, `block.ts`, `index.ts`, `README.md`).
-[`src/blocks/passthru/`](packages/flowgraph-blocks/src/blocks/passthru/README.md)
-is the minimum working example. Rust-backed blocks additionally live
+[`src/blocks/decimator/`](packages/flowgraph-blocks/src/blocks/decimator/)
+is a working example. Rust-backed blocks additionally live
 under `blocks/src/`; the `#[ferrite_block]` proc macro (commit #33)
 will generate `spec.json` from the Rust side once it lands.
 
