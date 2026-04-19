@@ -28,7 +28,7 @@ pub mod soapy_source;
 pub mod ws_bridge;
 
 pub use block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort,
+    AsAny, Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort,
     ParamKind, ParamSpec, Placement, PortMeta, PortSpec, PortType, Work, MAX_PORTS,
 };
 pub use channelizer::{Channelizer, ChannelizerParams};

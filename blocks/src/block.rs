@@ -15,6 +15,8 @@
 //! `docs/02-protocol.md` for how port types map to wire payload types
 //! when a block edge crosses the network.
 
+use std::any::Any;
+
 use anyhow::Result;
 use num_complex::Complex;
 
@@ -305,12 +307,32 @@ impl<'a> BlockIo<'a> {
     }
 }
 
+/// Supertrait glue: lets a `dyn Block` be downcast back to a concrete
+/// block type. Implemented for every `'static` type via a blanket impl,
+/// so existing `impl Block for Foo` blocks pick it up automatically.
+///
+/// The runtime uses this to reach into a specific block after the graph
+/// is built — e.g. to hand a `WsBridgeTx` its `IqBridgeSink` — without
+/// needing a type-erased "attach" method on `Block` itself.
+pub trait AsAny {
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: Any> AsAny for T {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
 /// The DSP block trait.
 ///
 /// Implementations are [`Send`] so the scheduler may move them between
 /// tokio tasks or Web Workers. They are not [`Sync`]; `process` takes
-/// `&mut self`.
-pub trait Block: Send {
+/// `&mut self`. Blocks are `'static` (carried via the [`AsAny`]
+/// supertrait) so the runtime can downcast a `dyn Block` back to the
+/// concrete type when it needs to hand the block transport handles or
+/// other non-JSON configuration.
+pub trait Block: Send + AsAny {
     /// Static type metadata. Available without an instance so a registry
     /// can enumerate block types at startup.
     fn spec() -> BlockSpec

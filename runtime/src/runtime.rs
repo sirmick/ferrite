@@ -439,6 +439,16 @@ impl Runtime {
         }
         None
     }
+
+    /// Borrow an instantiated block by id as its concrete type `T`.
+    /// Returns `None` if the id is absent or the block is a different
+    /// type. Callers use this to hand non-JSON handles to a specific
+    /// block — e.g. attaching an `IqBridgeSink` to a `WsBridgeTx` after
+    /// the graph has been built.
+    pub fn block_typed<T: Block + 'static>(&mut self, id: &str) -> Option<&mut T> {
+        self.block_mut(id)
+            .and_then(|b| b.as_any_mut().downcast_mut::<T>())
+    }
 }
 
 #[cfg(test)]
@@ -629,6 +639,24 @@ mod tests {
         );
         assert!(rt.block_mut("src").is_some());
         assert!(rt.block_mut("nope").is_none());
+    }
+
+    #[test]
+    fn block_typed_downcasts_to_concrete_type() {
+        use ferrite_blocks::SineSource;
+        let mut rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource"}},
+                "wires":[]
+            }"#,
+            16,
+        );
+        assert!(rt.block_typed::<SineSource>("src").is_some());
+        // Wrong type → None, not a panic.
+        assert!(rt.block_typed::<ferrite_blocks::FftBlock>("src").is_none());
+        // Missing id → None.
+        assert!(rt.block_typed::<SineSource>("nope").is_none());
     }
 
     #[test]
