@@ -70,6 +70,12 @@ stays authoritative.
 
 ## D05 — Flowgraph runtime is a shared TypeScript package, not Rust
 
+> **Superseded by D19.** A TS runtime was shipped through Phase D; once
+> channelizer + WBFM end-to-end worked, it became clear the server
+> needed to run the *same* graph the browser did, not just agree on its
+> JSON shape. Keeping "one runtime" meant picking a language — Rust
+> wins because the DSP blocks are already there.
+
 **Context.** Both the browser (WebAssembly) and a Node sidecar need to
 run flowgraphs. A Rust runtime would need both native and WASM
 instantiation paths and a second set of bindings for Node.
@@ -259,6 +265,11 @@ painful; a history where some commits don't build makes bisect useless.
 
 ## D17 — Ship `ferrite-headless` runtime in v0.1, ship the binary post-v0.1
 
+> **Superseded by D19.** The "shared runtime" referenced here is now
+> `runtime/` (Rust), not `packages/flowgraph-runtime/` (TS). The
+> "ships-in-v0.1, binary post-v0.1" split still stands; only the
+> language changed.
+
 **Context.** The symmetric runtime story (browser + Node) is load-bearing
 for future decoders that want to run headlessly. Whether the Node
 binary itself ships in v0.1 is a separate call.
@@ -283,6 +294,50 @@ choreography.
 
 **Consequence.** One clone, one `pnpm install`, one `cargo fetch`.
 Cross-package refactors land in one PR.
+
+## D19 — Single Rust runtime + Rust/WASM blocks, no TS runtime
+
+**Supersedes D05, adjusts D17.**
+
+**Context.** D05 put the flowgraph runtime in TypeScript so the browser
+and Node sidecar could share it. D02 kept DSP blocks in Rust
+(dual-compile). That gave us two runtimes in practice: `ferrited` ran
+a hardcoded pipeline natively, while the browser ran the TS runtime
+over the WASM blocks. Phase D shipped this split (commits #77–#80:
+`feat(runtime)` TS work) and then we hit the wall the split always
+implied: *the server needs to load and run the same preset the browser
+does* — not just agree on its JSON shape. Reconfigure events,
+receiver/demod swaps, and cross-environment flowgraphs (SoapySource
+server-side → Channelizer → WsBridge → FmDemod browser-side) all want
+one runtime on both ends, not two runtimes with a wire-format contract.
+
+**Decision.** One runtime, one language: **Rust**, dual-compile. A new
+`runtime/` crate (rlib + cdylib, `wasm` feature) owns JSON parse,
+validation, scheduler, block instantiation, tick pump, and lifecycle.
+`ferrited` links it as a library; the browser imports it as a WASM
+module. A preset is one cross-environment doc with per-block
+placement; the scheduler splits it and auto-inserts `WsBridge` pairs
+on wires that cross the boundary. Browser-only blocks (AudioSink,
+WsIqSource) stay as JS, registered into the Rust runtime via bindings.
+
+**Rejected.** Keep the TS runtime and add a second Rust runtime on the
+server — the split we're trying to escape. Port TS runtime semantics
+into a Rust port and call it "the same" — we'd still own two copies
+forever.
+
+**Consequence.**
+- `packages/flowgraph-runtime/` and `packages/flowgraph-blocks/` are
+  deleted at M4.
+- Phase D commits #77–#80 (TS `feat(runtime)` work) are historically
+  accurate for what shipped but are superseded by M1–M5 (see
+  `10-commits.md`).
+- New DSP blocks go in `blocks/` (Rust); do not add TS block wrappers.
+- `mutable_while_streaming` gives way to a `reconfigScope` on each
+  param: `Self` | `Downstream` | `SourceRestart`. The runtime diffs
+  presets and applies the minimum necessary action.
+- The Block trait currently lives in `blocks/`; `runtime/` depends on
+  it. The dep direction will likely invert once tick-pump and
+  lifecycle land — logged here so future-us isn't surprised.
 
 ## Revisiting decisions
 

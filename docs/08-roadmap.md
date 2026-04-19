@@ -113,8 +113,13 @@ runtime, FM demod, audio out.
 - `Channelizer` block runs server-side and produces per-VFO narrowband
   IQ on dedicated stream IDs.
 - REST endpoints `POST/PATCH/DELETE /api/device/{id}/vfo` land.
-- Flowgraph runtime in `packages/flowgraph-runtime/`: JSON parse →
-  validate → instantiate blocks from registry → wire → run in a Worker.
+- Flowgraph runtime in the Rust `runtime/` crate (rlib + cdylib, `wasm`
+  feature): JSON parse → validate → instantiate blocks from registry →
+  wire → run. `ferrited` links it natively; the browser imports it as a
+  WASM module and runs it in a Worker. See D19 — the TS
+  `packages/flowgraph-runtime/` package shipped through Phase D and is
+  superseded; M1–M5 track its replacement (commits addendum in
+  `10-commits.md`).
 - `FmDemod` block (Rust, dual-built).
 - AudioWorklet consumes from a SAB ring filled by the Worker's
   `AudioSink`.
@@ -217,7 +222,8 @@ logged in `docs/09-decisions.md`.
   replay mode covers "test against what I captured."
 - **`ferrite-headless` as a v0.1 deliverable.** The architecture admits
   it from day one; whether it *ships* in v0.1 is a separate call.
-  Default: follow-up. The runtime package ships in v0.1 either way.
+  Default: follow-up. The runtime crate (`runtime/`, Rust) ships in
+  v0.1 either way — see D19.
 - **Additional decoders** (APRS, FT8, M17+codec2) — land alongside
   their respective blocks post-v0.1. Candidate list is frozen; DMR is
   ruled out (AMBE licensing).

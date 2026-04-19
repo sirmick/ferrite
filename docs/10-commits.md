@@ -116,10 +116,10 @@ Channelizer, flowgraph runtime, FmDemod, audio out.
 74. `feat(server): DELETE /api/device/{id}/vfo/{vfo_id}`
 75. `feat(server): VFO streams on stream_id >= 2, iq_f32 payload`
 76. `feat(blocks): FmDemod block (Rust, dual-built) + unit test`
-77. `feat(runtime): flowgraph JSON parser + schema validation`
-78. `feat(runtime): block registry + instantiation`
-79. `feat(runtime): wire-up + topological scheduler`
-80. `feat(runtime): init / start / stop lifecycle + runtime.update()`
+77. `feat(runtime): flowgraph JSON parser + schema validation` *(shipped in TS; superseded by M1 — see "Runtime pivot" section below)*
+78. `feat(runtime): block registry + instantiation` *(shipped in TS; superseded by M1)*
+79. `feat(runtime): wire-up + topological scheduler` *(shipped in TS; superseded by M1)*
+80. `feat(runtime): init / start / stop lifecycle + runtime.update()` *(shipped in TS; superseded by M1)*
 81. `feat(web): SAB audio ring buffer (producer side)`
 82. `feat(web): AudioWorklet consumer (128-frame process loop)`
 83. `feat(web): AudioSink block using the ring buffer`
@@ -180,6 +180,87 @@ G03. `feat(web): spectrum-explorer Svelte component (SVG + virtualization)`
 G04. `feat(web): log-scale freq axis 0 Hz → 300 GHz with wheel zoom`
 G05. `feat(web): click-to-retune (with out-of-device-range state)`
 G06. `feat(web): WebGL fallback renderer if SVG density is a problem`
+
+## Runtime pivot — M1–M5 (supersedes Phase D commits #77–80)
+
+Phase D shipped a TS flowgraph runtime (`packages/flowgraph-runtime/`)
+plus TS block wrappers (`packages/flowgraph-blocks/`). Once WBFM ran
+end-to-end it was clear the server needed to run the *same* graph the
+browser did — not just agree on its JSON shape. See **D19** for the
+context and reasoning. M1–M5 replace the TS runtime with a single Rust
+runtime (`runtime/` crate, dual-compile native + WASM) and delete the
+TS runtime/blocks packages at M4.
+
+These milestones are sequential. Each is a set of commits; the commit
+list for the later milestones will be expanded as they are planned in
+detail. The headings below are load-bearing; the sub-items are a
+working outline.
+
+### M1 — Rust `runtime/` crate (library only)
+
+- [x] `feat(runtime): Rust runtime crate skeleton + FlowgraphDoc serde` — 01fef45
+- [x] `feat(runtime): graph validator + topo scheduler` — 4bbe89e
+- [x] `feat(runtime): registry-dependent validation + populated port types` — 7046992
+- [ ] `feat(runtime): block construction — factory registry producing Box<dyn Block>`
+- [ ] `feat(runtime): tick pump — buffer allocation, per-block process() loop, back-pressure`
+- [ ] `feat(runtime): lifecycle state machine — Init / Start / Stop / Reconfigure`
+- [ ] `feat(runtime): WsBridge block pair — placeholder; wires land in M2`
+
+**M1 done when:** `runtime/` builds as rlib + cdylib, runs a trivial
+SignalSource → Sink graph natively and under `wasm-pack test`, and
+exposes the API that M2 will call.
+
+### M2 — `ferrited` loads presets and runs the server-half
+
+- [ ] `feat(server): link ferrite-runtime, load preset from disk`
+- [ ] `feat(server): SoapySource Rust block (moves from hardcoded pipeline)`
+- [ ] `feat(server): scheduler splits preset into server-half + browser-half, auto-inserts WsBridge`
+- [ ] `feat(server): WsBridge server-side half — encode IQ to existing WS frame format`
+- [ ] `flowgraphs: wbfm.json updated with per-block placement (source=server, demod=browser)`
+- [ ] `test(server): end-to-end against the existing TS browser runtime — same waterfall + audio as before`
+
+**M2 done when:** browser is unchanged, `ferrited` runs WBFM from a
+preset file, and the golden-fixture audio test still passes.
+
+### M3 — Reconfigure event + `reconfigScope`
+
+- [ ] `feat(runtime): ReconfigureScope enum { Self, Downstream, SourceRestart }`
+- [ ] `feat(runtime): preset diff → minimal reconfigure plan`
+- [ ] `feat(runtime): rollback on apply failure (retain previous JSON)`
+- [ ] `feat(blocks): annotate existing block params with reconfigScope`
+- [ ] `feat(server): PATCH /api/device/{id}/flowgraph — apply new preset, return plan`
+- [ ] `chore: remove mutable_while_streaming — fully replaced by reconfigScope`
+
+**M3 done when:** changing a WBFM param (volume → Self, decim → Downstream,
+centre freq → SourceRestart) triggers only the matching restart scope,
+with rollback if the new preset fails to instantiate.
+
+### M4 — Browser loads the Rust runtime as WASM
+
+- [ ] `build(runtime): wasm-pack + vite-plugin-wasm integration in web/`
+- [ ] `feat(web): browser-only blocks registered into the Rust runtime (AudioSink, WsIqSource)`
+- [ ] `feat(web): flowgraph runner Worker — drives the Rust runtime via bindings`
+- [ ] `chore: delete packages/flowgraph-runtime`
+- [ ] `chore: delete packages/flowgraph-blocks`
+- [ ] `test(web): golden-fixture WBFM — same audio result under the Rust runtime`
+
+**M4 done when:** browser runs the same preset as M2 but via the Rust
+runtime in a Worker; the TS packages are gone; CI is green.
+
+### M5 — Config dialogs + receivers pane
+
+- [ ] `feat(blocks): AmDemod Rust block (dual-built)`
+- [ ] `flowgraphs: add flowgraphs/wbam.json (AM variant of wbfm)`
+- [ ] `feat(web): source options dialog — schema-driven, one section per source param group`
+- [ ] `feat(web): flowgraph options dialog — schema-driven, one section per non-source block`
+- [ ] `feat(web): dialogs gain a read-only JSON tab mirroring live preset`
+- [ ] `feat(web): receivers pane with AM/FM dropdown — full chain swap, source stable`
+- [ ] `test(web): dialog reconfigure paths map to correct reconfigScope`
+
+**M5 done when:** user picks AM or FM from the receivers pane and the
+flowgraph reconfigures without touching the source; source and
+flowgraph dialogs render correctly for both presets; VFO0 is the only
+wired VFO (with explicit room in the preset schema for VFO1+).
 
 ## How this file stays honest
 
