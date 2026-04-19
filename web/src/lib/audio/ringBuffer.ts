@@ -151,14 +151,77 @@ export class AudioRingWriter {
     Atomics.store(this.header, HEAD_INDEX, 0);
     Atomics.store(this.header, TAIL_INDEX, 0);
   }
+}
+
+/**
+ * Consumer-side handle on an SPSC audio ring. Owned by the AudioWorklet
+ * thread. Like the writer, all reads are non-blocking — when the ring
+ * is empty, `read` returns a short count (including 0) and the caller
+ * fills the rest of its output with silence.
+ */
+export class AudioRingReader {
+  readonly sab: SharedArrayBuffer;
+  readonly capacity: number;
+  private readonly mask: number;
+  private readonly header: Uint32Array;
+  private readonly data: Float32Array;
+
+  private constructor(sab: SharedArrayBuffer, capacity: number) {
+    this.sab = sab;
+    this.capacity = capacity;
+    this.mask = capacity - 1;
+    this.header = new Uint32Array(sab, 0, HEADER_U32_WORDS);
+    this.data = new Float32Array(sab, AUDIO_RING_HEADER_BYTES, capacity);
+  }
 
   /**
-   * Test-only helper: simulate the consumer advancing `tail`. The real
-   * reader lands in commit #82 — until then, unit tests use this to
-   * exercise the wrap-around path.
+   * Wrap an SAB. The AudioWorklet receives the SAB through
+   * `processorOptions` and constructs its reader here.
    */
-  _testAdvanceTail(n: number): void {
+  static fromSab(sab: SharedArrayBuffer): AudioRingReader {
+    const bodyBytes = sab.byteLength - AUDIO_RING_HEADER_BYTES;
+    if (bodyBytes <= 0 || bodyBytes % Float32Array.BYTES_PER_ELEMENT !== 0) {
+      throw new RangeError(
+        `AudioRingReader.fromSab: SAB body is not f32-aligned (body bytes ${bodyBytes})`,
+      );
+    }
+    const capacity = bodyBytes / Float32Array.BYTES_PER_ELEMENT;
+    if (!isPow2(capacity)) {
+      throw new RangeError(
+        `AudioRingReader.fromSab: inferred capacity ${capacity} is not a power of two`,
+      );
+    }
+    return new AudioRingReader(sab, capacity);
+  }
+
+  /** Samples currently available to read. */
+  availableRead(): number {
+    // Acquire-load on head pairs with the producer's release-store so
+    // every sample the producer wrote before bumping head is visible
+    // here.
+    const head = Atomics.load(this.header, HEAD_INDEX);
     const tail = Atomics.load(this.header, TAIL_INDEX);
-    Atomics.store(this.header, TAIL_INDEX, (tail + n) >>> 0);
+    return (head - tail) >>> 0;
+  }
+
+  /**
+   * Read up to `out.length` samples into `out`; returns the actual count
+   * copied. Partial reads happen when the ring is near-empty; the
+   * caller fills the remainder of `out` with silence.
+   */
+  read(out: Float32Array): number {
+    const head = Atomics.load(this.header, HEAD_INDEX);
+    const tail = Atomics.load(this.header, TAIL_INDEX);
+    const avail = (head - tail) >>> 0;
+    if (avail === 0) return 0;
+    const toRead = Math.min(avail, out.length);
+    const readPos = tail & this.mask;
+    const firstSpan = Math.min(toRead, this.capacity - readPos);
+    out.set(this.data.subarray(readPos, readPos + firstSpan), 0);
+    if (toRead > firstSpan) {
+      out.set(this.data.subarray(0, toRead - firstSpan), firstSpan);
+    }
+    Atomics.store(this.header, TAIL_INDEX, (tail + toRead) >>> 0);
+    return toRead;
   }
 }

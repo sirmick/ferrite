@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { AUDIO_RING_HEADER_BYTES, AudioRingWriter, audioRingSabBytes } from './ringBuffer.js';
+import {
+  AUDIO_RING_HEADER_BYTES,
+  AudioRingReader,
+  AudioRingWriter,
+  audioRingSabBytes,
+} from './ringBuffer.js';
 
 function floatArr(...xs: number[]): Float32Array {
   return Float32Array.from(xs);
@@ -87,8 +92,9 @@ describe('AudioRingWriter.write', () => {
 
   it('wraps around the ring body', () => {
     const w = AudioRingWriter.create(4);
+    const r = AudioRingReader.fromSab(w.sab);
     w.write(floatArr(1, 2, 3));
-    w._testAdvanceTail(3); // consumer drained
+    r.read(new Float32Array(3)); // consumer drains
     // head=3, tail=3, capacity=4 → 4 free, write pos wraps
     const n = w.write(floatArr(10, 20, 30, 40));
     expect(n).toBe(4);
@@ -131,10 +137,95 @@ describe('AudioRingWriter.write', () => {
 describe('AudioRingWriter.reset', () => {
   it('clears head and tail back to zero', () => {
     const w = AudioRingWriter.create(4);
+    const r = AudioRingReader.fromSab(w.sab);
     w.write(floatArr(1, 2, 3));
-    w._testAdvanceTail(1);
+    r.read(new Float32Array(1));
     w.reset();
     expect(w.availableRead()).toBe(0);
     expect(w.availableWrite()).toBe(4);
+  });
+});
+
+describe('AudioRingReader.fromSab', () => {
+  it('wraps an SAB that a writer already owns', () => {
+    const w = AudioRingWriter.create(8);
+    const r = AudioRingReader.fromSab(w.sab);
+    expect(r.capacity).toBe(8);
+    expect(r.sab).toBe(w.sab);
+  });
+
+  it('rejects SABs that do not describe a power-of-two ring', () => {
+    const sab = new SharedArrayBuffer(AUDIO_RING_HEADER_BYTES + 100 * 4);
+    expect(() => AudioRingReader.fromSab(sab)).toThrow(/power of two/);
+  });
+});
+
+describe('AudioRingReader.read', () => {
+  it('copies the requested count when the ring has enough', () => {
+    const w = AudioRingWriter.create(8);
+    const r = AudioRingReader.fromSab(w.sab);
+    w.write(floatArr(1, 2, 3, 4, 5));
+    const out = new Float32Array(5);
+    const n = r.read(out);
+    expect(n).toBe(5);
+    expect(Array.from(out)).toEqual([1, 2, 3, 4, 5]);
+    expect(r.availableRead()).toBe(0);
+  });
+
+  it('returns 0 when the ring is empty', () => {
+    const w = AudioRingWriter.create(4);
+    const r = AudioRingReader.fromSab(w.sab);
+    const out = new Float32Array(4);
+    expect(r.read(out)).toBe(0);
+    // out stays zeroed — reader never fabricates samples.
+    expect(Array.from(out)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('returns a partial count when the ring is near-empty', () => {
+    const w = AudioRingWriter.create(8);
+    const r = AudioRingReader.fromSab(w.sab);
+    w.write(floatArr(1, 2));
+    const out = new Float32Array(5);
+    const n = r.read(out);
+    expect(n).toBe(2);
+    expect(Array.from(out.subarray(0, 2))).toEqual([1, 2]);
+    // Trailing slots untouched — caller zero-fills.
+  });
+
+  it('unwraps samples that straddle the ring boundary', () => {
+    const w = AudioRingWriter.create(4);
+    const r = AudioRingReader.fromSab(w.sab);
+    // Advance head/tail so the next write wraps.
+    w.write(floatArr(1, 2, 3));
+    r.read(new Float32Array(3));
+    w.write(floatArr(10, 20, 30, 40));
+    const out = new Float32Array(4);
+    const n = r.read(out);
+    expect(n).toBe(4);
+    expect(Array.from(out)).toEqual([10, 20, 30, 40]);
+  });
+
+  it('streams pipeline-style: producer and consumer interleave', () => {
+    const w = AudioRingWriter.create(8);
+    const r = AudioRingReader.fromSab(w.sab);
+    const out = new Float32Array(4);
+    for (let cycle = 0; cycle < 10; cycle++) {
+      const src = floatArr(cycle * 4, cycle * 4 + 1, cycle * 4 + 2, cycle * 4 + 3);
+      expect(w.write(src)).toBe(4);
+      expect(r.read(out)).toBe(4);
+      expect(Array.from(out)).toEqual(Array.from(src));
+    }
+  });
+
+  it('handles head/tail wrap past 2^32 boundary', () => {
+    const w = AudioRingWriter.create(4);
+    const r = AudioRingReader.fromSab(w.sab);
+    const header = new Uint32Array(w.sab, 0, 2);
+    header[0] = 0xfffffffe;
+    header[1] = 0xfffffffe;
+    w.write(floatArr(1, 2, 3, 4));
+    const out = new Float32Array(4);
+    expect(r.read(out)).toBe(4);
+    expect(Array.from(out)).toEqual([1, 2, 3, 4]);
   });
 });
