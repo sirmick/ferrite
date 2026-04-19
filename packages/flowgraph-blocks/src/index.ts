@@ -7,6 +7,7 @@
 // justify a codegen barrel.
 
 import { BlockRegistry, type BlockModule } from "./registry.js";
+import decimator from "./blocks/decimator/index.js";
 import fmDemod from "./blocks/fm-demod/index.js";
 import passthru from "./blocks/passthru/index.js";
 
@@ -17,6 +18,7 @@ export type { BlockModule, BlockWidget, InstallCtx } from "./registry.js";
 
 /** All blocks shipped by this package, keyed by `spec.typeName`. */
 export const blocks: Readonly<Record<string, BlockModule>> = {
+  Decimator: decimator,
   FmDemod: fmDemod,
   Passthru: passthru,
 };

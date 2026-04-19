@@ -1,0 +1,47 @@
+{
+  "typeName": "Decimator",
+  "placement": "either",
+  "inputs": [{ "name": "in", "portType": "iq_f32" }],
+  "outputs": [{ "name": "out", "portType": "iq_f32" }],
+  "params": [
+    {
+      "key": "factor",
+      "label": "Decimation factor",
+      "kind": {
+        "kind": "range",
+        "min": 1.0,
+        "max": 1024.0,
+        "step": 1.0,
+        "default": 4.0,
+        "unit": ""
+      },
+      "mutableWhileStreaming": false
+    },
+    {
+      "key": "num_taps",
+      "label": "FIR length",
+      "kind": {
+        "kind": "range",
+        "min": 3.0,
+        "max": 2048.0,
+        "step": 2.0,
+        "default": 33.0,
+        "unit": "taps"
+      },
+      "mutableWhileStreaming": false
+    },
+    {
+      "key": "cutoff_normalized",
+      "label": "Cutoff (× input rate)",
+      "kind": {
+        "kind": "range",
+        "min": 0.001,
+        "max": 0.499,
+        "step": 0.001,
+        "default": 0.1,
+        "unit": ""
+      },
+      "mutableWhileStreaming": false
+    }
+  ]
+}
