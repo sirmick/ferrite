@@ -19,9 +19,9 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use ferrite_blocks::{
-    Block, BlockIo, FftBlock, FftBlockParams, FftWindow, FileIqSource, FileIqSourceParams, InBuf,
-    InputPort, LogMagU8, LogMagU8Params, OutBuf, OutputPort, PortMeta, SineSource,
-    SineSourceParams,
+    Block, BlockIo, Channelizer, ChannelizerParams, FftBlock, FftBlockParams, FftWindow,
+    FileIqSource, FileIqSourceParams, InBuf, InputPort, LogMagU8, LogMagU8Params, OutBuf,
+    OutputPort, PortMeta, SineSource, SineSourceParams,
 };
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
@@ -126,6 +126,37 @@ pub struct SessionState {
     pub gain_db: Option<f64>,
     pub antenna: Option<String>,
     pub agc: Option<bool>,
+    #[serde(default)]
+    pub vfos: Vec<VfoDescriptor>,
+}
+
+/// User-supplied VFO allocation spec — what `POST /api/device/{id}/vfo`
+/// takes in its body. `offset_hz` is relative to the current device centre;
+/// the channelizer pulls `[offset_hz - filter_bw_hz/2, offset_hz + filter_bw_hz/2]`
+/// down to baseband at `rate_hz`.
+///
+/// The server picks an integer decimation factor closest to
+/// `sample_rate / rate_hz`; the actual output rate is echoed back in
+/// [`VfoDescriptor::rate_hz`].
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[allow(clippy::struct_field_names)] // every field is a Hz quantity
+pub struct VfoSpec {
+    pub offset_hz: f64,
+    pub rate_hz: f64,
+    pub filter_bw_hz: f64,
+}
+
+/// What the VFO endpoint returns and what `SessionState` lists in `vfos`.
+/// `stream_id` is assigned by the server (≥ 2) and is the selector the
+/// client uses to demux VFO frames from the FFT waterfall.
+#[derive(Debug, Clone, Serialize)]
+pub struct VfoDescriptor {
+    pub vfo_id: String,
+    pub stream_id: u16,
+    pub payload_type: &'static str,
+    pub rate_hz: f64,
+    pub offset_hz: f64,
+    pub filter_bw_hz: f64,
 }
 
 /// Field-update spec for `PATCH /api/device/{id}/settings`. Every field is
@@ -161,6 +192,10 @@ impl PatchRequest {
 
 enum ControlCmd {
     Patch(PatchRequest),
+    AddVfo {
+        spec: VfoSpec,
+        respond: oneshot::Sender<Result<VfoDescriptor>>,
+    },
 }
 
 struct Session {
@@ -360,6 +395,33 @@ impl AppState {
         self.state(id).await
     }
 
+    /// Allocate a new VFO on the active session. Returns:
+    ///   * `None` if the id does not match the active session,
+    ///   * `Some(Err(..))` if the pipeline rejected the spec (bad rate,
+    ///     `filter_bw` wider than the input etc.) or was already shutting
+    ///     down,
+    ///   * `Some(Ok(descriptor))` with the assigned `stream_id` and the
+    ///     actual (rounded-to-integer-factor) output rate.
+    pub async fn add_vfo(&self, id: &str, spec: VfoSpec) -> Option<Result<VfoDescriptor>> {
+        let inner = self.inner.read().await;
+        let s = inner.session.as_ref()?;
+        if s.id != id {
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        if s.control
+            .send(ControlCmd::AddVfo { spec, respond: tx })
+            .is_err()
+        {
+            return Some(Err(anyhow!("pipeline shutting down")));
+        }
+        drop(inner);
+        match rx.await {
+            Ok(result) => Some(result),
+            Err(_) => Some(Err(anyhow!("pipeline dropped VFO response channel"))),
+        }
+    }
+
     /// Get a fresh frame subscription for `id`. Returns `None` if there is
     /// no matching active session.
     pub async fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<FrameBytes>> {
@@ -436,6 +498,7 @@ fn build_session_state(
         gain_db: gain,
         antenna: ant,
         agc,
+        vfos: Vec::new(),
     }
 }
 
@@ -575,6 +638,14 @@ async fn run_pipeline(
     let mut bins = vec![0_u8; n];
     let mut frame_buf = Vec::with_capacity(crate::ws_frame::HEADER_LEN + n);
 
+    // VFO book-keeping. `next_stream_id` is 2 on first allocation (per
+    // `docs/02-protocol.md` §"Stream IDs"); wraps to 2 after 0xFFFF which
+    // we never realistically hit (practical cap is a few dozen VFOs).
+    let mut vfos: Vec<ActiveVfo> = Vec::new();
+    let mut next_stream_id: u16 = FFT_STREAM + 1;
+    let mut next_vfo_seq: u64 = 0;
+    let mut control_seq: u32 = 0;
+
     let mut seq: u32 = 0;
     let period = Duration::from_secs_f32(1.0 / spec.fft_rate_hz);
     let mut interval = tokio::time::interval(period);
@@ -590,6 +661,32 @@ async fn run_pipeline(
             cmd = control.recv() => {
                 match cmd {
                     Some(ControlCmd::Patch(req)) => apply_patch(&req, &mut source, &mut log, &state),
+                    Some(ControlCmd::AddVfo { spec: vspec, respond }) => {
+                        let result = build_active_vfo(
+                            &vspec,
+                            spec.sample_rate_hz,
+                            &mut next_stream_id,
+                            &mut next_vfo_seq,
+                        );
+                        match result {
+                            Ok(active) => {
+                                let desc = active.descriptor.clone();
+                                vfos.push(active);
+                                if let Ok(mut s) = state.lock() {
+                                    s.vfos.push(desc.clone());
+                                }
+                                emit_json_event(
+                                    &tx,
+                                    &vfo_added_event(&desc),
+                                    &mut control_seq,
+                                );
+                                let _ = respond.send(Ok(desc));
+                            }
+                            Err(err) => {
+                                let _ = respond.send(Err(err));
+                            }
+                        }
+                    }
                     None => {
                         tracing::debug!("control channel closed");
                         return;
@@ -615,9 +712,174 @@ async fn run_pipeline(
                 // ticking so a later subscriber gets the next frame.
                 let _ = tx.send(Arc::new(frame_buf.clone()));
                 seq = seq.wrapping_add(1);
+
+                // Run every active VFO against the same wideband block.
+                // Feeding iq_a twice is fine — the channelizer only reads
+                // from its input slice. One failing channelizer logs and
+                // continues so one VFO's bug doesn't kill the others.
+                for vfo in &mut vfos {
+                    if let Err(err) = emit_vfo_frame(vfo, &iq_a, &tx) {
+                        tracing::error!(vfo = %vfo.descriptor.vfo_id, ?err, "vfo frame failed");
+                    }
+                }
             }
         }
     }
+}
+
+struct ActiveVfo {
+    descriptor: VfoDescriptor,
+    channelizer: Channelizer,
+    scratch: Vec<Complex<f32>>,
+    iq_bytes: Vec<u8>,
+    frame_buf: Vec<u8>,
+    seq: u32,
+}
+
+/// Build a [`Channelizer`] sized for the session's input rate. Picks the
+/// integer decimation factor closest to `input_rate / req.rate_hz` and
+/// echoes the actual output rate back to the caller via the descriptor.
+fn build_active_vfo(
+    req: &VfoSpec,
+    input_rate_hz: f64,
+    next_stream_id: &mut u16,
+    next_vfo_seq: &mut u64,
+) -> Result<ActiveVfo> {
+    if !(input_rate_hz.is_finite() && input_rate_hz > 0.0) {
+        return Err(anyhow!(
+            "session has no usable input rate ({input_rate_hz}); VFOs require a \
+             known sample rate — open with --rate or pass sample_rate_hz"
+        ));
+    }
+    if !(req.rate_hz.is_finite() && req.rate_hz > 0.0) {
+        return Err(anyhow!("VFO rate_hz must be > 0 (got {})", req.rate_hz));
+    }
+    if !(req.filter_bw_hz.is_finite() && req.filter_bw_hz > 0.0) {
+        return Err(anyhow!(
+            "VFO filter_bw_hz must be > 0 (got {})",
+            req.filter_bw_hz
+        ));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let factor = (input_rate_hz / req.rate_hz).round().max(1.0) as usize;
+    #[allow(clippy::cast_precision_loss)]
+    let actual_rate_hz = input_rate_hz / factor as f64;
+    #[allow(clippy::cast_possible_truncation)]
+    let cutoff_normalized = (req.filter_bw_hz / (2.0 * input_rate_hz)) as f32;
+    if !(cutoff_normalized > 0.0 && cutoff_normalized < 0.5) {
+        return Err(anyhow!(
+            "filter_bw_hz {} outside (0, {}) for input rate {}",
+            req.filter_bw_hz,
+            input_rate_hz,
+            input_rate_hz
+        ));
+    }
+    let num_taps = (8 * factor + 1).clamp(33, 2047);
+    let params = ChannelizerParams {
+        input_rate_hz,
+        freq_shift_hz: req.offset_hz,
+        factor,
+        num_taps,
+        cutoff_normalized,
+    };
+    let channelizer = Channelizer::new(params)?;
+
+    let stream_id = *next_stream_id;
+    *next_stream_id = next_stream_id.checked_add(1).unwrap_or(FFT_STREAM + 1);
+    let vfo_id = format!("vfo-{:016x}", *next_vfo_seq);
+    *next_vfo_seq = next_vfo_seq.wrapping_add(1);
+
+    let descriptor = VfoDescriptor {
+        vfo_id,
+        stream_id,
+        payload_type: "iq_f32",
+        rate_hz: actual_rate_hz,
+        offset_hz: req.offset_hz,
+        filter_bw_hz: req.filter_bw_hz,
+    };
+    Ok(ActiveVfo {
+        descriptor,
+        channelizer,
+        scratch: Vec::new(),
+        iq_bytes: Vec::new(),
+        frame_buf: Vec::new(),
+        seq: 0,
+    })
+}
+
+fn emit_vfo_frame(vfo: &mut ActiveVfo, iq_in: &[Complex<f32>], tx: &FrameTx) -> Result<()> {
+    let max_out = iq_in.len() / vfo.channelizer.factor() + 1;
+    if vfo.scratch.len() < max_out {
+        vfo.scratch.resize(max_out, Complex::new(0.0, 0.0));
+    }
+    let produced = {
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::IqF32(iq_in),
+        }];
+        let mut outputs = [OutputPort {
+            name: "out",
+            meta: PortMeta::default(),
+            buf: OutBuf::IqF32(&mut vfo.scratch),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut outputs,
+        };
+        let w = vfo
+            .channelizer
+            .process(&mut io)
+            .map_err(|e| anyhow!("channelizer: {e}"))?;
+        w.produced[0]
+    };
+    if produced == 0 {
+        return Ok(());
+    }
+    vfo.iq_bytes.clear();
+    vfo.iq_bytes.reserve(produced * 8);
+    for c in &vfo.scratch[..produced] {
+        vfo.iq_bytes.extend_from_slice(&c.re.to_le_bytes());
+        vfo.iq_bytes.extend_from_slice(&c.im.to_le_bytes());
+    }
+    let header = FrameHeader {
+        version: crate::ws_frame::PROTOCOL_VERSION,
+        payload_type: PayloadType::IqF32,
+        stream_id: vfo.descriptor.stream_id,
+        seq: vfo.seq,
+        timestamp_ns: now_ns(),
+    };
+    vfo.frame_buf.clear();
+    encode_into(&header, &vfo.iq_bytes, &mut vfo.frame_buf);
+    let _ = tx.send(Arc::new(vfo.frame_buf.clone()));
+    vfo.seq = vfo.seq.wrapping_add(1);
+    Ok(())
+}
+
+fn vfo_added_event(desc: &VfoDescriptor) -> String {
+    format!(
+        r#"{{"type":"vfo_added","vfo_id":"{vfo}","stream_id":{sid},"offset_hz":{off},"rate_hz":{rate},"filter_bw_hz":{bw},"payload_type":"{pt}"}}"#,
+        vfo = desc.vfo_id,
+        sid = desc.stream_id,
+        off = desc.offset_hz,
+        rate = desc.rate_hz,
+        bw = desc.filter_bw_hz,
+        pt = desc.payload_type,
+    )
+}
+
+fn emit_json_event(tx: &FrameTx, body: &str, seq: &mut u32) {
+    let header = FrameHeader {
+        version: crate::ws_frame::PROTOCOL_VERSION,
+        payload_type: PayloadType::JsonEvent,
+        stream_id: CONTROL_STREAM,
+        seq: *seq,
+        timestamp_ns: now_ns(),
+    };
+    let mut buf = Vec::with_capacity(crate::ws_frame::HEADER_LEN + body.len());
+    encode_into(&header, body.as_bytes(), &mut buf);
+    let _ = tx.send(Arc::new(buf));
+    *seq = seq.wrapping_add(1);
 }
 
 fn apply_patch(

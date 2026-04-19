@@ -33,6 +33,7 @@ mod device;
 mod soapy_source;
 
 #[path = "../src/routes.rs"]
+#[allow(dead_code, clippy::unused_async)]
 mod routes;
 
 async fn spawn_app() -> SocketAddr {
@@ -44,6 +45,7 @@ async fn spawn_app() -> SocketAddr {
         .route("/api/device/:id/close", post(routes::close_session))
         .route("/api/device/:id/state", get(routes::session_state))
         .route("/api/device/:id/settings", patch(routes::patch_settings))
+        .route("/api/device/:id/vfo", post(routes::add_vfo))
         .route("/ws", get(routes::ws_upgrade))
         .route("/ws/:id", get(routes::ws_session))
         .with_state(state);
@@ -258,6 +260,58 @@ async fn close_emits_session_closed_event() {
         }
     }
     assert!(saw_close, "expected a session_closed JsonEvent frame");
+}
+
+/// Open a sine session, POST /vfo, then confirm the allocated `stream_id`
+/// carries `IqF32` frames alongside the existing `FftU8` waterfall. The
+/// channelizer's content is not asserted here — `blocks/src/channelizer.rs`
+/// has unit tests for the DSP; this just proves the wiring.
+#[tokio::test]
+async fn add_vfo_streams_iq_f32_on_stream_two() {
+    let addr = spawn_app().await;
+    let body = r#"{"sample_rate_hz": 2000000, "fft_size": 512, "fft_rate_hz": 200.0}"#;
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), body).await;
+    let session_id = json_str(&resp, "session_id").expect("session_id");
+    let ws_url = json_str(&resp, "ws_url").expect("ws_url");
+
+    // Drop the FFT into the stream first so the WS is live before POST /vfo.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}{ws_url}"))
+        .await
+        .unwrap();
+
+    let vfo_body = r#"{"offset_hz": 100000, "rate_hz": 50000, "filter_bw_hz": 20000}"#;
+    let vfo_resp = http_post_json(
+        &format!("http://{addr}/api/device/{session_id}/vfo"),
+        vfo_body,
+    )
+    .await;
+    assert!(
+        vfo_resp.contains("\"payload_type\":\"iq_f32\""),
+        "vfo response: {vfo_resp}"
+    );
+    assert!(
+        vfo_resp.contains("\"stream_id\":2"),
+        "vfo response: {vfo_resp}"
+    );
+
+    let mut saw_iq = false;
+    for _ in 0..32 {
+        let Ok(Some(Ok(Message::Binary(bytes)))) =
+            tokio::time::timeout(Duration::from_secs(2), ws.next()).await
+        else {
+            break;
+        };
+        let (hdr, payload) = ws_frame::decode(&bytes).expect("decode");
+        if hdr.payload_type == ws_frame::PayloadType::IqF32 && hdr.stream_id == 2 {
+            // Every sample is 4B I + 4B Q; payload must be a multiple of 8.
+            assert!(!payload.is_empty() && payload.len() % 8 == 0);
+            saw_iq = true;
+            break;
+        }
+    }
+    assert!(saw_iq, "expected an IqF32 frame on stream_id=2");
+
+    let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
 }
 
 /// `device_args` in `POST /api/device/open` must produce a clean error

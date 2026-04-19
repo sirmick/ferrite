@@ -12,7 +12,7 @@ use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::session::{AppState, OpenSpec, PatchRequest, SessionState, SourceKind};
+use crate::session::{AppState, OpenSpec, PatchRequest, SessionState, SourceKind, VfoDescriptor};
 
 #[derive(Serialize)]
 pub struct Hello {
@@ -344,6 +344,55 @@ pub async fn patch_settings(
         .await
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Body of `POST /api/device/:id/vfo` — all three fields required.
+/// `offset_hz` is relative to the active session's centre frequency, per
+/// `docs/02-protocol.md`.
+#[derive(Deserialize)]
+#[allow(clippy::struct_field_names)] // every field is a Hz quantity
+pub struct AddVfoRequest {
+    pub offset_hz: f64,
+    pub rate_hz: f64,
+    pub filter_bw_hz: f64,
+}
+
+/// `POST /api/device/:id/vfo` — allocate a channelized narrowband slice.
+/// Returns the descriptor for the new stream (`stream_id ≥ 2`, `iq_f32`
+/// payload) or 404 if the id doesn't match the active session, or 400 if
+/// the requested spec can't be synthesised against the current input
+/// rate (e.g. `filter_bw_hz` ≥ `sample_rate_hz`).
+pub async fn add_vfo(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AddVfoRequest>,
+) -> Result<Json<VfoDescriptor>, (StatusCode, Json<ApiError>)> {
+    let spec = crate::session::VfoSpec {
+        offset_hz: req.offset_hz,
+        rate_hz: req.rate_hz,
+        filter_bw_hz: req.filter_bw_hz,
+    };
+    match state.add_vfo(&id, spec).await {
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "SESSION_NOT_FOUND",
+                    message: format!("no active session with id {id}"),
+                },
+            }),
+        )),
+        Some(Err(err)) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "INVALID_SETTINGS",
+                    message: err.to_string(),
+                },
+            }),
+        )),
+        Some(Ok(desc)) => Ok(Json(desc)),
+    }
 }
 
 pub async fn ws_session(
