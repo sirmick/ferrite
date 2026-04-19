@@ -333,6 +333,35 @@ pub trait Block: Send {
     }
 }
 
+/// Construct an instance from a JSON params value. The runtime calls this
+/// through the registry's `construct_fn` when instantiating a flowgraph —
+/// every `#[ferrite_block]`-annotated type must implement it.
+///
+/// Conventionally, blocks derive [`serde::Deserialize`] on their `…Params`
+/// struct with `#[serde(default)]` at the container level. That lets an
+/// absent or partial JSON object deserialize against the block's `Default`
+/// params, so flowgraphs can omit fields they're happy with.
+///
+/// `serde_json::Value::Null` is accepted and treated as "use defaults".
+pub trait BlockFactory: Block + Sized {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>>;
+}
+
+/// Helper used by [`BlockFactory`] impls: deserialize a JSON value into a
+/// `Params` struct, treating `Value::Null` as "use defaults". Keeps the
+/// null-handling convention single-sourced so every block's factory is
+/// identical except for the type names.
+pub(crate) fn deserialize_params<T>(value: &serde_json::Value) -> Result<T>
+where
+    T: serde::de::DeserializeOwned + Default,
+{
+    if value.is_null() {
+        Ok(T::default())
+    } else {
+        Ok(serde_json::from_value(value.clone())?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

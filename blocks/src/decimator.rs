@@ -24,14 +24,16 @@
 
 use anyhow::{bail, Result};
 use num_complex::Complex;
+use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, Work,
 };
 
 /// Construction-time params.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
 pub struct DecimatorParams {
     /// Decimation factor M ≥ 1. Output rate = input rate / M.
     pub factor: usize,
@@ -240,6 +242,13 @@ impl Block for Decimator {
         w.consumed[0] = consumed;
         w.produced[0] = produced;
         Ok(w)
+    }
+}
+
+impl BlockFactory for Decimator {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: DecimatorParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(Decimator::new(p)?))
     }
 }
 

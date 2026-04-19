@@ -9,13 +9,15 @@
 //! so the [`crate::fft::FftBlock`] upstream stays pure cf32 → cf32.
 
 use anyhow::Result;
+use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, Work,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
 pub struct LogMagU8Params {
     pub size: usize,
     pub floor_dbfs: f32,
@@ -189,6 +191,13 @@ impl Block for LogMagU8 {
         work.consumed[0] = n;
         work.produced[0] = n;
         Ok(work)
+    }
+}
+
+impl BlockFactory for LogMagU8 {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: LogMagU8Params = crate::block::deserialize_params(params)?;
+        Ok(Box::new(LogMagU8::new(p)))
     }
 }
 

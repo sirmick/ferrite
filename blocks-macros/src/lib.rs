@@ -74,6 +74,7 @@ pub fn ferrite_block(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ::ferrite_blocks::inventory::submit! {
             ::ferrite_blocks::registry::BlockEntry {
                 spec_fn: || <#self_ty as ::ferrite_blocks::Block>::spec(),
+                construct_fn: <#self_ty as ::ferrite_blocks::BlockFactory>::construct,
             }
         }
     };

@@ -22,10 +22,11 @@
 
 use anyhow::Result;
 use num_complex::Complex;
+use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockIo, BlockSpec, InitCtx, OutputPort, ParamKind, ParamSpec, Placement, PortSpec,
-    PortType, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, OutputPort, ParamKind, ParamSpec, Placement,
+    PortSpec, PortType, Work,
 };
 
 /// Reciprocal of 2³². The value `2³²` is exactly representable in f32
@@ -36,7 +37,8 @@ const INV_PHASE_SCALE: f32 = 1.0_f32 / 4_294_967_296.0_f32;
 
 /// Construction-time params. Every field is also present in the block's
 /// param schema and addressable by key via [`SineSource::set_param`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
 pub struct SineSourceParams {
     pub rate_hz: f64,
     pub center_freq_hz: f64,
@@ -209,6 +211,13 @@ impl Block for SineSource {
         let mut w = Work::new();
         w.produced[0] = n;
         Ok(w)
+    }
+}
+
+impl BlockFactory for SineSource {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: SineSourceParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(SineSource::new(p)))
     }
 }
 

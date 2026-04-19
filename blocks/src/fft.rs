@@ -14,13 +14,15 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use num_complex::Complex;
 use rustfft::{Fft as RustFft, FftPlanner};
+use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, Work,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FftWindow {
     None,
     Hann,
@@ -41,7 +43,8 @@ impl FftWindow {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
 pub struct FftBlockParams {
     pub size: usize,
     pub window: FftWindow,
@@ -192,6 +195,13 @@ impl Block for FftBlock {
         work.consumed[0] = n;
         work.produced[0] = n;
         Ok(work)
+    }
+}
+
+impl BlockFactory for FftBlock {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: FftBlockParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(FftBlock::new(p)?))
     }
 }
 

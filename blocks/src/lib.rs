@@ -25,8 +25,8 @@ pub mod registry;
 pub mod sine;
 
 pub use block::{
-    Block, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort, ParamKind, ParamSpec,
-    Placement, PortMeta, PortSpec, PortType, Work, MAX_PORTS,
+    Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort,
+    ParamKind, ParamSpec, Placement, PortMeta, PortSpec, PortType, Work, MAX_PORTS,
 };
 pub use channelizer::{Channelizer, ChannelizerParams};
 pub use decimator::{Decimator, DecimatorParams};

@@ -30,14 +30,16 @@
 use anyhow::{bail, Result};
 use core::f32::consts::{PI, TAU};
 use num_complex::Complex;
+use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, Work,
 };
 
 /// Construction-time params.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
 pub struct ChannelizerParams {
     /// Wideband input sample rate, Hz.
     pub input_rate_hz: f64,
@@ -70,6 +72,15 @@ impl ChannelizerParams {
             num_taps: 8 * factor + 1,
             cutoff_normalized,
         }
+    }
+}
+
+impl Default for ChannelizerParams {
+    fn default() -> Self {
+        // 2 MS/s wideband, centre of band, 4× decimation (500 kS/s out).
+        // Matches the WBFM preset's channelizer so a flowgraph can omit
+        // params entirely and still get a sensible tuner.
+        Self::new(2_000_000.0, 0.0, 4)
     }
 }
 
@@ -305,6 +316,13 @@ impl Block for Channelizer {
         w.consumed[0] = consumed;
         w.produced[0] = produced;
         Ok(w)
+    }
+}
+
+impl BlockFactory for Channelizer {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: ChannelizerParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(Channelizer::new(p)?))
     }
 }
 

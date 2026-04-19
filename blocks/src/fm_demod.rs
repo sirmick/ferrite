@@ -27,14 +27,16 @@
 
 use anyhow::{bail, Result};
 use num_complex::Complex;
+use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, Work,
 };
 
 /// Construction-time params.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
 pub struct FmDemodParams {
     /// Input IQ sample rate (Hz). Wired in by the scheduler from the input
     /// port's metadata; set explicitly for standalone tests.
@@ -165,6 +167,13 @@ impl Block for FmDemod {
         w.consumed[0] = n;
         w.produced[0] = n;
         Ok(w)
+    }
+}
+
+impl BlockFactory for FmDemod {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: FmDemodParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(FmDemod::new(p)?))
     }
 }
 

@@ -9,19 +9,35 @@
 //! supports without a hand-maintained table. Tests assert the expected
 //! blocks are registered.
 
-use crate::BlockSpec;
+use anyhow::Result;
 
-/// One block type's registry entry. Points at the block's static
-/// [`BlockSpec`] factory rather than embedding the spec directly so the
-/// spec stays single-sourced in the block's own impl.
+use crate::{Block, BlockSpec};
+
+/// Function pointer that constructs a concrete block from a JSON params
+/// value. Dispatches to `<T as BlockFactory>::construct` — every block
+/// annotated with `#[ferrite_block]` must implement `BlockFactory`.
+pub type ConstructFn = fn(&serde_json::Value) -> Result<Box<dyn Block>>;
+
+/// One block type's registry entry. Holds function pointers rather than
+/// inline values so the spec and the constructor stay single-sourced in
+/// the block's own impl.
 pub struct BlockEntry {
     pub spec_fn: fn() -> BlockSpec,
+    pub construct_fn: ConstructFn,
 }
 
 impl BlockEntry {
     #[must_use]
     pub fn spec(&self) -> BlockSpec {
         (self.spec_fn)()
+    }
+
+    /// Construct an instance from a JSON params value. Pass
+    /// `&serde_json::Value::Null` when the flowgraph omits the `params`
+    /// object; the block's [`crate::BlockFactory`] impl defaults
+    /// missing fields from its `Default`.
+    pub fn construct(&self, params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        (self.construct_fn)(params)
     }
 }
 
@@ -36,4 +52,47 @@ pub fn entries() -> impl Iterator<Item = &'static BlockEntry> {
 #[must_use]
 pub fn find(type_name: &str) -> Option<&'static BlockEntry> {
     entries().find(|e| e.spec().type_name == type_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find;
+
+    #[test]
+    fn construct_defaults_when_params_null() {
+        // SineSource has a Default; a Null params value must produce an
+        // instance using those defaults rather than failing.
+        let entry = find("SineSource").expect("SineSource registered");
+        entry
+            .construct(&serde_json::Value::Null)
+            .expect("defaults cover every field");
+    }
+
+    #[test]
+    fn construct_merges_partial_params_over_defaults() {
+        // Only specify one field; the rest come from Default via
+        // #[serde(default)] at the container level.
+        let entry = find("Decimator").expect("Decimator registered");
+        let params = serde_json::json!({ "factor": 8 });
+        entry.construct(&params).expect("valid Decimator params");
+    }
+
+    #[test]
+    fn construct_rejects_bad_params() {
+        // factor=0 is invalid — Decimator::new bails; the factory forwards
+        // that error rather than panicking.
+        let entry = find("Decimator").expect("Decimator registered");
+        let params = serde_json::json!({ "factor": 0, "num_taps": 33, "cutoff_normalized": 0.1 });
+        assert!(entry.construct(&params).is_err());
+    }
+
+    #[test]
+    fn construct_rejects_unknown_fields() {
+        // serde_json is lenient by default — unknown keys are ignored,
+        // not rejected. This test pins that behaviour so a flowgraph can
+        // carry extra comment-like fields without failing construction.
+        let entry = find("SineSource").expect("SineSource registered");
+        let params = serde_json::json!({ "rate_hz": 250_000.0, "_comment": "ignored" });
+        entry.construct(&params).expect("extra fields tolerated");
+    }
 }

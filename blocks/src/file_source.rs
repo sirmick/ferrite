@@ -26,10 +26,11 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use num_complex::Complex;
+use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockIo, BlockSpec, InitCtx, OutBuf, OutputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, OutBuf, OutputPort, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, Work,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +51,8 @@ impl IqFileFormat {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct FileIqSourceParams {
     pub path: PathBuf,
     /// Hint used when the file format does not embed a sample rate
@@ -285,6 +287,13 @@ impl Block for FileIqSource {
         let mut w = Work::new();
         w.produced[0] = full_samples;
         Ok(w)
+    }
+}
+
+impl BlockFactory for FileIqSource {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: FileIqSourceParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(FileIqSource::new(&p)?))
     }
 }
 
