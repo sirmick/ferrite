@@ -14,6 +14,7 @@ extern crate self as ferrite_blocks;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+pub mod audio_sink;
 pub mod block;
 pub mod channelizer;
 pub mod decimator;
@@ -27,6 +28,7 @@ pub mod sine;
 pub mod soapy_source;
 pub mod ws_bridge;
 
+pub use audio_sink::{AudioSink, AudioSinkParams};
 pub use block::{
     AsAny, Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort,
     ParamKind, ParamSpec, Placement, PortMeta, PortSpec, PortType, Work, MAX_PORTS,
@@ -95,6 +97,7 @@ mod tests {
             "FmDemod",
             "WsBridgeTx",
             "WsBridgeRx",
+            "AudioSink",
         ] {
             assert!(
                 names.contains(expected),
