@@ -246,7 +246,7 @@ impl Block for Decimator {
 /// Windowed-sinc low-pass filter. `cutoff` is the normalised cutoff in
 /// `(0, 0.5)` (fraction of sample rate). Applies a Hann window and
 /// normalises so the taps sum to 1 (unit DC gain).
-fn design_lpf(num_taps: usize, cutoff: f32) -> Vec<f32> {
+pub(crate) fn design_lpf(num_taps: usize, cutoff: f32) -> Vec<f32> {
     use core::f32::consts::PI;
     #[allow(clippy::cast_precision_loss)]
     let m = (num_taps - 1) as f32 / 2.0;

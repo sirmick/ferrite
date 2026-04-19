@@ -15,6 +15,7 @@ extern crate self as ferrite_blocks;
 use wasm_bindgen::prelude::*;
 
 pub mod block;
+pub mod channelizer;
 pub mod decimator;
 pub mod fft;
 pub mod file_source;
@@ -26,6 +27,7 @@ pub use block::{
     Block, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort, ParamKind, ParamSpec,
     Placement, PortMeta, PortSpec, PortType, Work, MAX_PORTS,
 };
+pub use channelizer::{Channelizer, ChannelizerParams};
 pub use decimator::{Decimator, DecimatorParams};
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
@@ -75,7 +77,14 @@ mod tests {
     fn registry_contains_every_shipped_block() {
         let names: HashSet<&'static str> =
             registry::entries().map(|e| e.spec().type_name).collect();
-        for expected in ["SineSource", "FFT", "FileIqSource", "LogMagU8", "Decimator"] {
+        for expected in [
+            "SineSource",
+            "FFT",
+            "FileIqSource",
+            "LogMagU8",
+            "Decimator",
+            "Channelizer",
+        ] {
             assert!(
                 names.contains(expected),
                 "{expected} missing from registry (found: {names:?})",
