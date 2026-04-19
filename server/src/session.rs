@@ -196,6 +196,46 @@ enum ControlCmd {
         spec: VfoSpec,
         respond: oneshot::Sender<Result<VfoDescriptor>>,
     },
+    PatchVfo {
+        vfo_id: String,
+        req: PatchVfoRequest,
+        respond: oneshot::Sender<Result<VfoDescriptor, VfoError>>,
+    },
+}
+
+/// Failure modes for VFO lookups. `NotFound` separates "the session id
+/// matched but the `vfo_id` didn't" from an outright validation error, so
+/// the REST handler can emit the right status code without string-matching
+/// the error message.
+#[derive(Debug)]
+pub enum VfoError {
+    NotFound,
+    Invalid(anyhow::Error),
+}
+
+impl std::fmt::Display for VfoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("vfo not found"),
+            Self::Invalid(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+/// Mid-stream retune spec for `PATCH /api/device/{id}/vfo/{vfo_id}`.
+/// Only `offset_hz` is honoured today — changing `filter_bw_hz` requires
+/// rebuilding the channelizer's LPF, which lands as its own commit (see
+/// `docs/10-commits.md` item #74 / #75 follow-ups).
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default)]
+pub struct PatchVfoRequest {
+    pub offset_hz: Option<f64>,
+}
+
+impl PatchVfoRequest {
+    fn is_noop(&self) -> bool {
+        self.offset_hz.is_none()
+    }
 }
 
 struct Session {
@@ -419,6 +459,53 @@ impl AppState {
         match rx.await {
             Ok(result) => Some(result),
             Err(_) => Some(Err(anyhow!("pipeline dropped VFO response channel"))),
+        }
+    }
+
+    /// Retune an existing VFO. Returns:
+    ///   * `None` — session id mismatch (→ 404)
+    ///   * `Some(Err(VfoError::NotFound))` — session matched, `vfo_id` didn't
+    ///   * `Some(Err(VfoError::Invalid(..)))` — pipeline rejected the spec
+    ///   * `Some(Ok(descriptor))` — post-patch snapshot
+    ///
+    /// A no-op request (no fields set) skips the pipeline round-trip and
+    /// returns the current descriptor from the cached `SessionState`.
+    pub async fn patch_vfo(
+        &self,
+        id: &str,
+        vfo_id: &str,
+        req: PatchVfoRequest,
+    ) -> Option<Result<VfoDescriptor, VfoError>> {
+        let inner = self.inner.read().await;
+        let s = inner.session.as_ref()?;
+        if s.id != id {
+            return None;
+        }
+        if req.is_noop() {
+            let desc = s
+                .state
+                .lock()
+                .ok()
+                .and_then(|g| g.vfos.iter().find(|v| v.vfo_id == vfo_id).cloned());
+            return Some(desc.ok_or(VfoError::NotFound));
+        }
+        let (tx, rx) = oneshot::channel();
+        if s.control
+            .send(ControlCmd::PatchVfo {
+                vfo_id: vfo_id.to_string(),
+                req,
+                respond: tx,
+            })
+            .is_err()
+        {
+            return Some(Err(VfoError::Invalid(anyhow!("pipeline shutting down"))));
+        }
+        drop(inner);
+        match rx.await {
+            Ok(result) => Some(result),
+            Err(_) => Some(Err(VfoError::Invalid(anyhow!(
+                "pipeline dropped PatchVfo response channel"
+            )))),
         }
     }
 
@@ -687,6 +774,10 @@ async fn run_pipeline(
                             }
                         }
                     }
+                    Some(ControlCmd::PatchVfo { vfo_id, req, respond }) => {
+                        let result = apply_patch_vfo(&mut vfos, &vfo_id, &req, &state);
+                        let _ = respond.send(result);
+                    }
                     None => {
                         tracing::debug!("control channel closed");
                         return;
@@ -805,6 +896,34 @@ fn build_active_vfo(
         frame_buf: Vec::new(),
         seq: 0,
     })
+}
+
+fn apply_patch_vfo(
+    vfos: &mut [ActiveVfo],
+    vfo_id: &str,
+    req: &PatchVfoRequest,
+    state: &Arc<Mutex<SessionState>>,
+) -> Result<VfoDescriptor, VfoError> {
+    let vfo = vfos
+        .iter_mut()
+        .find(|v| v.descriptor.vfo_id == vfo_id)
+        .ok_or(VfoError::NotFound)?;
+    if let Some(offset) = req.offset_hz {
+        if !offset.is_finite() {
+            return Err(VfoError::Invalid(anyhow!(
+                "offset_hz must be finite (got {offset})"
+            )));
+        }
+        vfo.channelizer.set_freq_shift(offset);
+        vfo.descriptor.offset_hz = offset;
+    }
+    let desc = vfo.descriptor.clone();
+    if let Ok(mut s) = state.lock() {
+        if let Some(slot) = s.vfos.iter_mut().find(|v| v.vfo_id == desc.vfo_id) {
+            slot.offset_hz = desc.offset_hz;
+        }
+    }
+    Ok(desc)
 }
 
 fn emit_vfo_frame(vfo: &mut ActiveVfo, iq_in: &[Complex<f32>], tx: &FrameTx) -> Result<()> {

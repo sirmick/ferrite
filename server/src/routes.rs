@@ -12,7 +12,10 @@ use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::session::{AppState, OpenSpec, PatchRequest, SessionState, SourceKind, VfoDescriptor};
+use crate::session::{
+    AppState, OpenSpec, PatchRequest, PatchVfoRequest, SessionState, SourceKind, VfoDescriptor,
+    VfoError,
+};
 
 #[derive(Serialize)]
 pub struct Hello {
@@ -383,6 +386,47 @@ pub async fn add_vfo(
             }),
         )),
         Some(Err(err)) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "INVALID_SETTINGS",
+                    message: err.to_string(),
+                },
+            }),
+        )),
+        Some(Ok(desc)) => Ok(Json(desc)),
+    }
+}
+
+/// `PATCH /api/device/:id/vfo/:vfo_id` — retune (and eventually resize)
+/// an existing VFO mid-stream. Today only `offset_hz` is honoured; the
+/// channelizer's mixer phase stays continuous across the change so the
+/// retune is glitch-free.
+pub async fn patch_vfo(
+    State(state): State<AppState>,
+    Path((id, vfo_id)): Path<(String, String)>,
+    Json(req): Json<PatchVfoRequest>,
+) -> Result<Json<VfoDescriptor>, (StatusCode, Json<ApiError>)> {
+    match state.patch_vfo(&id, &vfo_id, req).await {
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "SESSION_NOT_FOUND",
+                    message: format!("no active session with id {id}"),
+                },
+            }),
+        )),
+        Some(Err(VfoError::NotFound)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "VFO_NOT_FOUND",
+                    message: format!("no vfo {vfo_id} on session {id}"),
+                },
+            }),
+        )),
+        Some(Err(VfoError::Invalid(err))) => Err((
             StatusCode::BAD_REQUEST,
             Json(ApiError {
                 error: ApiErrorBody {

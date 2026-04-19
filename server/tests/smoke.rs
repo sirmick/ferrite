@@ -46,6 +46,7 @@ async fn spawn_app() -> SocketAddr {
         .route("/api/device/:id/state", get(routes::session_state))
         .route("/api/device/:id/settings", patch(routes::patch_settings))
         .route("/api/device/:id/vfo", post(routes::add_vfo))
+        .route("/api/device/:id/vfo/:vfo_id", patch(routes::patch_vfo))
         .route("/ws", get(routes::ws_upgrade))
         .route("/ws/:id", get(routes::ws_session))
         .with_state(state);
@@ -310,6 +311,64 @@ async fn add_vfo_streams_iq_f32_on_stream_two() {
         }
     }
     assert!(saw_iq, "expected an IqF32 frame on stream_id=2");
+
+    let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
+}
+
+/// Add a VFO, PATCH its `offset_hz`, and verify the descriptor (both in
+/// the PATCH response and in subsequent `GET /state`) reflects the new
+/// offset. Asserts the wiring, not the channelizer DSP — the
+/// `retune_mid_stream_is_continuous` test in `blocks/src/channelizer.rs`
+/// covers the glitch-free retune property.
+#[tokio::test]
+async fn patch_vfo_updates_offset_in_state() {
+    let addr = spawn_app().await;
+    let body = r#"{"sample_rate_hz": 2000000, "fft_size": 512, "fft_rate_hz": 200.0}"#;
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), body).await;
+    let session_id = json_str(&resp, "session_id").expect("session_id");
+
+    let vfo_resp = http_post_json(
+        &format!("http://{addr}/api/device/{session_id}/vfo"),
+        r#"{"offset_hz": 100000, "rate_hz": 50000, "filter_bw_hz": 20000}"#,
+    )
+    .await;
+    let vfo_id = json_str(&vfo_resp, "vfo_id").expect("vfo_id");
+
+    let patch = raw_request(
+        &format!("http://{addr}/api/device/{session_id}/vfo/{vfo_id}"),
+        "PATCH",
+        r#"{"offset_hz": -250000}"#,
+    )
+    .await;
+    assert!(
+        patch.contains("\"offset_hz\":-250000"),
+        "patch reply: {patch}"
+    );
+
+    let state = http_get(&format!("http://{addr}/api/device/{session_id}/state")).await;
+    assert!(
+        state.contains("\"offset_hz\":-250000"),
+        "post-patch state: {state}"
+    );
+
+    let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
+}
+
+/// PATCH against an unknown `vfo_id` must 404 with `VFO_NOT_FOUND`.
+#[tokio::test]
+async fn patch_vfo_unknown_returns_vfo_not_found() {
+    let addr = spawn_app().await;
+    let body = r#"{"fft_size": 128, "fft_rate_hz": 200.0}"#;
+    let resp = http_post_json(&format!("http://{addr}/api/device/open"), body).await;
+    let session_id = json_str(&resp, "session_id").expect("session_id");
+
+    let r = raw_request(
+        &format!("http://{addr}/api/device/{session_id}/vfo/vfo-nope"),
+        "PATCH",
+        r#"{"offset_hz": 1.0}"#,
+    )
+    .await;
+    assert!(r.contains("VFO_NOT_FOUND"), "reply: {r}");
 
     let _ = http_post_json(&format!("http://{addr}/api/device/{session_id}/close"), "").await;
 }
