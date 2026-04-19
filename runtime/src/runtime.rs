@@ -12,9 +12,11 @@
 //! for the linear chains that ship today (e.g. `SineSource → Decimator →
 //! FmDemod`); a credit-based scheme lands when a graph needs it.
 //!
-//! State machine is deliberately minimal here (an `initialized` flag).
-//! The full `Init / Start / Stop / Reconfigure` FSM is a separate
-//! milestone commit so this one stays focused on the hot path.
+//! Lifecycle: `Created → Initialized → Running → Stopped`. `tick()` is
+//! callable from `Initialized` or `Running` so tests can drive ticks
+//! in lock-step without flipping to `Running`. `Stopped` is terminal
+//! — no re-use. `Reconfigure` events come in M3 and don't add a new
+//! state here; they're handled in place while `Running`.
 //!
 //! The TS counterpart used to live in `packages/flowgraph-runtime/src/runtime.ts`
 //! and will be deleted at M4 once the browser loads this crate as WASM.
@@ -49,7 +51,24 @@ pub struct Runtime {
     /// (declaration order) to its upstream producer. `None` = dangling.
     input_bindings: Vec<Vec<Option<InputBinding>>>,
     frames_hint: usize,
-    initialized: bool,
+    state: RuntimeState,
+}
+
+/// Lifecycle state of a [`Runtime`]. Transitions are explicit and
+/// one-way; see the method docs for which state each call requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeState {
+    /// Just constructed. Only [`Runtime::init`] is legal.
+    Created,
+    /// [`Runtime::init`] has run. [`Runtime::tick`] is legal (useful
+    /// for lock-step tests), as is [`Runtime::start`].
+    Initialized,
+    /// [`Runtime::start`] has been called. [`Runtime::tick`] remains
+    /// legal; the caller owns the tick cadence — there is no internal
+    /// timer today.
+    Running,
+    /// Terminal. No further transitions; dispose and rebuild.
+    Stopped,
 }
 
 struct BlockEntry {
@@ -132,6 +151,10 @@ impl TypedBuf {
             Self::Events(v) => OutBuf::Events(v.as_mut_slice()),
         }
     }
+}
+
+fn state_error(op: &'static str, state: RuntimeState) -> anyhow::Error {
+    anyhow!("runtime: {op} not allowed from state {state:?}")
 }
 
 /// Dangling-input view — a zero-length slice of the right type so the
@@ -255,7 +278,7 @@ impl Runtime {
             entries,
             input_bindings,
             frames_hint,
-            initialized: false,
+            state: RuntimeState::Created,
         })
     }
 
@@ -264,14 +287,17 @@ impl Runtime {
         self.frames_hint
     }
 
-    /// Call `init` on every block in topological order. The hint is the
-    /// per-tick output-buffer capacity; blocks free to ignore. Rate
-    /// metadata is deferred — the full negotiation lands with the
-    /// lifecycle FSM commit.
+    #[must_use]
+    pub fn state(&self) -> RuntimeState {
+        self.state
+    }
+
+    /// Call `init` on every block in topological order. Required before
+    /// any `tick`. Blocks are free to ignore `frames_hint`; rate
+    /// metadata in `InitCtx` is empty today and gets populated when
+    /// the negotiation phase lands.
     pub fn init(&mut self) -> Result<()> {
-        if self.initialized {
-            return Err(anyhow!("runtime: init() called twice"));
-        }
+        self.require_state(RuntimeState::Created, "init")?;
         let frames_hint = self.frames_hint;
         for entry in &mut self.entries {
             let mut ctx = InitCtx {
@@ -284,16 +310,27 @@ impl Runtime {
                 .init(&mut ctx)
                 .with_context(|| format!("init block {:?}", entry.id))?;
         }
-        self.initialized = true;
+        self.state = RuntimeState::Initialized;
+        Ok(())
+    }
+
+    /// Transition `Initialized → Running`. A no-op beyond the state
+    /// flip today — there is no internal timer. Tests that only need
+    /// to drive `tick()` directly can skip this call.
+    pub fn start(&mut self) -> Result<()> {
+        self.require_state(RuntimeState::Initialized, "start")?;
+        self.state = RuntimeState::Running;
         Ok(())
     }
 
     /// Run one tick: walk blocks in topo order, calling `process` on
     /// each. Returns on the first block that errors; previously-run
-    /// blocks keep their mutated state.
+    /// blocks keep their mutated state. Legal from `Initialized` or
+    /// `Running`.
     pub fn tick(&mut self) -> Result<()> {
-        if !self.initialized {
-            return Err(anyhow!("runtime: tick() called before init()"));
+        match self.state {
+            RuntimeState::Initialized | RuntimeState::Running => {}
+            other => return Err(state_error("tick", other)),
         }
         let Self {
             entries,
@@ -361,18 +398,33 @@ impl Runtime {
     /// Call `stop` on every block in **reverse** topological order so
     /// consumers drain before producers disappear. Accumulates errors
     /// — every block is asked to stop even if an earlier one fails.
+    /// Legal from `Initialized` or `Running`; no-op if already
+    /// `Stopped`. Terminal: no re-use.
     pub fn stop(&mut self) -> Result<()> {
+        match self.state {
+            RuntimeState::Stopped => return Ok(()),
+            RuntimeState::Created => return Err(state_error("stop", self.state)),
+            RuntimeState::Initialized | RuntimeState::Running => {}
+        }
         let mut failures = Vec::new();
         for entry in self.entries.iter_mut().rev() {
             if let Err(e) = entry.block.stop() {
                 failures.push(format!("stop {:?}: {e}", entry.id));
             }
         }
-        self.initialized = false;
+        self.state = RuntimeState::Stopped;
         if failures.is_empty() {
             Ok(())
         } else {
             Err(anyhow!("runtime: stop errors — {}", failures.join("; ")))
+        }
+    }
+
+    fn require_state(&self, expected: RuntimeState, op: &'static str) -> Result<()> {
+        if self.state == expected {
+            Ok(())
+        } else {
+            Err(state_error(op, self.state))
         }
     }
 
@@ -453,6 +505,27 @@ mod tests {
     }
 
     #[test]
+    fn state_progresses_through_lifecycle() {
+        let mut rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource"}},
+                "wires":[]
+            }"#,
+            16,
+        );
+        assert_eq!(rt.state(), RuntimeState::Created);
+        rt.init().unwrap();
+        assert_eq!(rt.state(), RuntimeState::Initialized);
+        rt.tick().unwrap(); // legal from Initialized
+        rt.start().unwrap();
+        assert_eq!(rt.state(), RuntimeState::Running);
+        rt.tick().unwrap(); // still legal from Running
+        rt.stop().unwrap();
+        assert_eq!(rt.state(), RuntimeState::Stopped);
+    }
+
+    #[test]
     fn tick_before_init_errors() {
         let mut rt = load(
             r#"{
@@ -463,7 +536,7 @@ mod tests {
             16,
         );
         let err = rt.tick().unwrap_err();
-        assert!(format!("{err}").contains("before init"));
+        assert!(format!("{err}").contains("Created"));
     }
 
     #[test]
@@ -478,13 +551,42 @@ mod tests {
         );
         rt.init().unwrap();
         let err = rt.init().unwrap_err();
-        assert!(format!("{err}").contains("twice"));
+        assert!(format!("{err}").contains("Initialized"));
     }
 
     #[test]
-    fn stop_is_idempotent_across_blocks() {
-        // Two ticks then stop. stop() should succeed even though one of
-        // our real blocks (SineSource) has no custom stop logic.
+    fn start_before_init_errors() {
+        let mut rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource"}},
+                "wires":[]
+            }"#,
+            16,
+        );
+        let err = rt.start().unwrap_err();
+        assert!(format!("{err}").contains("Created"));
+    }
+
+    #[test]
+    fn stop_without_init_errors() {
+        let mut rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource"}},
+                "wires":[]
+            }"#,
+            16,
+        );
+        let err = rt.stop().unwrap_err();
+        assert!(format!("{err}").contains("Created"));
+    }
+
+    #[test]
+    fn stop_is_idempotent_after_first_stop() {
+        // Second stop() is a no-op, not an error — matches the TS
+        // runtime's contract so a `try { stop() }` in a cleanup path
+        // doesn't flag on a double-stop race.
         let mut rt = load(
             r#"{
                 "name":"t","environments":["browser"],
@@ -495,8 +597,24 @@ mod tests {
         );
         rt.init().unwrap();
         rt.tick().unwrap();
-        rt.tick().unwrap();
         rt.stop().unwrap();
+        rt.stop().unwrap();
+    }
+
+    #[test]
+    fn tick_after_stop_errors() {
+        let mut rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource"}},
+                "wires":[]
+            }"#,
+            16,
+        );
+        rt.init().unwrap();
+        rt.stop().unwrap();
+        let err = rt.tick().unwrap_err();
+        assert!(format!("{err}").contains("Stopped"));
     }
 
     #[test]

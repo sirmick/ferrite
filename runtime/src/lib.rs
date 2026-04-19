@@ -21,6 +21,6 @@ pub mod validate;
 pub use block_registry::{instantiate_blocks, BlockMap, InventorySpecRegistry};
 pub use doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
 pub use instantiate::{instantiate_flowgraph, SpecMap, SpecRegistry};
-pub use runtime::{Runtime, DEFAULT_FRAMES_HINT};
+pub use runtime::{Runtime, RuntimeState, DEFAULT_FRAMES_HINT};
 pub use schedule::{build_wire_plan, topological_order, InputSource, Schedule, WirePlan};
 pub use validate::{validate_doc, FlowgraphValidationError, Phase, ValidatedDoc, ValidationError};
