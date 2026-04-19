@@ -189,7 +189,7 @@
 <DeviceOptions
   bind:open={showOptions}
   capabilities={optionsCaps}
-  onApply={(req) => void session.open(req)}
+  onApply={(req) => void session.open(req, optionsCaps)}
   onClose={() => (showOptions = false)}
 />
 

@@ -2,6 +2,7 @@
   import { Dialog } from 'bits-ui';
   import { session } from '$lib/session.svelte';
   import type { PatchSettingsRequest } from '$lib/api/device';
+  import { firstChannel, rangesToChoices } from '$lib/controls/optionsModel';
 
   interface Props {
     open: boolean;
@@ -21,6 +22,51 @@
 
   function fmtMHz(hz: number): string {
     return `${(hz / 1e6).toFixed(3)} MHz`;
+  }
+
+  // Apply-and-restart (#67): knobs the device cannot retune live —
+  // sample rate, antenna, bandwidth — must close + reopen the session.
+  // We project the cached capability schema into select options; the
+  // form holds pending values that diverge from session.state until
+  // the user clicks "Apply & restart".
+  let ch = $derived(session.caps ? firstChannel(session.caps) : null);
+  let rateChoices = $derived(ch ? rangesToChoices(ch.sample_rate_ranges_hz) : []);
+  let bandwidthChoices = $derived(ch ? rangesToChoices(ch.bandwidth_ranges_hz) : []);
+
+  let pendingRate = $state<number | null>(null);
+  let pendingAntenna = $state<string | null>(null);
+  let pendingBandwidth = $state<number | null>(null);
+
+  // Re-seed pending values whenever the dialog opens against a fresh
+  // session, so leaving + reopening doesn't show stale staged changes.
+  $effect(() => {
+    if (open && s) {
+      pendingRate = s.sample_rate_hz;
+      pendingAntenna = s.antenna;
+      pendingBandwidth = null;
+    }
+  });
+
+  let restartChanged = $derived(
+    !!s &&
+      (pendingRate !== s.sample_rate_hz ||
+        pendingAntenna !== s.antenna ||
+        (pendingBandwidth !== null && pendingBandwidth !== s.sample_rate_hz)),
+  );
+
+  function applyAndRestart() {
+    if (!s || !restartChanged) return;
+    const overrides: Record<string, unknown> = {};
+    if (pendingRate !== null && pendingRate !== s.sample_rate_hz) {
+      overrides.sample_rate_hz = pendingRate;
+    }
+    if (pendingAntenna !== null && pendingAntenna !== s.antenna) {
+      overrides.antenna = pendingAntenna;
+    }
+    if (pendingBandwidth !== null) {
+      overrides.bandwidth_hz = pendingBandwidth;
+    }
+    void session.restart(overrides);
   }
 </script>
 
@@ -176,6 +222,73 @@
               />
             </label>
           </fieldset>
+
+          {#if session.caps && ch}
+            <fieldset class="grid gap-2 rounded border border-amber-900/60 p-2 text-xs">
+              <legend
+                class="px-1 text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]"
+              >
+                Apply &amp; restart
+              </legend>
+              <p class="text-[10px] text-[color:var(--color-muted)]">
+                These cannot retune live; saving closes and reopens the device.
+              </p>
+
+              {#if rateChoices.length > 1}
+                <label class="grid gap-1">
+                  <span class="text-[color:var(--color-muted)]">Sample rate</span>
+                  <select
+                    class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+                    bind:value={pendingRate}
+                  >
+                    {#each rateChoices as r (r)}
+                      <option value={r}>{(r / 1e6).toFixed(3)} MS/s</option>
+                    {/each}
+                  </select>
+                </label>
+              {/if}
+
+              {#if ch.antennas.length > 1}
+                <label class="grid gap-1">
+                  <span class="text-[color:var(--color-muted)]">Antenna</span>
+                  <select
+                    class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+                    bind:value={pendingAntenna}
+                  >
+                    {#each ch.antennas as a (a)}
+                      <option value={a}>{a}</option>
+                    {/each}
+                  </select>
+                </label>
+              {/if}
+
+              {#if bandwidthChoices.length > 0}
+                <label class="grid gap-1">
+                  <span class="text-[color:var(--color-muted)]">Bandwidth</span>
+                  <select
+                    class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+                    bind:value={pendingBandwidth}
+                  >
+                    <option value={null}>(unchanged)</option>
+                    {#each bandwidthChoices as b (b)}
+                      <option value={b}>{(b / 1e6).toFixed(3)} MHz</option>
+                    {/each}
+                  </select>
+                </label>
+              {/if}
+
+              <div class="flex justify-end pt-1">
+                <button
+                  type="button"
+                  class="rounded bg-amber-600 px-3 py-1 text-xs font-semibold text-slate-900 disabled:opacity-50"
+                  disabled={!restartChanged}
+                  onclick={applyAndRestart}
+                >
+                  Apply &amp; restart
+                </button>
+              </div>
+            </fieldset>
+          {/if}
         {/if}
 
         <div class="flex justify-end gap-2 pt-2">
