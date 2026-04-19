@@ -230,25 +230,22 @@ impl SoapyIqSource {
             .map_err(|_| anyhow!("soapy latest mutex poisoned"))?;
         self.ticks = self.ticks.saturating_add(1);
         let (mut gap, mut stale) = (false, false);
-        match guard.as_ref() {
-            Some(samples) => {
-                let n = out.len().min(samples.len());
-                out[..n].copy_from_slice(&samples[..n]);
-                if n < out.len() {
-                    out[n..].fill(Complex::new(0.0, 0.0));
-                }
-                if version == self.last_seen_version {
-                    self.stale = self.stale.saturating_add(1);
-                    stale = true;
-                } else {
-                    self.last_seen_version = version;
-                }
+        if let Some(samples) = guard.as_ref() {
+            let n = out.len().min(samples.len());
+            out[..n].copy_from_slice(&samples[..n]);
+            if n < out.len() {
+                out[n..].fill(Complex::new(0.0, 0.0));
             }
-            None => {
-                out.fill(Complex::new(0.0, 0.0));
-                self.gaps = self.gaps.saturating_add(1);
-                gap = true;
+            if version == self.last_seen_version {
+                self.stale = self.stale.saturating_add(1);
+                stale = true;
+            } else {
+                self.last_seen_version = version;
             }
+        } else {
+            out.fill(Complex::new(0.0, 0.0));
+            self.gaps = self.gaps.saturating_add(1);
+            gap = true;
         }
         drop(guard);
         if gap || stale {

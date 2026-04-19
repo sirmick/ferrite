@@ -1,6 +1,6 @@
 //! Tracing → broadcast channel tee, consumed by `/ws/logs`.
 //!
-//! The browser's LogPanel connects to `/ws/logs` and receives every log
+//! The browser's `LogPanel` connects to `/ws/logs` and receives every log
 //! line ferrited would otherwise only write to stderr. Keeps debugging a
 //! headless daemon practical when the UI is the only view the user has.
 
@@ -59,7 +59,7 @@ where
 
 struct MessageVisitor<'a>(&'a mut String);
 
-impl<'a> Visit for MessageVisitor<'a> {
+impl Visit for MessageVisitor<'_> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
             let _ = write!(self.0, "{value:?}");
