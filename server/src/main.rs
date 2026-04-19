@@ -23,6 +23,7 @@ use tower_http::{
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod device;
+mod log_stream;
 mod routes;
 mod session;
 #[cfg(feature = "soapysdr")]
@@ -86,9 +87,11 @@ fn parse_source(arg: &str, loop_playback: bool) -> Result<SourceKind> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let log_broadcast = log_stream::LogBroadcast::new();
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(fmt::layer().with_target(false))
+        .with(log_broadcast.layer())
         .init();
 
     let args = Args::parse();
@@ -112,7 +115,7 @@ async fn main() -> Result<()> {
     let static_root: PathBuf = std::env::var_os("FERRITE_STATIC_ROOT")
         .map_or_else(|| PathBuf::from("./web-dist"), PathBuf::from);
 
-    let state = session::AppState::new(cli);
+    let state = session::AppState::new(cli).with_logs(log_broadcast);
 
     let mut app = Router::new()
         .route("/api/hello", get(routes::hello))
@@ -122,6 +125,7 @@ async fn main() -> Result<()> {
         .route("/api/device/:id/state", get(routes::session_state))
         .route("/api/device/:id/settings", patch(routes::patch_settings))
         .route("/ws", get(routes::ws_upgrade))
+        .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/:id", get(routes::ws_session))
         .with_state(state);
 

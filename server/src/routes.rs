@@ -35,6 +35,37 @@ pub async fn ws_upgrade(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(ws_echo)
 }
 
+/// Streams every `tracing` log line as a text WS message. Lets the UI
+/// show server-side logs alongside its own client-side ones.
+pub async fn ws_logs(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    let Some(logs) = state.logs().cloned() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "logs disabled").into_response();
+    };
+    ws.on_upgrade(move |socket| ws_logs_forward(socket, logs))
+        .into_response()
+}
+
+async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroadcast) {
+    let mut rx = logs.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(line) => {
+                if socket.send(Message::Text(line)).await.is_err() {
+                    return;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                let _ = socket
+                    .send(Message::Text(format!(
+                        "[WARN] log stream lagged by {n} lines"
+                    )))
+                    .await;
+            }
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
 async fn ws_echo(mut socket: WebSocket) {
     tracing::debug!("ws connected");
     while let Some(msg) = socket.recv().await {

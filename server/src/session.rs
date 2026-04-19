@@ -185,6 +185,7 @@ struct Inner {
 pub struct AppState {
     inner: Arc<RwLock<Inner>>,
     cli: Arc<CliConfig>,
+    logs: Option<crate::log_stream::LogBroadcast>,
 }
 
 impl Default for AppState {
@@ -202,7 +203,19 @@ impl AppState {
                 session: None,
             })),
             cli: Arc::new(cli),
+            logs: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_logs(mut self, logs: crate::log_stream::LogBroadcast) -> Self {
+        self.logs = Some(logs);
+        self
+    }
+
+    #[must_use]
+    pub fn logs(&self) -> Option<&crate::log_stream::LogBroadcast> {
+        self.logs.as_ref()
     }
 
     /// Seed for [`OpenSpec`] in request handlers — starts from the plain

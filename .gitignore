@@ -21,3 +21,6 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Vendored SoapySDR sources/builds (cloned via scripts/build-soapysdr.sh)
+/soapysdr/

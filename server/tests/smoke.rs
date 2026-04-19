@@ -14,6 +14,10 @@ use tokio_tungstenite::tungstenite::Message;
 #[path = "../src/ws_frame.rs"]
 mod ws_frame;
 
+#[path = "../src/log_stream.rs"]
+#[allow(dead_code)]
+mod log_stream;
+
 #[path = "../src/session.rs"]
 #[allow(dead_code)]
 mod session;

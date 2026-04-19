@@ -28,17 +28,17 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
 use ferrite_blocks::{BlockIo, OutputPort};
 use num_complex::Complex;
-use soapysdr::{Device, Direction, RxStream};
+use soapysdr::{Device, Direction, ErrorCode, RxStream};
 
 #[derive(Debug, Clone)]
 pub struct SoapyIqSourceParams {
@@ -65,8 +65,23 @@ pub struct SoapyIqSource {
     sample_rate_hz: f64,
     center_freq_hz: f64,
     latest: LatestSlot,
+    /// Bumped by the reader after every successful write to `latest`.
+    /// The pipeline compares it against `last_seen_version` to tell a
+    /// fresh block from a re-served stale one.
+    version: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
+    /// Gap instrumentation. `gaps` = pipeline ticks where the reader
+    /// hadn't produced any block yet (zero-fill, only at startup).
+    /// `stale` = ticks where we re-served the previous block because
+    /// the reader was mid-stall; those show as duplicate waterfall
+    /// rows rather than black rows. Both are surfaced as rate-limited
+    /// warns so the UI log panel shows drop-outs.
+    ticks: u64,
+    gaps: u64,
+    stale: u64,
+    last_seen_version: u64,
+    last_warn_log: Option<Instant>,
 }
 
 impl SoapyIqSource {
@@ -119,14 +134,24 @@ impl SoapyIqSource {
         }
 
         let latest: LatestSlot = Arc::new(Mutex::new(None));
+        let version = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
 
         let reader_latest = latest.clone();
+        let reader_version = version.clone();
         let reader_stop = stop.clone();
         let block_size = params.fft_size;
         let reader = thread::Builder::new()
             .name("soapy-rx".into())
-            .spawn(move || run_reader(stream, block_size, &reader_latest, &reader_stop))
+            .spawn(move || {
+                run_reader(
+                    stream,
+                    block_size,
+                    &reader_latest,
+                    &reader_version,
+                    &reader_stop,
+                );
+            })
             .context("spawn soapy reader thread")?;
 
         Ok(Self {
@@ -135,8 +160,14 @@ impl SoapyIqSource {
             sample_rate_hz: actual_rate,
             center_freq_hz: actual_freq,
             latest,
+            version,
             stop,
             reader: Some(reader),
+            ticks: 0,
+            gaps: 0,
+            stale: 0,
+            last_seen_version: 0,
+            last_warn_log: None,
         })
     }
 
@@ -189,20 +220,51 @@ impl SoapyIqSource {
         else {
             return Ok(());
         };
-        let snapshot = self
+        // Read the version first so that a concurrent reader write
+        // between the load and the lock counts as "fresh" (we'll copy
+        // the new data and the higher version on the next tick).
+        let version = self.version.load(Ordering::Acquire);
+        let guard = self
             .latest
             .lock()
-            .map_err(|_| anyhow!("soapy latest mutex poisoned"))?
-            .take();
-        match snapshot {
+            .map_err(|_| anyhow!("soapy latest mutex poisoned"))?;
+        self.ticks = self.ticks.saturating_add(1);
+        let (mut gap, mut stale) = (false, false);
+        match guard.as_ref() {
             Some(samples) => {
                 let n = out.len().min(samples.len());
                 out[..n].copy_from_slice(&samples[..n]);
                 if n < out.len() {
                     out[n..].fill(Complex::new(0.0, 0.0));
                 }
+                if version == self.last_seen_version {
+                    self.stale = self.stale.saturating_add(1);
+                    stale = true;
+                } else {
+                    self.last_seen_version = version;
+                }
             }
-            None => out.fill(Complex::new(0.0, 0.0)),
+            None => {
+                out.fill(Complex::new(0.0, 0.0));
+                self.gaps = self.gaps.saturating_add(1);
+                gap = true;
+            }
+        }
+        drop(guard);
+        if gap || stale {
+            let now = Instant::now();
+            let due = self
+                .last_warn_log
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1));
+            if due {
+                tracing::warn!(
+                    gaps = self.gaps,
+                    stale = self.stale,
+                    ticks = self.ticks,
+                    "soapy reader stall — pipeline served stale or zero-fill block"
+                );
+                self.last_warn_log = Some(now);
+            }
         }
         Ok(())
     }
@@ -222,6 +284,7 @@ fn run_reader(
     mut stream: RxStream<Complex<f32>>,
     block_size: usize,
     latest: &LatestSlot,
+    version: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
 ) {
     let mut buf = vec![Complex::new(0.0_f32, 0.0); block_size];
@@ -236,11 +299,19 @@ fn run_reader(
             };
             match result {
                 Ok(0) => {
-                    // Timeout with no samples: brief backoff so we
-                    // don't pin the core if the device went away.
                     thread::sleep(Duration::from_millis(2));
                 }
                 Ok(n) => filled += n,
+                Err(err) if err.code == ErrorCode::Timeout => {
+                    // Normal during stream startup before samples flow,
+                    // and under bursty drivers. Retry with brief backoff.
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(err) if err.code == ErrorCode::Overflow => {
+                    // Driver dropped samples; we only care about the
+                    // latest block anyway, so keep reading.
+                    tracing::debug!("soapy overflow");
+                }
                 Err(err) => {
                     tracing::warn!(?err, "soapy read error; ending reader");
                     let _ = stream.deactivate(None);
@@ -250,8 +321,15 @@ fn run_reader(
         }
         if filled == block_size {
             if let Ok(mut slot) = latest.lock() {
-                *slot = Some(buf.clone());
+                // Ping-pong the scratch buffer with whatever the slot
+                // held so we avoid a 32 KB allocation every ~2 ms.
+                let prev = slot.replace(std::mem::take(&mut buf));
+                buf = prev.unwrap_or_else(|| vec![Complex::new(0.0, 0.0); block_size]);
+                if buf.len() != block_size {
+                    buf.resize(block_size, Complex::new(0.0, 0.0));
+                }
             }
+            version.fetch_add(1, Ordering::Release);
         }
     }
     let _ = stream.deactivate(None);
