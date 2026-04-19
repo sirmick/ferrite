@@ -1,7 +1,13 @@
 // Flowgraph runtime — public entry point.
-// The runtime implementation lands in Phase D. Export the type surface now
-// so downstream packages can compile against it.
+// Phase D is landing the runtime in slices: parser + structural validation
+// first (this commit), then block registry + wiring, then the scheduler.
 
-export * from "./types";
+export * from "./types.js";
+export {
+  FlowgraphValidationError,
+  parseFlowgraph,
+  validateFlowgraph,
+} from "./validate.js";
+export type { ParsedFlowgraph } from "./validate.js";
 
 export const RUNTIME_VERSION = "0.0.1";
