@@ -222,6 +222,40 @@ mod tests {
     }
 
     #[test]
+    fn am_demod_schema_surfaces_both_params_with_correct_scopes() {
+        let schemas = all_block_schemas();
+        let am = schemas
+            .iter()
+            .find(|s| s.type_name == "AmDemod")
+            .expect("AmDemod registered");
+        let rate = am
+            .params
+            .iter()
+            .find(|p| p.key == "sample_rate_hz")
+            .unwrap();
+        assert_eq!(rate.reconfig_scope, "sourceRestart");
+        let tau = am.params.iter().find(|p| p.key == "bias_tau_ms").unwrap();
+        assert_eq!(tau.reconfig_scope, "downstream");
+    }
+
+    #[test]
+    fn decimator_schema_params_are_downstream() {
+        let schemas = all_block_schemas();
+        let d = schemas
+            .iter()
+            .find(|s| s.type_name == "Decimator")
+            .expect("Decimator registered");
+        for key in ["factor", "num_taps", "cutoff_normalized"] {
+            let p = d
+                .params
+                .iter()
+                .find(|p| p.key == key)
+                .unwrap_or_else(|| panic!("param {key} missing on Decimator"));
+            assert_eq!(p.reconfig_scope, "downstream", "param {key}");
+        }
+    }
+
+    #[test]
     fn range_param_serializes_with_kind_tag() {
         let schemas = all_block_schemas();
         let fm = schemas.iter().find(|s| s.type_name == "FmDemod").unwrap();
