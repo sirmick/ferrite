@@ -79,6 +79,89 @@ pub struct PortSpec {
     pub port_type: PortType,
 }
 
+/// Scope of runtime action required when a parameter changes while the
+/// graph is running.
+///
+/// Replaces the binary `mutable_while_streaming` flag from the early
+/// runtime prototype (see D19 in `docs/09-decisions.md`). Each param
+/// declares the smallest unit the runtime must touch to pick up the new
+/// value, so preset edits produce a minimum reconfigure plan instead of
+/// restarting the whole graph on every knob tweak.
+///
+/// The wire-format variants are `camelCase` (`self` / `downstream` /
+/// `sourceRestart`) to match the rest of the capability schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReconfigureScope {
+    /// Apply in-place inside the owning block. No scheduler-visible
+    /// action — e.g. a gain or mixer-frequency that the block swaps on
+    /// the next `process` call.
+    SelfBlock,
+    /// Re-`init` the owning block and every block downstream on the
+    /// new rate / frame size before resuming. Intra-graph — the source
+    /// end stays running.
+    Downstream,
+    /// The source end of the graph is torn down and re-opened — any
+    /// hardware or transport resource is re-acquired. Centre-frequency
+    /// on a fixed-rate SDR typically needs this.
+    SourceRestart,
+}
+
+impl ReconfigureScope {
+    /// Wire-format tag emitted in the capability schema.
+    #[must_use]
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::SelfBlock => "self",
+            Self::Downstream => "downstream",
+            Self::SourceRestart => "sourceRestart",
+        }
+    }
+
+    /// Parse the wire-format tag. Returns `None` on unknown input so
+    /// the caller can surface a schema error rather than panicking.
+    #[must_use]
+    pub fn from_wire_str(s: &str) -> Option<Self> {
+        match s {
+            "self" => Some(Self::SelfBlock),
+            "downstream" => Some(Self::Downstream),
+            "sourceRestart" => Some(Self::SourceRestart),
+            _ => None,
+        }
+    }
+
+    /// Ordering of scopes from cheapest to most disruptive. `merge`
+    /// picks the larger of two scopes when a reconfigure plan touches
+    /// several params at once.
+    #[must_use]
+    pub const fn cost(self) -> u8 {
+        match self {
+            Self::SelfBlock => 0,
+            Self::Downstream => 1,
+            Self::SourceRestart => 2,
+        }
+    }
+
+    /// Combine two scopes into the one that covers both. Used by the
+    /// runtime's diff engine when a single preset edit changes params
+    /// with mixed scopes.
+    #[must_use]
+    pub const fn merge(self, other: Self) -> Self {
+        if self.cost() >= other.cost() {
+            self
+        } else {
+            other
+        }
+    }
+}
+
+impl Default for ReconfigureScope {
+    /// Conservative default — assume a new param value invalidates
+    /// the whole graph until the block author narrows it down.
+    fn default() -> Self {
+        Self::SourceRestart
+    }
+}
+
 /// A block parameter schema entry.
 #[derive(Debug, Clone, Copy)]
 pub struct ParamSpec {
@@ -506,5 +589,44 @@ mod tests {
         assert_eq!(PortType::IqF32.element_size(), 8);
         assert_eq!(PortType::FftF32.element_size(), 4);
         assert_eq!(PortType::FftU8.element_size(), 1);
+    }
+
+    #[test]
+    fn reconfigure_scope_wire_strings_round_trip() {
+        use super::ReconfigureScope;
+        for scope in [
+            ReconfigureScope::SelfBlock,
+            ReconfigureScope::Downstream,
+            ReconfigureScope::SourceRestart,
+        ] {
+            let wire = scope.as_wire_str();
+            assert_eq!(ReconfigureScope::from_wire_str(wire), Some(scope));
+        }
+        assert_eq!(ReconfigureScope::from_wire_str("nope"), None);
+    }
+
+    #[test]
+    fn reconfigure_scope_default_is_most_disruptive() {
+        use super::ReconfigureScope;
+        // Conservative default — block authors must explicitly opt into
+        // a cheaper scope.
+        assert_eq!(ReconfigureScope::default(), ReconfigureScope::SourceRestart);
+    }
+
+    #[test]
+    fn reconfigure_scope_merge_picks_larger() {
+        use super::ReconfigureScope::{Downstream, SelfBlock, SourceRestart};
+        assert_eq!(SelfBlock.merge(Downstream), Downstream);
+        assert_eq!(Downstream.merge(SelfBlock), Downstream);
+        assert_eq!(Downstream.merge(SourceRestart), SourceRestart);
+        assert_eq!(SourceRestart.merge(SelfBlock), SourceRestart);
+        assert_eq!(SelfBlock.merge(SelfBlock), SelfBlock);
+    }
+
+    #[test]
+    fn reconfigure_scope_cost_is_ordered() {
+        use super::ReconfigureScope::{Downstream, SelfBlock, SourceRestart};
+        assert!(SelfBlock.cost() < Downstream.cost());
+        assert!(Downstream.cost() < SourceRestart.cost());
     }
 }

@@ -33,7 +33,8 @@ pub mod ws_iq_source;
 pub use audio_sink::{AudioSink, AudioSinkParams};
 pub use block::{
     AsAny, Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort,
-    ParamKind, ParamSpec, Placement, PortMeta, PortSpec, PortType, Work, MAX_PORTS,
+    ParamKind, ParamSpec, Placement, PortMeta, PortSpec, PortType, ReconfigureScope, Work,
+    MAX_PORTS,
 };
 pub use channelizer::{Channelizer, ChannelizerParams};
 pub use decimator::{Decimator, DecimatorParams};
