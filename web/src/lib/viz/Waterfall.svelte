@@ -3,7 +3,7 @@
   import { pixelToFreqLinear, WaterfallRenderer } from './waterfall';
   import type { FrameClient } from '$lib/ws/client';
   import { FFT_STREAM, PayloadType } from '$lib/ws/frame';
-  import { session } from '$lib/session.svelte';
+  import { pipeline, currentAxes } from '$lib/pipeline.svelte';
 
   interface Props {
     client: FrameClient;
@@ -16,7 +16,7 @@
   let canvas: HTMLCanvasElement | undefined = $state();
   let wrap: HTMLDivElement | undefined = $state();
 
-  let s = $derived(session.state);
+  let axes = $derived(currentAxes(pipeline));
 
   // Pointer drag state: `dragX` is the current pointer CSS-X relative to
   // the canvas. While null the cursor sits at geometric centre — the VFO
@@ -25,13 +25,18 @@
   let dragX = $state<number | null>(null);
 
   function pointerFreq(clientX: number): number | null {
-    if (!canvas || !s) return null;
+    if (!canvas || !axes) return null;
     const rect = canvas.getBoundingClientRect();
-    return pixelToFreqLinear(clientX - rect.left, rect.width, s.center_freq_hz, s.sample_rate_hz);
+    return pixelToFreqLinear(
+      clientX - rect.left,
+      rect.width,
+      axes.center_freq_hz,
+      axes.sample_rate_hz,
+    );
   }
 
   function onPointerDown(ev: PointerEvent) {
-    if (!s || !canvas) return;
+    if (!axes || !canvas) return;
     if (ev.button !== 0) return;
     (ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId);
     dragging = true;
@@ -51,7 +56,7 @@
     dragging = false;
     const f = pointerFreq(ev.clientX);
     dragX = null;
-    if (f !== null) void session.patch({ center_freq_hz: Math.round(f) });
+    if (f !== null) void pipeline.patchSourceParams({ center_freq_hz: Math.round(f) });
   }
 
   function onPointerCancel(ev: PointerEvent) {
@@ -90,7 +95,7 @@
     onpointercancel={onPointerCancel}
     title="drag to retune"
   ></canvas>
-  {#if s}
+  {#if axes}
     <div
       class="pointer-events-none absolute top-0 bottom-0 w-px"
       class:bg-sky-400={!dragging}

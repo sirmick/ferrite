@@ -11,7 +11,7 @@
   let { refreshKey }: Props = $props();
 
   let doc = $state<FlowgraphDoc | null>(null);
-  let status = $state<'loading' | 'ready' | 'not_preset' | 'error'>('loading');
+  let status = $state<'loading' | 'ready' | 'error'>('loading');
   let errorMessage = $state<string | null>(null);
 
   $effect(() => {
@@ -24,13 +24,7 @@
     status = 'loading';
     errorMessage = null;
     try {
-      const d = await fetchFlowgraph();
-      if (d === null) {
-        status = 'not_preset';
-        doc = null;
-        return;
-      }
-      doc = d;
+      doc = await fetchFlowgraph();
       status = 'ready';
     } catch (err) {
       status = 'error';
@@ -55,10 +49,6 @@
 
   {#if status === 'loading'}
     <p class="text-xs text-[color:var(--color-muted)]">Loading…</p>
-  {:else if status === 'not_preset'}
-    <p class="text-xs text-[color:var(--color-muted)]">
-      ferrited is not in preset mode; no flowgraph to display.
-    </p>
   {:else if status === 'error'}
     <p class="text-xs text-rose-400">{errorMessage}</p>
   {:else}

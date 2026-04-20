@@ -7,12 +7,11 @@
   import SourceDialog from '$lib/controls/SourceDialog.svelte';
   import DeviceOptions from '$lib/controls/DeviceOptions.svelte';
   import FlowgraphDialog from '$lib/controls/FlowgraphDialog.svelte';
-  import SessionSettings from '$lib/controls/SessionSettings.svelte';
   import type { DeviceCapabilities } from '$lib/api/devices';
+  import type { SourceConfig } from '$lib/api/source';
   import { demoAddInWorker } from '$lib/workers/demo-client';
-  import type { OpenDeviceRequest } from '$lib/api/device';
   import { FFT_STREAM } from '$lib/ws/frame';
-  import { session } from '$lib/session.svelte';
+  import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { patchConsole } from '$lib/logs/store.svelte';
   import { connectServerLogs } from '$lib/logs/client';
   import { onMount } from 'svelte';
@@ -23,21 +22,8 @@
   let showSource = $state(false);
   let showOptions = $state(false);
   let optionsCaps = $state<DeviceCapabilities | null>(null);
-  let showSettings = $state(false);
   let showFlowgraph = $state(false);
   let leftTab = $state<'bands' | 'catalog' | 'receivers'>('bands');
-
-  // Initial sine-source defaults the SourceModal seeds from. The session
-  // store carries the live spec once a device is open; this is just the
-  // first-load form state.
-  let params = $state<OpenDeviceRequest>({
-    sample_rate_hz: 2_000_000,
-    center_freq_hz: 100_000_000,
-    tone_freq_abs_hz: 100_001_000,
-    amplitude: 0.25,
-    fft_size: 4096,
-    fft_rate_hz: 30,
-  });
 
   async function runDemo() {
     try {
@@ -51,17 +37,16 @@
   onMount(() => {
     patchConsole();
     const disconnectLogs = connectServerLogs();
-    void session.open($state.snapshot(params));
+    void pipeline.init();
     return () => {
       disconnectLogs();
-      void session.teardown();
+      pipeline.teardown();
     };
   });
 
-  // Count frames per second against whichever client is current; a re-open
-  // swaps `session.client`, this effect re-subscribes automatically.
+  // Count frames per second against whichever client is current.
   $effect(() => {
-    const c = session.client;
+    const c = pipeline.client;
     if (!c) {
       frameRate = 0;
       return;
@@ -91,12 +76,30 @@
 
   // Pretty-print the active source for the header chip.
   let sourceLabel = $derived.by(() => {
-    const s = session.state;
+    const s = pipeline.source;
     if (!s) return '';
-    if (s.source_kind === 'soapy') return `soapy ${(s.center_freq_hz / 1e6).toFixed(3)} MHz`;
-    if (s.source_kind === 'file') return 'file';
-    return `sine ${(s.center_freq_hz / 1e6).toFixed(3)} MHz`;
+    const axes = currentAxes(pipeline);
+    const freq = axes ? `${(axes.center_freq_hz / 1e6).toFixed(3)} MHz` : '';
+    if (s.type === 'SoapySource') return `soapy ${freq}`;
+    if (s.type === 'FileSource') return 'file';
+    if (s.type === 'SineSource') return `sine ${freq}`;
+    return `${s.type} ${freq}`;
   });
+
+  let startStopBusy = $state(false);
+  async function togglePipeline() {
+    if (startStopBusy) return;
+    startStopBusy = true;
+    try {
+      if (pipeline.status === 'running') {
+        await pipeline.stop();
+      } else {
+        await pipeline.start();
+      }
+    } finally {
+      startStopBusy = false;
+    }
+  }
 </script>
 
 <div class="flex h-dvh w-dvw flex-col">
@@ -108,24 +111,26 @@
     <div class="flex items-center gap-4 text-xs text-[color:var(--color-muted)]">
       <span>wasm: {wasmStatus}</span>
       <span>
-        ws: {session.wsStatus}
-        {#if session.wsStatus === 'open' && frameRate > 0}
+        ws: {pipeline.wsStatus}
+        {#if pipeline.wsStatus === 'open' && frameRate > 0}
           ({frameRate.toFixed(1)} fps, {lastFrameSize} B)
         {/if}
       </span>
       {#if sourceLabel}
         <span class="font-mono text-[11px]">{sourceLabel}</span>
       {/if}
-      {#if session.errorMessage}
-        <span class="text-rose-400" title={session.errorMessage}>error</span>
+      {#if pipeline.errorMessage}
+        <span class="text-rose-400" title={pipeline.errorMessage}>error</span>
       {/if}
       <button
         type="button"
-        class="rounded border border-slate-700 px-2 py-0.5 text-xs text-[color:var(--color-fg)] hover:border-slate-600 disabled:opacity-50"
-        disabled={!session.state}
-        onclick={() => (showSettings = true)}
+        class="rounded border px-2 py-0.5 text-xs font-semibold disabled:opacity-50"
+        class:running={pipeline.status === 'running'}
+        class:stopped={pipeline.status !== 'running'}
+        disabled={startStopBusy || pipeline.phase === 'loading'}
+        onclick={togglePipeline}
       >
-        Settings…
+        {pipeline.status === 'running' ? 'Stop' : 'Start'}
       </button>
       <button
         type="button"
@@ -181,13 +186,13 @@
       </div>
     </aside>
     <div class="min-w-0 flex-1">
-      {#if session.client}
-        <Workspace client={session.client} />
+      {#if pipeline.client}
+        <Workspace client={pipeline.client} />
       {:else}
         <div
           class="flex h-full items-center justify-center text-sm text-[color:var(--color-muted)]"
         >
-          waiting for session…
+          connecting…
         </div>
       {/if}
     </div>
@@ -196,26 +201,21 @@
 
 <SourceDialog
   bind:open={showSource}
-  {params}
+  source={pipeline.source}
   onClose={() => (showSource = false)}
   onPickDevice={(caps) => {
     optionsCaps = caps;
     showOptions = true;
   }}
-  onApplyTone={(p) => {
-    params = p;
-    void session.open(p);
-  }}
+  onApply={(cfg: SourceConfig) => void pipeline.patchSource(cfg)}
 />
 
 <DeviceOptions
   bind:open={showOptions}
   capabilities={optionsCaps}
-  onApply={(req) => void session.open(req, optionsCaps)}
+  onApply={(cfg: SourceConfig) => void pipeline.patchSource(cfg)}
   onClose={() => (showOptions = false)}
 />
-
-<SessionSettings bind:open={showSettings} onClose={() => (showSettings = false)} />
 
 <FlowgraphDialog bind:open={showFlowgraph} onClose={() => (showFlowgraph = false)} />
 
@@ -224,5 +224,19 @@
     color: var(--color-fg);
     background: rgba(125, 211, 252, 0.08);
     border-bottom: 1px solid #7dd3fc;
+  }
+  .running {
+    border-color: rgb(248 113 113);
+    color: rgb(248 113 113);
+  }
+  .running:hover {
+    border-color: rgb(252 165 165);
+  }
+  .stopped {
+    border-color: rgb(134 239 172);
+    color: rgb(134 239 172);
+  }
+  .stopped:hover {
+    border-color: rgb(187 247 208);
   }
 </style>

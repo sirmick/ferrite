@@ -3,7 +3,7 @@
 // Pure functions over `DeviceCapabilities` — no Svelte runtime dependency
 // so it stays unit-testable (#69).
 
-import type { OpenDeviceRequest } from '$lib/api/device';
+import type { SourceConfig } from '$lib/api/source';
 import {
   deviceArgsString,
   type DeviceCapabilities,
@@ -173,17 +173,19 @@ function summarisedGain(state: OptionsState): number | null {
   return state.gains.reduce((acc, g) => acc + g.value_db, 0);
 }
 
-/** Build the REST request payload for `POST /api/device/open`. */
-export function toOpenRequest(caps: DeviceCapabilities, state: OptionsState): OpenDeviceRequest {
-  const req: OpenDeviceRequest = {
+/** Build a SourceConfig targeting `SoapySource` for the PATCH /api/source
+ * path. The preset's `src` hints (center_freq_hz, sample_rate_hz) are
+ * overridden by this config via `compose_source`. */
+export function toSourceConfig(caps: DeviceCapabilities, state: OptionsState): SourceConfig {
+  const params: Record<string, unknown> = {
     sample_rate_hz: state.sample_rate_hz,
     center_freq_hz: state.center_freq_hz,
-    device_args: deviceArgsString(caps.info),
+    args: deviceArgsString(caps.info),
   };
-  if (state.bandwidth_hz !== null) req.bandwidth_hz = state.bandwidth_hz;
-  if (state.antenna) req.antenna = state.antenna;
-  if (state.has_agc) req.agc = state.agc;
+  if (state.bandwidth_hz !== null) params.bandwidth_hz = state.bandwidth_hz;
+  if (state.antenna) params.antenna = state.antenna;
+  if (state.has_agc) params.agc = state.agc;
   const gain = summarisedGain(state);
-  if (gain !== null) req.gain_db = gain;
-  return req;
+  if (gain !== null) params.gain_db = gain;
+  return { type: 'SoapySource', params };
 }

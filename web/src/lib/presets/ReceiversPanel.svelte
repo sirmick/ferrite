@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { fetchFlowgraph, patchFlowgraph, type ReconfigurePlan } from '$lib/api/flowgraph';
+  import { fetchFlowgraph, patchFlowgraph, type ReconfigureResponse } from '$lib/api/flowgraph';
   import { RECEIVERS, applyRecipe, detectReceiver, findRecipe, type ReceiverId } from './receivers';
   import { onMount } from 'svelte';
 
-  let status = $state<'idle' | 'loading' | 'not_preset' | 'error' | 'ready' | 'applying'>('idle');
+  let status = $state<'idle' | 'loading' | 'error' | 'ready' | 'applying'>('idle');
   let errorMessage = $state<string | null>(null);
   let activeId = $state<ReceiverId | null>(null);
-  let lastPlan = $state<ReconfigurePlan | null>(null);
+  let lastPlan = $state<ReconfigureResponse | null>(null);
 
   onMount(() => {
     void refresh();
@@ -16,13 +16,7 @@
     status = 'loading';
     errorMessage = null;
     try {
-      const doc = await fetchFlowgraph();
-      if (doc === null) {
-        status = 'not_preset';
-        activeId = null;
-        return;
-      }
-      activeId = detectReceiver(doc);
+      activeId = detectReceiver(await fetchFlowgraph());
       status = 'ready';
     } catch (err) {
       status = 'error';
@@ -37,18 +31,13 @@
     errorMessage = null;
     try {
       const doc = await fetchFlowgraph();
-      if (doc === null) {
-        status = 'not_preset';
-        return;
-      }
       const next = applyRecipe(doc, recipe);
       if (next === null) {
         status = 'error';
         errorMessage = 'live preset has no demod block — cannot swap receiver';
         return;
       }
-      const plan = await patchFlowgraph(next);
-      lastPlan = plan;
+      lastPlan = await patchFlowgraph(next);
       activeId = id;
       status = 'ready';
     } catch (err) {
@@ -69,10 +58,6 @@
   <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3">
     {#if status === 'loading' || status === 'idle'}
       <p class="text-[color:var(--color-muted)]">Loading…</p>
-    {:else if status === 'not_preset'}
-      <p class="text-[color:var(--color-muted)]">
-        ferrited is not in preset mode; start with <code class="font-mono">--flowgraph</code> to use receivers.
-      </p>
     {:else}
       <label class="grid gap-1">
         <span class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">Mode</span
@@ -99,10 +84,9 @@
         <p class="text-[color:var(--color-muted)]">Applying…</p>
       {:else if lastPlan}
         <p class="text-[11px] text-emerald-400">
-          {lastPlan.noop ? 'no-op' : lastPlan.overall} — {lastPlan.changes.length} param change{lastPlan
-            .changes.length === 1
-            ? ''
-            : 's'}, {lastPlan.structural_count} structural
+          {lastPlan.noop ? 'no-op' : !lastPlan.applied ? 'queued' : (lastPlan.overall ?? 'applied')} —
+          {lastPlan.changes.length} param change{lastPlan.changes.length === 1 ? '' : 's'},
+          {lastPlan.structural_count} structural
         </p>
       {/if}
     {/if}

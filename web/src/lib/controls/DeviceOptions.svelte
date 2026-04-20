@@ -1,10 +1,10 @@
 <script lang="ts">
   import { Dialog } from 'bits-ui';
-  import type { OpenDeviceRequest } from '$lib/api/device';
+  import type { SourceConfig } from '$lib/api/source';
   import type { DeviceCapabilities } from '$lib/api/devices';
   import {
     defaultsFor,
-    toOpenRequest,
+    toSourceConfig,
     validate,
     type OptionsState,
   } from '$lib/controls/optionsModel';
@@ -12,7 +12,7 @@
   interface Props {
     open: boolean;
     capabilities: DeviceCapabilities | null;
-    onApply: (req: OpenDeviceRequest) => void;
+    onApply: (cfg: SourceConfig) => void;
     onClose: () => void;
   }
 
@@ -33,7 +33,7 @@
 
   function apply() {
     if (!state || !capabilities || errors.length > 0) return;
-    onApply(toOpenRequest(capabilities, state));
+    onApply(toSourceConfig(capabilities, state));
     open = false;
   }
 
@@ -205,7 +205,7 @@
             disabled={!canApply}
             onclick={apply}
           >
-            Open
+            Apply
           </button>
         </div>
       </div>

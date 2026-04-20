@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { defaultsFor, rangesToChoices, toOpenRequest, validate } from './optionsModel';
+import { defaultsFor, rangesToChoices, toSourceConfig, validate } from './optionsModel';
 import { RTLSDR_CAPS, SDRPLAY_CAPS } from './__fixtures__/devices';
 
 describe('rangesToChoices', () => {
@@ -120,34 +120,35 @@ describe('validate', () => {
   });
 });
 
-describe('toOpenRequest', () => {
-  it('emits device_args + sample rate + centre + gain + AGC for RTL-SDR', () => {
+describe('toSourceConfig', () => {
+  it('emits SoapySource with args + sample rate + centre + gain + AGC for RTL-SDR', () => {
     const state = defaultsFor(RTLSDR_CAPS)!;
-    const req = toOpenRequest(RTLSDR_CAPS, state);
-    expect(req.device_args).toBe('driver=rtlsdr,serial=00000001');
-    expect(req.sample_rate_hz).toBe(2_048_000);
-    expect(req.center_freq_hz).toBe(state.center_freq_hz);
-    expect(req.antenna).toBe('RX');
-    expect(req.agc).toBe(false);
+    const cfg = toSourceConfig(RTLSDR_CAPS, state);
+    expect(cfg.type).toBe('SoapySource');
+    expect(cfg.params.args).toBe('driver=rtlsdr,serial=00000001');
+    expect(cfg.params.sample_rate_hz).toBe(2_048_000);
+    expect(cfg.params.center_freq_hz).toBe(state.center_freq_hz);
+    expect(cfg.params.antenna).toBe('RX');
+    expect(cfg.params.agc).toBe(false);
     // RTL gain default sits at the midpoint of [0, 49.6] step 0.1 → 24.8.
-    expect(req.gain_db).toBeCloseTo(24.8, 1);
+    expect(cfg.params.gain_db as number).toBeCloseTo(24.8, 1);
   });
 
   it('sums per-element gains when the device exposes multiple stages', () => {
     const state = defaultsFor(SDRPLAY_CAPS)!;
     // IFGR midpoint (39 = 20 + floor(39/2)*1) + RFGR midpoint (4) = 43.
-    expect(toOpenRequest(SDRPLAY_CAPS, state).gain_db).toBe(43);
+    expect(toSourceConfig(SDRPLAY_CAPS, state).params.gain_db).toBe(43);
   });
 
   it('omits bandwidth_hz when the device has no bandwidth ladder', () => {
     const state = defaultsFor(RTLSDR_CAPS)!;
-    const req = toOpenRequest(RTLSDR_CAPS, state);
-    expect(req.bandwidth_hz).toBeUndefined();
+    const cfg = toSourceConfig(RTLSDR_CAPS, state);
+    expect(cfg.params.bandwidth_hz).toBeUndefined();
   });
 
   it('includes bandwidth_hz when the device offers one', () => {
     const state = defaultsFor(SDRPLAY_CAPS)!;
-    const req = toOpenRequest(SDRPLAY_CAPS, state);
-    expect(req.bandwidth_hz).toBe(200_000);
+    const cfg = toSourceConfig(SDRPLAY_CAPS, state);
+    expect(cfg.params.bandwidth_hz).toBe(200_000);
   });
 });

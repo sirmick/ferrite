@@ -8,7 +8,7 @@
     patchFlowgraph,
     type BlockSchema,
     type ParamSchema,
-    type ReconfigurePlan,
+    type ReconfigureResponse,
   } from '$lib/api/flowgraph';
 
   interface Props {
@@ -22,7 +22,7 @@
   let schemas = $state<BlockSchema[]>([]);
   let status = $state<'idle' | 'loading' | 'ready' | 'applying' | 'error'>('idle');
   let errorMessage = $state<string | null>(null);
-  let lastPlan = $state<ReconfigurePlan | null>(null);
+  let lastPlan = $state<ReconfigureResponse | null>(null);
   let formValues = $state<Record<string, Record<string, unknown>>>({});
 
   type Tab = 'form' | 'json';
@@ -42,11 +42,6 @@
     errorMessage = null;
     try {
       const [d, s] = await Promise.all([fetchFlowgraph(), fetchBlockSchemas()]);
-      if (d === null) {
-        status = 'error';
-        errorMessage = 'ferrited is not in preset mode; flowgraph is unavailable';
-        return;
-      }
       doc = d;
       schemas = s;
       formValues = seedFormValues(d, s);
@@ -280,8 +275,13 @@
 
           {#if lastPlan}
             <p class="text-[11px] text-emerald-400">
-              Applied: {lastPlan.noop ? 'no-op' : lastPlan.overall} — {lastPlan.changes.length} param
-              change{lastPlan.changes.length === 1 ? '' : 's'}, {lastPlan.structural_count} structural
+              {lastPlan.noop
+                ? 'no-op'
+                : !lastPlan.applied
+                  ? 'queued'
+                  : (lastPlan.overall ?? 'applied')} —
+              {lastPlan.changes.length} param change{lastPlan.changes.length === 1 ? '' : 's'},
+              {lastPlan.structural_count} structural
             </p>
           {/if}
         {/if}

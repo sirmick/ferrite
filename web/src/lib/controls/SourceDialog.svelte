@@ -2,55 +2,65 @@
   import { Dialog } from 'bits-ui';
   import DevicePicker from './DevicePicker.svelte';
   import PresetJsonView from './PresetJsonView.svelte';
-  import type { OpenDeviceRequest } from '$lib/api/device';
+  import type { SourceConfig } from '$lib/api/source';
   import type { DeviceCapabilities } from '$lib/api/devices';
   import { untrack } from 'svelte';
 
   interface Props {
     open: boolean;
-    /** Current tone/source params — seeds the Tone tab. */
-    params: OpenDeviceRequest;
-    /** Selected a Soapy device: parent should open the DeviceOptions flow. */
+    /** Current source config — seeds the Tone tab when its type is sine. */
+    source: SourceConfig | null;
+    /** Selected a Soapy device: parent opens the DeviceOptions flow. */
     onPickDevice: (caps: DeviceCapabilities) => void;
-    /** Applied the tone-generator form: parent should (re)open the session. */
-    onApplyTone: (next: OpenDeviceRequest) => void;
+    /** Applied a source-config from any tab — parent PATCHes it. */
+    onApply: (cfg: SourceConfig) => void;
     onClose: () => void;
   }
 
-  let { open = $bindable(), params, onPickDevice, onApplyTone, onClose }: Props = $props();
+  let { open = $bindable(), source, onPickDevice, onApply, onClose }: Props = $props();
 
   type Tab = 'device' | 'tone' | 'file' | 'json';
   let tab = $state<Tab>('device');
 
   const CENTER_FREQ_HZ = 100_000_000;
+  const DEFAULT_SINE_RATE_HZ = 2_000_000;
 
-  function toneOffsetFrom(p: OpenDeviceRequest): number {
-    const abs = p.tone_freq_abs_hz ?? CENTER_FREQ_HZ + 1000;
-    return Math.round((abs - CENTER_FREQ_HZ) / 1000);
+  function sineParamsFrom(cfg: SourceConfig | null) {
+    const p = cfg?.type === 'SineSource' ? cfg.params : {};
+    return {
+      rate_hz: (p.rate_hz as number | undefined) ?? DEFAULT_SINE_RATE_HZ,
+      center_freq_hz: (p.center_freq_hz as number | undefined) ?? CENTER_FREQ_HZ,
+      tone_freq_abs_hz: (p.tone_freq_abs_hz as number | undefined) ?? CENTER_FREQ_HZ + 1_000,
+      amplitude: (p.amplitude as number | undefined) ?? 0.25,
+    };
   }
 
-  let toneOffsetKHz = $state(untrack(() => toneOffsetFrom(params)));
-  let amplitude = $state(untrack(() => params.amplitude ?? 0.25));
-  let fftSize = $state(untrack(() => params.fft_size ?? 4096));
-  let fftRateHz = $state(untrack(() => params.fft_rate_hz ?? 30));
+  let seed = untrack(() => sineParamsFrom(source));
+  let toneOffsetKHz = $state(Math.round((seed.tone_freq_abs_hz - seed.center_freq_hz) / 1000));
+  let amplitude = $state(seed.amplitude);
+  let centerFreqMHz = $state(seed.center_freq_hz / 1e6);
+  let rateMHz = $state(seed.rate_hz / 1e6);
 
   $effect(() => {
     if (open) {
-      toneOffsetKHz = toneOffsetFrom(params);
-      amplitude = params.amplitude ?? 0.25;
-      fftSize = params.fft_size ?? 4096;
-      fftRateHz = params.fft_rate_hz ?? 30;
+      const s = sineParamsFrom(source);
+      toneOffsetKHz = Math.round((s.tone_freq_abs_hz - s.center_freq_hz) / 1000);
+      amplitude = s.amplitude;
+      centerFreqMHz = s.center_freq_hz / 1e6;
+      rateMHz = s.rate_hz / 1e6;
     }
   });
 
   function applyTone() {
-    onApplyTone({
-      sample_rate_hz: 2_000_000,
-      center_freq_hz: CENTER_FREQ_HZ,
-      tone_freq_abs_hz: CENTER_FREQ_HZ + toneOffsetKHz * 1000,
-      amplitude,
-      fft_size: fftSize,
-      fft_rate_hz: fftRateHz,
+    const center = Math.round(centerFreqMHz * 1e6);
+    onApply({
+      type: 'SineSource',
+      params: {
+        rate_hz: Math.round(rateMHz * 1e6),
+        center_freq_hz: center,
+        tone_freq_abs_hz: center + toneOffsetKHz * 1000,
+        amplitude,
+      },
     });
     open = false;
     onClose();
@@ -117,6 +127,34 @@
 
               <label class="grid gap-1 text-xs">
                 <div class="flex justify-between">
+                  <span class="text-[color:var(--color-muted)]">Centre frequency</span>
+                  <span class="font-mono">{centerFreqMHz.toFixed(3)} MHz</span>
+                </div>
+                <input
+                  type="number"
+                  step="0.001"
+                  min="0"
+                  bind:value={centerFreqMHz}
+                  class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+                />
+              </label>
+
+              <label class="grid gap-1 text-xs">
+                <div class="flex justify-between">
+                  <span class="text-[color:var(--color-muted)]">Sample rate</span>
+                  <span class="font-mono">{rateMHz.toFixed(3)} MHz</span>
+                </div>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  bind:value={rateMHz}
+                  class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+                />
+              </label>
+
+              <label class="grid gap-1 text-xs">
+                <div class="flex justify-between">
                   <span class="text-[color:var(--color-muted)]">Tone offset</span>
                   <span class="font-mono">
                     {toneOffsetKHz >= 0 ? '+' : '−'}{Math.abs(toneOffsetKHz)} kHz
@@ -131,28 +169,6 @@
                   <span class="font-mono">{amplitude.toFixed(2)}</span>
                 </div>
                 <input type="range" min="0" max="1" step="0.01" bind:value={amplitude} />
-              </label>
-
-              <label class="grid gap-1 text-xs">
-                <span class="text-[color:var(--color-muted)]">FFT size</span>
-                <select
-                  class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
-                  bind:value={fftSize}
-                >
-                  <option value={512}>512</option>
-                  <option value={1024}>1024</option>
-                  <option value={2048}>2048</option>
-                  <option value={4096}>4096</option>
-                  <option value={8192}>8192</option>
-                </select>
-              </label>
-
-              <label class="grid gap-1 text-xs">
-                <div class="flex justify-between">
-                  <span class="text-[color:var(--color-muted)]">FFT rate</span>
-                  <span class="font-mono">{fftRateHz} Hz</span>
-                </div>
-                <input type="range" min="5" max="60" step="1" bind:value={fftRateHz} />
               </label>
 
               <div class="flex justify-end gap-2 pt-2">
@@ -178,7 +194,7 @@
             <div class="flex flex-col gap-3 text-xs text-[color:var(--color-muted)]">
               <p>IQ file replay is wired as a CLI option today:</p>
               <pre
-                class="rounded border border-slate-800 bg-slate-900/60 p-2 font-mono text-[11px] text-slate-300">cargo run -p ferrited -- --source file:///path/to/capture.cf32 --rate 2000000 --freq 100000000</pre>
+                class="rounded border border-slate-800 bg-slate-900/60 p-2 font-mono text-[11px] text-slate-300">cargo run -p ferrited -- --flowgraph flowgraphs/wbfm.json --source-type FileSource --source-path /path/to/capture.cf32</pre>
               <p>REST-side file browsing lands in a later pass.</p>
             </div>
           {:else if tab === 'json'}

@@ -3,7 +3,7 @@
 // `server/src/block_schema.rs`.
 
 import type { FlowgraphDoc } from '$lib/flowgraph';
-import { ApiError } from '$lib/api/device';
+import { ApiError } from '$lib/api/errors';
 
 export type ReconfigScope = 'self' | 'downstream' | 'sourceRestart';
 export type BlockPlacement = 'native' | 'browser' | 'either';
@@ -49,11 +49,23 @@ export interface ReconfigurePlan {
   noop: boolean;
 }
 
-/** GET /api/flowgraph — currently-applied preset doc, or `null` if the
- * server isn't in preset mode. */
-export async function fetchFlowgraph(): Promise<FlowgraphDoc | null> {
+/**
+ * Wire shape of the PATCH /api/flowgraph and /api/source responses.
+ * `applied: false` means the patch was stored but no pipeline was
+ * running — the stored doc will take effect on the next start. The
+ * remaining fields mirror `ReconfigurePlan` when `applied: true`.
+ */
+export interface ReconfigureResponse {
+  applied: boolean;
+  overall: ReconfigScope | null;
+  changes: ParamChange[];
+  structural_count: number;
+  noop: boolean;
+}
+
+/** GET /api/flowgraph — currently-applied preset doc. */
+export async function fetchFlowgraph(): Promise<FlowgraphDoc> {
   const r = await fetch('/api/flowgraph');
-  if (r.status === 409) return null;
   if (!r.ok) throw new ApiError(r.status, `flowgraph fetch failed (${r.status})`);
   return (await r.json()) as FlowgraphDoc;
 }
@@ -144,9 +156,10 @@ export function predictScope(
   };
 }
 
-/** PATCH /api/flowgraph — swap the running preset. Returns the reconfigure
- * plan the server applied; throws on 400 (rollback) or 409 (not preset mode). */
-export async function patchFlowgraph(doc: FlowgraphDoc): Promise<ReconfigurePlan> {
+/** PATCH /api/flowgraph — store a new preset. Reconfigures the running
+ * pipeline if there is one; otherwise the doc is queued for the next
+ * start. Throws on 400 (reconfigure rollback). */
+export async function patchFlowgraph(doc: FlowgraphDoc): Promise<ReconfigureResponse> {
   const r = await fetch('/api/flowgraph', {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
@@ -156,5 +169,5 @@ export async function patchFlowgraph(doc: FlowgraphDoc): Promise<ReconfigurePlan
     const text = await r.text();
     throw new ApiError(r.status, `flowgraph patch failed (${r.status}): ${text}`);
   }
-  return (await r.json()) as ReconfigurePlan;
+  return (await r.json()) as ReconfigureResponse;
 }

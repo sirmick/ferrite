@@ -1,6 +1,6 @@
 <script lang="ts">
   import { bands, type BandEntry } from './bands';
-  import { session } from '$lib/session.svelte';
+  import { pipeline, currentAxes } from '$lib/pipeline.svelte';
 
   let openGroups = $state<Record<string, boolean>>({});
   function toggle(name: string) {
@@ -18,11 +18,12 @@
   }
 
   function tune(e: BandEntry) {
-    if (!session.state) return;
-    void session.patch({ center_freq_hz: e.hz });
+    if (!pipeline.source) return;
+    void pipeline.patchSourceParams({ center_freq_hz: e.hz });
   }
 
-  let active = $derived(session.state?.center_freq_hz ?? null);
+  let axes = $derived(currentAxes(pipeline));
+  let active = $derived(axes?.center_freq_hz ?? null);
 </script>
 
 <div
@@ -52,7 +53,7 @@
                   type="button"
                   class="flex w-full items-center justify-between gap-2 px-3 py-0.5 text-left text-[11px] hover:bg-slate-800/70"
                   class:active={active === entry.hz}
-                  disabled={!session.state}
+                  disabled={!pipeline.source}
                   onclick={() => tune(entry)}
                 >
                   <span class="truncate">{entry.label}</span>
