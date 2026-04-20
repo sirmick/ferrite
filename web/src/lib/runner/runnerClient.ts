@@ -6,10 +6,9 @@
 // The `WorkerLike` shape is the minimum subset of `Worker` we rely
 // on — tests pass a fake; production passes `new Worker(...)`.
 
-import type { RuntimeState } from '@ferrite/flowgraph-runtime';
 import type { FlowgraphDoc } from '@ferrite/flowgraph-runtime/types';
 
-import type { LoadResult, RunnerRequest, RunnerResponse } from './protocol.js';
+import type { LoadResult, RunnerRequest, RunnerResponse, RuntimeState } from './protocol.js';
 
 /**
  * The shape we require of the underlying transport. `Worker` satisfies
@@ -48,11 +47,6 @@ export class FlowgraphRunner {
   async stop(): Promise<void> {
     const resp = await this.send({ id: this.nextId++, kind: 'stop' });
     assertKind(resp, 'stop');
-  }
-
-  async update(blockId: string, params: unknown): Promise<void> {
-    const resp = await this.send({ id: this.nextId++, kind: 'update', blockId, params });
-    assertKind(resp, 'update');
   }
 
   async state(): Promise<RuntimeState> {

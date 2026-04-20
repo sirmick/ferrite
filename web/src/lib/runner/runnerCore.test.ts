@@ -1,171 +1,177 @@
-import { describe, expect, it, vi } from 'vitest';
+// Integration-y tests for `RunnerCore` against the real Rust runtime.
+//
+// The Rust engine is instantiated from the wasm-pack bundle (same
+// `initSync` pattern as `rustRuntime.test.ts`), so these tests exercise
+// the full doc split → load → tick path end-to-end without any JS-side
+// block stubs. The only fake is `FakeFrameClient`, which records
+// subscriptions and lets tests simulate incoming IQ frames.
 
-import { BlockRegistry } from '@ferrite/flowgraph-blocks';
-import type { BlockInstance, BlockSpec, FlowgraphDoc } from '@ferrite/flowgraph-runtime/types';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { FrameClient } from '../ws/client.js';
+import type { FlowgraphDoc } from '@ferrite/flowgraph-runtime/types';
+
+import type { FrameClient, FrameHandler } from '../ws/client.js';
+import { PayloadType, PROTOCOL_VERSION, type ParsedFrame } from '../ws/frame.js';
+import { initSync } from '../wasm/runtime/runtime.js';
 import type { RunnerRequest } from './protocol.js';
 import { RunnerCore, type RunnerEnv } from './runnerCore.js';
+import { createRuntime, splitFlowgraphForEnv } from './rustRuntime.js';
 
-// ---------------------------------------------------------------------------
-// Stub blocks — a source (produces iq_f32, no inputs) wired to a sink
-// (consumes iq_f32, no outputs). Construction is recorded so tests can
-// assert on params flowing through the graph. One variant of the sink
-// carries a fake SharedArrayBuffer so the audio-SAB collection path is
-// exercised.
-// ---------------------------------------------------------------------------
+const WASM_PATH = resolve(__dirname, '../wasm/runtime/runtime_bg.wasm');
 
-class StubSource implements BlockInstance {
-  initCalls = 0;
-  stopCalls = 0;
-  updates: unknown[] = [];
-  init(): void {
-    this.initCalls++;
-  }
-  process(): { consumed: number[]; produced: number[] } {
-    return { consumed: [], produced: [0] };
-  }
-  stop(): void {
-    this.stopCalls++;
-  }
-  update(params: unknown): void {
-    this.updates.push(params);
-  }
-}
-
-class StubSink implements BlockInstance {
-  readonly sab: SharedArrayBuffer;
-  constructor(sabBytes: number) {
-    this.sab = new SharedArrayBuffer(sabBytes);
-  }
-  init(): void {}
-  process(): { consumed: number[]; produced: number[] } {
-    return { consumed: [0], produced: [] };
-  }
-  stop(): void {}
-}
-
-const SRC_SPEC: BlockSpec = {
-  typeName: 'StubSource',
-  placement: 'either',
-  inputs: [],
-  outputs: [{ name: 'out', portType: 'iq_f32' }],
-  params: [],
-};
-
-const SINK_SPEC: BlockSpec = {
-  typeName: 'StubSink',
-  placement: 'either',
-  inputs: [{ name: 'in', portType: 'iq_f32' }],
-  outputs: [],
-  params: [],
-};
-
-function makeRegistry(sources: Map<string, StubSource>, sinks: Map<string, StubSink>) {
-  return () => {
-    const reg = new BlockRegistry();
-    reg.add({
-      spec: SRC_SPEC,
-      construct: () => {
-        const b = new StubSource();
-        sources.set(`src-${sources.size}`, b);
-        return b;
-      },
-    });
-    reg.add({
-      spec: SINK_SPEC,
-      construct: () => {
-        const b = new StubSink(256);
-        sinks.set(`sink-${sinks.size}`, b);
-        return b;
-      },
-    });
-    return reg;
-  };
-}
-
-const DOC: FlowgraphDoc = {
-  name: 'test',
+// Browser-only fixture — SineSource → FmDemod → AudioSink. No WS; the
+// graph type-checks and exercises start/tick/stop without an IQ pump.
+// The docs carry `placement: 'browser'` under `params`-sibling — the
+// Rust split accepts it even though the TS `BlockInstanceDecl` doesn't
+// declare it, so we cast through `unknown` at the single edge.
+const SINE_DOC = {
+  name: 'sine-audio',
   environments: ['browser'],
   blocks: {
-    source: { type: 'StubSource' },
-    sink: { type: 'StubSink' },
+    src: { type: 'SineSource', placement: 'browser', params: { rate_hz: 240000 } },
+    demod: {
+      type: 'FmDemod',
+      placement: 'browser',
+      params: { sample_rate_hz: 240000, max_deviation_hz: 75000 },
+    },
+    sink: { type: 'AudioSink', placement: 'browser', params: { buffer_samples: 4096 } },
   },
-  wires: [['source.out', 'sink.in']],
-};
+  wires: [
+    ['src.out', 'demod.in'],
+    ['demod.out', 'sink.in'],
+  ],
+} as unknown as FlowgraphDoc;
 
-function makeEnv(): { env: RunnerEnv; clients: FakeFrameClient[] } {
+// Browser-only fixture with a WsIqSource feeding the same demod → sink
+// chain. Exercises the FrameClient subscription + pushIq path.
+const WS_DOC = {
+  name: 'ws-audio',
+  environments: ['browser'],
+  blocks: {
+    rx: {
+      type: 'WsIqSource',
+      placement: 'browser',
+      params: { stream_id: 1234, buffer_samples: 4096 },
+    },
+    demod: {
+      type: 'FmDemod',
+      placement: 'browser',
+      params: { sample_rate_hz: 240000, max_deviation_hz: 75000 },
+    },
+    sink: { type: 'AudioSink', placement: 'browser', params: { buffer_samples: 4096 } },
+  },
+  wires: [
+    ['rx.out', 'demod.in'],
+    ['demod.out', 'sink.in'],
+  ],
+} as unknown as FlowgraphDoc;
+
+class FakeFrameClient {
+  readonly subs = new Map<number, Set<FrameHandler>>();
+  closeCalls = 0;
+
+  subscribe(streamId: number, handler: FrameHandler): () => void {
+    let set = this.subs.get(streamId);
+    if (!set) {
+      set = new Set();
+      this.subs.set(streamId, set);
+    }
+    set.add(handler);
+    return () => set!.delete(handler);
+  }
+
+  close(): void {
+    this.closeCalls++;
+  }
+
+  /** Synthesise an IqF32 frame and deliver it to every subscriber. */
+  deliver(streamId: number, floats: Float32Array): void {
+    const frame: ParsedFrame = {
+      header: {
+        version: PROTOCOL_VERSION,
+        payloadType: PayloadType.IqF32,
+        streamId,
+        seq: 0,
+        timestampNs: 0n,
+      },
+      payload: new Uint8Array(floats.buffer, floats.byteOffset, floats.byteLength),
+    };
+    this.subs.get(streamId)?.forEach((h) => h(frame));
+  }
+}
+
+function makeEnv(overrides: Partial<RunnerEnv> = {}): {
+  env: RunnerEnv;
+  clients: FakeFrameClient[];
+} {
   const clients: FakeFrameClient[] = [];
-  const sources = new Map<string, StubSource>();
-  const sinks = new Map<string, StubSink>();
   const env: RunnerEnv = {
     createFrameClient: () => {
       const c = new FakeFrameClient();
       clients.push(c);
       return c as unknown as FrameClient;
     },
-    createRegistry: makeRegistry(sources, sinks),
+    splitDoc: (doc, e) => splitFlowgraphForEnv(doc, e),
+    createRuntime: (doc, e) => createRuntime(doc, e),
+    tickIntervalMs: 1,
+    ...overrides,
   };
   return { env, clients };
 }
-
-class FakeFrameClient {
-  closeCalls = 0;
-  subscribe(): () => void {
-    return () => undefined;
-  }
-  close(): void {
-    this.closeCalls++;
-  }
-}
-
-// ---------------------------------------------------------------------------
 
 function req(kind: 'start' | 'stop' | 'state', id = 1): RunnerRequest {
   return { id, kind };
 }
 
 describe('RunnerCore', () => {
-  it('load instantiates blocks, inits them, and returns SABs + block ids', async () => {
+  beforeAll(() => {
+    const bytes = readFileSync(WASM_PATH);
+    initSync({ module: bytes });
+  });
+
+  it('load splits the doc, instantiates blocks, and exposes audio SABs', async () => {
     const { env, clients } = makeEnv();
     const core = new RunnerCore(env);
-    const resp = await core.handle({ id: 1, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
+    const resp = await core.handle({ id: 1, kind: 'load', doc: SINE_DOC, wsUrl: 'ws://x' });
 
     expect(resp.ok).toBe(true);
     if (!resp.ok || resp.kind !== 'load') throw new Error('wrong kind');
-    expect(new Set(resp.data.blocks)).toEqual(new Set(['source', 'sink']));
+    expect(new Set(resp.data.blocks)).toEqual(new Set(['src', 'demod', 'sink']));
     expect(Object.keys(resp.data.audioSabs)).toEqual(['sink']);
-    expect(resp.data.audioSabs.sink.byteLength).toBe(256);
+    // Capacity (4096 f32 samples) + 64-byte header.
+    expect(resp.data.audioSabs.sink.byteLength).toBe(4096 * 4 + 64);
     expect(clients).toHaveLength(1);
   });
 
   it('load fails if already loaded', async () => {
     const { env } = makeEnv();
     const core = new RunnerCore(env);
-    await core.handle({ id: 1, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
-    const resp = await core.handle({ id: 2, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
+    await core.handle({ id: 1, kind: 'load', doc: SINE_DOC, wsUrl: 'ws://x' });
+    const resp = await core.handle({ id: 2, kind: 'load', doc: SINE_DOC, wsUrl: 'ws://x' });
     expect(resp.ok).toBe(false);
     if (resp.ok) throw new Error('unreachable');
     expect(resp.error).toMatch(/already loaded/);
   });
 
-  it('load surfaces validation errors as ok:false', async () => {
+  it('load surfaces Rust-side validation errors as ok:false', async () => {
     const { env } = makeEnv();
     const core = new RunnerCore(env);
     const bad: FlowgraphDoc = {
       name: 'bad',
-      environments: ['node'], // wrong env
-      blocks: { a: { type: 'StubSource' } },
+      environments: ['browser'],
+      blocks: { a: { type: 'NoSuchBlock' } },
       wires: [],
     };
     const resp = await core.handle({ id: 1, kind: 'load', doc: bad, wsUrl: 'ws://x' });
     expect(resp.ok).toBe(false);
   });
 
-  it('start / stop drive the Runtime lifecycle', async () => {
+  it('state reports the lifecycle transitions', async () => {
     const { env } = makeEnv();
     const core = new RunnerCore(env);
-    await core.handle({ id: 1, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
+    await core.handle({ id: 1, kind: 'load', doc: SINE_DOC, wsUrl: 'ws://x' });
 
     let s = await core.handle(req('state', 2));
     expect(s.ok && s.kind === 'state' && s.data.state).toBe('initialized');
@@ -179,15 +185,14 @@ describe('RunnerCore', () => {
     expect(s.ok && s.kind === 'state' && s.data.state).toBe('stopped');
   });
 
-  it('stop closes the FrameClient and clears the runtime', async () => {
+  it('stop closes the FrameClient and leaves the core reusable', async () => {
     const { env, clients } = makeEnv();
     const core = new RunnerCore(env);
-    await core.handle({ id: 1, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
+    await core.handle({ id: 1, kind: 'load', doc: SINE_DOC, wsUrl: 'ws://x' });
     await core.handle(req('stop', 2));
     expect(clients[0]!.closeCalls).toBe(1);
 
-    // Fresh load works after stop — core is reusable.
-    const resp = await core.handle({ id: 3, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
+    const resp = await core.handle({ id: 3, kind: 'load', doc: SINE_DOC, wsUrl: 'ws://x' });
     expect(resp.ok).toBe(true);
   });
 
@@ -205,70 +210,69 @@ describe('RunnerCore', () => {
     expect(resp.ok).toBe(false);
   });
 
-  it('update forwards to the block', async () => {
-    const { env } = makeEnv();
-    const sources = new Map<string, StubSource>();
-    const sinks = new Map<string, StubSink>();
-    env.createRegistry = makeRegistry(sources, sinks);
-    const core = new RunnerCore(env);
-    await core.handle({ id: 1, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
-    const resp = await core.handle({
-      id: 2,
-      kind: 'update',
-      blockId: 'source',
-      params: { gain: 2 },
-    });
-    expect(resp.ok).toBe(true);
-    const src = [...sources.values()][0]!;
-    expect(src.updates).toEqual([{ gain: 2 }]);
-  });
-
-  it('update for unknown block is ok:false', async () => {
-    const { env } = makeEnv();
-    const core = new RunnerCore(env);
-    await core.handle({ id: 1, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
-    const resp = await core.handle({
-      id: 2,
-      kind: 'update',
-      blockId: 'ghost',
-      params: {},
-    });
-    expect(resp.ok).toBe(false);
-  });
-
   it('echoes the request id on every response', async () => {
     const { env } = makeEnv();
     const core = new RunnerCore(env);
     const a = await core.handle(req('state', 42));
-    const b = await core.handle({ id: 99, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
+    const b = await core.handle({ id: 99, kind: 'load', doc: SINE_DOC, wsUrl: 'ws://x' });
     expect(a.id).toBe(42);
     expect(b.id).toBe(99);
   });
 
-  it('load failure does not leave a half-built runtime', async () => {
-    const badInit = vi.fn().mockRejectedValue(new Error('init boom'));
-    class BadSink extends StubSink {
-      constructor() {
-        super(32);
-      }
-      override init = badInit;
-    }
-    const env: RunnerEnv = {
-      createFrameClient: () => new FakeFrameClient() as unknown as FrameClient,
-      createRegistry: () => {
-        const reg = new BlockRegistry();
-        reg.add({ spec: SRC_SPEC, construct: () => new StubSource() });
-        reg.add({ spec: SINK_SPEC, construct: () => new BadSink() });
-        return reg;
-      },
-    };
+  it('subscribes to each WsIqSource stream and forwards frames via pushIq', async () => {
+    const { env, clients } = makeEnv();
     const core = new RunnerCore(env);
-    const r1 = await core.handle({ id: 1, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
-    expect(r1.ok).toBe(false);
-    // Next load should succeed — error path cleaned up.
-    const r2 = await core.handle({ id: 2, kind: 'load', doc: DOC, wsUrl: 'ws://x' });
-    // Still uses BadSink; this one will also fail. The point is the
-    // core accepts another load rather than getting wedged.
-    expect(r2.ok).toBe(false);
+    const resp = await core.handle({ id: 1, kind: 'load', doc: WS_DOC, wsUrl: 'ws://x' });
+    expect(resp.ok).toBe(true);
+
+    const client = clients[0]!;
+    expect([...client.subs.keys()]).toEqual([1234]);
+
+    // Deliver two complex samples. After a tick the demod+sink chain
+    // should have drained some of them; the pushIq path is proven by
+    // the frame delivery not throwing and the tick running clean.
+    client.deliver(1234, new Float32Array([0.5, 0.5, -0.5, 0.5]));
+
+    await core.handle(req('start', 2));
+    await new Promise((r) => setTimeout(r, 20));
+    const stopResp = await core.handle(req('stop', 3));
+    expect(stopResp.ok).toBe(true);
+  });
+
+  it('unsubscribes and closes the client on stop', async () => {
+    const { env, clients } = makeEnv();
+    const core = new RunnerCore(env);
+    await core.handle({ id: 1, kind: 'load', doc: WS_DOC, wsUrl: 'ws://x' });
+    const client = clients[0]!;
+    expect(client.subs.get(1234)!.size).toBe(1);
+    await core.handle(req('stop', 2));
+    expect(client.subs.get(1234)!.size).toBe(0);
+    expect(client.closeCalls).toBe(1);
+  });
+
+  it('tick loop drains audio into the SAB writer', async () => {
+    const { env } = makeEnv();
+    const core = new RunnerCore(env);
+    const loadResp = await core.handle({ id: 1, kind: 'load', doc: SINE_DOC, wsUrl: 'ws://x' });
+    if (!loadResp.ok || loadResp.kind !== 'load') throw new Error('unreachable');
+    const sab = loadResp.data.audioSabs.sink;
+    const head = new Uint32Array(sab, 0, 1);
+    expect(Atomics.load(head, 0)).toBe(0);
+
+    await core.handle(req('start', 2));
+    await new Promise((r) => setTimeout(r, 25));
+    await core.handle(req('stop', 3));
+
+    expect(Atomics.load(head, 0)).toBeGreaterThan(0);
+  });
+
+  it('load failure tears down the FrameClient', async () => {
+    const { env, clients } = makeEnv({
+      createRuntime: vi.fn().mockRejectedValue(new Error('simulated init blow-up')),
+    });
+    const core = new RunnerCore(env);
+    const resp = await core.handle({ id: 1, kind: 'load', doc: SINE_DOC, wsUrl: 'ws://x' });
+    expect(resp.ok).toBe(false);
+    expect(clients[0]!.closeCalls).toBe(1);
   });
 });

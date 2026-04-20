@@ -6,9 +6,14 @@
 // `kind` as the request, so callers can narrow on the tuple. Errors
 // collapse into a single `{ok:false, error}` shape so the client can
 // reject the pending promise without per-kind branches.
+//
+// `update` (runtime param tweaks) is intentionally absent — the Rust
+// runtime's reconfiguration surface lands with M3 once the
+// `reconfigScope` schema is in place.
 
-import type { RuntimeState } from '@ferrite/flowgraph-runtime';
 import type { FlowgraphDoc } from '@ferrite/flowgraph-runtime/types';
+
+export type RuntimeState = 'created' | 'initialized' | 'running' | 'stopped';
 
 export type RunnerRequest =
   | {
@@ -19,12 +24,6 @@ export type RunnerRequest =
     }
   | { readonly id: number; readonly kind: 'start' }
   | { readonly id: number; readonly kind: 'stop' }
-  | {
-      readonly id: number;
-      readonly kind: 'update';
-      readonly blockId: string;
-      readonly params: unknown;
-    }
   | { readonly id: number; readonly kind: 'state' };
 
 /**
@@ -39,7 +38,7 @@ export interface LoadResult {
 
 export type RunnerResponse =
   | { readonly id: number; readonly ok: true; readonly kind: 'load'; readonly data: LoadResult }
-  | { readonly id: number; readonly ok: true; readonly kind: 'start' | 'stop' | 'update' }
+  | { readonly id: number; readonly ok: true; readonly kind: 'start' | 'stop' }
   | {
       readonly id: number;
       readonly ok: true;

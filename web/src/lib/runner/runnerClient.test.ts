@@ -117,19 +117,6 @@ describe('FlowgraphRunner', () => {
     await expect(pending).rejects.toThrow(/terminated/);
   });
 
-  it('update forwards blockId and params verbatim', async () => {
-    const w = new FakeWorker();
-    const runner = new FlowgraphRunner(w);
-    const pending = runner.update('vfo1', { centerFreqHz: 100e6 });
-    const req = w.posted[0]!;
-    expect(req.kind).toBe('update');
-    if (req.kind !== 'update') throw new Error('unreachable');
-    expect(req.blockId).toBe('vfo1');
-    expect(req.params).toEqual({ centerFreqHz: 100e6 });
-    w.reply({ id: req.id, ok: true, kind: 'update' });
-    await pending;
-  });
-
   it('ignores replies with unknown ids', async () => {
     const w = new FakeWorker();
     new FlowgraphRunner(w);
