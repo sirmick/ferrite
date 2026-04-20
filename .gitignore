@@ -24,3 +24,6 @@ dist/
 
 # Vendored SoapySDR sources/builds (cloned via scripts/build-soapysdr.sh)
 /soapysdr/
+
+# Upstream decoder codebases cloned for WASM-port feasibility research
+/research/

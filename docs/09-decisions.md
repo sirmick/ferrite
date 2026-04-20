@@ -342,6 +342,86 @@ forever.
   it. The dep direction will likely invert once tick-pump and
   lifecycle land — logged here so future-us isn't surprised.
 
+## D20 — Decoder growth is a separate roadmap; first post-M5 phase is analog listening, not decoders
+
+**Context.** With M5 closed, the engine work is effectively done for
+v0.x: Rust runtime, dual-compile blocks, JSON presets, per-VFO
+channelizer, reconfigure via preset diff. The natural next question —
+"what should Ferrite decode, and in what order?" — is large enough
+(dozens of modes, several C-vendor lifts, patent-encumbered edge cases)
+that it doesn't fit in `08-roadmap.md` without swamping the
+platform-phase narrative. It also benefits from being driven
+capability-first, not project-first (see
+`research/CAPABILITIES_ROADMAP.md` and
+`research/WASM_PORT_ASSESSMENT.md` for the feasibility groundwork).
+
+**Decision.**
+
+1. **Decoder roadmap lives in `docs/decoder-roadmap/`** — index at
+   `README.md`, six phase files, plus a `90-vendor-port-guide.md`
+   mechanics reference. Phases 1–2 are detailed; 3–6 are sketches that
+   get fleshed out as their predecessors close.
+
+2. **The first post-M5 phase is analog listening (Phase 1), not a
+   decoder phase.** That phase ships the reusable helper blocks
+   (`AmDemod`, `SsbDemod`, `Deemphasis`, `Squelch`, `Agc`, `Resample`)
+   and the six listening presets (WBFM / NBFM / AM / USB / LSB / CW).
+   Every later decoder chain starts with some subset of these; building
+   them well once makes every subsequent phase cheap.
+
+3. **The first C-vendor is multimon-ng (Phase 2), not dump1090.** Per
+   `research/WASM_PORT_ASSESSMENT.md`, multimon-ng is the single
+   cleanest codebase in the set and delivers five decoders (POCSAG,
+   FLEX, DTMF, EAS, CTCSS) from one lift. Debug the `blocks/native/`
+   tooling against the easiest target, not simultaneously with a
+   harder port. dump1090 moves to Phase 3 alongside direwolf and
+   rtl_433.
+
+4. **ADS-B is Tier 3 (aviation data), not Tier 1.** Adjusts the
+   natural reading of `docs/03-blocks.md`, which lists it under v0.1
+   scope. The engineering is the same; the categorisation is just
+   corrected.
+
+5. **`blocks/native/` is built once in Phase 2 and reused by every
+   subsequent vendor.** Shared shim header (`ferrite_port.h`),
+   wasi-libc linking, golden-fixture harness. `liquid-dsp-sys` lifted
+   as a sibling substrate in the same phase. No parallel
+   infrastructure per vendor.
+
+6. **Patent-encumbered digital voice (DMR/P25/NXDN/DAB/DRM) ships via
+   a `ferrite-helper` native sidecar protocol**, not in-WASM. Ferrite
+   distributes nothing patent-encumbered; users install helpers via
+   their OS package manager. This is separate from the D17 Node
+   sidecar and covers a different class of problem.
+
+7. **Patent-free digital voice (M17, FreeDV) ships in-WASM via
+   Codec2.** Strategic differentiator — "digital voice in your
+   browser, no binary blobs".
+
+**Rejected.**
+- Fold decoder planning into `08-roadmap.md`. Too much volume; the
+  platform narrative gets lost.
+- Start post-M5 with the first C-vendor. Higher-risk — would force us
+  to debug the `blocks/native/` pattern against a harder codebase
+  (direwolf globals, dump1090 output coupling) before we've proved
+  it works at all.
+- Port wsjt-x for FT8. Fortran + FFTW is impractical; use `kgoba/ft8_lib`
+  (pure C, WASM-friendly). Captured in Phase 4.
+
+**Consequence.**
+- `docs/decoder-roadmap/` is the authoritative forward plan for
+  decoder growth; `docs/10-commits.md` pulls commit-level items from
+  it as each phase opens.
+- `research/WASM_PORT_ASSESSMENT.md` and
+  `research/CAPABILITIES_ROADMAP.md` are the feasibility inputs the
+  roadmap rests on — kept in `research/` (gitignored, exploratory)
+  rather than promoted to `docs/`, because their value is
+  point-in-time and the roadmap itself is the durable artefact.
+- When a decoder ships, move the relevant line from the
+  capabilities-roadmap table into a "shipped" list in the decoder's
+  phase doc; the preset JSON + block source are then the living
+  documentation.
+
 ## Revisiting decisions
 
 Decisions here are not immutable — they are **load-bearing assumptions**.
