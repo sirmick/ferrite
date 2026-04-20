@@ -458,7 +458,7 @@ impl Runtime {
     /// Borrow an instantiated block by id as its concrete type `T`.
     /// Returns `None` if the id is absent or the block is a different
     /// type. Callers use this to hand non-JSON handles to a specific
-    /// block — e.g. attaching an `IqBridgeSink` to a `WsBridgeTx` after
+    /// block — e.g. attaching a `BridgeSink` to a `WsBridgeTx` after
     /// the graph has been built.
     pub fn block_typed<T: Block + 'static>(&mut self, id: &str) -> Option<&mut T> {
         self.block_mut(id)

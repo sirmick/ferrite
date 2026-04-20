@@ -400,7 +400,7 @@ impl<'a> BlockIo<'a> {
 /// so existing `impl Block for Foo` blocks pick it up automatically.
 ///
 /// The runtime uses this to reach into a specific block after the graph
-/// is built — e.g. to hand a `WsBridgeTx` its `IqBridgeSink` — without
+/// is built — e.g. to hand a `WsBridgeTx` its `BridgeSink` — without
 /// needing a type-erased "attach" method on `Block` itself.
 pub trait AsAny {
     fn as_any_mut(&mut self) -> &mut dyn Any;

@@ -3,8 +3,8 @@
 //! the session's WebSocket `FrameTx`.
 //!
 //! Flow: parse doc → `split_for_environment(.., Node)` → load runtime
-//! → find every `WsBridgeTx` in the split doc and attach a shared
-//! [`BroadcastIqSink`] → `init` → `start` → tick on an interval until
+//! → find every bridge-Tx in the split doc and attach a shared
+//! [`BroadcastSink`] → `init` → `start` → tick on an interval until
 //! the shutdown signal fires. Cross-env `stream_id`s are chosen by
 //! `env_split` from `CROSS_ENV_STREAM_BASE` (1000+); the node half
 //! and browser half agree on those ids without any negotiation.
@@ -19,7 +19,7 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use ferrite_blocks::ws_bridge::{FftU8BridgeSink, IqBridgeSink, WsBridgeTx, WsBridgeTxFftU8};
+use ferrite_blocks::ws_bridge::{BridgeSink, WsBridgeTx, WsBridgeTxFftU8};
 use ferrite_runtime::{
     split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry, ReconfigurePlan,
     Runtime, DEFAULT_FRAMES_HINT,
@@ -29,10 +29,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{
-    bridge_sink::{BroadcastFftU8Sink, BroadcastIqSink},
-    session::FrameTx,
-};
+use crate::{bridge_sink::BroadcastSink, session::FrameTx};
 
 /// Handle to a running preset pipeline. Callers can either drop the
 /// handle (which cancels the runtime task via the `oneshot` sender
@@ -47,7 +44,7 @@ pub struct PresetHandle {
 }
 
 /// Preset-mode slot stored inside [`AppState`]. Bundles the broadcast
-/// `FrameTx` that [`BroadcastIqSink`] publishes to with the
+/// `FrameTx` that [`BroadcastSink`] publishes to with the
 /// [`PresetHandle`] that keeps the runtime task alive. Dropping the
 /// mount closes the broadcast channel and cancels the runtime task
 /// (the `oneshot` on `shutdown` fires via drop).
@@ -61,11 +58,12 @@ pub struct PresetMount {
     /// [`Self::reconfigure`] between ticks. The mutex is held only for
     /// the duration of a tick (or a reconfigure), so contention is low.
     runtime: Arc<Mutex<Runtime>>,
-    /// Held so [`Self::reconfigure`] can re-attach them to the fresh
-    /// bridge-Tx instances that a rebuild produces — the sinks on the
-    /// old instances don't carry over.
-    iq_sink: Arc<dyn IqBridgeSink>,
-    fft_sink: Arc<dyn FftU8BridgeSink>,
+    /// Held so [`Self::reconfigure`] can re-attach it to the fresh
+    /// bridge-Tx instances that a rebuild produces — the sink on the
+    /// old instances doesn't carry over. One sink serves every Tx
+    /// block regardless of port type; the sink discriminates by the
+    /// `BridgePayloadType` tag on each push.
+    bridge_sink: Arc<dyn BridgeSink>,
     /// Last-applied cross-env doc as-authored (pre-split). The node
     /// runtime only carries the node half; this is what the HTTP
     /// `GET /api/flowgraph` endpoint surfaces so the UI can render the
@@ -80,9 +78,8 @@ impl PresetMount {
     /// against the applied doc, and swapped in atomically — with the
     /// same rollback guarantees as [`Runtime::reconfigure`].
     ///
-    /// After a successful swap the shared broadcast sinks are
-    /// re-attached to every bridge-Tx in the new graph — IQ to every
-    /// `WsBridgeTx`, FftU8 to every `WsBridgeTxFftU8` — so frames keep
+    /// After a successful swap the shared broadcast sink is
+    /// re-attached to every bridge-Tx in the new graph so frames keep
     /// flowing to `/ws/preset` without a client reconnect.
     pub async fn reconfigure(&self, new_doc: &FlowgraphDoc) -> Result<ReconfigurePlan> {
         let node_half = split_for_environment(new_doc, Environment::Node, &InventorySpecRegistry)
@@ -97,7 +94,7 @@ impl PresetMount {
             *self.full_doc.lock().await = new_doc.clone();
             return Ok(plan);
         }
-        attach_bridge_sinks(&mut rt, &node_half, &self.iq_sink, &self.fft_sink)?;
+        attach_bridge_sinks(&mut rt, &node_half, &self.bridge_sink)?;
         *self.full_doc.lock().await = new_doc.clone();
         Ok(plan)
     }
@@ -143,9 +140,8 @@ pub fn spawn_preset(
     let mut runtime = Runtime::load_doc(&node_half, Environment::Node, DEFAULT_FRAMES_HINT)
         .context("runtime load_doc")?;
 
-    let iq_sink: Arc<dyn IqBridgeSink> = Arc::new(BroadcastIqSink::new(frames.clone()));
-    let fft_sink: Arc<dyn FftU8BridgeSink> = Arc::new(BroadcastFftU8Sink::new(frames.clone()));
-    attach_bridge_sinks(&mut runtime, &node_half, &iq_sink, &fft_sink)?;
+    let bridge_sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(frames.clone()));
+    attach_bridge_sinks(&mut runtime, &node_half, &bridge_sink)?;
 
     runtime.init().context("runtime init")?;
     runtime.start().context("runtime start")?;
@@ -160,21 +156,20 @@ pub fn spawn_preset(
             join,
         },
         runtime,
-        iq_sink,
-        fft_sink,
+        bridge_sink,
         full_doc: Arc::new(Mutex::new(doc.clone())),
     })
 }
 
-/// Walk `node_half` and attach the right broadcast sink to every
-/// bridge-Tx by type. Auto-inserted bridges from `env_split` and
+/// Walk `node_half` and attach the shared broadcast sink to every
+/// bridge-Tx block. Auto-inserted bridges from `env_split` and
 /// author-written bridges are treated the same — both are just blocks
-/// whose `type_name` matches.
+/// whose `type_name` matches. Every bridge-Tx type is listed here so
+/// adding a new one (e.g. `WsBridgeTxRealF32`) is a single arm.
 fn attach_bridge_sinks(
     runtime: &mut Runtime,
     node_half: &FlowgraphDoc,
-    iq_sink: &Arc<dyn IqBridgeSink>,
-    fft_sink: &Arc<dyn FftU8BridgeSink>,
+    sink: &Arc<dyn BridgeSink>,
 ) -> Result<()> {
     for (id, decl) in &node_half.blocks {
         match decl.type_name.as_str() {
@@ -182,13 +177,13 @@ fn attach_bridge_sinks(
                 let tx = runtime.block_typed::<WsBridgeTx>(id).ok_or_else(|| {
                     anyhow!("runtime is missing expected WsBridgeTx {id:?} after load")
                 })?;
-                tx.attach_sink(Arc::clone(iq_sink));
+                tx.attach_sink(Arc::clone(sink));
             }
             "WsBridgeTxFftU8" => {
                 let tx = runtime.block_typed::<WsBridgeTxFftU8>(id).ok_or_else(|| {
                     anyhow!("runtime is missing expected WsBridgeTxFftU8 {id:?} after load")
                 })?;
-                tx.attach_sink(Arc::clone(fft_sink));
+                tx.attach_sink(Arc::clone(sink));
             }
             _ => {}
         }

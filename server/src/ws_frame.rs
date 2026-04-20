@@ -35,7 +35,7 @@ pub const VFO_STREAM_BASE: u16 = FFT_STREAM + 1;
 
 /// Payload-type enum. Numeric values match the wire encoding — do not
 /// reorder or reassign without bumping [`PROTOCOL_VERSION`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum PayloadType {
     FftU8 = 0x01,

@@ -51,7 +51,7 @@ pub use soapy_source::{SoapySource, SoapySourceParams};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use tee_iq_f32::TeeIqF32;
 pub use ws_bridge::{
-    FftU8BridgeSink, IqBridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx, WsBridgeTxFftU8,
+    BridgePayloadType, BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx, WsBridgeTxFftU8,
 };
 pub use ws_iq_source::{WsIqSource, WsIqSourceParams};
 
