@@ -34,6 +34,7 @@ use ferrite_blocks::{
 use crate::block_registry::{instantiate_blocks, BlockMap, InventorySpecRegistry};
 use crate::doc::{Environment, FlowgraphDoc};
 use crate::instantiate::{instantiate_flowgraph, SpecMap};
+use crate::reconfigure::{diff_presets, ReconfigurePlan};
 use crate::schedule::Schedule;
 use crate::validate::validate_doc;
 
@@ -52,6 +53,15 @@ pub struct Runtime {
     input_bindings: Vec<Vec<Option<InputBinding>>>,
     frames_hint: usize,
     state: RuntimeState,
+    /// The doc the currently-instantiated graph was built from. Set by
+    /// [`Runtime::load_doc`]; `None` for runtimes built through
+    /// [`Runtime::from_parts`] (those can't be reconfigured because we
+    /// don't have an old doc to diff against).
+    applied_doc: Option<FlowgraphDoc>,
+    /// Environment the doc is running in. Paired with [`Self::applied_doc`]
+    /// so a reconfigure can rebuild through [`Runtime::load_doc`] with
+    /// the same half of a cross-env split.
+    environment: Option<Environment>,
 }
 
 /// Lifecycle state of a [`Runtime`]. Transitions are explicit and
@@ -182,7 +192,10 @@ impl Runtime {
         let (specs, schedule) = instantiate_flowgraph(&v, &InventorySpecRegistry, env)
             .map_err(|e| anyhow!("instantiate: {e}"))?;
         let blocks = instantiate_blocks(doc)?;
-        Self::from_parts(blocks, &specs, &schedule, frames_hint)
+        let mut rt = Self::from_parts(blocks, &specs, &schedule, frames_hint)?;
+        rt.applied_doc = Some(doc.clone());
+        rt.environment = Some(env);
+        Ok(rt)
     }
 
     /// Assemble a runtime from already-produced pieces. `blocks` is
@@ -279,6 +292,8 @@ impl Runtime {
             input_bindings,
             frames_hint,
             state: RuntimeState::Created,
+            applied_doc: None,
+            environment: None,
         })
     }
 
@@ -448,6 +463,87 @@ impl Runtime {
     pub fn block_typed<T: Block + 'static>(&mut self, id: &str) -> Option<&mut T> {
         self.block_mut(id)
             .and_then(|b| b.as_any_mut().downcast_mut::<T>())
+    }
+
+    /// The doc the runtime was built from. `None` when constructed via
+    /// [`Self::from_parts`] — those paths opt out of the reconfigure
+    /// machinery because they have no old doc to diff against.
+    #[must_use]
+    pub fn applied_doc(&self) -> Option<&FlowgraphDoc> {
+        self.applied_doc.as_ref()
+    }
+
+    /// Apply `new_doc` to this runtime. Returns the [`ReconfigurePlan`]
+    /// describing the change. A no-op plan is returned unchanged without
+    /// touching the running graph.
+    ///
+    /// ### Rollback contract
+    ///
+    /// Build-time failures (bad JSON, validator reject, instantiate
+    /// error, init error on the new graph) leave this runtime **exactly
+    /// as it was** — callers can safely retry with a different doc.
+    /// The swap happens only after the replacement graph has cleared
+    /// every phase of construction, so a partial apply is impossible.
+    ///
+    /// ### What this slice does
+    ///
+    /// Every scope — `SelfBlock`, `Downstream`, `SourceRestart` — is
+    /// handled by a full rebuild today: the runtime loads the new doc
+    /// into a fresh graph, stops the old one, and swaps state in place.
+    /// The declared scope is still surfaced in the returned plan so the
+    /// wire protocol and future in-place fast paths have the information
+    /// they need; the behavioural optimisation is a follow-up.
+    pub fn reconfigure(&mut self, new_doc: &FlowgraphDoc) -> Result<ReconfigurePlan> {
+        let old_doc = self
+            .applied_doc
+            .as_ref()
+            .ok_or_else(|| anyhow!("runtime: reconfigure requires a load_doc-built runtime"))?;
+        let env = self
+            .environment
+            .ok_or_else(|| anyhow!("runtime: reconfigure requires a load_doc-built runtime"))?;
+
+        let plan = diff_presets(old_doc, new_doc, &InventorySpecRegistry)
+            .map_err(|e| anyhow!("reconfigure: {e}"))?;
+        if plan.is_noop() {
+            return Ok(plan);
+        }
+
+        // Build the replacement graph fully (including init) before we
+        // touch the current one. Any failure here returns Err without
+        // mutating `self`.
+        let mut replacement = Self::load_doc(new_doc, env, self.frames_hint)?;
+        replacement.init()?;
+
+        // Match the prior lifecycle so a Running graph stays Running.
+        let prev_state = self.state;
+        if matches!(
+            prev_state,
+            RuntimeState::Initialized | RuntimeState::Running
+        ) {
+            // Best-effort stop: the new graph is already live in our hand,
+            // so we don't want a stop error to block the swap.
+            let _ = self.stop();
+        }
+
+        let Self {
+            entries,
+            input_bindings,
+            frames_hint,
+            state,
+            applied_doc,
+            environment,
+        } = replacement;
+        self.entries = entries;
+        self.input_bindings = input_bindings;
+        self.frames_hint = frames_hint;
+        self.state = state;
+        self.applied_doc = applied_doc;
+        self.environment = environment;
+
+        if prev_state == RuntimeState::Running {
+            self.start()?;
+        }
+        Ok(plan)
     }
 }
 
@@ -690,5 +786,147 @@ mod tests {
             panic!("expected unknown-producer error");
         };
         assert!(format!("{err}").contains("ghost"));
+    }
+
+    #[test]
+    fn load_doc_stashes_applied_doc_for_reconfigure() {
+        let rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource"}},
+                "wires":[]
+            }"#,
+            16,
+        );
+        let applied = rt.applied_doc().expect("load_doc populates applied_doc");
+        assert_eq!(applied.name, "t");
+    }
+
+    #[test]
+    fn from_parts_leaves_applied_doc_empty() {
+        // A runtime assembled from parts (no doc) has nothing to diff
+        // against — the reconfigure path should refuse rather than guess.
+        let doc: FlowgraphDoc = serde_json::from_str(
+            r#"{"name":"t","environments":["browser"],"blocks":{"src":{"type":"SineSource"}},"wires":[]}"#,
+        )
+        .unwrap();
+        let v = validate_doc(&doc).unwrap();
+        let (specs, schedule) =
+            instantiate_flowgraph(&v, &InventorySpecRegistry, Environment::Browser).unwrap();
+        let blocks = instantiate_blocks(&doc).unwrap();
+        let rt = Runtime::from_parts(blocks, &specs, &schedule, 16).unwrap();
+        assert!(rt.applied_doc().is_none());
+    }
+
+    #[test]
+    fn reconfigure_noop_on_identical_doc() {
+        let doc_json = r#"{
+            "name":"t","environments":["browser"],
+            "blocks":{"src":{"type":"SineSource","params":{"amplitude":0.5}}},
+            "wires":[]
+        }"#;
+        let mut rt = load(doc_json, 16);
+        rt.init().unwrap();
+        let doc: FlowgraphDoc = serde_json::from_str(doc_json).unwrap();
+        let plan = rt.reconfigure(&doc).unwrap();
+        assert!(plan.is_noop());
+        // Lifecycle untouched.
+        assert_eq!(rt.state(), RuntimeState::Initialized);
+    }
+
+    #[test]
+    fn reconfigure_applies_param_change_and_preserves_running_state() {
+        let mut rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource","params":{"rate_hz":4,"tone_freq_abs_hz":1,"center_freq_hz":0,"amplitude":0.5}}},
+                "wires":[]
+            }"#,
+            8,
+        );
+        rt.init().unwrap();
+        rt.start().unwrap();
+        let new_doc: FlowgraphDoc = serde_json::from_str(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource","params":{"rate_hz":4,"tone_freq_abs_hz":1,"center_freq_hz":0,"amplitude":0.25}}},
+                "wires":[]
+            }"#,
+        )
+        .unwrap();
+        let plan = rt.reconfigure(&new_doc).unwrap();
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.changes[0].param_key, "amplitude");
+        // Running-before is Running-after.
+        assert_eq!(rt.state(), RuntimeState::Running);
+        rt.tick().unwrap();
+        // Amplitude actually took effect.
+        let TypedBuf::IqF32(buf) = &rt.entries[0].outputs[0] else {
+            panic!("expected IqF32");
+        };
+        assert!((buf[0].re - 0.25).abs() < 1e-6 && buf[0].im.abs() < 1e-6);
+        // applied_doc is updated.
+        assert_eq!(
+            rt.applied_doc().unwrap().blocks["src"]
+                .params
+                .as_ref()
+                .unwrap()["amplitude"]
+                .as_f64(),
+            Some(0.25)
+        );
+    }
+
+    #[test]
+    fn reconfigure_rolls_back_on_build_failure() {
+        let original_json = r#"{
+            "name":"t","environments":["browser"],
+            "blocks":{"src":{"type":"SineSource"}},
+            "wires":[]
+        }"#;
+        let mut rt = load(original_json, 16);
+        rt.init().unwrap();
+        rt.start().unwrap();
+        // New doc is invalid — references a block type the registry
+        // doesn't know.
+        let bad_doc: FlowgraphDoc = serde_json::from_str(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource"},"ghost":{"type":"NotAThing"}},
+                "wires":[]
+            }"#,
+        )
+        .unwrap();
+        let err = rt.reconfigure(&bad_doc).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("NotAThing") || msg.contains("ghost") || msg.contains("validate"),
+            "unexpected err: {msg}"
+        );
+        // Rollback: the runtime is untouched. State, applied_doc, block
+        // count all unchanged.
+        assert_eq!(rt.state(), RuntimeState::Running);
+        rt.tick().unwrap();
+        assert_eq!(
+            rt.applied_doc().unwrap().blocks.len(),
+            1,
+            "rollback must preserve old doc"
+        );
+    }
+
+    #[test]
+    fn reconfigure_refuses_when_no_applied_doc() {
+        // Hand-built runtimes (from_parts) can't reconfigure — there's
+        // no old doc to diff against.
+        let doc: FlowgraphDoc = serde_json::from_str(
+            r#"{"name":"t","environments":["browser"],"blocks":{"src":{"type":"SineSource"}},"wires":[]}"#,
+        )
+        .unwrap();
+        let v = validate_doc(&doc).unwrap();
+        let (specs, schedule) =
+            instantiate_flowgraph(&v, &InventorySpecRegistry, Environment::Browser).unwrap();
+        let blocks = instantiate_blocks(&doc).unwrap();
+        let mut rt = Runtime::from_parts(blocks, &specs, &schedule, 16).unwrap();
+        let err = rt.reconfigure(&doc).unwrap_err();
+        assert!(format!("{err}").contains("reconfigure"));
     }
 }
