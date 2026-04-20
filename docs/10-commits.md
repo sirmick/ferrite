@@ -248,13 +248,13 @@ runtime in a Worker; the TS packages are gone; CI is green.
 
 ### M5 — Config dialogs + receivers pane
 
-- [ ] `feat(blocks): AmDemod Rust block (dual-built)`
-- [ ] `flowgraphs: add flowgraphs/wbam.json (AM variant of wbfm)`
-- [ ] `feat(web): source options dialog — schema-driven, one section per source param group`
-- [ ] `feat(web): flowgraph options dialog — schema-driven, one section per non-source block`
-- [ ] `feat(web): dialogs gain a read-only JSON tab mirroring live preset`
-- [ ] `feat(web): receivers pane with AM/FM dropdown — full chain swap, source stable`
-- [ ] `test(web): dialog reconfigure paths map to correct reconfigScope`
+- [x] `feat(blocks): AmDemod Rust block (dual-built)` — decda9b
+- [x] `flowgraphs: add flowgraphs/wbam.json (AM variant of wbfm)` — 6cd791a
+- [x] `feat(web): source options dialog — schema-driven, one section per source param group` — 3551740
+- [x] `feat(web): flowgraph options dialog — schema-driven, one section per non-source block` — 3501ea4
+- [x] `feat(web): dialogs gain a read-only JSON tab mirroring live preset` — 38410a7
+- [x] `feat(web): receivers pane with AM/FM dropdown — full chain swap, source stable` — a2c6dda
+- [x] `test(web): dialog reconfigure paths map to correct reconfigScope` — 1ab711f
 
 **M5 done when:** user picks AM or FM from the receivers pane and the
 flowgraph reconfigures without touching the source; source and
