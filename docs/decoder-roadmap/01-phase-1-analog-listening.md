@@ -21,6 +21,44 @@ This phase also turns Ferrite into a **useful receiver for a human** —
 which matters for morale, demos, and user testing while the deeper
 decoder work is underway.
 
+## Where these blocks run
+
+Worth saying up-front because it's a recurring confusion point:
+
+- **Block source is target-agnostic** (D19). Every block in this phase
+  compiles to both native (linked into `ferrited`) and WASM (loaded by
+  the browser). The same `.rs` file. The runtime decides placement per
+  preset via per-block `env` hints + auto-inserted `WsBridge` pairs on
+  environment-crossing wires.
+- **Conventional placement for analog-listening presets:**
+  - **Server-side (`ferrited`):** `SoapySource → Channelizer(narrowband
+    VFO) → WsBridgeTx`. Heavy wideband work, device I/O.
+  - **Browser-side (Worker):** `WsBridgeRx → FmDemod/AmDemod/SsbDemod →
+    Deemphasis → Squelch → Agc → Resample → AudioSink`.
+  - Narrowband demod is cheap, so browser-side is the default. Multiple
+    browser clients can have their own demod mode selection off one
+    shared wideband server stream.
+- **Two browser threads are involved** — don't conflate them:
+  - **Flowgraph Worker** (a Web Worker) hosts the Rust runtime WASM
+    module. *All Phase 1 demod blocks run here.* Scheduler ticks, DSP
+    math, block lifecycle.
+  - **AudioWorklet** (audio rendering thread) only runs the 128-frame
+    `process()` callback that reads PCM from a `SharedArrayBuffer`
+    ring and hands it to the audio hardware. It does not run DSP
+    blocks.
+  - **`AudioSink` is the bridge between them** — writes into the SAB
+    ring from the Worker side; the AudioWorklet reads from it.
+- **Headless server use is a first-class mode** too. A preset that
+  hosts the entire chain inside `ferrited` (no browser attached —
+  e.g. record demodulated audio to disk on the SBC) runs every Phase 1
+  block natively with the exact same source. Only `AudioSink` is
+  browser-only; the headless case uses a `FileSink` or `NullSink`
+  terminus instead.
+
+This lets us write native Rust unit tests (`cargo test`) and browser
+parity tests (`wasm-bindgen-test`) against exactly the same block
+source. See `docs/05-testing.md`.
+
 ## Blocks to add (Rust)
 
 All live in `blocks/` next to the existing `FmDemod`. All dual-compile
@@ -88,6 +126,101 @@ All live in `blocks/` next to the existing `FmDemod`. All dual-compile
   TS frontend as one of the few blocks that *don't* port to WASM (browser
   API binding). Server-side doesn't need it; server audio goes out via the
   WS audio stream to the browser.
+
+### `DtmfDecoder` — the end-of-phase digital canary (Rust, hand-rolled)
+
+Added specifically to prove the `events` bridge end-to-end before Phase 2
+layers on the C-vendor infrastructure. DTMF is the **easiest real digital
+mode to implement**: eight Goertzel detectors (four row tones, four
+column tones), threshold, pick the pair, emit a character. ~80 LOC.
+Generating test DTMF is also trivial (two summed sines) — meaning the
+entire headless e2e chain has no external dependencies.
+
+- **Ports:** `real_f32` in (8 kHz or 22050 Hz — pick one) → `events` out.
+- **Params:** `hold_ms` (minimum tone duration before emit), `off_ms`
+  (minimum gap between emits of the same digit).
+- **Event shape:**
+  ```json
+  { "kind": "dtmf", "digit": "5", "duration_ms": 200, "t_ms": 12345 }
+  ```
+- **~80 LOC Rust.** No vendor dependency, no FEC, no framing.
+
+**Why Rust-from-scratch here and not wait for Phase 2's multimon-ng
+`DtmfDecoder`:** Phase 2 validates the C-vendor path. This block
+validates the Rust-native digital-decoder path *and* the `events`
+bridge, before Phase 2 starts. When multimon-ng's DTMF ships in Phase
+2, both blocks should produce identical event streams on the same
+audio fixture — a nice parity test for the C-vendor tooling.
+
+This is also the first demonstration of the Phase 5 bake-off principle
+(Rust vs vendor): some modes are cheap enough in Rust that vendoring
+is genuinely not worth it. DTMF is clearly on the Rust side of that
+line.
+
+## Events bridge — how digital events reach the browser main thread
+
+New in this phase. Minimal design; grows later if needed.
+
+**The chain:**
+
+```
+block emits on `events` port
+        ↓
+EventsSink (Rust block, browser or native)
+        ↓
+   target-specific delivery:
+     - browser: self.postMessage(event) from the flowgraph Worker →
+       main thread receives in worker.onmessage → console.log / UI hook
+     - native: push onto a caller-provided mpsc::Sender<Event> →
+       test code drains and asserts; ferrited CLI logs to stderr
+```
+
+**Design rules for the first cut:**
+
+- **Events are JSON.** Each block serialises to `serde_json::Value` at
+  its output port. `EventsSink` preserves the JSON as-is — no typed
+  re-encoding. Keeps the bridge dumb; lets decoders ship new event
+  kinds without runtime changes.
+- **`postMessage` is the right primitive here**, not the SAB ring.
+  Events are low-rate (tens per second worst case), not realtime
+  (late-by-50ms doesn't matter). SAB is reserved for audio.
+- **Events are structured-cloneable** — i.e. strings, numbers, arrays,
+  objects only. No TypedArrays with transfer (those are for bulk bytes),
+  no ArrayBuffer sharing. `postMessage(json_value)` works because the
+  Rust side already produced a plain JS object via `serde-wasm-bindgen`.
+- **No schema enforcement yet.** Each event has a `kind` discriminator
+  string (`"dtmf"`, `"pocsag"`, …); main-thread consumer switches on
+  that. Typed schemas can come later — this is a v0.x logging-sufficient
+  baseline per the user's explicit ask.
+- **Main thread side** is a ~20-line TS utility that subscribes to the
+  runtime Worker's `message` channel, filters by `{ type: "event" }`
+  messages, and dispatches to a log sink (browser console) + a future
+  UI hook. Pluggable, no hard dep on any UI component.
+
+**Flowgraph shape for the canary test:**
+
+```
+SignalSource(dtmf("1234"))  → DtmfDecoder  → EventsSink
+       ↓ real_f32                ↓ events        ↓
+    (samples)              (4 digit events)   (delivered)
+```
+
+Native (headless):
+- `SignalSource` is Rust, generates the DTMF audio programmatically.
+- `EventsSink` in native mode pushes into `mpsc::Sender<Event>` the
+  test provides.
+- Test asserts `"1234"` arrives in order, each with `duration_ms`
+  matching the generator.
+
+Browser (parity):
+- Same flowgraph JSON, loaded by the browser runtime.
+- `EventsSink` in browser mode posts to main thread.
+- Playwright-style test asserts `console.log` sees the same four
+  events in order.
+
+**End-of-Phase-1 acceptance:** both tests pass. That's the proof the
+`events` bridge works before Phase 2 loads it with multimon-ng's five
+decoders.
 
 ## Preset flowgraphs to ship
 
