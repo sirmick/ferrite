@@ -165,16 +165,14 @@ impl Default for ReconfigureScope {
 /// A block parameter schema entry.
 ///
 /// `reconfig_scope` tells the runtime's diff engine how much it needs to
-/// touch when this param changes while the graph is running. The legacy
-/// `mutable_while_streaming` flag is kept alongside for the duration of
-/// M3 so existing readers don't break while callers migrate to the
-/// richer scope; it's removed at the end of the milestone.
+/// touch when this param changes while the graph is running. Scope
+/// `SelfBlock` means "mutable while streaming" in practice — a strict
+/// superset of the old binary flag.
 #[derive(Debug, Clone, Copy)]
 pub struct ParamSpec {
     pub key: &'static str,
     pub label: &'static str,
     pub kind: ParamKind,
-    pub mutable_while_streaming: bool,
     pub reconfig_scope: ReconfigureScope,
 }
 
@@ -506,7 +504,6 @@ mod tests {
                         default: 1.0,
                         unit: "",
                     },
-                    mutable_while_streaming: true,
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 }],
             }

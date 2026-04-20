@@ -202,7 +202,6 @@ impl Block for FileIqSource {
                     key: "path",
                     label: "Path",
                     kind: ParamKind::Text { default: "" },
-                    mutable_while_streaming: false,
                     // New file = new stream; re-open the source.
                     reconfig_scope: ReconfigureScope::SourceRestart,
                 },
@@ -210,7 +209,6 @@ impl Block for FileIqSource {
                     key: "loop",
                     label: "Loop",
                     kind: ParamKind::Toggle { default: false },
-                    mutable_while_streaming: true,
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
             ],

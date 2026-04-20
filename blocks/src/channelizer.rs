@@ -24,7 +24,7 @@
 //!   decimator invariant `total_out = total_in / factor` holds across
 //!   arbitrary `process()` call sizes, same as Decimator.
 //!
-//! `freq_shift_hz` is the only param marked `mutable_while_streaming`:
+//! `freq_shift_hz` is the only param with `ReconfigureScope::SelfBlock`:
 //! the VFO can retune without tearing down the pipeline.
 
 use anyhow::{bail, Result};
@@ -203,7 +203,6 @@ impl Block for Channelizer {
                         default: 0.0,
                         unit: "Hz",
                     },
-                    mutable_while_streaming: true,
                     // The only "tune knob" on the VFO — the whole point is
                     // to retune without restarting the graph.
                     reconfig_scope: ReconfigureScope::SelfBlock,
@@ -218,7 +217,6 @@ impl Block for Channelizer {
                         default: 4.0,
                         unit: "",
                     },
-                    mutable_while_streaming: false,
                     // Changes output rate; downstream chain re-inits.
                     reconfig_scope: ReconfigureScope::Downstream,
                 },
@@ -232,7 +230,6 @@ impl Block for Channelizer {
                         default: 33.0,
                         unit: "taps",
                     },
-                    mutable_while_streaming: false,
                     reconfig_scope: ReconfigureScope::Downstream,
                 },
                 ParamSpec {
@@ -245,7 +242,6 @@ impl Block for Channelizer {
                         default: 0.1,
                         unit: "",
                     },
-                    mutable_while_streaming: false,
                     reconfig_scope: ReconfigureScope::Downstream,
                 },
             ],

@@ -71,7 +71,6 @@ const STREAM_ID_PARAM: ParamSpec = ParamSpec {
         default: 0.0,
         unit: "",
     },
-    mutable_while_streaming: false,
     // Bridge wiring is fixed per graph load — re-plumbing the WS pair
     // is a source-level restart.
     reconfig_scope: ReconfigureScope::SourceRestart,

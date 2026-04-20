@@ -140,7 +140,6 @@ impl Block for SineSource {
                         default: 2_000_000.0,
                         unit: "S/s",
                     },
-                    mutable_while_streaming: false,
                     // Source rate ripples through every downstream rate
                     // negotiation — treat as a source restart.
                     reconfig_scope: ReconfigureScope::SourceRestart,
@@ -155,7 +154,6 @@ impl Block for SineSource {
                         default: 100_000_000.0,
                         unit: "Hz",
                     },
-                    mutable_while_streaming: true,
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
@@ -168,7 +166,6 @@ impl Block for SineSource {
                         default: 100_001_000.0,
                         unit: "Hz",
                     },
-                    mutable_while_streaming: true,
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
@@ -181,7 +178,6 @@ impl Block for SineSource {
                         default: 0.25,
                         unit: "",
                     },
-                    mutable_while_streaming: true,
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
             ],

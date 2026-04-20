@@ -94,7 +94,6 @@ impl Block for LogMagU8 {
                         default: 4096.0,
                         unit: "bins",
                     },
-                    mutable_while_streaming: false,
                     // Output bin count — downstream consumers re-init.
                     reconfig_scope: ReconfigureScope::Downstream,
                 },
@@ -108,7 +107,6 @@ impl Block for LogMagU8 {
                         default: -100.0,
                         unit: "dBFS",
                     },
-                    mutable_while_streaming: true,
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
@@ -121,7 +119,6 @@ impl Block for LogMagU8 {
                         default: 0.0,
                         unit: "dBFS",
                     },
-                    mutable_while_streaming: true,
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
@@ -134,7 +131,6 @@ impl Block for LogMagU8 {
                         default: 0.3,
                         unit: "",
                     },
-                    mutable_while_streaming: true,
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
             ],

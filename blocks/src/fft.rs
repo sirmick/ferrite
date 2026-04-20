@@ -134,7 +134,6 @@ impl Block for FftBlock {
                         default: 4096.0,
                         unit: "bins",
                     },
-                    mutable_while_streaming: false,
                     // Changing FFT size changes the output port's bin count,
                     // so every downstream consumer must re-init.
                     reconfig_scope: ReconfigureScope::Downstream,
@@ -146,7 +145,6 @@ impl Block for FftBlock {
                         values: &["none", "hann", "hamming", "blackman"],
                         default: "hann",
                     },
-                    mutable_while_streaming: false,
                     // Window is just a coefficient table — swap in place
                     // on the next `process` call.
                     reconfig_scope: ReconfigureScope::SelfBlock,

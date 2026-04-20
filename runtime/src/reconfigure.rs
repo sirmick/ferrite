@@ -33,7 +33,7 @@
 
 use std::collections::BTreeSet;
 
-use ferrite_blocks::{BlockSpec, ParamSpec, ReconfigureScope};
+use ferrite_blocks::{BlockSpec, ReconfigureScope};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -230,7 +230,7 @@ fn diff_params(
                 param_key: key.to_string(),
                 old_value: old_val,
                 new_value: new_val,
-                scope: effective_scope(p),
+                scope: p.reconfig_scope,
             });
         } else {
             // Unknown key — registered spec doesn't declare it.
@@ -256,15 +256,6 @@ fn param_value_or_null(v: Option<&Value>, key: &str) -> Value {
         .and_then(|m| m.get(key))
         .cloned()
         .unwrap_or(Value::Null)
-}
-
-/// The legacy `mutable_while_streaming` flag stays on each spec for the
-/// duration of M3. Until it's removed (final M3 commit), prefer the
-/// richer `reconfig_scope` — but if a block author somehow set the two
-/// in contradiction (mutable=true but scope=SourceRestart), keep the
-/// costlier interpretation to stay conservative.
-fn effective_scope(p: &ParamSpec) -> ReconfigureScope {
-    p.reconfig_scope
 }
 
 #[cfg(test)]
@@ -300,7 +291,6 @@ mod tests {
                     default: 1.0,
                     unit: "",
                 },
-                mutable_while_streaming: true,
                 reconfig_scope: ReconfigureScope::SelfBlock,
             },
             FBParamSpec {
@@ -313,7 +303,6 @@ mod tests {
                     default: 33.0,
                     unit: "",
                 },
-                mutable_while_streaming: false,
                 reconfig_scope: ReconfigureScope::Downstream,
             },
             FBParamSpec {
@@ -326,7 +315,6 @@ mod tests {
                     default: 48_000.0,
                     unit: "Hz",
                 },
-                mutable_while_streaming: false,
                 reconfig_scope: ReconfigureScope::SourceRestart,
             },
         ],

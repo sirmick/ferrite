@@ -61,7 +61,6 @@ const BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
         default: DEFAULT_BUFFER_SAMPLES_F64,
         unit: "samples",
     },
-    mutable_while_streaming: false,
     // Ring allocation is part of block construction — changing it needs
     // a fresh SAB handed to a fresh AudioWorklet, which only happens on
     // a source-level restart.

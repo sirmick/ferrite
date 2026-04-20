@@ -69,7 +69,6 @@ const STREAM_ID_PARAM: ParamSpec = ParamSpec {
         default: 0.0,
         unit: "",
     },
-    mutable_while_streaming: false,
     // Wired into the FrameClient subscription at load time — the
     // subscription would have to be rebuilt against the WS.
     reconfig_scope: ReconfigureScope::SourceRestart,
@@ -85,7 +84,6 @@ const BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
         default: DEFAULT_BUFFER_SAMPLES_F64,
         unit: "samples",
     },
-    mutable_while_streaming: false,
     reconfig_scope: ReconfigureScope::SourceRestart,
 };
 

@@ -115,7 +115,6 @@ impl Block for FmDemod {
                         default: 240_000.0,
                         unit: "Hz",
                     },
-                    mutable_while_streaming: false,
                     // Matches the upstream producer's rate — changing it
                     // here implies the whole chain is being retuned.
                     reconfig_scope: ReconfigureScope::SourceRestart,
@@ -130,7 +129,6 @@ impl Block for FmDemod {
                         default: 75_000.0,
                         unit: "Hz",
                     },
-                    mutable_while_streaming: false,
                     // Only recomputes the output gain constant, but the
                     // value is baked at `new()` — re-init the block.
                     reconfig_scope: ReconfigureScope::Downstream,

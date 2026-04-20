@@ -162,7 +162,6 @@ impl Block for Decimator {
                         default: 4.0,
                         unit: "",
                     },
-                    mutable_while_streaming: false,
                     // Output rate = input_rate / factor — every downstream
                     // block re-inits at the new negotiated rate.
                     reconfig_scope: ReconfigureScope::Downstream,
@@ -177,7 +176,6 @@ impl Block for Decimator {
                         default: 33.0,
                         unit: "taps",
                     },
-                    mutable_while_streaming: false,
                     // Filter length is baked into the FIR state — needs
                     // a re-init, but output rate is unchanged.
                     reconfig_scope: ReconfigureScope::Downstream,
@@ -192,7 +190,6 @@ impl Block for Decimator {
                         default: 0.1,
                         unit: "",
                     },
-                    mutable_while_streaming: false,
                     reconfig_scope: ReconfigureScope::Downstream,
                 },
             ],

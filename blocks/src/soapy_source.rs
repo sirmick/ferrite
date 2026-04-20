@@ -216,7 +216,6 @@ impl Block for SoapySource {
                     kind: ParamKind::Text {
                         default: "driver=rtlsdr",
                     },
-                    mutable_while_streaming: false,
                     // Swapping devices = reopen the whole source.
                     reconfig_scope: ReconfigureScope::SourceRestart,
                 },
@@ -230,7 +229,6 @@ impl Block for SoapySource {
                         default: 2_400_000.0,
                         unit: "Hz",
                     },
-                    mutable_while_streaming: false,
                     // Hardware clock parameter — must re-open the stream.
                     reconfig_scope: ReconfigureScope::SourceRestart,
                 },
@@ -244,7 +242,6 @@ impl Block for SoapySource {
                         default: 100_000_000.0,
                         unit: "Hz",
                     },
-                    mutable_while_streaming: true,
                     // Tuning is live on Soapy devices — just call set_freq.
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
@@ -258,7 +255,6 @@ impl Block for SoapySource {
                         default: 20.0,
                         unit: "dB",
                     },
-                    mutable_while_streaming: true,
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
@@ -271,7 +267,6 @@ impl Block for SoapySource {
                         default: 0.0,
                         unit: "",
                     },
-                    mutable_while_streaming: false,
                     reconfig_scope: ReconfigureScope::SourceRestart,
                 },
             ],
