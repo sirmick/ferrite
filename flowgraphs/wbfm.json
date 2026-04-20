@@ -2,7 +2,7 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "wbfm",
   "label": "FM broadcast (mono)",
-  "description": "Wideband FM receiver authored as one cross-env doc. The node half reads 2.4 MS/s IQ off an RTL-SDR (or any Soapy device with a matching `args` string) and a Channelizer pulls a 240 kS/s VFO to baseband. The `chan.out → decim.in` wire crosses the environment boundary; `env_split` auto-inserts a `WsBridgeTx`/`WsBridgeRx` pair at load time and deterministically allocates a `stream_id` starting at `CROSS_ENV_STREAM_BASE` (1000). The browser half does a 5× decimation to 48 kHz, runs a phase-discriminator FM demod, and feeds the AudioSink ring. Stereo pilot + L-R + RDS would widen the baseband and land as a separate preset.",
+  "description": "Wideband FM receiver authored as one cross-env doc. The node half reads 2.4 MS/s IQ off an RTL-SDR (or any Soapy device with a matching `args` string) and a Channelizer pulls a 240 kS/s VFO to baseband. A TeeIqF32 fans the channelizer output into two paths: a server-side FFT → LogMagU8 chain that terminates at the `ui:fft` sentinel (env_split inserts a WsBridgeTxFftU8 on the node half with ui_name=\"fft\"), and the main audio chain where a 5× decim to 48 kHz, phase-discriminator FM demod, and AudioSink run in the browser. The `tee.out0 → decim.in` wire crosses the environment boundary; env_split auto-inserts a WsBridgeTx/WsBridgeRx pair and allocates stream_ids from CROSS_ENV_STREAM_BASE (1000) in wire order.",
   "environments": ["node", "browser"],
   "blocks": {
     "src": {
@@ -24,6 +24,28 @@
         "factor": 10,
         "num_taps": 81,
         "cutoff_normalized": 0.03125
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 4096,
+        "window": "hann"
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 4096,
+        "floor_dbfs": -100.0,
+        "ceil_dbfs": 0.0,
+        "alpha": 0.3
       }
     },
     "decim": {
@@ -52,7 +74,11 @@
   },
   "wires": [
     ["src.out", "chan.in"],
-    ["chan.out", "decim.in"],
+    ["chan.out", "tee.in"],
+    ["tee.out0", "decim.in"],
+    ["tee.out1", "fft.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
     ["decim.out", "demod.in"],
     ["demod.out", "audio.in"]
   ]

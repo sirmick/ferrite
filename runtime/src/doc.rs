@@ -167,17 +167,19 @@ mod tests {
     fn parses_shipped_wbfm_preset() {
         let doc = FlowgraphDoc::from_json(WBFM).expect("wbfm.json parses");
         assert_eq!(doc.name, "wbfm");
-        // wbfm.json is authored cross-env: SoapySource on node, FM
-        // demod + AudioSink on browser. `env_split` carves at load.
+        // wbfm.json is authored cross-env: SoapySource + channelizer +
+        // FFT tap on node, FM demod + AudioSink on browser. The FFT
+        // tap terminates at `ui:fft`; env_split synthesizes the Tx on
+        // load. `tee.out0 → decim.in` is the env crossing.
         assert_eq!(
             doc.environments,
             vec![Environment::Node, Environment::Browser]
         );
         assert_eq!(
             doc.blocks.keys().cloned().collect::<Vec<_>>(),
-            vec!["audio", "chan", "decim", "demod", "src"],
+            vec!["audio", "chan", "decim", "demod", "fft", "logmag", "src", "tee"],
         );
-        assert_eq!(doc.wires.len(), 4);
+        assert_eq!(doc.wires.len(), 8);
         // Spot-check one block's params survived the round-trip.
         let demod = doc.blocks.get("demod").expect("demod block present");
         assert_eq!(demod.type_name, "FmDemod");
@@ -191,22 +193,27 @@ mod tests {
             Some(Environment::Node)
         );
         assert_eq!(doc.blocks.get("audio").unwrap().placement, None);
+        // UI-terminal FFT wire is the sentinel form.
+        assert!(doc
+            .wires
+            .iter()
+            .any(|w| w.src == "logmag.out" && w.dst == "ui:fft"));
     }
 
     #[test]
     fn parses_shipped_wbam_preset() {
         let doc = FlowgraphDoc::from_json(WBAM).expect("wbam.json parses");
         assert_eq!(doc.name, "wbam");
-        // Same cross-env shape as wbfm: Soapy source on node, demod +
-        // audio on browser — the receivers pane toggle relies on this
-        // symmetry for a clean demod-only reconfigure.
+        // Same cross-env shape as wbfm: Soapy source + FFT tap on node,
+        // demod + audio on browser — the receivers pane toggle relies
+        // on this symmetry for a clean demod-only reconfigure.
         assert_eq!(
             doc.environments,
             vec![Environment::Node, Environment::Browser]
         );
         assert_eq!(
             doc.blocks.keys().cloned().collect::<Vec<_>>(),
-            vec!["audio", "chan", "decim", "demod", "src"],
+            vec!["audio", "chan", "decim", "demod", "fft", "logmag", "src", "tee"],
         );
         let demod = doc.blocks.get("demod").expect("demod block present");
         assert_eq!(demod.type_name, "AmDemod");

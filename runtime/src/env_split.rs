@@ -30,7 +30,7 @@
 
 use std::collections::BTreeMap;
 
-use ferrite_blocks::Placement;
+use ferrite_blocks::{Placement, PortType};
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -67,6 +67,18 @@ pub enum SplitError {
     UnsupportedCrossing { wire: Wire },
     #[error("split would synthesize bridge block {id:?} but the source doc already uses that id")]
     BridgeNameCollision { id: String },
+    #[error(
+        "ui:{ui_name:?} wire source {endpoint:?} has port type {port_type:?} — no WsBridgeTx variant exists for it"
+    )]
+    UnsupportedUiPortType {
+        ui_name: String,
+        endpoint: String,
+        port_type: PortType,
+    },
+    #[error(
+        "ui:{ui_name:?} wire source {endpoint:?} references an output port that doesn't exist"
+    )]
+    UnknownSourcePort { ui_name: String, endpoint: String },
 }
 
 /// Split `doc` for `env`: keep only blocks placed in `env`, keep only
@@ -110,12 +122,13 @@ pub fn split_for_environment(
             if producer_env != env {
                 continue;
             }
+            let tx_type = pick_ui_tx_type(doc, registry, &wire.src, ui_name)?;
             let bridge_id = format!("__ui_{ui_name}_{sid}");
             insert_bridge(
                 &mut new_blocks,
                 doc,
                 bridge_id.clone(),
-                "WsBridgeTx",
+                tx_type,
                 env,
                 json!({ "stream_id": sid, "ui_name": ui_name }),
             )?;
@@ -173,6 +186,43 @@ pub fn split_for_environment(
         blocks: new_blocks,
         wires: new_wires,
     })
+}
+
+/// Resolve the source port's type and map it to the matching WsBridgeTx
+/// variant. Only the two Tx variants that exist today are supported
+/// (IqF32 → `WsBridgeTx`, FftU8 → `WsBridgeTxFftU8`); other port types
+/// would need their own Tx block before a `ui:<name>` wire can carry them.
+fn pick_ui_tx_type(
+    doc: &FlowgraphDoc,
+    registry: &dyn SpecRegistry,
+    source: &str,
+    ui_name: &str,
+) -> Result<&'static str, SplitError> {
+    let (block_id, port_name) = split_endpoint(source);
+    let decl = doc
+        .blocks
+        .get(block_id)
+        .expect("validate_doc caught unknown source blocks before split");
+    let spec = registry
+        .get(&decl.type_name)
+        .expect("resolve_placements caught unknown block types before split");
+    let port =
+        spec.outputs
+            .iter()
+            .find(|p| p.name == port_name)
+            .ok_or(SplitError::UnknownSourcePort {
+                ui_name: ui_name.to_string(),
+                endpoint: source.to_string(),
+            })?;
+    match port.port_type {
+        PortType::IqF32 => Ok("WsBridgeTx"),
+        PortType::FftU8 => Ok("WsBridgeTxFftU8"),
+        other => Err(SplitError::UnsupportedUiPortType {
+            ui_name: ui_name.to_string(),
+            endpoint: source.to_string(),
+            port_type: other,
+        }),
+    }
 }
 
 /// Reject browser→node crossings up front so the split loop below can
@@ -363,6 +413,28 @@ mod tests {
         outputs: IQ_OUT,
         params: NO_PARAMS,
     };
+    const FFT_OUT: &[PortSpec] = &[PortSpec {
+        name: "out",
+        port_type: PortType::FftU8,
+    }];
+    const FFT_HW_SRC: BlockSpec = BlockSpec {
+        type_name: "FftHwSrc",
+        placement: Placement::NativeOnly,
+        inputs: NO_PORTS,
+        outputs: FFT_OUT,
+        params: NO_PARAMS,
+    };
+    const REAL_OUT: &[PortSpec] = &[PortSpec {
+        name: "out",
+        port_type: PortType::RealF32,
+    }];
+    const REAL_HW_SRC: BlockSpec = BlockSpec {
+        type_name: "RealHwSrc",
+        placement: Placement::NativeOnly,
+        inputs: NO_PORTS,
+        outputs: REAL_OUT,
+        params: NO_PARAMS,
+    };
 
     fn stub() -> StubRegistry {
         StubRegistry(vec![
@@ -371,6 +443,8 @@ mod tests {
             ("Either", &EITHER),
             ("WsBridgeTx", &WS_TX),
             ("WsBridgeRx", &WS_RX),
+            ("FftHwSrc", &FFT_HW_SRC),
+            ("RealHwSrc", &REAL_HW_SRC),
         ])
     }
 
@@ -726,6 +800,40 @@ mod tests {
         let browser = split_for_environment(&doc, Environment::Browser, &stub()).unwrap();
         assert!(browser.blocks.is_empty());
         assert!(browser.wires.is_empty());
+    }
+
+    #[test]
+    fn ui_sink_on_fft_u8_source_synthesizes_fft_u8_tx() {
+        let doc = doc_from(
+            r#"{
+                "name": "ui-fft",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src": {"type": "FftHwSrc"}
+                },
+                "wires": [["src.out", "ui:fft"]]
+            }"#,
+        );
+        let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
+        let tx_id = format!("__ui_fft_{CROSS_ENV_STREAM_BASE}");
+        let tx = node.blocks.get(&tx_id).expect("ui-side bridge inserted");
+        assert_eq!(tx.type_name, "WsBridgeTxFftU8");
+    }
+
+    #[test]
+    fn ui_sink_on_unsupported_port_type_errors() {
+        let doc = doc_from(
+            r#"{
+                "name": "ui-real",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src": {"type": "RealHwSrc"}
+                },
+                "wires": [["src.out", "ui:audio"]]
+            }"#,
+        );
+        let err = split_for_environment(&doc, Environment::Node, &stub()).unwrap_err();
+        assert!(matches!(err, SplitError::UnsupportedUiPortType { .. }));
     }
 
     #[test]
