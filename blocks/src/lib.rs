@@ -14,7 +14,6 @@ extern crate self as ferrite_blocks;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-pub mod audio_ring;
 pub mod audio_sink;
 pub mod block;
 pub mod channelizer;
@@ -27,9 +26,9 @@ pub mod registry;
 pub mod sine;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_source;
+pub mod spsc_ring;
 pub mod ws_bridge;
 
-pub use audio_ring::AudioRing;
 pub use audio_sink::{AudioSink, AudioSinkParams};
 pub use block::{
     AsAny, Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort,
@@ -44,6 +43,7 @@ pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
 pub use soapy_source::{SoapySource, SoapySourceParams};
+pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use ws_bridge::{WsBridgeParams, WsBridgeRx, WsBridgeTx};
 
 /// Marks an `impl Block for T` so `T` is added to [`registry`].

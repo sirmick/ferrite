@@ -19,11 +19,11 @@
 use anyhow::Result;
 use serde::Deserialize;
 
-use crate::audio_ring::AudioRing;
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, ParamKind, ParamSpec, Placement, PortSpec,
     PortType, Work,
 };
+use crate::spsc_ring::AudioRing;
 
 /// Ring capacity default — ~170 ms at 48 kHz. Matches the TS
 /// `AudioSink` default so presets carry the same numbers across the
