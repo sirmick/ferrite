@@ -6,8 +6,18 @@
 //! keys like `environments`, `blocks`, `wires`) — serde's default
 //! matches the TS shape without any `#[serde(rename)]` on this struct.
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{Error as _, SeqAccess, Visitor},
+    ser::SerializeSeq,
+    Deserialize, Deserializer, Serialize, Serializer,
+};
 use std::collections::BTreeMap;
+use std::fmt;
+
+// Wire is serialized as a JSON array `[src, dst]` for TS/JSON
+// compatibility with the existing preset files, but the Rust type is a
+// struct so call sites can use named field access and grow the type
+// later without touching every consumer.
 
 /// Where a flowgraph (or half of one) runs.
 ///
@@ -43,9 +53,77 @@ pub struct BlockInstanceDecl {
     pub placement: Option<Environment>,
 }
 
-/// Wire endpoints are `"instance_id.port_name"` strings. Encoded as a
-/// two-element JSON array to match the TS shape (`readonly [string, string]`).
-pub type Wire = [String; 2];
+/// Wire — `src → dst`, each endpoint a `"block_id.port"` string.
+///
+/// Serialized as a JSON array `["src.out", "dst.in"]` for TS
+/// compatibility. The struct form gives Rust callers named field access
+/// and leaves room to grow (e.g. future metadata) without touching every
+/// consumer.
+///
+/// The `dst` string can also carry a `"ui:<name>"` sentinel marking a
+/// UI-terminal sink: the split pass inserts a `WsBridgeTx` on the
+/// producing side and drops the wire on the consuming side. See
+/// [`Wire::ui_sink_name`] and `env_split::split_for_environment`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wire {
+    pub src: String,
+    pub dst: String,
+}
+
+impl Wire {
+    /// Build a wire from two endpoints.
+    #[must_use]
+    pub fn new(src: impl Into<String>, dst: impl Into<String>) -> Self {
+        Self {
+            src: src.into(),
+            dst: dst.into(),
+        }
+    }
+
+    /// `Some(name)` if `dst` is a `"ui:<name>"` UI-terminal sink.
+    #[must_use]
+    pub fn ui_sink_name(&self) -> Option<&str> {
+        self.dst.strip_prefix("ui:")
+    }
+}
+
+impl Serialize for Wire {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(2))?;
+        seq.serialize_element(&self.src)?;
+        seq.serialize_element(&self.dst)?;
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Wire {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct WireVisitor;
+
+        impl<'de> Visitor<'de> for WireVisitor {
+            type Value = Wire;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON array [src, dst]")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Wire, A::Error> {
+                let src: String = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(0, &self))?;
+                let dst: String = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(1, &self))?;
+                if seq.next_element::<serde_json::Value>()?.is_some() {
+                    return Err(A::Error::invalid_length(3, &self));
+                }
+                Ok(Wire { src, dst })
+            }
+        }
+
+        d.deserialize_seq(WireVisitor)
+    }
+}
 
 /// Top-level flowgraph document. Use [`FlowgraphDoc::from_json`] to load
 /// from a slice.
@@ -166,6 +244,28 @@ mod tests {
     fn rejects_garbage() {
         assert!(FlowgraphDoc::from_json(b"not json at all").is_err());
         assert!(FlowgraphDoc::from_json(b"{}").is_err()); // missing required fields
+    }
+
+    #[test]
+    fn wire_round_trips_as_two_element_array() {
+        let w: Wire = serde_json::from_str(r#"["a.out", "b.in"]"#).unwrap();
+        assert_eq!(w.src, "a.out");
+        assert_eq!(w.dst, "b.in");
+        let back = serde_json::to_string(&w).unwrap();
+        assert_eq!(back, r#"["a.out","b.in"]"#);
+    }
+
+    #[test]
+    fn wire_ui_sink_name_strips_prefix() {
+        let w = Wire::new("src.out", "ui:waterfall");
+        assert_eq!(w.ui_sink_name(), Some("waterfall"));
+        assert_eq!(Wire::new("src.out", "sink.in").ui_sink_name(), None);
+    }
+
+    #[test]
+    fn wire_rejects_three_element_array() {
+        let err = serde_json::from_str::<Wire>(r#"["a.out", "b.in", "extra"]"#);
+        assert!(err.is_err());
     }
 
     #[test]

@@ -496,7 +496,7 @@ mod tests {
     fn wire_change_is_structural() {
         let a = base_doc();
         let mut b = base_doc();
-        b.wires.push(["s.out".into(), "s.in".into()]);
+        b.wires.push(crate::doc::Wire::new("s.out", "s.in"));
         let plan = diff_presets(&a, &b, &TestRegistry).unwrap();
         assert_eq!(plan.structural, vec![StructuralChange::WiresChanged]);
         assert_eq!(plan.overall, ReconfigureScope::SourceRestart);

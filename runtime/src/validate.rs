@@ -143,18 +143,24 @@ fn check_shape(doc: &FlowgraphDoc) -> Vec<ValidationError> {
         }
     }
     for (i, wire) in doc.wires.iter().enumerate() {
-        for endpoint in wire {
-            if !endpoint.contains('.') {
-                errors.push(ValidationError {
-                    phase: Phase::Shape,
-                    error: format!(
-                        "wire[{i}] endpoints must be \"instance.port\" strings (got {endpoint:?})"
-                    ),
-                    wire: Some(wire.clone()),
-                    block: None,
-                    port: None,
-                });
-            }
+        // Sources are always `instance.port`. Destinations are either
+        // `instance.port` or a `ui:<name>` UI-terminal sentinel.
+        let mut bad = |endpoint: &str| {
+            errors.push(ValidationError {
+                phase: Phase::Shape,
+                error: format!(
+                    "wire[{i}] endpoints must be \"instance.port\" (or \"ui:<name>\" on dst); got {endpoint:?}"
+                ),
+                wire: Some(wire.clone()),
+                block: None,
+                port: None,
+            });
+        };
+        if !wire.src.contains('.') {
+            bad(&wire.src);
+        }
+        if wire.ui_sink_name().is_none() && !wire.dst.contains('.') {
+            bad(&wire.dst);
         }
     }
     errors
@@ -167,8 +173,7 @@ fn check_shape(doc: &FlowgraphDoc) -> Vec<ValidationError> {
 fn check_wire_endpoints(doc: &FlowgraphDoc) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     for wire in &doc.wires {
-        let (from_block, _) = split_endpoint(&wire[0]);
-        let (to_block, _) = split_endpoint(&wire[1]);
+        let (from_block, _) = split_endpoint(&wire.src);
         if !doc.blocks.contains_key(from_block) {
             errors.push(ValidationError {
                 phase: Phase::WireEndpoints,
@@ -178,6 +183,13 @@ fn check_wire_endpoints(doc: &FlowgraphDoc) -> Vec<ValidationError> {
                 port: None,
             });
         }
+        // `ui:<name>` destinations are UI-terminal sentinels — no block
+        // needs to exist for them. `env_split` resolves them into a
+        // WsBridgeTx on the producing side.
+        if wire.ui_sink_name().is_some() {
+            continue;
+        }
+        let (to_block, _) = split_endpoint(&wire.dst);
         if !doc.blocks.contains_key(to_block) {
             errors.push(ValidationError {
                 phase: Phase::WireEndpoints,
@@ -200,22 +212,28 @@ fn check_fan(doc: &FlowgraphDoc) -> Vec<ValidationError> {
     let mut seen_out: HashSet<&str> = HashSet::new();
     let mut seen_in: HashSet<&str> = HashSet::new();
     for wire in &doc.wires {
-        if !seen_out.insert(&wire[0]) {
+        if !seen_out.insert(&wire.src) {
             errors.push(ValidationError {
                 phase: Phase::Fan,
                 error: format!(
                     "output port {:?} is wired more than once — use a Tee block to broadcast",
-                    wire[0]
+                    wire.src
                 ),
                 wire: Some(wire.clone()),
                 block: None,
                 port: None,
             });
         }
-        if !seen_in.insert(&wire[1]) {
+        // `ui:<name>` destinations are virtual — don't enforce fan-in
+        // against them; multiple producers could (in principle) share
+        // the same sink name. The split pass will flag real conflicts.
+        if wire.ui_sink_name().is_some() {
+            continue;
+        }
+        if !seen_in.insert(&wire.dst) {
             errors.push(ValidationError {
                 phase: Phase::Fan,
-                error: format!("input port {:?} is wired more than once", wire[1]),
+                error: format!("input port {:?} is wired more than once", wire.dst),
                 wire: Some(wire.clone()),
                 block: None,
                 port: None,
@@ -235,8 +253,12 @@ fn check_dag(doc: &FlowgraphDoc) -> Vec<ValidationError> {
         adj.insert(id.as_str(), HashSet::new());
     }
     for wire in &doc.wires {
-        let (from, _) = split_endpoint(&wire[0]);
-        let (to, _) = split_endpoint(&wire[1]);
+        let (from, _) = split_endpoint(&wire.src);
+        // `ui:<name>` destinations never close a cycle — skip them.
+        if wire.ui_sink_name().is_some() {
+            continue;
+        }
+        let (to, _) = split_endpoint(&wire.dst);
         if adj.contains_key(from) && adj.contains_key(to) {
             adj.get_mut(from).unwrap().insert(to);
         }
@@ -299,8 +321,10 @@ fn check_dag(doc: &FlowgraphDoc) -> Vec<ValidationError> {
 fn check_connectivity(doc: &FlowgraphDoc) -> Vec<ValidationError> {
     let mut touched: HashSet<&str> = HashSet::new();
     for wire in &doc.wires {
-        touched.insert(split_endpoint(&wire[0]).0);
-        touched.insert(split_endpoint(&wire[1]).0);
+        touched.insert(split_endpoint(&wire.src).0);
+        if wire.ui_sink_name().is_none() {
+            touched.insert(split_endpoint(&wire.dst).0);
+        }
     }
     let mut warnings = Vec::new();
     for id in doc.blocks.keys() {
@@ -371,7 +395,7 @@ mod tests {
     #[test]
     fn rejects_wire_to_unknown_block() {
         let mut d = minimal_doc();
-        d.wires.push(["a.out2".into(), "nope.in".into()]);
+        d.wires.push(crate::doc::Wire::new("a.out2", "nope.in"));
         let err = validate_doc(&d).unwrap_err();
         assert!(err.errors.iter().any(|e| e.phase == Phase::WireEndpoints));
     }
@@ -387,7 +411,7 @@ mod tests {
                 placement: None,
             },
         );
-        d.wires.push(["c.out".into(), "b.in".into()]);
+        d.wires.push(crate::doc::Wire::new("c.out", "b.in"));
         let err = validate_doc(&d).unwrap_err();
         assert!(err.errors.iter().any(|e| e.phase == Phase::Fan));
     }
@@ -395,7 +419,7 @@ mod tests {
     #[test]
     fn rejects_cycle() {
         let mut d = minimal_doc();
-        d.wires.push(["b.out".into(), "a.in".into()]);
+        d.wires.push(crate::doc::Wire::new("b.out", "a.in"));
         let err = validate_doc(&d).unwrap_err();
         assert!(err.errors.iter().any(|e| e.phase == Phase::Dag));
     }
@@ -420,7 +444,7 @@ mod tests {
     #[test]
     fn rejects_endpoint_without_port() {
         let mut d = minimal_doc();
-        d.wires[0][0] = "a".into(); // missing ".port"
+        d.wires[0].src = "a".into(); // missing ".port"
         let err = validate_doc(&d).unwrap_err();
         assert!(err.errors.iter().any(|e| e.phase == Phase::Shape));
     }

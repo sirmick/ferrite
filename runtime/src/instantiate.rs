@@ -150,10 +150,10 @@ fn check_wire_port_endpoints<R: SpecRegistry>(
 ) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     for wire in &doc.wires {
-        if let Some(err) = resolve_port_existence(wire, 0, "output", doc, registry) {
+        if let Some(err) = resolve_port_existence(wire, &wire.src, "output", doc, registry) {
             errors.push(err);
         }
-        if let Some(err) = resolve_port_existence(wire, 1, "input", doc, registry) {
+        if let Some(err) = resolve_port_existence(wire, &wire.dst, "input", doc, registry) {
             errors.push(err);
         }
     }
@@ -162,12 +162,11 @@ fn check_wire_port_endpoints<R: SpecRegistry>(
 
 fn resolve_port_existence<R: SpecRegistry>(
     wire: &crate::doc::Wire,
-    side_index: usize,
+    endpoint: &str,
     side_name: &'static str,
     doc: &FlowgraphDoc,
     registry: &R,
 ) -> Option<ValidationError> {
-    let endpoint = &wire[side_index];
     let (block_id, port_name) = split_endpoint(endpoint);
     let decl = doc.blocks.get(block_id)?;
     let spec = registry.get(&decl.type_name)?;
@@ -201,10 +200,10 @@ fn check_wire_type_match<R: SpecRegistry>(
 ) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     for wire in &doc.wires {
-        let Some(src_type) = lookup_port_type(&wire[0], true, doc, registry) else {
+        let Some(src_type) = lookup_port_type(&wire.src, true, doc, registry) else {
             continue;
         };
-        let Some(dst_type) = lookup_port_type(&wire[1], false, doc, registry) else {
+        let Some(dst_type) = lookup_port_type(&wire.dst, false, doc, registry) else {
             continue;
         };
         if src_type != dst_type {
@@ -212,7 +211,7 @@ fn check_wire_type_match<R: SpecRegistry>(
                 phase: Phase::WireTypeMatch,
                 error: format!(
                     "{} is {src_type:?}; {} expects {dst_type:?}",
-                    wire[0], wire[1]
+                    wire.src, wire.dst
                 ),
                 wire: Some(wire.clone()),
                 block: None,
@@ -265,8 +264,8 @@ fn build_wire_plan_with_types(doc: &FlowgraphDoc, specs: &SpecMap) -> WirePlan {
         .map(|k| (k.clone(), BTreeMap::new()))
         .collect();
     for wire in &doc.wires {
-        let (src_block, src_port) = split_endpoint(&wire[0]);
-        let (dst_block, dst_port) = split_endpoint(&wire[1]);
+        let (src_block, src_port) = split_endpoint(&wire.src);
+        let (dst_block, dst_port) = split_endpoint(&wire.dst);
         let port_type = specs
             .get(src_block)
             .and_then(|s| s.outputs.iter().find(|p| p.name == src_port))

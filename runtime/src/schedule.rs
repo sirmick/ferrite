@@ -67,8 +67,8 @@ pub fn topological_order(doc: &FlowgraphDoc) -> anyhow::Result<Vec<String>> {
         ids.iter().map(|k| (k.clone(), Vec::new())).collect();
 
     for wire in &doc.wires {
-        let from = split_endpoint(&wire[0]).0.to_string();
-        let to = split_endpoint(&wire[1]).0.to_string();
+        let from = split_endpoint(&wire.src).0.to_string();
+        let to = split_endpoint(&wire.dst).0.to_string();
         if from == to {
             // Self-loops are cycles; caller should have rejected. Guard anyway.
             continue;
@@ -129,8 +129,8 @@ pub fn build_wire_plan(doc: &FlowgraphDoc) -> WirePlan {
         .map(|k| (k.clone(), BTreeMap::new()))
         .collect();
     for wire in &doc.wires {
-        let (src_block, src_port) = split_endpoint(&wire[0]);
-        let (dst_block, dst_port) = split_endpoint(&wire[1]);
+        let (src_block, src_port) = split_endpoint(&wire.src);
+        let (dst_block, dst_port) = split_endpoint(&wire.dst);
         plan.get_mut(dst_block).expect("dst block present").insert(
             dst_port.to_string(),
             InputSource {
