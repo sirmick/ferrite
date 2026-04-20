@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Dialog } from 'bits-ui';
+  import PresetJsonView from './PresetJsonView.svelte';
   import type { FlowgraphDoc } from '$lib/flowgraph';
   import {
     fetchBlockSchemas,
@@ -23,6 +24,9 @@
   let errorMessage = $state<string | null>(null);
   let lastPlan = $state<ReconfigurePlan | null>(null);
   let formValues = $state<Record<string, Record<string, unknown>>>({});
+
+  type Tab = 'form' | 'json';
+  let tab = $state<Tab>('form');
 
   $effect(() => {
     if (open) {
@@ -152,7 +156,26 @@
           </Dialog.Description>
         </div>
 
-        {#if status === 'loading'}
+        <div class="flex border-b border-slate-800 text-xs">
+          <button
+            type="button"
+            class="px-3 py-1"
+            class:tab-active={tab === 'form'}
+            class:tab-idle={tab !== 'form'}
+            onclick={() => (tab = 'form')}>Form</button
+          >
+          <button
+            type="button"
+            class="px-3 py-1"
+            class:tab-active={tab === 'json'}
+            class:tab-idle={tab !== 'json'}
+            onclick={() => (tab = 'json')}>JSON</button
+          >
+        </div>
+
+        {#if tab === 'json'}
+          <PresetJsonView refreshKey={open} />
+        {:else if status === 'loading'}
           <p class="text-xs text-[color:var(--color-muted)]">Loading…</p>
         {:else if status === 'error'}
           <p class="text-xs text-rose-400">{errorMessage}</p>
@@ -271,16 +294,33 @@
           >
             Close
           </button>
-          <button
-            type="button"
-            class="rounded bg-[color:var(--color-accent)] px-3 py-1 text-sm font-semibold text-slate-900 disabled:opacity-50"
-            disabled={status !== 'ready' || entries.length === 0}
-            onclick={apply}
-          >
-            {status === 'applying' ? 'Applying…' : 'Apply'}
-          </button>
+          {#if tab === 'form'}
+            <button
+              type="button"
+              class="rounded bg-[color:var(--color-accent)] px-3 py-1 text-sm font-semibold text-slate-900 disabled:opacity-50"
+              disabled={status !== 'ready' || entries.length === 0}
+              onclick={apply}
+            >
+              {status === 'applying' ? 'Applying…' : 'Apply'}
+            </button>
+          {/if}
         </div>
       </div>
     </Dialog.Content>
   </Dialog.Portal>
 </Dialog.Root>
+
+<style>
+  .tab-active {
+    border-bottom: 2px solid var(--color-accent);
+    color: var(--color-fg);
+    font-weight: 600;
+  }
+  .tab-idle {
+    color: var(--color-muted);
+    border-bottom: 2px solid transparent;
+  }
+  .tab-idle:hover {
+    color: var(--color-fg);
+  }
+</style>

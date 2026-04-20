@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Dialog } from 'bits-ui';
   import DevicePicker from './DevicePicker.svelte';
+  import PresetJsonView from './PresetJsonView.svelte';
   import type { OpenDeviceRequest } from '$lib/api/device';
   import type { DeviceCapabilities } from '$lib/api/devices';
   import { untrack } from 'svelte';
@@ -18,7 +19,7 @@
 
   let { open = $bindable(), params, onPickDevice, onApplyTone, onClose }: Props = $props();
 
-  type Tab = 'device' | 'tone' | 'file';
+  type Tab = 'device' | 'tone' | 'file' | 'json';
   let tab = $state<Tab>('device');
 
   const CENTER_FREQ_HZ = 100_000_000;
@@ -65,6 +66,7 @@
     { id: 'device', label: 'Device' },
     { id: 'tone', label: 'Tone' },
     { id: 'file', label: 'File' },
+    { id: 'json', label: 'JSON' },
   ];
 </script>
 
@@ -179,6 +181,8 @@
                 class="rounded border border-slate-800 bg-slate-900/60 p-2 font-mono text-[11px] text-slate-300">cargo run -p ferrited -- --source file:///path/to/capture.cf32 --rate 2000000 --freq 100000000</pre>
               <p>REST-side file browsing lands in a later pass.</p>
             </div>
+          {:else if tab === 'json'}
+            <PresetJsonView refreshKey={open} />
           {/if}
         </div>
       </div>
