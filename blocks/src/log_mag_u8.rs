@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
-    Placement, PortSpec, PortType, ReconfigureScope, Work,
+    Placement, PortSpec, PortType, ReconfigureScope, Work, MAX_PORTS,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -139,6 +139,12 @@ impl Block for LogMagU8 {
 
     fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
         Ok(())
+    }
+
+    fn output_capacity_hints(&self) -> [usize; MAX_PORTS] {
+        let mut h = [0; MAX_PORTS];
+        h[0] = self.params.size;
+        h
     }
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {

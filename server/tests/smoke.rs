@@ -205,6 +205,90 @@ async fn patch_source_while_running_reports_applied() {
 }
 
 #[tokio::test]
+async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
+    // End-to-end smoke: load the shipped wbfm preset, feed it a
+    // SineSource (no hardware required), connect to /ws/preset, and
+    // confirm both crossings light up:
+    //   - stream 1000: IQ crossing on `tee.out0 → decim.in`
+    //   - stream 1001: FFT tap on `logmag.out → ui:fft`
+    // This exercises the full pipeline compose → env_split → runtime
+    // → broadcast → WS path against the same preset the web UI ships.
+    let preset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("flowgraphs/wbfm.json");
+    let preset: FlowgraphDoc =
+        serde_json::from_str(&std::fs::read_to_string(&preset_path).expect("wbfm.json readable"))
+            .expect("wbfm.json parses");
+
+    // Match the preset's 2.4 MS/s hint so Channelizer runs at its
+    // authored input rate. Tone a little below centre so the FFT has a
+    // well-defined non-zero bin.
+    let source = SourceConfig {
+        type_name: "SineSource".into(),
+        params: json!({
+            "rate_hz": 2_400_000.0,
+            "tone_freq_abs_hz": 100_050_000.0,
+            "amplitude": 0.5,
+        }),
+    };
+    let state = app_state::AppState::new(preset, source, Duration::from_millis(5));
+    state.start().await.expect("wbfm auto-start");
+    let app = Router::new()
+        .route("/ws/preset", get(routes::ws_preset))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/preset"))
+        .await
+        .expect("ws connect");
+
+    // Collect frames for up to 2s, tagging each with its stream id.
+    // wbfm's FFT fires every FFT_SIZE (4096) samples at 240 kS/s post-
+    // channelizer, and IQ crossings fire every runtime tick, so we
+    // should see both stream ids well within the window.
+    let mut saw_iq = false;
+    let mut saw_fft = false;
+    let mut counts: std::collections::BTreeMap<(u16, &'static str), usize> =
+        std::collections::BTreeMap::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline && (!saw_iq || !saw_fft) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let msg = match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(m))) => m,
+            _ => break,
+        };
+        let Message::Binary(bytes) = msg else {
+            continue;
+        };
+        match Frame::from_postcard(&bytes).expect("decode") {
+            Frame::IqF32 { stream_id, .. } => {
+                *counts.entry((stream_id, "IqF32")).or_default() += 1;
+                if stream_id == 1000 {
+                    saw_iq = true;
+                }
+            }
+            Frame::FftU8 {
+                stream_id, payload, ..
+            } => {
+                *counts.entry((stream_id, "FftU8")).or_default() += 1;
+                if stream_id == 1001 {
+                    assert_eq!(payload.len(), 4096, "expected 4096 FFT bins");
+                    saw_fft = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_iq, "no IqF32 on stream 1000 within 2s; saw {counts:?}");
+    assert!(saw_fft, "no FftU8 on stream 1001 within 2s; saw {counts:?}");
+}
+
+#[tokio::test]
 async fn ui_sinks_returns_fft_stream_id_for_server_side_tap() {
     // Preset with a single `ui:fft` sink from a node-side logmag chain.
     // env_split assigns stream_id=1000 on the first slot, payload=FftU8.

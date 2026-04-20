@@ -232,10 +232,12 @@ impl Runtime {
                     "runtime: block {id:?} declares > {MAX_PORTS} ports on one side"
                 ));
             }
+            let hints = block.output_capacity_hints();
             let outputs = spec
                 .outputs
                 .iter()
-                .map(|p| TypedBuf::for_port(p.port_type, frames_hint))
+                .enumerate()
+                .map(|(i, p)| TypedBuf::for_port(p.port_type, frames_hint.max(hints[i])))
                 .collect::<Vec<_>>();
             let produced = vec![0; spec.outputs.len()];
             entries.push(BlockEntry {

@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
-    Placement, PortSpec, PortType, ReconfigureScope, Work,
+    Placement, PortSpec, PortType, ReconfigureScope, Work, MAX_PORTS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -64,6 +64,11 @@ pub struct FftBlock {
     plan: Arc<dyn RustFft<f32>>,
     window: Vec<f32>,
     scratch: Vec<Complex<f32>>,
+    // Accumulates input across `process` calls until a full `size`-sample
+    // frame is ready. The runtime's back-pressure is coarse: unconsumed
+    // input is not re-presented next tick, so an FFT that needs more
+    // samples than one upstream tick produces must buffer internally.
+    accum: Vec<Complex<f32>>,
 }
 
 impl FftBlock {
@@ -78,11 +83,13 @@ impl FftBlock {
         let plan = planner.plan_fft_forward(params.size);
         let window = build_window(params.window, params.size);
         let scratch = vec![Complex::new(0.0, 0.0); params.size];
+        let accum = Vec::with_capacity(params.size);
         Ok(Self {
             params,
             plan,
             window,
             scratch,
+            accum,
         })
     }
 
@@ -157,6 +164,12 @@ impl Block for FftBlock {
         Ok(())
     }
 
+    fn output_capacity_hints(&self) -> [usize; MAX_PORTS] {
+        let mut h = [0; MAX_PORTS];
+        h[0] = self.params.size;
+        h
+    }
+
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
         let n = self.params.size;
         let src = io
@@ -167,22 +180,34 @@ impl Block for FftBlock {
         let Some(src) = src else {
             return Ok(Work::new());
         };
-        if src.len() < n {
-            return Ok(Work::new());
+
+        // Pull every available input sample into the internal accumulator.
+        // Cap at `n` — anything beyond a full frame is discarded rather
+        // than queued, since the runtime already gave us a fresh view
+        // next tick and overlapping frames aren't useful for the
+        // waterfall.
+        let take = (n - self.accum.len()).min(src.len());
+        self.accum.extend_from_slice(&src[..take]);
+        let mut work = Work::new();
+        work.consumed[0] = src.len();
+
+        if self.accum.len() < n {
+            return Ok(work);
         }
+
         let dst = io
             .outputs
             .iter_mut()
             .find(|p| p.name == "out")
             .and_then(OutputPort::as_iq_f32_mut);
         let Some(dst) = dst else {
-            return Ok(Work::new());
+            return Ok(work);
         };
         if dst.len() < n {
-            return Ok(Work::new());
+            return Ok(work);
         }
 
-        for (i, (&s, &w)) in src[..n].iter().zip(self.window.iter()).enumerate() {
+        for (i, (&s, &w)) in self.accum[..n].iter().zip(self.window.iter()).enumerate() {
             self.scratch[i] = s * w;
         }
         self.plan.process(&mut self.scratch);
@@ -195,8 +220,7 @@ impl Block for FftBlock {
             *out = self.scratch[(k + half) % n];
         }
 
-        let mut work = Work::new();
-        work.consumed[0] = n;
+        self.accum.clear();
         work.produced[0] = n;
         Ok(work)
     }

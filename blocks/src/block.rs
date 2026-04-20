@@ -437,6 +437,21 @@ pub trait Block: Send + AsAny {
     /// hot path.
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work>;
 
+    /// Per-output minimum capacity the block needs to make forward
+    /// progress in one `process` call. Index-parallel to
+    /// [`BlockSpec::outputs`]; unused slots are 0. The runtime treats the
+    /// return value as a *floor* on each output buffer's capacity and
+    /// allocates `max(frames_hint, hints[i])`.
+    ///
+    /// Default is all zeros, which is correct for blocks that produce
+    /// one output sample per input sample or whose output volume is
+    /// bounded by `frames_hint`. Blocks that emit in fixed-size frames
+    /// larger than `frames_hint` (FFT, LogMagU8) must override so the
+    /// runtime provisions buffers big enough to hold one frame.
+    fn output_capacity_hints(&self) -> [usize; MAX_PORTS] {
+        [0; MAX_PORTS]
+    }
+
     /// Flush and release. Must be idempotent.
     fn stop(&mut self) -> Result<()> {
         Ok(())
