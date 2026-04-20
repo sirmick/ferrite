@@ -156,6 +156,7 @@ async fn main() -> Result<()> {
             "/api/device/:id/vfo/:vfo_id",
             patch(routes::patch_vfo).delete(routes::delete_vfo),
         )
+        .route("/api/flowgraph", patch(routes::patch_flowgraph))
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
         .route("/ws/:id", get(routes::ws_session))
@@ -236,8 +237,6 @@ fn spawn_preset_mount(
     let doc: FlowgraphDoc = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing flowgraph {}", path.display()))?;
     let (frames, _) = broadcast::channel(32);
-    let handle =
-        preset_pipeline::spawn_preset(&doc, frames.clone(), Duration::from_micros(tick_period_us))
-            .context("spawn preset pipeline")?;
-    Ok(preset_pipeline::PresetMount { frames, handle })
+    preset_pipeline::spawn_preset(&doc, frames, Duration::from_micros(tick_period_us))
+        .context("spawn preset pipeline")
 }

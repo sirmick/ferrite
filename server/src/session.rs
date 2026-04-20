@@ -590,6 +590,19 @@ impl AppState {
         let inner = self.inner.read().await;
         Some(inner.preset.as_ref()?.frames.subscribe())
     }
+
+    /// Apply a new flowgraph to the preset pipeline. Returns `None` when
+    /// the server is not in preset mode; otherwise forwards to
+    /// [`crate::preset_pipeline::PresetMount::reconfigure`], which diffs,
+    /// rebuilds, and hot-swaps with rollback on failure.
+    pub async fn reconfigure_preset(
+        &self,
+        new_doc: &ferrite_runtime::FlowgraphDoc,
+    ) -> Option<Result<ferrite_runtime::ReconfigurePlan>> {
+        let inner = self.inner.read().await;
+        let mount = inner.preset.as_ref()?;
+        Some(mount.reconfigure(new_doc).await)
+    }
 }
 
 /// Tear down a session, sending a final `session_closed` JSON event to

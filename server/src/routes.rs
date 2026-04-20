@@ -464,6 +464,81 @@ pub async fn ws_session(
     ws.on_upgrade(move |socket| handle_session(socket, id, state))
 }
 
+/// One entry in the `changes` array returned by `PATCH /api/flowgraph`.
+/// Mirrors `ferrite_runtime::ParamChange` — the wire shape matches the
+/// internal type so a future TS client can deserialize it directly.
+#[derive(Serialize)]
+pub struct ParamChangeDto {
+    pub block_id: String,
+    pub param_key: String,
+    pub old_value: serde_json::Value,
+    pub new_value: serde_json::Value,
+    pub scope: &'static str,
+}
+
+/// `PATCH /api/flowgraph` response: the plan the server just applied.
+/// `overall` uses the wire-format scope strings (`self`, `downstream`,
+/// `sourceRestart`).
+#[derive(Serialize)]
+pub struct FlowgraphPatchResponse {
+    pub overall: &'static str,
+    pub changes: Vec<ParamChangeDto>,
+    pub structural_count: usize,
+    pub noop: bool,
+}
+
+/// `PATCH /api/flowgraph` — apply a new preset to the running pipeline.
+/// Returns the `ReconfigurePlan` the server computed (200), or 409 when
+/// the server isn't in preset mode (no pipeline to target), or 400 when
+/// the new doc fails to parse / validate / build. Rollback is atomic:
+/// a 400 response guarantees the running graph is untouched.
+pub async fn patch_flowgraph(
+    State(state): State<AppState>,
+    Json(new_doc): Json<ferrite_runtime::FlowgraphDoc>,
+) -> Result<Json<FlowgraphPatchResponse>, (StatusCode, Json<ApiError>)> {
+    let Some(result) = state.reconfigure_preset(&new_doc).await else {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "NOT_PRESET_MODE",
+                    message: "ferrited was started without --flowgraph; \
+                              PATCH /api/flowgraph only works in preset mode"
+                        .into(),
+                },
+            }),
+        ));
+    };
+    let plan = result.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "RECONFIGURE_FAILED",
+                    message: format!("{e:#}"),
+                },
+            }),
+        )
+    })?;
+    let changes = plan
+        .changes
+        .iter()
+        .map(|c| ParamChangeDto {
+            block_id: c.block_id.clone(),
+            param_key: c.param_key.clone(),
+            old_value: c.old_value.clone(),
+            new_value: c.new_value.clone(),
+            scope: c.scope.as_wire_str(),
+        })
+        .collect();
+    Ok(Json(FlowgraphPatchResponse {
+        noop: plan.is_noop(),
+        overall: plan.overall.as_wire_str(),
+        changes,
+        structural_count: plan.structural.len(),
+    }))
+}
+
 /// `GET /ws/preset` — single WebSocket endpoint exposed when `ferrited`
 /// is started with `--flowgraph <path>`. Subscribes to the preset
 /// pipeline's broadcast channel and forwards every frame as a binary
