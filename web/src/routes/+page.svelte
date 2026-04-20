@@ -2,6 +2,7 @@
   import Workspace from '$lib/layout/Workspace.svelte';
   import LogPanel from '$lib/layout/LogPanel.svelte';
   import BandsPanel from '$lib/presets/BandsPanel.svelte';
+  import ReceiversPanel from '$lib/presets/ReceiversPanel.svelte';
   import SignalCatalog from '$lib/presets/SignalCatalog.svelte';
   import SourceDialog from '$lib/controls/SourceDialog.svelte';
   import DeviceOptions from '$lib/controls/DeviceOptions.svelte';
@@ -24,7 +25,7 @@
   let optionsCaps = $state<DeviceCapabilities | null>(null);
   let showSettings = $state(false);
   let showFlowgraph = $state(false);
-  let leftTab = $state<'bands' | 'catalog'>('bands');
+  let leftTab = $state<'bands' | 'catalog' | 'receivers'>('bands');
 
   // Initial sine-source defaults the SourceModal seeds from. The session
   // store carries the live spec once a device is open; this is just the
@@ -158,12 +159,20 @@
             class:tab-active={leftTab === 'catalog'}
             onclick={() => (leftTab = 'catalog')}>Catalog</button
           >
+          <button
+            type="button"
+            class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+            class:tab-active={leftTab === 'receivers'}
+            onclick={() => (leftTab = 'receivers')}>Receivers</button
+          >
         </div>
         <div class="min-h-0 flex-1">
           {#if leftTab === 'bands'}
             <BandsPanel />
-          {:else}
+          {:else if leftTab === 'catalog'}
             <SignalCatalog />
+          {:else}
+            <ReceiversPanel />
           {/if}
         </div>
       </div>
