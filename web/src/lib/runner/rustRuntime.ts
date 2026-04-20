@@ -77,4 +77,15 @@ export async function createRuntime(
   return new RuntimeHandle(JSON.stringify(doc), env, framesHint);
 }
 
+/**
+ * Copy audio samples accumulated in the named `AudioSink` block into
+ * `out`. Returns the number of samples actually written; short return
+ * means the sink's ring drained dry. Typically invoked immediately
+ * after `tick()` by the flowgraph runner Worker, which then pushes
+ * the samples into a `SharedArrayBuffer` read by the `AudioWorklet`.
+ */
+export function drainAudioFromSink(rt: RuntimeHandle, blockId: string, out: Float32Array): number {
+  return rt.drainAudio(blockId, out);
+}
+
 export type { RuntimeHandle };

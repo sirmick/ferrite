@@ -155,5 +155,48 @@ describe('rust runtime wasm shim', () => {
     it('throws on unknown environment at construction', () => {
       expect(() => new RuntimeHandle(sineToSinkDoc, 'mainframe')).toThrow(/unknown environment/);
     });
+
+    it('drains demodulated audio out of the AudioSink block', () => {
+      const rt = new RuntimeHandle(sineToSinkDoc, 'browser');
+      try {
+        rt.init();
+        rt.tick();
+        const out = new Float32Array(1024);
+        const got = rt.drainAudio('sink', out);
+        // FmDemod decimates 240k → 48k by factor 5, so one 1024-frame
+        // tick leaves about 204 samples in the sink. Exact count
+        // depends on FmDemod's internal rounding — pin the lower bound.
+        expect(got).toBeGreaterThan(0);
+        expect(got).toBeLessThanOrEqual(1024);
+        // A pure complex exponential should demod to a non-zero
+        // instantaneous-frequency estimate.
+        const anyNonZero = out.slice(0, got).some((x) => x !== 0);
+        expect(anyNonZero).toBe(true);
+      } finally {
+        rt.free();
+      }
+    });
+
+    it('reports zero dropped samples on a fresh sink', () => {
+      const rt = new RuntimeHandle(sineToSinkDoc, 'browser');
+      try {
+        rt.init();
+        expect(rt.audioDroppedSamples('sink')).toBe(0n);
+      } finally {
+        rt.free();
+      }
+    });
+
+    it('rejects drainAudio for a non-AudioSink block', () => {
+      const rt = new RuntimeHandle(sineToSinkDoc, 'browser');
+      try {
+        rt.init();
+        const out = new Float32Array(16);
+        expect(() => rt.drainAudio('src', out)).toThrow(/AudioSink/);
+        expect(() => rt.drainAudio('ghost', out)).toThrow(/ghost/);
+      } finally {
+        rt.free();
+      }
+    });
   });
 });

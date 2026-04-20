@@ -10,6 +10,7 @@
 //! it, native builds compile without any wasm-bindgen dependency pulled
 //! in.
 
+use ferrite_blocks::AudioSink;
 use wasm_bindgen::prelude::*;
 
 use crate::block_registry::InventorySpecRegistry;
@@ -140,5 +141,34 @@ impl RuntimeHandle {
     #[wasm_bindgen(getter, js_name = framesHint)]
     pub fn frames_hint(&self) -> usize {
         self.rt.frames_hint()
+    }
+
+    /// Drain accumulated samples from the named `AudioSink` block into
+    /// `out`. Returns the number of samples actually copied — shorter
+    /// than `out.len()` means the ring drained dry.
+    ///
+    /// The browser runner calls this after each `tick` and pushes the
+    /// samples into a `SharedArrayBuffer` that the `AudioWorklet`
+    /// drains on the audio clock. Errors if no block with that id
+    /// exists, or if it exists but isn't an `AudioSink`.
+    #[wasm_bindgen(js_name = drainAudio)]
+    pub fn drain_audio(&mut self, block_id: &str, out: &mut [f32]) -> Result<usize, JsError> {
+        let sink = self
+            .rt
+            .block_typed::<AudioSink>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no AudioSink block named {block_id:?}")))?;
+        Ok(sink.ring_mut().read(out))
+    }
+
+    /// Cumulative count of samples the named `AudioSink` has dropped
+    /// because its ring was full. Browser UIs surface this as a glitch
+    /// counter.
+    #[wasm_bindgen(js_name = audioDroppedSamples)]
+    pub fn audio_dropped_samples(&mut self, block_id: &str) -> Result<u64, JsError> {
+        let sink = self
+            .rt
+            .block_typed::<AudioSink>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no AudioSink block named {block_id:?}")))?;
+        Ok(sink.dropped_samples())
     }
 }
