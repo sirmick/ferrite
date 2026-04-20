@@ -66,100 +66,118 @@
         {#if !state || !capabilities}
           <p class="text-xs text-[color:var(--color-muted)]">No channel info available.</p>
         {:else}
-          <label class="grid gap-1 text-xs">
-            <span class="text-[color:var(--color-muted)]">Sample rate</span>
-            {#if state.sample_rate_choices.length > 1}
-              <select
-                class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
-                bind:value={state.sample_rate_hz}
-              >
-                {#each state.sample_rate_choices as r (r)}
-                  <option value={r}>{fmtHz(r)}</option>
-                {/each}
-              </select>
-            {:else}
-              <input
-                type="number"
-                class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
-                bind:value={state.sample_rate_hz}
-              />
+          <section class="flex flex-col gap-3">
+            <header class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">
+              Sampling
+            </header>
+            <label class="grid gap-1 text-xs">
+              <span class="text-[color:var(--color-muted)]">Sample rate</span>
+              {#if state.sample_rate_choices.length > 1}
+                <select
+                  class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+                  bind:value={state.sample_rate_hz}
+                >
+                  {#each state.sample_rate_choices as r (r)}
+                    <option value={r}>{fmtHz(r)}</option>
+                  {/each}
+                </select>
+              {:else}
+                <input
+                  type="number"
+                  class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+                  bind:value={state.sample_rate_hz}
+                />
+              {/if}
+            </label>
+
+            {#if state.bandwidth_choices.length > 0}
+              <label class="grid gap-1 text-xs">
+                <span class="text-[color:var(--color-muted)]">Analog bandwidth</span>
+                <select
+                  class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+                  bind:value={state.bandwidth_hz}
+                >
+                  {#each state.bandwidth_choices as b (b)}
+                    <option value={b}>{fmtHz(b)}</option>
+                  {/each}
+                </select>
+              </label>
             {/if}
-          </label>
+          </section>
 
-          <label class="grid gap-1 text-xs">
-            <div class="flex justify-between">
-              <span class="text-[color:var(--color-muted)]">Centre frequency</span>
-              <span class="font-mono">{fmtHz(state.center_freq_hz)}</span>
-            </div>
-            <input
-              type="number"
-              min={state.freq_range.min}
-              max={state.freq_range.max}
-              step={state.freq_range.step}
-              class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
-              bind:value={state.center_freq_hz}
-            />
-            <div class="flex justify-between text-[10px] text-[color:var(--color-muted)]">
-              <span>{fmtHz(state.freq_range.min)}</span>
-              <span>{fmtHz(state.freq_range.max)}</span>
-            </div>
-          </label>
-
-          {#if state.antenna_choices.length > 0}
-            <label class="grid gap-1 text-xs">
-              <span class="text-[color:var(--color-muted)]">Antenna</span>
-              <select
-                class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
-                bind:value={state.antenna}
-              >
-                {#each state.antenna_choices as a (a)}
-                  <option value={a}>{a}</option>
-                {/each}
-              </select>
-            </label>
-          {/if}
-
-          {#if state.bandwidth_choices.length > 0}
-            <label class="grid gap-1 text-xs">
-              <span class="text-[color:var(--color-muted)]">Bandwidth</span>
-              <select
-                class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
-                bind:value={state.bandwidth_hz}
-              >
-                {#each state.bandwidth_choices as b (b)}
-                  <option value={b}>{fmtHz(b)}</option>
-                {/each}
-              </select>
-            </label>
-          {/if}
-
-          {#if state.has_agc}
-            <label class="flex items-center justify-between gap-2 text-xs">
-              <span class="text-[color:var(--color-muted)]">AGC</span>
-              <input type="checkbox" bind:checked={state.agc} />
-            </label>
-          {/if}
-
-          {#each state.gains as gain, i (gain.name)}
+          <section class="flex flex-col gap-3">
+            <header class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">
+              Tuning
+            </header>
             <label class="grid gap-1 text-xs">
               <div class="flex justify-between">
-                <span class="text-[color:var(--color-muted)]">{gain.name} gain</span>
-                <span class="font-mono">{gain.value_db.toFixed(1)} dB</span>
+                <span class="text-[color:var(--color-muted)]">Centre frequency</span>
+                <span class="font-mono">{fmtHz(state.center_freq_hz)}</span>
               </div>
               <input
-                type="range"
-                min={gain.range.min}
-                max={gain.range.max}
-                step={gain.range.step}
-                bind:value={state.gains[i].value_db}
-                disabled={state.has_agc && state.agc}
+                type="number"
+                min={state.freq_range.min}
+                max={state.freq_range.max}
+                step={state.freq_range.step}
+                class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+                bind:value={state.center_freq_hz}
               />
               <div class="flex justify-between text-[10px] text-[color:var(--color-muted)]">
-                <span>{gain.range.min} dB</span>
-                <span>{gain.range.max} dB</span>
+                <span>{fmtHz(state.freq_range.min)}</span>
+                <span>{fmtHz(state.freq_range.max)}</span>
               </div>
             </label>
-          {/each}
+          </section>
+
+          {#if state.antenna_choices.length > 0 || state.has_agc || state.gains.length > 0}
+            <section class="flex flex-col gap-3">
+              <header class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">
+                Frontend
+              </header>
+
+              {#if state.antenna_choices.length > 0}
+                <label class="grid gap-1 text-xs">
+                  <span class="text-[color:var(--color-muted)]">Antenna</span>
+                  <select
+                    class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+                    bind:value={state.antenna}
+                  >
+                    {#each state.antenna_choices as a (a)}
+                      <option value={a}>{a}</option>
+                    {/each}
+                  </select>
+                </label>
+              {/if}
+
+              {#if state.has_agc}
+                <label class="flex items-center justify-between gap-2 text-xs">
+                  <span class="text-[color:var(--color-muted)]">AGC</span>
+                  <input type="checkbox" bind:checked={state.agc} />
+                </label>
+              {/if}
+
+              {#each state.gains as gain, i (gain.name)}
+                <label class="grid gap-1 text-xs">
+                  <div class="flex justify-between">
+                    <span class="text-[color:var(--color-muted)]">{gain.name} gain</span>
+                    <span class="font-mono">{gain.value_db.toFixed(1)} dB</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={gain.range.min}
+                    max={gain.range.max}
+                    step={gain.range.step}
+                    bind:value={state.gains[i].value_db}
+                    disabled={state.has_agc && state.agc}
+                  />
+                  <div class="flex justify-between text-[10px] text-[color:var(--color-muted)]">
+                    <span>{gain.range.min} dB</span>
+                    <span>{gain.range.max} dB</span>
+                  </div>
+                </label>
+              {/each}
+            </section>
+          {/if}
 
           {#if errors.length > 0}
             <ul class="text-[11px] text-rose-400">
