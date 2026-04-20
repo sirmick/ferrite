@@ -422,6 +422,64 @@ capability-first, not project-first (see
   phase doc; the preset JSON + block source are then the living
   documentation.
 
+## D21 — Waterfall tuning interactions: click-drag = SDR centre (expensive); right-click = VFO offset (cheap)
+
+**Context.** There are two frequency knobs in every preset that carries
+a `Channelizer`: the SDR's hardware LO (`source.center_freq_hz`, set
+via `PATCH /api/source`) and the Channelizer's offset within the
+wideband capture (`chan.freq_shift_hz`, set via `PATCH
+/api/flowgraph`). They sit at very different cost tiers — moving the
+LO is a device restart-ish operation (retune latency, gain
+renegotiation, waterfall resets); moving the Channelizer offset is a
+single-block `Self`-scope reconfigure, imperceptible. Phase D's
+original "drag VFO on waterfall to retune" plan conflated them.
+
+Today the UI only exposes the LO knob (Nixie widget + BandsPanel
+presets both `PATCH /api/source`). The Channelizer offset has no UI
+control at all, so every retune goes through the expensive path. This
+matters more the moment multi-VFO lands — N parallel channelizers
+sharing one wideband capture is the whole point.
+
+**Decision.** Two distinct waterfall interactions, one per tier:
+
+- **Click-and-drag the waterfall ≡ SDR centre re-tune.** Drags the
+  whole spectrum. Debounced at mouse-up; commits via `PATCH
+  /api/source` (so `SourceRestart` scope). Cursor shows "grabbing" +
+  "heavy" visual affordance so the user feels the weight.
+- **Right-click on a spectrum feature ≡ set VFO offset.** Places the
+  channelizer at the clicked absolute frequency (computed as `clicked
+  − source.center`). Commits via `PATCH /api/flowgraph` on the
+  channelizer's `freq_shift_hz` param (`Self` scope, no source
+  disturbance). Multi-VFO future: right-click menu offers "set
+  VFO<n>" per channelizer in the preset.
+
+Rationale for this mapping: drag is a **motion-weighted** gesture the
+user expects to be continuous and costly (you move the whole picture);
+right-click is a **point-weighted** gesture the user expects to be
+instant (targeted, surgical). That matches the cost tiers.
+
+**Rejected.**
+- Single "drag to tune" that decides based on how far you dragged —
+  too ambiguous, unpredictable.
+- Always route tuning through the Channelizer (keep the SDR LO
+  fixed). Loses access to spectrum beyond one decimated bandwidth,
+  and the LO *does* need to move sometimes (different bands).
+- A separate Channelizer-offset slider in a dialog — doesn't
+  compose with the spectrum picture the user is already staring at.
+
+**Consequence.**
+- Phase D's "drag VFO on waterfall to retune" line in
+  `docs/08-roadmap.md` was under-specified; this decision fills the
+  gap.
+- A new commit-plan item lands under "Post-M5" in
+  `docs/10-commits.md`: `feat(web): waterfall tuning — drag = source
+  center, right-click = channelizer offset`.
+- When multi-VFO lands, the right-click menu grows a "set VFO<n>"
+  submenu; the drag behaviour is unchanged.
+- The `reconfigScope` contract (M3) gets its first real exercise from
+  this UX — `freq_shift_hz` must be `Self`-scope so right-click feels
+  instant. That's a concrete acceptance test for the scope machinery.
+
 ## Revisiting decisions
 
 Decisions here are not immutable — they are **load-bearing assumptions**.

@@ -296,6 +296,17 @@ UI — device enumerated, preset started, waterfall flowing from
 `/ws/preset` transport, with the server holding exactly one preset-
 backed pipeline and the source independently patchable.
 
+### Follow-ups
+
+- [ ] `feat(web): waterfall tuning — drag = source centre, right-click
+      = channelizer offset` — wires both frequency knobs into the
+      spectrum picture per D21. Drag debounces at mouse-up and
+      `PATCH /api/source`; right-click places the channelizer at the
+      clicked absolute freq via `PATCH /api/flowgraph` (`Self`-scope
+      `freq_shift_hz`). First real exercise of the M3 `reconfigScope`
+      machinery. Multi-VFO extension: right-click menu grows a "set
+      VFO<n>" submenu; drag behaviour unchanged.
+
 ## How this file stays honest
 
 - **PRs update it.** Each PR that lands a commit here crosses that item off

@@ -135,7 +135,9 @@ runtime, FM demod, audio out.
   `AudioSink`.
 - `flowgraphs/wbfm.json` loads, runs, and produces clean audio.
 - Per-digit frequency dial widget.
-- Drag VFO cursor on the waterfall to retune mid-stream.
+- Waterfall tuning interactions: click-drag = SDR centre (expensive,
+  `PATCH /api/source` → SourceRestart), right-click = VFO/channelizer
+  offset (cheap, `PATCH /api/flowgraph` → Self-scope). See D21.
 - Golden-fixture CI test: replay-mode `ferrited` + the WBFM flowgraph
   → audio RMS and a known pilot tone match within tolerance.
 - `ferrited --flowgraph <path>` loads the same preset and runs its
