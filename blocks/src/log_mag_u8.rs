@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
-    Placement, PortSpec, PortType, Work,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -95,6 +95,8 @@ impl Block for LogMagU8 {
                         unit: "bins",
                     },
                     mutable_while_streaming: false,
+                    // Output bin count — downstream consumers re-init.
+                    reconfig_scope: ReconfigureScope::Downstream,
                 },
                 ParamSpec {
                     key: "floor_dbfs",
@@ -107,6 +109,7 @@ impl Block for LogMagU8 {
                         unit: "dBFS",
                     },
                     mutable_while_streaming: true,
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
                     key: "ceil_dbfs",
@@ -119,6 +122,7 @@ impl Block for LogMagU8 {
                         unit: "dBFS",
                     },
                     mutable_while_streaming: true,
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
                     key: "alpha",
@@ -131,6 +135,7 @@ impl Block for LogMagU8 {
                         unit: "",
                     },
                     mutable_while_streaming: true,
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
             ],
         }

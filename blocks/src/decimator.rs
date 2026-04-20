@@ -28,7 +28,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
-    Placement, PortSpec, PortType, Work,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 /// Construction-time params.
@@ -163,6 +163,9 @@ impl Block for Decimator {
                         unit: "",
                     },
                     mutable_while_streaming: false,
+                    // Output rate = input_rate / factor — every downstream
+                    // block re-inits at the new negotiated rate.
+                    reconfig_scope: ReconfigureScope::Downstream,
                 },
                 ParamSpec {
                     key: "num_taps",
@@ -175,6 +178,9 @@ impl Block for Decimator {
                         unit: "taps",
                     },
                     mutable_while_streaming: false,
+                    // Filter length is baked into the FIR state — needs
+                    // a re-init, but output rate is unchanged.
+                    reconfig_scope: ReconfigureScope::Downstream,
                 },
                 ParamSpec {
                     key: "cutoff_normalized",
@@ -187,6 +193,7 @@ impl Block for Decimator {
                         unit: "",
                     },
                     mutable_while_streaming: false,
+                    reconfig_scope: ReconfigureScope::Downstream,
                 },
             ],
         }

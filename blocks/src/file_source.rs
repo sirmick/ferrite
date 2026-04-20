@@ -30,7 +30,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, OutBuf, OutputPort, ParamKind, ParamSpec,
-    Placement, PortSpec, PortType, Work,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,12 +203,15 @@ impl Block for FileIqSource {
                     label: "Path",
                     kind: ParamKind::Text { default: "" },
                     mutable_while_streaming: false,
+                    // New file = new stream; re-open the source.
+                    reconfig_scope: ReconfigureScope::SourceRestart,
                 },
                 ParamSpec {
                     key: "loop",
                     label: "Loop",
                     kind: ParamKind::Toggle { default: false },
                     mutable_while_streaming: true,
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
             ],
         }

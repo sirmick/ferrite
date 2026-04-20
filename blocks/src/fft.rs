@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
-    Placement, PortSpec, PortType, Work,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -135,6 +135,9 @@ impl Block for FftBlock {
                         unit: "bins",
                     },
                     mutable_while_streaming: false,
+                    // Changing FFT size changes the output port's bin count,
+                    // so every downstream consumer must re-init.
+                    reconfig_scope: ReconfigureScope::Downstream,
                 },
                 ParamSpec {
                     key: "window",
@@ -144,6 +147,9 @@ impl Block for FftBlock {
                         default: "hann",
                     },
                     mutable_while_streaming: false,
+                    // Window is just a coefficient table — swap in place
+                    // on the next `process` call.
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
             ],
         }

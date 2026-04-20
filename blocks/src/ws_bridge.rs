@@ -30,7 +30,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, ParamKind, ParamSpec, Placement, PortSpec,
-    PortType, Work,
+    PortType, ReconfigureScope, Work,
 };
 
 /// Transport contract for [`WsBridgeTx`]. The runtime constructs a sink
@@ -72,6 +72,9 @@ const STREAM_ID_PARAM: ParamSpec = ParamSpec {
         unit: "",
     },
     mutable_while_streaming: false,
+    // Bridge wiring is fixed per graph load — re-plumbing the WS pair
+    // is a source-level restart.
+    reconfig_scope: ReconfigureScope::SourceRestart,
 };
 
 // ---------------------------------------------------------------------------

@@ -163,12 +163,19 @@ impl Default for ReconfigureScope {
 }
 
 /// A block parameter schema entry.
+///
+/// `reconfig_scope` tells the runtime's diff engine how much it needs to
+/// touch when this param changes while the graph is running. The legacy
+/// `mutable_while_streaming` flag is kept alongside for the duration of
+/// M3 so existing readers don't break while callers migrate to the
+/// richer scope; it's removed at the end of the milestone.
 #[derive(Debug, Clone, Copy)]
 pub struct ParamSpec {
     pub key: &'static str,
     pub label: &'static str,
     pub kind: ParamKind,
     pub mutable_while_streaming: bool,
+    pub reconfig_scope: ReconfigureScope,
 }
 
 /// Type-level shape of one param. Rendered 1:1 by the generic options
@@ -471,7 +478,7 @@ where
 mod tests {
     use super::{
         Block, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort, ParamKind,
-        ParamSpec, Placement, PortMeta, PortSpec, PortType, Work,
+        ParamSpec, Placement, PortMeta, PortSpec, PortType, ReconfigureScope, Work,
     };
 
     struct Passthru;
@@ -500,6 +507,7 @@ mod tests {
                         unit: "",
                     },
                     mutable_while_streaming: true,
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 }],
             }
         }

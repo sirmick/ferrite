@@ -31,7 +31,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
-    Placement, PortSpec, PortType, Work,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 /// Construction-time params.
@@ -116,6 +116,9 @@ impl Block for FmDemod {
                         unit: "Hz",
                     },
                     mutable_while_streaming: false,
+                    // Matches the upstream producer's rate — changing it
+                    // here implies the whole chain is being retuned.
+                    reconfig_scope: ReconfigureScope::SourceRestart,
                 },
                 ParamSpec {
                     key: "max_deviation_hz",
@@ -128,6 +131,9 @@ impl Block for FmDemod {
                         unit: "Hz",
                     },
                     mutable_while_streaming: false,
+                    // Only recomputes the output gain constant, but the
+                    // value is baked at `new()` — re-init the block.
+                    reconfig_scope: ReconfigureScope::Downstream,
                 },
             ],
         }

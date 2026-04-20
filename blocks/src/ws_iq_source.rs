@@ -26,7 +26,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, OutputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, Work,
+    PortSpec, PortType, ReconfigureScope, Work,
 };
 use crate::spsc_ring::IqRing;
 
@@ -70,6 +70,9 @@ const STREAM_ID_PARAM: ParamSpec = ParamSpec {
         unit: "",
     },
     mutable_while_streaming: false,
+    // Wired into the FrameClient subscription at load time — the
+    // subscription would have to be rebuilt against the WS.
+    reconfig_scope: ReconfigureScope::SourceRestart,
 };
 
 const BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
@@ -83,6 +86,7 @@ const BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
         unit: "samples",
     },
     mutable_while_streaming: false,
+    reconfig_scope: ReconfigureScope::SourceRestart,
 };
 
 pub struct WsIqSource {

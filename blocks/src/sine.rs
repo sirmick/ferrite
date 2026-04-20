@@ -26,7 +26,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, OutputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, Work,
+    PortSpec, PortType, ReconfigureScope, Work,
 };
 
 /// Reciprocal of 2³². The value `2³²` is exactly representable in f32
@@ -141,6 +141,9 @@ impl Block for SineSource {
                         unit: "S/s",
                     },
                     mutable_while_streaming: false,
+                    // Source rate ripples through every downstream rate
+                    // negotiation — treat as a source restart.
+                    reconfig_scope: ReconfigureScope::SourceRestart,
                 },
                 ParamSpec {
                     key: "center_freq_hz",
@@ -153,6 +156,7 @@ impl Block for SineSource {
                         unit: "Hz",
                     },
                     mutable_while_streaming: true,
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
                     key: "tone_freq_abs_hz",
@@ -165,6 +169,7 @@ impl Block for SineSource {
                         unit: "Hz",
                     },
                     mutable_while_streaming: true,
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
                     key: "amplitude",
@@ -177,6 +182,7 @@ impl Block for SineSource {
                         unit: "",
                     },
                     mutable_while_streaming: true,
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
             ],
         }

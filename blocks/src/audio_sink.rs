@@ -21,7 +21,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, ParamKind, ParamSpec, Placement, PortSpec,
-    PortType, Work,
+    PortType, ReconfigureScope, Work,
 };
 use crate::spsc_ring::AudioRing;
 
@@ -62,6 +62,10 @@ const BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
         unit: "samples",
     },
     mutable_while_streaming: false,
+    // Ring allocation is part of block construction — changing it needs
+    // a fresh SAB handed to a fresh AudioWorklet, which only happens on
+    // a source-level restart.
+    reconfig_scope: ReconfigureScope::SourceRestart,
 };
 
 pub struct AudioSink {

@@ -34,7 +34,7 @@ use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
-    Placement, PortSpec, PortType, Work,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 /// Construction-time params.
@@ -204,6 +204,9 @@ impl Block for Channelizer {
                         unit: "Hz",
                     },
                     mutable_while_streaming: true,
+                    // The only "tune knob" on the VFO — the whole point is
+                    // to retune without restarting the graph.
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
                     key: "factor",
@@ -216,6 +219,8 @@ impl Block for Channelizer {
                         unit: "",
                     },
                     mutable_while_streaming: false,
+                    // Changes output rate; downstream chain re-inits.
+                    reconfig_scope: ReconfigureScope::Downstream,
                 },
                 ParamSpec {
                     key: "num_taps",
@@ -228,6 +233,7 @@ impl Block for Channelizer {
                         unit: "taps",
                     },
                     mutable_while_streaming: false,
+                    reconfig_scope: ReconfigureScope::Downstream,
                 },
                 ParamSpec {
                     key: "cutoff_normalized",
@@ -240,6 +246,7 @@ impl Block for Channelizer {
                         unit: "",
                     },
                     mutable_while_streaming: false,
+                    reconfig_scope: ReconfigureScope::Downstream,
                 },
             ],
         }

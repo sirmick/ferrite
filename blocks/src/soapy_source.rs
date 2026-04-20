@@ -53,7 +53,7 @@ use soapysdr::{Device, Direction, ErrorCode, RxStream};
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, OutputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, Work,
+    PortSpec, PortType, ReconfigureScope, Work,
 };
 
 /// Construction-time params. All fields are optional in the JSON preset;
@@ -217,6 +217,8 @@ impl Block for SoapySource {
                         default: "driver=rtlsdr",
                     },
                     mutable_while_streaming: false,
+                    // Swapping devices = reopen the whole source.
+                    reconfig_scope: ReconfigureScope::SourceRestart,
                 },
                 ParamSpec {
                     key: "sample_rate_hz",
@@ -229,6 +231,8 @@ impl Block for SoapySource {
                         unit: "Hz",
                     },
                     mutable_while_streaming: false,
+                    // Hardware clock parameter — must re-open the stream.
+                    reconfig_scope: ReconfigureScope::SourceRestart,
                 },
                 ParamSpec {
                     key: "center_freq_hz",
@@ -241,6 +245,8 @@ impl Block for SoapySource {
                         unit: "Hz",
                     },
                     mutable_while_streaming: true,
+                    // Tuning is live on Soapy devices — just call set_freq.
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
                     key: "gain_db",
@@ -253,6 +259,7 @@ impl Block for SoapySource {
                         unit: "dB",
                     },
                     mutable_while_streaming: true,
+                    reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
                     key: "channel",
@@ -265,6 +272,7 @@ impl Block for SoapySource {
                         unit: "",
                     },
                     mutable_while_streaming: false,
+                    reconfig_scope: ReconfigureScope::SourceRestart,
                 },
             ],
         }
