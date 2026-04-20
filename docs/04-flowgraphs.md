@@ -65,6 +65,18 @@ messages). Convention: lower_snake_case nouns.
 Sources and sinks are **blocks** from the runtime's perspective (they implement
 the same trait). Placement is declared by the block's `BlockSpec::placement`:
 
+### The `Source` placeholder
+
+Every cross-env preset names its source as `"type": "Source"`. This is
+a **placeholder** — at load time, `compose_source` reads the
+`SourceConfig` subresource from `AppState` (updated via `PATCH
+/api/source`) and substitutes the real source block (`SoapySource`,
+`SineSource`, `FileIqSource`) into the graph before validation. That
+keeps preset files stable across source swaps — changing device is a
+`PATCH /api/source` call, not a preset rewrite. The placeholder carries
+tuning hints (`center_freq_hz`, `sample_rate_hz`, `bandwidth_hz`) which
+the real source inherits unless the `SourceConfig` overrides them.
+
 ### Node-side (`Placement::NativeOnly`)
 
 | type              | direction | notes                                                   |
@@ -77,13 +89,16 @@ the same trait). Placement is declared by the block's `BlockSpec::placement`:
 | type              | direction | notes                                                   |
 |-------------------|-----------|---------------------------------------------------------|
 | `AudioSink`       | sink      | feeds the AudioWorklet ring buffer (SAB)                |
+| `WsIqSource`      | source    | subscribes to a `stream_id` on `/ws/preset`             |
 
 ### Either (DSP; pin with per-instance `placement`)
 
-DSP blocks (`Channelizer`, `Decimator`, `FmDemod`, `FFT`, `LogMagU8`,
-`SineSource`) default to `Placement::Either`. In a cross-env doc they
-carry a `placement: "node" | "browser"` field that chooses which side they
-land on.
+DSP blocks (`Channelizer`, `Decimator`, `FmDemod`, `AmDemod`, `FFT`,
+`LogMagU8`, `TeeIqF32`, `SineSource`) default to `Placement::Either`.
+In a cross-env doc they carry a `placement: "node" | "browser"` field
+that chooses which side they land on. Leaving `placement` unset lets
+`env_split` infer the side from the neighbourhood (a block fed by a
+`node`-pinned producer lands on the node half).
 
 ### Cross-env bridges are automatic
 
@@ -91,8 +106,21 @@ land on.
 hand-authored. The loader inspects each wire; wires that cross the
 node/browser boundary are rewritten to insert a `WsBridgeTx` on the node
 side and a `WsBridgeRx` on the browser side, sharing a freshly allocated
-`stream_id` starting at `CROSS_ENV_STREAM_BASE` (1000). See
-[02-protocol.md](02-protocol.md#stream-ids) for the id allocation story.
+`stream_id` starting at `CROSS_ENV_STREAM_BASE` (1000). Allocation is
+deterministic: wires that cross the boundary are enumerated in
+declaration order. See [02-protocol.md](02-protocol.md#stream-ids) for
+the full id allocation story.
+
+### `ui:<name>` sinks
+
+A wire whose RHS is the sentinel `"ui:<name>"` (rather than a real
+block port) declares a **UI-bound** output. `env_split` rewrites it
+into a `WsBridgeTx` on the server side only — the browser discovers
+the allocated `stream_id` and payload type via
+`GET /api/ui-sinks?name=<name>` rather than by declaring a matching
+`WsBridgeRx` in the preset. This is how the waterfall's FFT stream
+flows from a server-side `FFT → LogMagU8` chain without the browser
+having to know which preset block emitted it.
 
 ## Wires
 
@@ -168,46 +196,60 @@ Non-updatable param changes require restarting the flowgraph.
 
 ## Example: WBFM (cross-env)
 
-The shipped `flowgraphs/wbfm.json`: node half reads 2.4 MS/s IQ off the
-RTL-SDR and channelizes to 240 kS/s; the `chan.out → decim.in` wire crosses
-the boundary and `env_split` inserts a bridge pair carrying stream_id 1000.
-The browser half decimates 5× to 48 kHz, demodulates, and feeds the audio
-ring.
+The shipped `flowgraphs/wbfm.json`: node half reads 2.4 MS/s IQ from
+the `Source` placeholder (resolved to whatever device is current), runs
+a `Channelizer` to 240 kS/s, and fans the channelizer output through a
+`TeeIqF32` — one leg heads to a server-side `FFT → LogMagU8` chain
+that terminates at the `ui:fft` sentinel sink (so the waterfall gets
+its stream), the other leg crosses the env boundary into a browser-side
+`Decimator → FmDemod → AudioSink`.
 
 ```json
 {
   "name": "wbfm",
   "environments": ["node", "browser"],
   "blocks": {
-    "src":   { "type": "SoapySource",
-               "params": { "args": "driver=rtlsdr",
-                           "sample_rate_hz": 2400000,
-                           "center_freq_hz": 100100000,
-                           "bandwidth_hz": 2000000 } },
-    "chan":  { "type": "Channelizer", "placement": "node",
-               "params": { "input_rate_hz": 2400000, "factor": 10,
-                           "num_taps": 81, "cutoff_normalized": 0.03125 } },
-    "decim": { "type": "Decimator",   "placement": "browser",
-               "params": { "factor": 5, "num_taps": 41,
-                           "cutoff_normalized": 0.08 } },
-    "demod": { "type": "FmDemod",     "placement": "browser",
-               "params": { "sample_rate_hz": 48000,
-                           "max_deviation_hz": 75000 } },
-    "audio": { "type": "AudioSink",
-               "params": { "buffer_samples": 8192 } }
+    "src":    { "type": "Source", "placement": "node",
+                "params": { "center_freq_hz": 100100000,
+                            "sample_rate_hz": 2400000,
+                            "bandwidth_hz": 2000000 } },
+    "chan":   { "type": "Channelizer", "placement": "node",
+                "params": { "input_rate_hz": 2400000, "factor": 10,
+                            "num_taps": 81, "cutoff_normalized": 0.03125 } },
+    "tee":    { "type": "TeeIqF32", "placement": "node" },
+    "fft":    { "type": "FFT", "placement": "node",
+                "params": { "size": 4096, "window": "hann" } },
+    "logmag": { "type": "LogMagU8", "placement": "node",
+                "params": { "size": 4096, "floor_dbfs": -100.0,
+                            "ceil_dbfs": 0.0, "alpha": 0.3 } },
+    "decim":  { "type": "Decimator", "placement": "browser",
+                "params": { "factor": 5, "num_taps": 41,
+                            "cutoff_normalized": 0.08 } },
+    "demod":  { "type": "FmDemod", "placement": "browser",
+                "params": { "sample_rate_hz": 48000,
+                            "max_deviation_hz": 75000 } },
+    "audio":  { "type": "AudioSink",
+                "params": { "buffer_samples": 8192 } }
   },
   "wires": [
-    ["src.out",   "chan.in"],
-    ["chan.out",  "decim.in"],
-    ["decim.out", "demod.in"],
-    ["demod.out", "audio.in"]
+    ["src.out",    "chan.in"],
+    ["chan.out",   "tee.in"],
+    ["tee.out0",   "decim.in"],
+    ["tee.out1",   "fft.in"],
+    ["fft.out",    "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["decim.out",  "demod.in"],
+    ["demod.out",  "audio.in"]
   ]
 }
 ```
 
-`src` and `audio` omit `placement` because their `BlockSpec` pins them
-(NativeOnly / WasmOnly). `chan`, `decim`, `demod` are `Placement::Either`
-and must declare a side.
+`audio` omits `placement` (its `BlockSpec` is `WasmOnly`); everything
+else pins explicitly. The `tee.out0 → decim.in` wire crosses the
+env boundary — `env_split` inserts a `WsBridgeTx`/`WsBridgeRx` pair on
+`stream_id = 1000`. The `logmag.out → ui:fft` wire allocates
+`stream_id = 1001` and the browser learns the id via
+`GET /api/ui-sinks`.
 
 ### Deployment overrides
 
@@ -228,25 +270,24 @@ editing the preset:
 
 Overrides are resolved client-side (or sidecar-side) before validation.
 
-## Shipped presets (v0.1)
+## Shipped presets
 
 | file                      | purpose                                |
 |---------------------------|----------------------------------------|
 | `flowgraphs/wbfm.json`    | WBFM listening, Phase D smoke target   |
-| `flowgraphs/nbfm.json`    | narrow FM listening                    |
-| `flowgraphs/am.json`      | AM listening                           |
-| `flowgraphs/adsb.json`    | ADS-B, Phase E target                  |
+| `flowgraphs/wbam.json`    | AM listening (AM variant of wbfm)      |
 
-SSB/CW, APRS, FT8, M17 flowgraphs land alongside their respective blocks
-post-v0.1.
+NBFM, SSB/CW, APRS, ADS-B, FT8, M17 presets land alongside their
+respective blocks — see `docs/decoder-roadmap/` for the sequence.
 
 ## Schema authoring
 
-The flowgraph JSON schema lives at `packages/flowgraph-runtime/schema/v1.json`
-(JSON Schema draft 2020-12). The `#[ferrite_block]` macro emits a per-block
-params sub-schema into `packages/flowgraph-blocks/schemas/`, which the
-runtime resolves when validating. End result: a contributor who adds a new
-block gets schema validation for that block's params automatically.
+Block param schemas come from the `#[ferrite_block]` attribute-derived
+`BlockSpec` in the `blocks/` crate — exposed to clients via
+`GET /api/blocks`. There is no separate on-disk schema file; the
+source tree is the schema. Adding a new block gives the dialog UI
+automatic rendering of its params through the same `optionsModel`
+pipeline the source and flowgraph dialogs use.
 
 ## Hot reload (dev only)
 

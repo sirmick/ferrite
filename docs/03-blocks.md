@@ -264,17 +264,38 @@ no side effects — the "writing to stdout" you may remember from dump1090 is
 gone; frames come out of an output port and the flowgraph decides what a
 sink does with them.
 
-## Blocks planned for v0.1
+## Shipped blocks
+
+Post-M5, the registered blocks are:
+
+| block           | ports                              | purpose                                        | status  |
+|-----------------|------------------------------------|------------------------------------------------|---------|
+| `Source`        | — → iq_f32                         | placeholder resolved to a real source via `compose_source` | shipped |
+| `SoapySource`   | — → iq_f32                         | RTL-SDR / SDRPlay / any Soapy device           | shipped |
+| `FileIqSource`  | — → iq_f32                         | reads IQ from a local file                     | shipped |
+| `SineSource`    | — → iq_f32                         | synthetic tone — test fixture                  | shipped |
+| `Channelizer`   | iq_f32 → iq_f32                    | frequency shift + FIR + decimate, one VFO      | shipped |
+| `Decimator`     | iq_f32 → iq_f32                    | FIR + decimate                                 | shipped |
+| `TeeIqF32`      | iq_f32 → 2 × iq_f32                | 1→2 IQ fan-out                                 | shipped |
+| `FFT`           | iq_f32 → iq_f32 (bins)             | windowed DFT, with input accumulation          | shipped |
+| `LogMagU8`      | iq_f32 (bins) → bytes              | log-magnitude scale → `u8` bins for waterfall  | shipped |
+| `FmDemod`       | iq_f32 → real_f32                  | WBFM listening                                 | shipped |
+| `AmDemod`       | iq_f32 → real_f32                  | AM listening                                   | shipped |
+| `AudioSink`     | real_f32 → —                       | feeds AudioWorklet ring (SAB) in the browser   | shipped |
+| `WsIqSource`    | — → iq_f32                         | subscribes to a `stream_id` on `/ws/preset`    | shipped |
+| `WsBridgeTx`    | * → —                              | auto-inserted by `env_split` on crossings      | shipped |
+| `WsBridgeRx`    | — → *                              | auto-inserted by `env_split` on crossings      | shipped |
+
+Planned (see `docs/decoder-roadmap/`):
 
 | block           | ports                              | purpose                              | phase |
 |-----------------|------------------------------------|--------------------------------------|-------|
-| `SignalSource`  | — → iq_f32                         | test/loopback IQ generator           | B     |
-| `FFT`           | iq_f32 → fft_f32                   | spectrum                             | B     |
-| `Decimator`     | iq_f32 → iq_f32                    | rate reduction                       | B     |
-| `Channelizer`   | iq_f32 → N × iq_f32                | narrowband slice extraction          | C/D   |
-| `FmDemod`       | iq_f32 → real_f32                  | WBFM listening                       | D     |
-| `AmDemod`       | iq_f32 → real_f32                  | post-v0.1                            | —     |
-| `SsbDemod`      | iq_f32 → real_f32                  | post-v0.1                            | —     |
-| `AdsbDecoder`   | iq_f32 → frames                    | ADS-B (dump1090 port)                | E     |
-| `Ft8Decoder`    | real_f32 → events                  | FT8 (ft8_lib port), post-v0.1        | —     |
-| `Codec2Decoder` | frames → real_f32                  | M17 audio, post-v0.1                 | —     |
+| `SsbDemod`      | iq_f32 → real_f32                  | SSB listening                        | 1     |
+| `Squelch`       | real_f32 → real_f32                | carrier-gate                         | 1     |
+| `Deemphasis`    | real_f32 → real_f32                | FM de-emphasis                       | 1     |
+| `Agc`           | real_f32 → real_f32                | audio AGC                            | 1     |
+| `Resample`      | real_f32 → real_f32                | rational-rate resampler              | 1     |
+| `AdsbDecoder`   | iq_f32 → frames                    | ADS-B (dump1090 port)                | 3     |
+| `Multimon`      | real_f32 → events                  | POCSAG/FLEX/DTMF/EAS/CTCSS umbrella  | 2     |
+| `Ft8Decoder`    | real_f32 → events                  | FT8 (ft8_lib port)                   | 4     |
+| `Codec2Decoder` | frames → real_f32                  | M17 audio                            | 6     |

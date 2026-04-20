@@ -10,19 +10,29 @@ can demo every few weeks stays honest about what works.
 Each phase lists a crisp definition of "done" — the moment at which it is
 legitimate to start planning the next phase.
 
-| phase | name                             | status       | demo gate                                                        |
-|-------|----------------------------------|--------------|------------------------------------------------------------------|
-| 0     | Docs-first                       | in progress  | this docs tree exists, plan frozen                               |
-| A     | Scaffolding                      | next         | "hello WS" ping-pong over the real stack; CI green               |
-| B     | Synthetic data path E2E          | planned      | synthetic waterfall visible in browser, no hardware              |
-| C     | First real device                | planned      | RTL-SDR + SDRPlay enumerate, open, stream; options dialog works  |
-| D     | First listening experience       | planned      | tune to a local FM station, hear audio, drag VFO on waterfall    |
-| E     | First decoder                    | planned      | ADS-B messages decoded live from a real receiver                 |
-| F     | LLM signal identify              | post-v0.1    | drag waterfall box → "that's APRS" with sigidwiki deep-link      |
-| G     | Spectrum allocation explorer     | post-v0.1    | full-spectrum zoomable chart, click-to-retune                    |
+| phase | name                             | status                                 | demo gate                                                        |
+|-------|----------------------------------|----------------------------------------|------------------------------------------------------------------|
+| 0     | Docs-first                       | done                                   | this docs tree exists, plan frozen                               |
+| A     | Scaffolding                      | done                                   | "hello WS" ping-pong over the real stack; CI green               |
+| B     | Synthetic data path E2E          | done                                   | synthetic waterfall visible in browser, no hardware              |
+| C     | First real device                | done                                   | RTL-SDR + SDRPlay enumerate, open, stream; options dialog works  |
+| D     | First listening experience       | done via M1–M5 pivot + post-M5 refactors | tune to a local FM station, hear audio, drag VFO on waterfall    |
+| E     | First decoder                    | planned                                | ADS-B messages decoded live from a real receiver                 |
+| F     | LLM signal identify              | post-v0.1                              | drag waterfall box → "that's APRS" with sigidwiki deep-link      |
+| G     | Spectrum allocation explorer     | post-v0.1                              | full-spectrum zoomable chart, click-to-retune                    |
 
 Phases A–E are **v0.1**. Phases F and G are the shape of v0.2, sketched
 here so decisions in v0.1 don't paint them into a corner.
+
+> **Where we actually are (2026-04-20):** Phase D shipped via the M1–M5
+> runtime pivot (see `docs/10-commits.md` "Runtime pivot — M1–M5") plus
+> the post-M5 preset-first server refactors. Forward work now splits
+> two ways: (a) the analog-listening + decoder sequence in
+> `docs/decoder-roadmap/` (capability-first, starting with the Phase 1
+> helper blocks), and (b) the first C-vendor port (multimon-ng —
+> decoder-roadmap Phase 2) as the `blocks/native/` substrate. ADS-B
+> (originally planned as Phase E's first decoder) is now decoder-roadmap
+> Phase 3 — see D20 in `09-decisions.md` for why.
 
 ## Phase 0 — Documentation
 

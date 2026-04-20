@@ -261,6 +261,41 @@ flowgraph reconfigures without touching the source; source and
 flowgraph dialogs render correctly for both presets; VFO0 is the only
 wired VFO (with explicit room in the preset schema for VFO1+).
 
+## Post-M5 — preset-first server + FFT tap
+
+After M5 closed, a cluster of refactors landed to finish wiring the
+shipped pipeline end-to-end: the server went preset-first (one
+`AppState`, no `SessionState`), the FFT waterfall started flowing via
+a server-side `ui:fft` tap, and the WS transport moved to a single
+postcard `Frame` enum shared by both sides. This section tracks what
+shipped.
+
+- [x] `feat(blocks): TeeIqF32 block — 1→2 IQ fan-out` — 61b706a
+- [x] `feat(blocks+server): FftU8 bridge transport across /ws/preset` — 2d85126
+- [x] `refactor(blocks+server): unify bridge sinks behind one BridgeSink trait` — 2910d0f
+- [x] `refactor(blocks+server+web): postcard Frame transport, drop 16-byte header` — 1a14232
+- [x] `refactor(runtime): Wire struct, ui:<name> sinks, Placement::Either inference` — a74cbc7
+- [x] `feat(flowgraphs,runtime): server-side FFT tap via ui:fft in wbfm+wbam` — edf95d4
+- [x] `feat(runtime,flowgraphs): Source placeholder + compose_source` — 0f197f6
+- [x] `refactor(server): preset-first AppState, REST, and CLI; drop SessionState` — 597fd9d
+- [x] `refactor(web): preset-first pipeline store, SourceDialog, header Start/Stop` — 25792d4
+- [x] `feat(server,web): GET /api/ui-sinks for preset-allocated stream_ids` — c81f0a5
+- [x] `feat(runtime,blocks): output capacity hints + FFT input accumulation` — c786a24
+
+**E2E coverage landed alongside:**
+
+- [x] `test(server): wbfm_preset_e2e_emits_iq_and_fft_streams` — full
+      preset → pipeline → `/ws/preset` → both crossings light up
+- [x] `test(web): runnerDsp — browser runtime tested in Node against
+      FakeFrameClient, recovers a 1 kHz FM tone from fixture IQ`
+- [x] `test(blocks): wbfm_e2e — synthetic WBFM with mono + pilot`
+
+**Post-M5 done when:** a real session works end-to-end from the shipped
+UI — device enumerated, preset started, waterfall flowing from
+`ui:fft`, WBFM audible in the browser — through the postcard-framed
+`/ws/preset` transport, with the server holding exactly one preset-
+backed pipeline and the source independently patchable.
+
 ## How this file stays honest
 
 - **PRs update it.** Each PR that lands a commit here crosses that item off

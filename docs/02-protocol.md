@@ -10,22 +10,32 @@ Two surfaces:
 A client (browser, or a second `ferrited --flowgraph` consumer) always
 does REST to set up state, then opens a WS to receive streams.
 
-## Session lifecycle
+## Pipeline lifecycle
+
+`ferrited` holds exactly **one preset-backed pipeline**. The preset is
+authored as a `FlowgraphDoc` JSON document (see `04-flowgraphs.md`); its
+source block is the one subresource that accepts independent patching so
+device/tuning changes don't re-serialise the whole doc. Post-M5 the
+surface is preset-first — there is no session-id, no device-open handle,
+no per-VFO REST; a VFO is just a channelizer in the preset.
 
 ```
-client ──► GET  /api/devices                 ─► [ { device... } ]
-client ──► POST /api/device/open  { args,     ─► { session_id, ws_url, streams }
-                                    stream }
-client ──► WebSocket connect ws_url           ─► binary frames start flowing
-client ──► POST /api/device/{id}/vfo { ... }  ─► { vfo_id, stream_id }
-client ──► PATCH /api/device/{id}/vfo/{vfo_id} { ... }   (retune mid-stream)
-client ──► PATCH /api/device/{id}/settings { ... }       (AGC, gain, etc.)
-client ──► POST /api/device/{id}/close        ─► {}
+client ──► GET  /api/devices             ─► [ { device... } ]
+client ──► GET  /api/flowgraph           ─► FlowgraphDoc
+client ──► GET  /api/source              ─► SourceConfig
+client ──► GET  /api/ui-sinks            ─► [ { name, stream_id, payload_type } ]
+client ──► WebSocket connect /ws/preset  ─► postcard-framed binary stream
+client ──► PATCH /api/source  { ... }    ─► { applied: bool }        (hot reconfigure)
+client ──► PATCH /api/flowgraph { ... }  ─► { plan: ReconfigurePlan } (hot or cold)
+client ──► POST /api/pipeline/start      ─► { status: "running" }
+client ──► POST /api/pipeline/stop       ─► { status: "stopped" }
 ```
 
-Single-listener posture: there is at most one active session on `ferrited`.
-A second `POST /api/device/open` while a session is active closes the first
-session (last-connect wins) and returns a new `session_id`.
+Single-listener posture: there is at most one active pipeline, and it is
+whatever the server currently holds. Clients subscribe to individual
+streams on `/ws/preset` by their `stream_id` (discovered via
+`GET /api/ui-sinks` or allocated deterministically by `env_split` — see
+"Stream IDs" below).
 
 ## REST endpoints
 
@@ -118,138 +128,82 @@ exposes. The frontend renders the options dialog from this schema; adding a
 new Soapy driver therefore adds new UI automatically as long as the driver
 populates `getSettingInfo` properly.
 
-### `POST /api/device/open`
+### `GET /api/flowgraph`
 
-Take ownership of a device.
+Return the preset `FlowgraphDoc` currently bound to the server. Exact
+round-trip of the JSON the user authored (plus any patches since).
 
-Request:
+### `PATCH /api/flowgraph`
 
-```json
-{
-  "args": { "driver": "rtlsdr", "serial": "0000001" },
-  "stream": {
-    "sample_rate": 2048000,
-    "center_freq": 100000000,
-    "antenna": "RX",
-    "agc": false,
-    "gain": { "TUNER": 30.0 },
-    "settings": { "biastee": false, "offset_tune": false }
-  },
-  "fft": {
-    "size": 8192,
-    "rate_hz": 30,
-    "window": "hann"
-  }
-}
-```
+Replace the preset with a new one, or patch a subset of its blocks/wires.
+The server computes a minimal reconfigure plan (M3) and applies it —
+hot where the diff supports it, cold-restart otherwise. Rollback on
+apply failure preserves the previous preset and returns a structured
+error.
 
 Response:
 
 ```json
 {
-  "session_id": "8a3d4b2f-...",
-  "ws_url": "/ws/8a3d4b2f-...",
-  "streams": {
-    "fft": { "stream_id": 0, "payload_type": "fft_u8", "size": 8192 }
+  "applied": true,
+  "plan": {
+    "restart": false,
+    "reconfigured_blocks": ["demod"],
+    "stream_ids_preserved": [1000, 1001]
   }
 }
 ```
 
-Failure (device busy, driver error, invalid settings): standard error response
-(see below). If another session was active, it is closed atomically and its WS
-receives a `session_closed` event immediately before disconnect.
+### `GET /api/source`
 
-### `GET /api/device/{session_id}/state`
+The `SourceConfig` subresource — `{ type_name, params }`. This is just
+the `src` entry of the preset, exposed separately so a tuning change
+doesn't require PATCHing the whole flowgraph.
 
-Current settings + FFT config + list of open VFOs.
+### `PATCH /api/source`
+
+Swap source type or tweak source params. Hot-applies while running
+(restarts only the source subgraph). If the pipeline is stopped, the
+patch is stored but not realised until the next `start`; the response's
+`applied` flag distinguishes.
+
+### `GET /api/pipeline`
+
+```json
+{ "status": "running" | "stopped" }
+```
+
+### `POST /api/pipeline/start`, `POST /api/pipeline/stop`
+
+Idempotent lifecycle toggles. Returns the new status.
+
+### `GET /api/ui-sinks`
+
+Enumerate every `ui:<name>` sentinel sink in the current preset along
+with the `stream_id` the runtime allocated for it. This is how the
+browser finds the FFT stream without hard-coding an id.
 
 Response:
 
 ```json
 {
-  "session_id": "8a3d4b2f-...",
-  "device": { "id": "rtlsdr://0000001" },
-  "stream": {
-    "sample_rate": 2048000,
-    "center_freq": 100000000,
-    "agc": false,
-    "gain": { "TUNER": 30.0 },
-    "antenna": "RX",
-    "settings": { "biastee": false, "offset_tune": false, "direct_samp": "off" }
-  },
-  "fft": { "size": 8192, "rate_hz": 30, "window": "hann" },
-  "vfos": [
-    { "vfo_id": "...", "stream_id": 1, "offset_hz": 100000, "rate": 48000,
-      "payload_type": "iq_f32" }
+  "sinks": [
+    { "name": "fft", "stream_id": 1001, "payload_type": "fft_u8" }
   ]
 }
 ```
 
-### `PATCH /api/device/{session_id}/settings`
+### `GET /api/blocks`
 
-Mutate device settings while streaming. Body is a partial — only include keys
-that change.
+Dump the block registry's param schemas — what the dialog UI renders
+from. One entry per registered block type, each with its param list,
+port shapes, and `placement`.
 
-Request:
+### `GET /api/devices`
 
-```json
-{ "center_freq": 101100000, "gain": { "TUNER": 34.0 }, "agc": true }
-```
-
-Response: the updated `state` object.
-
-Failure if any requested change targets a setting with
-`mutableWhileStreaming: false` — the response identifies the offending keys
-and no changes are applied. Clients should detect this and offer the user an
-"Apply & restart stream" affordance that first closes the session and reopens
-with the new settings.
-
-### `POST /api/device/{session_id}/vfo`
-
-Add a VFO (a channelized narrowband slice).
-
-Request:
-
-```json
-{
-  "offset_hz": 100000,
-  "rate": 48000,
-  "filter_bw": 200000,
-  "payload_type": "iq_f32"
-}
-```
-
-`offset_hz` is relative to the current device `center_freq`; the VFO auto-
-updates when the device retunes, so relative-frequency semantics survive
-retuning naturally. Absolute mode available by passing `center_freq_abs`
-instead of `offset_hz`.
-
-Response:
-
-```json
-{ "vfo_id": "...", "stream_id": 2, "payload_type": "iq_f32", "rate": 48000 }
-```
-
-### `PATCH /api/device/{session_id}/vfo/{vfo_id}`
-
-Move or reconfigure a VFO mid-stream (drag its cursor on the waterfall).
-
-Request:
-
-```json
-{ "offset_hz": 225000, "filter_bw": 12000 }
-```
-
-Response: the updated VFO descriptor.
-
-### `DELETE /api/device/{session_id}/vfo/{vfo_id}`
-
-Tear down a VFO. The corresponding `stream_id` is released; any further frames
-bearing it would be a bug.
-
-### `POST /api/device/{session_id}/close`
-
-Release the device. Disconnects the WS. Returns `{}` on success.
+Enumerate attached Soapy devices with their capability schemas — same
+shape as before. The source dialog composes this with whatever preset
+hints are declared in the `Source` block.
 
 ### `POST /api/identify` (Phase F)
 
@@ -293,95 +247,103 @@ Failures return a non-2xx HTTP status plus:
 }
 ```
 
-Codes (non-exhaustive): `DEVICE_NOT_FOUND`, `DEVICE_BUSY`, `DEVICE_FAILED`,
-`INVALID_SETTINGS`, `SETTING_IMMUTABLE_WHILE_STREAMING`, `SESSION_NOT_FOUND`,
-`VFO_NOT_FOUND`, `STREAM_LIMIT_REACHED`, `INTERNAL`.
+Codes (non-exhaustive): `DEVICE_NOT_FOUND`, `DEVICE_FAILED`,
+`INVALID_PRESET`, `RECONFIGURE_FAILED`, `PIPELINE_NOT_RUNNING`, `INTERNAL`.
 
 ## WebSocket frame format
 
-One WS connection per session. All frames are **binary**. A common fixed
-header precedes every payload:
+All `/ws/preset` traffic is **binary**. Every frame is a `postcard`-
+serialised value of the `Frame` enum defined in `blocks/src/frame.rs`:
 
-```
-Offset  Size   Field          Notes
-------  -----  -------------  -------------------------------------------
-  0     1      version        0x01 for this spec version
-  1     1      payload_type   enum (see below)
-  2     2      stream_id      big-endian u16 (0 = server control stream)
-  4     4      seq            big-endian u32, per-stream, wraps
-  8     8      timestamp_ns   big-endian u64, device clock
- 16     ...    payload        payload-type-specific
+```rust
+pub enum Frame {
+    IqF32     { stream_id: u16, seq: u32, timestamp_ns: u64, payload: Vec<u8> },
+    FftU8     { stream_id: u16, seq: u32, timestamp_ns: u64, payload: Vec<u8> },
+    JsonEvent { stream_id: u16, seq: u32, timestamp_ns: u64, payload: Vec<u8> },
+}
 ```
 
-Total fixed header: 16 bytes.
+The variant tag **is** the protocol discriminator — a schema change
+(adding/removing/reshaping a variant) is a version bump. There is no
+separate fixed-length header byte. The browser decoder is a WASM export
+from the same crate (`decodeFrame()` in `ferrite_blocks`), so the
+server and browser cannot disagree on the schema without a build break.
 
-### `payload_type` values
+### Variants
 
-| value | name            | payload                                             |
-|-------|-----------------|-----------------------------------------------------|
-| 0x01  | `fft_u8`        | `size` bytes of unsigned magnitude, 0..255           |
-| 0x02  | `fft_f16`       | `2 * size` bytes of half-float magnitudes (dBFS)     |
-| 0x10  | `iq_s16`        | interleaved I,Q signed 16-bit samples                |
-| 0x11  | `iq_f32`        | interleaved I,Q 32-bit floats (native-endian f32)    |
-| 0x20  | `audio_f32`     | mono 32-bit float PCM (server-side demod path; rare) |
-| 0x80  | `json_event`    | UTF-8 JSON — see event schema below                  |
-| 0x81  | `json_control`  | UTF-8 JSON — reserved for future client→server       |
-| 0xFF  | `error`         | UTF-8 JSON error object, same shape as REST errors   |
+| variant     | `payload` contents                                        |
+|-------------|-----------------------------------------------------------|
+| `IqF32`     | interleaved I,Q little-endian `f32`, 8 bytes/sample       |
+| `FftU8`     | `size` bytes of log-magnitude bins, 0..255 (floor..ceil)  |
+| `JsonEvent` | UTF-8 JSON — see event schema below                       |
 
-`iq_f32` notes: payload byte length is `8 * num_samples` (4B I + 4B Q per
-sample). Endian is native to the server; both server and client architectures
-we target are little-endian, and the wire protocol asserts LE in the FFT
-frames' header timestamps but leaves IQ payload as-is to avoid per-sample
-byte-swap overhead. Non-LE clients must swap.
+The block-side producer builds a `Frame` with `seq = 0` and
+`timestamp_ns = 0`; the `BridgeSink` trait overrides both from its own
+per-stream counters before serialising, so no block needs to thread a
+mutable counter through `process()`.
+
+The `JsonEvent` variant covers what the old spec called `json_event`,
+`json_control`, and `error` — all three are structurally JSON and there
+was no value in three tags. The JSON body's `"type"` field does the
+dispatch.
 
 ### Stream IDs
 
-- `stream_id = 0` is the **control stream**: server pushes `json_event`
-  frames here (state changes, warnings, errors).
-- `stream_id = 1` (convention) is the **waterfall FFT** stream (allocated
-  implicitly at `POST /api/device/open`).
-- `stream_id` 2..999 are assigned by the server when VFOs are created via
-  the REST API. Clients receive the mapping via the `POST /api/device/.../vfo`
-  response.
-- `stream_id >= 1000` (`CROSS_ENV_STREAM_BASE`) are allocated automatically
-  by the runtime's `env_split` pass when a flowgraph crosses the node/browser
-  boundary. Each cross-env wire gets its own id, assigned in wire-declaration
-  order, carried on an auto-inserted `WsBridgeTx`/`WsBridgeRx` pair. The
-  allocation is deterministic for a given doc, so the browser side and the
-  node side resolve to the same numbers without any negotiation round-trip.
+- `stream_id = 0` — the **control stream** carrying `JsonEvent` frames
+  (lifecycle, warnings, errors). Clients that care subscribe to it; the
+  rest ignore it.
+- `stream_id = 1` — conventional "waterfall FFT" id. The current preset-
+  first server allocates FFT taps via `ui:<name>` sinks (see below), so
+  this id is mostly a legacy anchor in the frame module.
+- `stream_id >= 1000` (`CROSS_ENV_STREAM_BASE`) — allocated
+  deterministically by the runtime's `env_split` pass. Two allocation
+  sources share this range:
+  - Wires that cross the node/browser boundary — each such wire gets a
+    `stream_id`, carried on an auto-inserted `WsBridgeTx`/`WsBridgeRx`
+    pair.
+  - `ui:<name>` sentinel sinks — any wire whose RHS is `ui:<name>` is
+    treated as a server-to-UI crossing. `env_split` rewrites it to a
+    `WsBridgeTx` on the server side and emits nothing on the browser
+    side — the browser discovers the allocated id via
+    `GET /api/ui-sinks` rather than through the preset.
+
+Both allocations are deterministic for a given preset, so server and
+browser resolve to the same numbers without negotiation.
 
 ### JSON event schema (stream 0)
 
 All events are `{ "type": "...", ... }`. Known types:
 
-| type              | fields                                                   |
-|-------------------|----------------------------------------------------------|
-| `state_changed`   | `{ stream: {...}, fft: {...}, vfos: [...] }` — full or partial echo |
-| `vfo_added`       | `{ vfo_id, stream_id, offset_hz, rate, payload_type }`   |
-| `vfo_removed`     | `{ vfo_id, stream_id }`                                  |
-| `warning`         | `{ code, message }` — e.g. buffer underrun               |
-| `session_closed`  | `{ reason }` — server is about to disconnect              |
+| type                     | fields                                               |
+|--------------------------|------------------------------------------------------|
+| `pipeline_started`       | `{ preset_name }`                                    |
+| `pipeline_stopped`       | `{ reason }`                                         |
+| `pipeline_reconfigured`  | `{ plan }` — same shape as the PATCH response body   |
+| `warning`                | `{ code, message }` — e.g. buffer underrun           |
 
 ## Subscription semantics
 
-The waterfall FFT stream and all VFO streams are **push** — the server sends
-frames as they are produced, a client cannot throttle individual streams.
-Clients that cannot keep up will see the server's outbound buffer saturate;
-backpressure is handled at the WS layer (TCP's flow control). Any dropped
-frames surface as a gap in `seq` numbers — clients should detect this and
-either reset their local state or ignore the gap depending on what the stream
-represents.
+All `/ws/preset` streams are **push** — the server emits frames as they
+are produced, and a client cannot throttle individual streams. Clients
+that can't keep up will see the outbound buffer saturate; backpressure
+is handled at the WS layer (TCP's flow control). Dropped frames surface
+as gaps in a stream's `seq` counter (per-stream, monotonic, wraps at
+`u32::MAX`) — clients should detect this and either reset their local
+state or ignore the gap depending on what the stream carries.
 
-For power saving or tab-visibility throttling, clients should simply close
-streams they are not rendering (`DELETE` the VFO, unsubscribe from FFT) rather
-than try to rate-limit. The server side is where the FFT cost lives.
+For power saving or tab-visibility throttling, clients should just
+unsubscribe from streams they aren't rendering. The server side is
+where the FFT cost lives.
 
 ## Protocol versioning
 
-The `version` byte in the frame header and a `X-Ferrite-Protocol-Version`
-header on REST responses identify the protocol version. Breaking changes
-bump this byte. Minor additions (new `payload_type` values, new event types)
-do not; clients that see an unknown type should log and ignore.
+The postcard `Frame` enum **is** the wire schema — a version bump is a
+variant added, removed, or reshaped. The browser decoder is built from
+the same crate as the server encoder (`ferrite_blocks`), so any
+mismatch between what the server sends and what the browser expects is
+a build break, not a runtime ambiguity. There is no separate version
+byte; the variant tag covers forward-compat within a tag, and anything
+bigger is a breaking change to the schema itself.
 
 ## Security
 
