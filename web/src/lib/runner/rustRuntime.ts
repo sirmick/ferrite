@@ -88,4 +88,15 @@ export function drainAudioFromSink(rt: RuntimeHandle, blockId: string, out: Floa
   return rt.drainAudio(blockId, out);
 }
 
+/**
+ * Push a batch of interleaved IQ floats into the named `WsIqSource`
+ * block. Typically called from the Worker that hosts the multiplexed
+ * WebSocket: each incoming IQ frame for this stream id lands here, the
+ * block's internal ring absorbs it, and the next `tick` emits the
+ * samples onto the flowgraph.
+ */
+export function pushIqIntoSource(rt: RuntimeHandle, blockId: string, samples: Float32Array): void {
+  rt.pushIq(blockId, samples);
+}
+
 export type { RuntimeHandle };

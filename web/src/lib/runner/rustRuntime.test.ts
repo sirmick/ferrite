@@ -198,5 +198,93 @@ describe('rust runtime wasm shim', () => {
         rt.free();
       }
     });
+
+    // Browser-only fixture for the incoming-IQ side of the bridge —
+    // WsIqSource's ring is filled from JS via pushIq, then drained by
+    // process onto the IqF32 output. Pair it with FmDemod + AudioSink
+    // so the end-to-end push → tick → drain pipeline is exercised.
+    const wsIqToSinkDoc = JSON.stringify({
+      name: 'ws-iq-audio',
+      environments: ['browser'],
+      blocks: {
+        src: {
+          type: 'WsIqSource',
+          placement: 'browser',
+          params: { stream_id: 42, buffer_samples: 4096 },
+        },
+        demod: {
+          type: 'FmDemod',
+          placement: 'browser',
+          params: { sample_rate_hz: 240000, max_deviation_hz: 75000 },
+        },
+        sink: { type: 'AudioSink', placement: 'browser' },
+      },
+      wires: [
+        ['src.out', 'demod.in'],
+        ['demod.out', 'sink.in'],
+      ],
+    });
+
+    it('buffers IQ samples pushed in from JS', () => {
+      const rt = new RuntimeHandle(wsIqToSinkDoc, 'browser');
+      try {
+        rt.init();
+        // 6 floats = 3 complex samples.
+        rt.pushIq('src', new Float32Array([1, 2, 3, 4, 5, 6]));
+        expect(rt.iqBufferedSamples('src')).toBe(3);
+        expect(rt.iqDroppedSamples('src')).toBe(0n);
+      } finally {
+        rt.free();
+      }
+    });
+
+    it('tick drains buffered IQ samples through the graph', () => {
+      const rt = new RuntimeHandle(wsIqToSinkDoc, 'browser');
+      try {
+        rt.init();
+        // Fill with a plausible IQ signal (unit magnitude). 1024 pairs
+        // → 2048 floats; small enough that a single 1024-frame tick
+        // drains it completely.
+        const pairs = 1024;
+        const iq = new Float32Array(pairs * 2);
+        for (let i = 0; i < pairs; i++) {
+          iq[i * 2] = Math.cos(i * 0.01);
+          iq[i * 2 + 1] = Math.sin(i * 0.01);
+        }
+        rt.pushIq('src', iq);
+        expect(rt.iqBufferedSamples('src')).toBe(pairs);
+        rt.tick();
+        expect(rt.iqBufferedSamples('src')).toBeLessThan(pairs);
+      } finally {
+        rt.free();
+      }
+    });
+
+    it('tallies dropped IQ samples when the ring overflows', () => {
+      const rt = new RuntimeHandle(wsIqToSinkDoc, 'browser');
+      try {
+        rt.init();
+        // buffer_samples=4096 pairs → 8192 floats; push twice that in
+        // one shot. Half the samples should drop on the floor.
+        const overflow = new Float32Array(8192 * 2);
+        rt.pushIq('src', overflow);
+        expect(rt.iqBufferedSamples('src')).toBe(4096);
+        expect(rt.iqDroppedSamples('src')).toBe(4096n);
+      } finally {
+        rt.free();
+      }
+    });
+
+    it('rejects pushIq for a non-WsIqSource block', () => {
+      const rt = new RuntimeHandle(wsIqToSinkDoc, 'browser');
+      try {
+        rt.init();
+        const samples = new Float32Array([0, 0]);
+        expect(() => rt.pushIq('demod', samples)).toThrow(/WsIqSource/);
+        expect(() => rt.pushIq('ghost', samples)).toThrow(/ghost/);
+      } finally {
+        rt.free();
+      }
+    });
   });
 });
