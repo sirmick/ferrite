@@ -28,6 +28,7 @@ pub mod sine;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_source;
 pub mod spsc_ring;
+pub mod tee_iq_f32;
 pub mod ws_bridge;
 pub mod ws_iq_source;
 
@@ -48,6 +49,7 @@ pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
 pub use soapy_source::{SoapySource, SoapySourceParams};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
+pub use tee_iq_f32::TeeIqF32;
 pub use ws_bridge::{WsBridgeParams, WsBridgeRx, WsBridgeTx};
 pub use ws_iq_source::{WsIqSource, WsIqSourceParams};
 
@@ -103,6 +105,7 @@ mod tests {
             "Channelizer",
             "FmDemod",
             "AmDemod",
+            "TeeIqF32",
             "WsBridgeTx",
             "WsBridgeRx",
             "AudioSink",
