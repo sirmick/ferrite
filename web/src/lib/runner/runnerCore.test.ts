@@ -13,7 +13,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FlowgraphDoc } from '../flowgraph.js';
 
 import type { FrameClient, FrameHandler } from '../ws/client.js';
-import { PayloadType, PROTOCOL_VERSION, type ParsedFrame } from '../ws/frame.js';
+import { PayloadType, type ParsedFrame } from '../ws/frame.js';
 import { initSync } from '../wasm/runtime/runtime.js';
 import type { RunnerRequest } from './protocol.js';
 import { RunnerCore, type RunnerEnv } from './runnerCore.js';
@@ -90,7 +90,6 @@ class FakeFrameClient {
   deliver(streamId: number, floats: Float32Array): void {
     const frame: ParsedFrame = {
       header: {
-        version: PROTOCOL_VERSION,
         payloadType: PayloadType.IqF32,
         streamId,
         seq: 0,

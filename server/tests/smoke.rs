@@ -7,12 +7,10 @@ use axum::{
     routing::{get, patch, post},
     Router,
 };
+use ferrite_blocks::frame::Frame;
 use futures_util::StreamExt;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
-
-#[path = "../src/ws_frame.rs"]
-mod ws_frame;
 
 #[path = "../src/log_stream.rs"]
 #[allow(dead_code)]
@@ -102,10 +100,15 @@ async fn open_then_stream_fft_frames() {
         Message::Binary(b) => b,
         other => panic!("expected binary, got {other:?}"),
     };
-    let (header, payload) = ws_frame::decode(&bytes).expect("decode");
-    assert_eq!(header.payload_type, ws_frame::PayloadType::FftU8);
-    assert_eq!(header.stream_id, ws_frame::FFT_STREAM);
-    assert_eq!(payload.len(), 128);
+    match Frame::from_postcard(&bytes).expect("decode") {
+        Frame::FftU8 {
+            stream_id, payload, ..
+        } => {
+            assert_eq!(stream_id, ferrite_blocks::frame::FFT_STREAM);
+            assert_eq!(payload.len(), 128);
+        }
+        other => panic!("expected FftU8, got {other:?}"),
+    }
 
     let close_url = format!("http://{addr}/api/device/{session_id}/close");
     let _ = http_post_json(&close_url, "").await;
@@ -154,8 +157,9 @@ async fn ws_round_trip_peak_bin() {
             .expect("ws stream open")
             .expect("ws ok");
         if let Message::Binary(bytes) = msg {
-            let (_hdr, payload) = ws_frame::decode(&bytes).expect("decode");
-            last_payload = Some(payload.to_vec());
+            if let Frame::FftU8 { payload, .. } = Frame::from_postcard(&bytes).expect("decode") {
+                last_payload = Some(payload);
+            }
         }
     }
     let payload = last_payload.expect("at least one binary frame");
@@ -250,14 +254,15 @@ async fn close_emits_session_closed_event() {
             break;
         };
         if let Message::Binary(bytes) = frame {
-            let (hdr, payload) = ws_frame::decode(&bytes).expect("decode");
-            if hdr.payload_type == ws_frame::PayloadType::JsonEvent
-                && std::str::from_utf8(payload)
+            if let Frame::JsonEvent { payload, .. } = Frame::from_postcard(&bytes).expect("decode")
+            {
+                if std::str::from_utf8(&payload)
                     .map(|s| s.contains("session_closed"))
                     .unwrap_or(false)
-            {
-                saw_close = true;
-                break;
+                {
+                    saw_close = true;
+                    break;
+                }
             }
         }
     }
@@ -303,12 +308,16 @@ async fn add_vfo_streams_iq_f32_on_stream_two() {
         else {
             break;
         };
-        let (hdr, payload) = ws_frame::decode(&bytes).expect("decode");
-        if hdr.payload_type == ws_frame::PayloadType::IqF32 && hdr.stream_id == 2 {
-            // Every sample is 4B I + 4B Q; payload must be a multiple of 8.
-            assert!(!payload.is_empty() && payload.len() % 8 == 0);
-            saw_iq = true;
-            break;
+        if let Frame::IqF32 {
+            stream_id, payload, ..
+        } = Frame::from_postcard(&bytes).expect("decode")
+        {
+            if stream_id == 2 {
+                // Every sample is 4B I + 4B Q; payload must be a multiple of 8.
+                assert!(!payload.is_empty() && payload.len() % 8 == 0);
+                saw_iq = true;
+                break;
+            }
         }
     }
     assert!(saw_iq, "expected an IqF32 frame on stream_id=2");
@@ -417,9 +426,8 @@ async fn delete_vfo_removes_descriptor_and_emits_event() {
         else {
             break;
         };
-        let (hdr, payload) = ws_frame::decode(&bytes).expect("decode");
-        if hdr.payload_type == ws_frame::PayloadType::JsonEvent {
-            if let Ok(text) = std::str::from_utf8(payload) {
+        if let Frame::JsonEvent { payload, .. } = Frame::from_postcard(&bytes).expect("decode") {
+            if let Ok(text) = std::str::from_utf8(&payload) {
                 if text.contains("vfo_removed") && text.contains(&vfo_id) {
                     saw_removed = true;
                     break;
@@ -507,8 +515,13 @@ async fn iq_f32_payload_decodes_as_le_f32_pairs() {
         else {
             break;
         };
-        let (hdr, payload) = ws_frame::decode(&bytes).expect("decode");
-        if hdr.payload_type != ws_frame::PayloadType::IqF32 || hdr.stream_id < 2 {
+        let Frame::IqF32 {
+            stream_id, payload, ..
+        } = Frame::from_postcard(&bytes).expect("decode")
+        else {
+            continue;
+        };
+        if stream_id < 2 {
             continue;
         }
         assert_eq!(

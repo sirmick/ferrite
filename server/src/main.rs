@@ -33,7 +33,6 @@ mod routes;
 mod session;
 #[cfg(feature = "soapysdr")]
 mod soapy_source;
-mod ws_frame;
 
 use session::{CliConfig, SourceKind};
 

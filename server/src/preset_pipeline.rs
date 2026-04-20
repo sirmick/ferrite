@@ -62,7 +62,7 @@ pub struct PresetMount {
     /// bridge-Tx instances that a rebuild produces — the sink on the
     /// old instances doesn't carry over. One sink serves every Tx
     /// block regardless of port type; the sink discriminates by the
-    /// `BridgePayloadType` tag on each push.
+    /// `Frame` variant it receives on each push.
     bridge_sink: Arc<dyn BridgeSink>,
     /// Last-applied cross-env doc as-authored (pre-split). The node
     /// runtime only carries the node half; this is what the HTTP
@@ -223,7 +223,7 @@ async fn drive(
 #[cfg(test)]
 mod tests {
     use super::spawn_preset;
-    use crate::ws_frame::{decode, PayloadType};
+    use ferrite_blocks::frame::Frame;
     use ferrite_runtime::FlowgraphDoc;
     use std::time::Duration;
     use tokio::sync::broadcast;
@@ -252,12 +252,17 @@ mod tests {
             .await
             .expect("a frame within 1s")
             .expect("broadcast ok");
-        let (header, payload) = decode(&bytes).unwrap();
-        assert_eq!(header.payload_type, PayloadType::IqF32);
-        assert_eq!(header.stream_id, 1000);
-        // SineSource defaults to DEFAULT_FRAMES_HINT (1024) samples per
-        // tick; each complex sample is 8 bytes.
-        assert_eq!(payload.len(), 1024 * 8);
+        match Frame::from_postcard(&bytes).unwrap() {
+            Frame::IqF32 {
+                stream_id, payload, ..
+            } => {
+                assert_eq!(stream_id, 1000);
+                // SineSource defaults to DEFAULT_FRAMES_HINT (1024)
+                // samples per tick; each complex sample is 8 bytes.
+                assert_eq!(payload.len(), 1024 * 8);
+            }
+            other => panic!("expected IqF32 frame, got {other:?}"),
+        }
         mount.handle.shutdown().await.unwrap();
     }
 
@@ -341,10 +346,13 @@ mod tests {
             .await
             .expect("post-reconfigure frame within 1s")
             .expect("broadcast ok");
-        let (header, _payload) = decode(&bytes).unwrap();
-        // Same bridge pair — same stream id.
-        assert_eq!(header.stream_id, 1000);
-        assert_eq!(header.payload_type, PayloadType::IqF32);
+        match Frame::from_postcard(&bytes).unwrap() {
+            Frame::IqF32 { stream_id, .. } => {
+                // Same bridge pair — same stream id.
+                assert_eq!(stream_id, 1000);
+            }
+            other => panic!("expected IqF32 frame, got {other:?}"),
+        }
         mount.handle.shutdown().await.unwrap();
     }
 

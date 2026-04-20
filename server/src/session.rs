@@ -19,6 +19,7 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use ferrite_blocks::{
+    frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE},
     Block, BlockIo, Channelizer, ChannelizerParams, FftBlock, FftBlockParams, FftWindow,
     FileIqSource, FileIqSourceParams, InBuf, InputPort, LogMagU8, LogMagU8Params, OutBuf,
     OutputPort, PortMeta, SineSource, SineSourceParams,
@@ -26,10 +27,6 @@ use ferrite_blocks::{
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
-
-use crate::ws_frame::{
-    encode_into, FrameHeader, PayloadType, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE,
-};
 
 /// Server-wide source selection. Set once at startup via CLI; every session
 /// opened afterwards uses this kind, unless the open request explicitly
@@ -620,16 +617,15 @@ fn evict(mut s: Session, reason: &str) {
         r#"{{"type":"session_closed","session_id":"{id}","reason":"{reason}"}}"#,
         id = s.id,
     );
-    let header = FrameHeader {
-        version: crate::ws_frame::PROTOCOL_VERSION,
-        payload_type: PayloadType::JsonEvent,
+    let frame = Frame::JsonEvent {
         stream_id: CONTROL_STREAM,
         seq: 0,
         timestamp_ns: now_ns(),
+        payload: body.into_bytes(),
     };
-    let mut buf = Vec::with_capacity(crate::ws_frame::HEADER_LEN + body.len());
-    encode_into(&header, body.as_bytes(), &mut buf);
-    let _ = s.frames.send(Arc::new(buf));
+    if let Ok(bytes) = frame.to_postcard() {
+        let _ = s.frames.send(Arc::new(bytes));
+    }
     if let Some(tx) = s.shutdown.take() {
         let _ = tx.send(());
     }
@@ -815,7 +811,6 @@ async fn run_pipeline(
     let mut iq_a = vec![Complex::new(0.0_f32, 0.0); n];
     let mut iq_b = vec![Complex::new(0.0_f32, 0.0); n];
     let mut bins = vec![0_u8; n];
-    let mut frame_buf = Vec::with_capacity(crate::ws_frame::HEADER_LEN + n);
 
     // VFO book-keeping. `next_stream_id` starts at `VFO_STREAM_BASE` (2)
     // per `docs/02-protocol.md` §"Stream IDs"; wraps back there after
@@ -862,19 +857,19 @@ async fn run_pipeline(
                     tracing::error!(?err, "pipeline tick failed");
                     return;
                 }
-                let header = FrameHeader {
-                    version: crate::ws_frame::PROTOCOL_VERSION,
-                    payload_type: PayloadType::FftU8,
+                let frame = Frame::FftU8 {
                     stream_id: FFT_STREAM,
                     seq,
                     timestamp_ns: now_ns(),
+                    payload: bins.clone(),
                 };
-                frame_buf.clear();
-                encode_into(&header, &bins, &mut frame_buf);
-                // Send fails only when there are no live receivers; that's
-                // expected when nothing has connected yet — drop and keep
-                // ticking so a later subscriber gets the next frame.
-                let _ = tx.send(Arc::new(frame_buf.clone()));
+                if let Ok(bytes) = frame.to_postcard() {
+                    // Send fails only when there are no live receivers;
+                    // that's expected when nothing has connected yet —
+                    // drop and keep ticking so a later subscriber gets
+                    // the next frame.
+                    let _ = tx.send(Arc::new(bytes));
+                }
                 seq = seq.wrapping_add(1);
 
                 // Run every active VFO against the same wideband block.
@@ -896,7 +891,6 @@ struct ActiveVfo {
     channelizer: Channelizer,
     scratch: Vec<Complex<f32>>,
     iq_bytes: Vec<u8>,
-    frame_buf: Vec<u8>,
     seq: u32,
 }
 
@@ -1024,7 +1018,6 @@ fn build_active_vfo(
         channelizer,
         scratch: Vec::new(),
         iq_bytes: Vec::new(),
-        frame_buf: Vec::new(),
         seq: 0,
     })
 }
@@ -1096,16 +1089,20 @@ fn emit_vfo_frame(vfo: &mut ActiveVfo, iq_in: &[Complex<f32>], tx: &FrameTx) -> 
         vfo.iq_bytes.extend_from_slice(&c.re.to_le_bytes());
         vfo.iq_bytes.extend_from_slice(&c.im.to_le_bytes());
     }
-    let header = FrameHeader {
-        version: crate::ws_frame::PROTOCOL_VERSION,
-        payload_type: PayloadType::IqF32,
+    let frame = Frame::IqF32 {
         stream_id: vfo.descriptor.stream_id,
         seq: vfo.seq,
         timestamp_ns: now_ns(),
+        payload: std::mem::take(&mut vfo.iq_bytes),
     };
-    vfo.frame_buf.clear();
-    encode_into(&header, &vfo.iq_bytes, &mut vfo.frame_buf);
-    let _ = tx.send(Arc::new(vfo.frame_buf.clone()));
+    // Reclaim the buffer allocation from the frame after serializing so
+    // the next tick re-uses it without reallocating.
+    let bytes = frame.to_postcard().map_err(|e| anyhow!("postcard: {e}"))?;
+    if let Frame::IqF32 { payload, .. } = frame {
+        vfo.iq_bytes = payload;
+        vfo.iq_bytes.clear();
+    }
+    let _ = tx.send(Arc::new(bytes));
     vfo.seq = vfo.seq.wrapping_add(1);
     Ok(())
 }
@@ -1131,16 +1128,15 @@ fn vfo_removed_event(desc: &VfoDescriptor) -> String {
 }
 
 fn emit_json_event(tx: &FrameTx, body: &str, seq: &mut u32) {
-    let header = FrameHeader {
-        version: crate::ws_frame::PROTOCOL_VERSION,
-        payload_type: PayloadType::JsonEvent,
+    let frame = Frame::JsonEvent {
         stream_id: CONTROL_STREAM,
         seq: *seq,
         timestamp_ns: now_ns(),
+        payload: body.as_bytes().to_vec(),
     };
-    let mut buf = Vec::with_capacity(crate::ws_frame::HEADER_LEN + body.len());
-    encode_into(&header, body.as_bytes(), &mut buf);
-    let _ = tx.send(Arc::new(buf));
+    if let Ok(bytes) = frame.to_postcard() {
+        let _ = tx.send(Arc::new(bytes));
+    }
     *seq = seq.wrapping_add(1);
 }
 
@@ -1283,7 +1279,7 @@ fn tick(
 #[cfg(test)]
 mod tests {
     use super::{AppState, CliConfig, OpenSpec, SourceKind};
-    use crate::ws_frame::{decode, PayloadType, FFT_STREAM};
+    use ferrite_blocks::frame::{Frame, FFT_STREAM};
     use std::time::Duration;
 
     #[tokio::test]
@@ -1300,10 +1296,15 @@ mod tests {
             .await
             .expect("frame within 1s")
             .expect("broadcast ok");
-        let (header, payload) = decode(&bytes).unwrap();
-        assert_eq!(header.payload_type, PayloadType::FftU8);
-        assert_eq!(header.stream_id, FFT_STREAM);
-        assert_eq!(payload.len(), 256);
+        match Frame::from_postcard(&bytes).unwrap() {
+            Frame::FftU8 {
+                stream_id, payload, ..
+            } => {
+                assert_eq!(stream_id, FFT_STREAM);
+                assert_eq!(payload.len(), 256);
+            }
+            other => panic!("expected FftU8, got {other:?}"),
+        }
         state.close(&opened.id).await;
     }
 

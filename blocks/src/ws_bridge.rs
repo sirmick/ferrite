@@ -12,10 +12,11 @@
 //! There is one Tx block per port type ([`WsBridgeTx`] for `IqF32`,
 //! [`WsBridgeTxFftU8`] for `FftU8`) because the block framework is
 //! statically typed on ports. They all share the **same**
-//! [`BridgeSink`] trait — each Tx encodes its input into bytes, tags
-//! it with a [`BridgePayloadType`], and pushes through the sink. The
-//! transport implementation (framing, seq counters, the WS hop)
-//! doesn't care which port type the bytes came from.
+//! [`BridgeSink`] trait — each Tx encodes its input as bytes, wraps it
+//! in the appropriate [`Frame`] variant with `seq = 0` and
+//! `timestamp_ns = 0`, and pushes through the sink. The sink stamps the
+//! envelope and serializes with postcard; the block stays ignorant of
+//! the wire protocol.
 
 use std::sync::Arc;
 
@@ -23,38 +24,29 @@ use anyhow::Result;
 use num_complex::Complex;
 use serde::Deserialize;
 
-use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, ReconfigureScope, Work,
+use crate::{
+    block::{
+        Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, ParamKind, ParamSpec, Placement,
+        PortSpec, PortType, ReconfigureScope, Work,
+    },
+    frame::Frame,
 };
 
-/// Payload tag carried on every bridge push. The transport uses this
-/// to pick the wire `payload_type` byte; the `#[repr(u8)]` discriminants
-/// match the wire values in `docs/02-protocol.md` so the server-side
-/// sink doesn't need a translation table. Block crate owns this enum
-/// because blocks must not depend on the server crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum BridgePayloadType {
-    FftU8 = 0x01,
-    IqF32 = 0x11,
-}
-
 /// Transport contract shared by every `WsBridgeTx*` block. The runtime
-/// constructs one sink per preset (today that's the WS frame encoder +
+/// constructs one sink per preset (today that's the postcard encoder +
 /// broadcast channel in `ferrited::session`) and hands the same
-/// `Arc<dyn BridgeSink>` to every Tx block via `attach_sink`. Each Tx
-/// block then encodes its input into bytes and pushes through this
-/// handle, tagged with the appropriate [`BridgePayloadType`].
+/// `Arc<dyn BridgeSink>` to every Tx block via `attach_sink`.
 ///
-/// Framing, `seq` counters, and the WS send all live on the
-/// implementation side — blocks stay ignorant of the wire protocol.
+/// `seq` and `timestamp_ns` are sink-owned: the block emits a
+/// zero-filled envelope and the sink overwrites both before
+/// serializing. Framing and the WS send live on the implementation
+/// side — blocks stay ignorant of the wire protocol.
 pub trait BridgeSink: Send + Sync {
-    /// Push one block of pre-encoded bytes tagged with a bridge-pair
-    /// `stream_id` and the payload type. Implementations are expected
-    /// to be lossy-latest or backpressure-free — the block itself does
-    /// not await.
-    fn push(&self, stream_id: u32, payload_type: BridgePayloadType, bytes: &[u8]);
+    /// Submit a frame for transport. Implementations are expected to be
+    /// lossy-latest or backpressure-free — the block itself does not
+    /// await. `seq`/`timestamp_ns` on the incoming frame are ignored
+    /// and rewritten by the sink.
+    fn push(&self, frame: Frame);
 }
 
 /// Stream identifier carried on both ends of a bridge pair. Unique
@@ -82,6 +74,18 @@ const STREAM_ID_PARAM: ParamSpec = ParamSpec {
     // is a source-level restart.
     reconfig_scope: ReconfigureScope::SourceRestart,
 };
+
+/// Narrow the `u32` param back to the wire's `u16` stream id. `u16` is
+/// plenty (64k streams) and matches the `Frame` schema; the `u32` on
+/// the params struct just avoids a JSON-schema oddity around max.
+#[allow(clippy::cast_possible_truncation)]
+const fn stream_id_u16(stream_id: u32) -> u16 {
+    if stream_id > u16::MAX as u32 {
+        u16::MAX
+    } else {
+        stream_id as u16
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tx (IqF32) — server-side egress for baseband IQ samples. Accepts
@@ -150,8 +154,13 @@ impl Block for WsBridgeTx {
         if let Some(port) = io.inputs.iter().find(|p| p.name == "in") {
             if let Some(slice) = port.as_iq_f32() {
                 if let Some(sink) = &self.sink {
-                    let bytes = Self::encode_iq_f32(slice);
-                    sink.push(self.params.stream_id, BridgePayloadType::IqF32, &bytes);
+                    let payload = Self::encode_iq_f32(slice);
+                    sink.push(Frame::IqF32 {
+                        stream_id: stream_id_u16(self.params.stream_id),
+                        seq: 0,
+                        timestamp_ns: 0,
+                        payload,
+                    });
                 }
                 // Consume whatever arrived regardless of sink presence:
                 // an unwired bridge still needs to relieve upstream
@@ -228,7 +237,7 @@ impl BlockFactory for WsBridgeRx {
 // ---------------------------------------------------------------------------
 // Tx (FftU8) — server-side egress for log-magnitude spectrum bytes.
 // The payload is already `u8` on the wire, so the block just forwards
-// the slice to the same `BridgeSink` with the `FftU8` tag.
+// the slice to the same `BridgeSink` wrapped in an `FftU8` frame.
 // ---------------------------------------------------------------------------
 
 pub struct WsBridgeTxFftU8 {
@@ -249,7 +258,7 @@ impl WsBridgeTxFftU8 {
 
     /// Wire a transport sink — mirrors [`WsBridgeTx::attach_sink`]. The
     /// runtime calls this once after construction and before `init`;
-    /// `process` forwards every arriving FftU8 slice through the sink.
+    /// `process` forwards every arriving `FftU8` slice through the sink.
     pub fn attach_sink(&mut self, sink: Arc<dyn BridgeSink>) {
         self.sink = Some(sink);
     }
@@ -279,7 +288,12 @@ impl Block for WsBridgeTxFftU8 {
         if let Some(port) = io.inputs.iter().find(|p| p.name == "in") {
             if let InBuf::FftU8(slice) = &port.buf {
                 if let Some(sink) = &self.sink {
-                    sink.push(self.params.stream_id, BridgePayloadType::FftU8, slice);
+                    sink.push(Frame::FftU8 {
+                        stream_id: stream_id_u16(self.params.stream_id),
+                        seq: 0,
+                        timestamp_ns: 0,
+                        payload: slice.to_vec(),
+                    });
                 }
                 w.consumed[0] = slice.len();
             }
@@ -297,26 +311,24 @@ impl BlockFactory for WsBridgeTxFftU8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BridgePayloadType, BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx, WsBridgeTxFftU8,
+    use super::{BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx, WsBridgeTxFftU8};
+    use crate::{
+        block::{Block, BlockIo, InBuf, InputPort, OutBuf, OutputPort, PortMeta, Work},
+        frame::Frame,
     };
-    use crate::block::{Block, BlockIo, InBuf, InputPort, OutBuf, OutputPort, PortMeta, Work};
     use num_complex::Complex;
     use std::sync::{Arc, Mutex};
 
     /// Captures every `push` call so tests can assert the block
-    /// forwarded the right `(stream_id, payload_type, bytes)` tuples.
+    /// forwarded the right Frame variants.
     #[derive(Default)]
     struct CapturingSink {
-        calls: Mutex<Vec<(u32, BridgePayloadType, Vec<u8>)>>,
+        calls: Mutex<Vec<Frame>>,
     }
 
     impl BridgeSink for CapturingSink {
-        fn push(&self, stream_id: u32, payload_type: BridgePayloadType, bytes: &[u8]) {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((stream_id, payload_type, bytes.to_vec()));
+        fn push(&self, frame: Frame) {
+            self.calls.lock().unwrap().push(frame);
         }
     }
 
@@ -374,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn iq_tx_encodes_complex_as_le_interleaved_floats() {
+    fn iq_tx_pushes_iq_f32_frame_with_le_interleaved_floats() {
         let sink = Arc::new(CapturingSink::default());
         let mut tx = WsBridgeTx::new(WsBridgeParams { stream_id: 1234 });
         tx.attach_sink(sink.clone());
@@ -394,14 +406,19 @@ mod tests {
 
         let calls = sink.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        let (id, pt, bytes) = &calls[0];
-        assert_eq!(*id, 1234);
-        assert_eq!(*pt, BridgePayloadType::IqF32);
-        assert_eq!(bytes.len(), 16);
-        assert_eq!(&bytes[0..4], &1.0_f32.to_le_bytes());
-        assert_eq!(&bytes[4..8], &2.0_f32.to_le_bytes());
-        assert_eq!(&bytes[8..12], &3.0_f32.to_le_bytes());
-        assert_eq!(&bytes[12..16], &4.0_f32.to_le_bytes());
+        match &calls[0] {
+            Frame::IqF32 {
+                stream_id, payload, ..
+            } => {
+                assert_eq!(*stream_id, 1234);
+                assert_eq!(payload.len(), 16);
+                assert_eq!(&payload[0..4], &1.0_f32.to_le_bytes());
+                assert_eq!(&payload[4..8], &2.0_f32.to_le_bytes());
+                assert_eq!(&payload[8..12], &3.0_f32.to_le_bytes());
+                assert_eq!(&payload[12..16], &4.0_f32.to_le_bytes());
+            }
+            other => panic!("expected IqF32 frame, got {other:?}"),
+        }
     }
 
     #[test]
@@ -435,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn fft_tx_forwards_bytes_as_fft_u8_tag() {
+    fn fft_tx_pushes_fft_u8_frame() {
         let sink = Arc::new(CapturingSink::default());
         let mut tx = WsBridgeTxFftU8::new(WsBridgeParams { stream_id: 1 });
         tx.attach_sink(sink.clone());
@@ -455,18 +472,23 @@ mod tests {
 
         let calls = sink.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        let (id, pt, bytes) = &calls[0];
-        assert_eq!(*id, 1);
-        assert_eq!(*pt, BridgePayloadType::FftU8);
-        assert_eq!(bytes, &input);
+        match &calls[0] {
+            Frame::FftU8 {
+                stream_id, payload, ..
+            } => {
+                assert_eq!(*stream_id, 1);
+                assert_eq!(payload, &input);
+            }
+            other => panic!("expected FftU8 frame, got {other:?}"),
+        }
     }
 
     #[test]
     fn one_sink_instance_serves_both_tx_block_types() {
         // The point of the unified trait: a single `Arc<dyn BridgeSink>`
         // can be attached to every Tx block in a preset regardless of
-        // port type, and the sink tells them apart by the payload_type
-        // tag on each push.
+        // port type, and the sink tells them apart by the Frame variant
+        // it receives.
         let sink = Arc::new(CapturingSink::default());
         let sink_dyn: Arc<dyn BridgeSink> = sink.clone();
 
@@ -503,9 +525,13 @@ mod tests {
 
         let calls = sink.calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0, 1000);
-        assert_eq!(calls[0].1, BridgePayloadType::IqF32);
-        assert_eq!(calls[1].0, 1);
-        assert_eq!(calls[1].1, BridgePayloadType::FftU8);
+        assert!(matches!(
+            &calls[0],
+            Frame::IqF32 {
+                stream_id: 1000,
+                ..
+            }
+        ));
+        assert!(matches!(&calls[1], Frame::FftU8 { stream_id: 1, .. }));
     }
 }

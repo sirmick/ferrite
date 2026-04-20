@@ -22,6 +22,7 @@ pub mod decimator;
 pub mod fft;
 pub mod file_source;
 pub mod fm_demod;
+pub mod frame;
 pub mod log_mag_u8;
 pub mod registry;
 pub mod sine;
@@ -44,15 +45,14 @@ pub use decimator::{Decimator, DecimatorParams};
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use fm_demod::{FmDemod, FmDemodParams};
+pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
 pub use soapy_source::{SoapySource, SoapySourceParams};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use tee_iq_f32::TeeIqF32;
-pub use ws_bridge::{
-    BridgePayloadType, BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx, WsBridgeTxFftU8,
-};
+pub use ws_bridge::{BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx, WsBridgeTxFftU8};
 pub use ws_iq_source::{WsIqSource, WsIqSourceParams};
 
 /// Marks an `impl Block for T` so `T` is added to [`registry`].

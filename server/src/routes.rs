@@ -244,7 +244,7 @@ pub async fn open_session(
         session_id: opened.id,
         ws_url,
         fft: StreamDescriptor {
-            stream_id: crate::ws_frame::FFT_STREAM,
+            stream_id: ferrite_blocks::frame::FFT_STREAM,
             payload_type: "fft_u8",
             size: opened.fft_size,
             rate_hz: opened.fft_rate_hz,
