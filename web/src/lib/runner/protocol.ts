@@ -11,7 +11,7 @@
 // runtime's reconfiguration surface lands with M3 once the
 // `reconfigScope` schema is in place.
 
-import type { FlowgraphDoc } from '@ferrite/flowgraph-runtime/types';
+import type { FlowgraphDoc } from '../flowgraph.js';
 
 export type RuntimeState = 'created' | 'initialized' | 'running' | 'stopped';
 

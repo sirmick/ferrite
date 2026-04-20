@@ -18,7 +18,7 @@ import initWasm, {
   version,
 } from '../wasm/runtime/runtime.js';
 
-import type { FlowgraphDoc } from '@ferrite/flowgraph-runtime/types';
+import type { FlowgraphDoc } from '../flowgraph.js';
 
 let initPromise: Promise<void> | undefined;
 

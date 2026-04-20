@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { FlowgraphDoc } from '@ferrite/flowgraph-runtime/types';
+import type { FlowgraphDoc } from '../flowgraph.js';
 
 import type { FrameClient, FrameHandler } from '../ws/client.js';
 import { PayloadType, PROTOCOL_VERSION, type ParsedFrame } from '../ws/frame.js';

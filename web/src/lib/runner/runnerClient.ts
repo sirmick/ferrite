@@ -6,7 +6,7 @@
 // The `WorkerLike` shape is the minimum subset of `Worker` we rely
 // on — tests pass a fake; production passes `new Worker(...)`.
 
-import type { FlowgraphDoc } from '@ferrite/flowgraph-runtime/types';
+import type { FlowgraphDoc } from '../flowgraph.js';
 
 import type { LoadResult, RunnerRequest, RunnerResponse, RuntimeState } from './protocol.js';
 

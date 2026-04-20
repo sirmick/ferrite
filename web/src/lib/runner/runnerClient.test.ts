@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { FlowgraphDoc } from '@ferrite/flowgraph-runtime/types';
+import type { FlowgraphDoc } from '../flowgraph.js';
 
 import type { RunnerRequest, RunnerResponse } from './protocol.js';
 import { FlowgraphRunner, type WorkerLike } from './runnerClient.js';

@@ -14,7 +14,7 @@
 // `AudioRingWriter` that an `AudioWorkletNode` on the main thread
 // drains on the audio clock.
 
-import type { FlowgraphDoc } from '@ferrite/flowgraph-runtime/types';
+import type { FlowgraphDoc } from '../flowgraph.js';
 
 import { AudioRingWriter } from '../audio/ringBuffer.js';
 import type { FrameClient } from '../ws/client.js';
