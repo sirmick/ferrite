@@ -17,10 +17,12 @@
 //! [`WsBridgeRx`] produces nothing. Real encode/send/recv/decode logic
 //! arrives with the server preset-load commit in M2.
 //!
-//! Only `IqF32` is wired up today — it's the port type every preset in
-//! the repo currently uses at the env boundary (`Channelizer.out`,
-//! `FmDemod.in`). `RealF32`, `FftU8`, etc. land as siblings when a
-//! preset needs them.
+//! `IqF32` and `FftU8` are wired up today — IQ is the baseband type
+//! every VFO crossing uses, and FftU8 is the compact log-magnitude
+//! spectrum the browser renders as a waterfall. Each port type is a
+//! sibling `WsBridgeTx{Type}` block with its own `…BridgeSink` trait;
+//! they share the `stream_id` param and the transport hop. `RealF32`
+//! and friends land as further siblings when a preset needs them.
 
 use std::sync::Arc;
 
@@ -203,9 +205,90 @@ impl BlockFactory for WsBridgeRx {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FftU8 sibling — server-side egress for log-magnitude spectrum bytes.
+// ---------------------------------------------------------------------------
+
+/// Transport contract for [`WsBridgeTxFftU8`]. Mirrors [`IqBridgeSink`]
+/// for the `FftU8` port type; the two live side-by-side because one
+/// trait per payload type keeps the block specs pinned to one port
+/// type each (no runtime port-type dispatch inside the sink).
+pub trait FftU8BridgeSink: Send + Sync {
+    /// Push one block of log-magnitude bytes tagged with a bridge-pair
+    /// `stream_id`. `bytes.len()` is usually the FFT size; the
+    /// implementation handles framing.
+    fn push_fft_u8(&self, stream_id: u32, bytes: &[u8]);
+}
+
+pub struct WsBridgeTxFftU8 {
+    params: WsBridgeParams,
+    sink: Option<Arc<dyn FftU8BridgeSink>>,
+}
+
+impl WsBridgeTxFftU8 {
+    #[must_use]
+    pub const fn new(params: WsBridgeParams) -> Self {
+        Self { params, sink: None }
+    }
+
+    #[must_use]
+    pub const fn stream_id(&self) -> u32 {
+        self.params.stream_id
+    }
+
+    /// Wire a transport sink — mirrors [`WsBridgeTx::attach_sink`]. The
+    /// runtime calls this once after construction and before `init`;
+    /// `process` forwards every arriving FftU8 slice through the sink.
+    pub fn attach_sink(&mut self, sink: Arc<dyn FftU8BridgeSink>) {
+        self.sink = Some(sink);
+    }
+}
+
+#[ferrite_blocks_macros::ferrite_block]
+impl Block for WsBridgeTxFftU8 {
+    fn spec() -> BlockSpec {
+        BlockSpec {
+            type_name: "WsBridgeTxFftU8",
+            placement: Placement::NativeOnly,
+            inputs: &[PortSpec {
+                name: "in",
+                port_type: PortType::FftU8,
+            }],
+            outputs: &[],
+            params: &[STREAM_ID_PARAM],
+        }
+    }
+
+    fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+        let mut w = Work::new();
+        if let Some(port) = io.inputs.iter().find(|p| p.name == "in") {
+            if let crate::block::InBuf::FftU8(slice) = &port.buf {
+                if let Some(sink) = &self.sink {
+                    sink.push_fft_u8(self.params.stream_id, slice);
+                }
+                w.consumed[0] = slice.len();
+            }
+        }
+        Ok(w)
+    }
+}
+
+impl BlockFactory for WsBridgeTxFftU8 {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: WsBridgeParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(WsBridgeTxFftU8::new(p)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IqBridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx};
+    use super::{
+        FftU8BridgeSink, IqBridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx, WsBridgeTxFftU8,
+    };
     use crate::block::{Block, BlockIo, InBuf, InputPort, OutBuf, OutputPort, PortMeta, Work};
     use num_complex::Complex;
     use std::sync::{Arc, Mutex};
@@ -314,5 +397,56 @@ mod tests {
         };
         let w: Work = tx.process(&mut io).unwrap();
         assert_eq!(w.consumed[0], 16);
+    }
+
+    #[test]
+    fn fft_tx_spec_is_native_only_fft_u8_in() {
+        let s = WsBridgeTxFftU8::spec();
+        assert_eq!(s.type_name, "WsBridgeTxFftU8");
+        assert!(matches!(s.placement, crate::block::Placement::NativeOnly));
+        assert_eq!(s.inputs.len(), 1);
+        assert!(matches!(
+            s.inputs[0].port_type,
+            crate::block::PortType::FftU8
+        ));
+        assert_eq!(s.outputs.len(), 0);
+    }
+
+    /// Mirror of [`CapturingSink`] for the FftU8 side. Records
+    /// `(stream_id, payload_len)` tuples so tests can assert the block
+    /// forwarded the right bytes on the right stream.
+    #[derive(Default)]
+    struct CapturingFftSink {
+        calls: Mutex<Vec<(u32, Vec<u8>)>>,
+    }
+
+    impl FftU8BridgeSink for CapturingFftSink {
+        fn push_fft_u8(&self, stream_id: u32, bytes: &[u8]) {
+            self.calls.lock().unwrap().push((stream_id, bytes.to_vec()));
+        }
+    }
+
+    #[test]
+    fn fft_tx_forwards_bytes_to_attached_sink() {
+        let sink = Arc::new(CapturingFftSink::default());
+        let mut tx = WsBridgeTxFftU8::new(WsBridgeParams { stream_id: 1 });
+        tx.attach_sink(sink.clone());
+
+        let input: Vec<u8> = (0..32).collect();
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::FftU8(&input),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut [],
+        };
+        let w: Work = tx.process(&mut io).unwrap();
+        assert_eq!(w.consumed[0], 32);
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, 1);
+        assert_eq!(calls[0].1, input);
     }
 }

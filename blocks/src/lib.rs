@@ -50,7 +50,9 @@ pub use sine::{SineSource, SineSourceParams};
 pub use soapy_source::{SoapySource, SoapySourceParams};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use tee_iq_f32::TeeIqF32;
-pub use ws_bridge::{WsBridgeParams, WsBridgeRx, WsBridgeTx};
+pub use ws_bridge::{
+    FftU8BridgeSink, IqBridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx, WsBridgeTxFftU8,
+};
 pub use ws_iq_source::{WsIqSource, WsIqSourceParams};
 
 /// Marks an `impl Block for T` so `T` is added to [`registry`].
@@ -107,6 +109,7 @@ mod tests {
             "AmDemod",
             "TeeIqF32",
             "WsBridgeTx",
+            "WsBridgeTxFftU8",
             "WsBridgeRx",
             "AudioSink",
             "WsIqSource",

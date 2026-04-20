@@ -1,16 +1,19 @@
-//! `BroadcastIqSink` — transport hook that turns `IqBridgeSink` pushes
-//! from a runtime's `WsBridgeTx` into framed WebSocket frames on the
-//! session's broadcast channel.
+//! `BroadcastIqSink` / `BroadcastFftU8Sink` — transport hooks that turn
+//! bridge-sink pushes from the Rust runtime into framed WebSocket frames
+//! on the session's broadcast channel.
 //!
-//! The Rust runtime instantiates a `WsBridgeTx` for each cross-env
-//! wire in the node half of a preset. The bridge publishes IQ samples
-//! through its `IqBridgeSink` handle — this module owns the framing,
-//! per-stream `seq` counter, and the broadcast-channel hop into the
-//! outbound WS fanout.
+//! The runtime instantiates a `WsBridgeTx`/`WsBridgeTxFftU8` for each
+//! cross-env wire in the node half of a preset. Each bridge publishes
+//! through a typed sink trait (`IqBridgeSink`, `FftU8BridgeSink`); the
+//! corresponding struct here owns the framing, the per-stream `seq`
+//! counter, and the broadcast-channel hop into the outbound WS fanout.
 //!
-//! Payload encoding matches `docs/02-protocol.md`: `payload_type =
-//! IqF32`, interleaved I,Q little-endian floats (LE is asserted on the
-//! wire for IQ — see §"Endianness"). Per-stream `seq` wraps at `u32`.
+//! Payload encoding matches `docs/02-protocol.md`: IQ frames are
+//! interleaved I,Q little-endian floats tagged `IqF32`; FFT frames are
+//! the log-magnitude byte slice tagged `FftU8`. Per-stream `seq` wraps
+//! at `u32`; each payload type keeps its own seq map so a collision on
+//! `stream_id` across types (which is a misuse) doesn't interleave
+//! their counters.
 
 use std::{
     collections::HashMap,
@@ -18,7 +21,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ferrite_blocks::ws_bridge::IqBridgeSink;
+use ferrite_blocks::ws_bridge::{FftU8BridgeSink, IqBridgeSink};
 use num_complex::Complex;
 
 use crate::{
@@ -81,6 +84,54 @@ impl IqBridgeSink for BroadcastIqSink {
         let frame = encode(&header, &payload);
         // send() only fails when there are no live receivers; drop
         // silently so a pre-subscribe startup doesn't log-spam.
+        let _ = self.tx.send(std::sync::Arc::new(frame));
+    }
+}
+
+/// Sibling of [`BroadcastIqSink`] for the `FftU8` port type. Wraps
+/// incoming log-magnitude byte slices as `PayloadType::FftU8` frames
+/// and pushes them onto the same broadcast channel the IQ sink uses;
+/// subscribers on `/ws/preset` demultiplex by `stream_id`.
+pub struct BroadcastFftU8Sink {
+    tx: FrameTx,
+    /// Per-stream seq counter — independent from the IQ sink's map
+    /// because the payload types are distinct channels on the wire.
+    seqs: Mutex<HashMap<u16, u32>>,
+}
+
+impl BroadcastFftU8Sink {
+    #[must_use]
+    pub fn new(tx: FrameTx) -> Self {
+        Self {
+            tx,
+            seqs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn next_seq(&self, stream_id: u16) -> u32 {
+        let mut map = self.seqs.lock().expect("seq lock poisoned");
+        let slot = map.entry(stream_id).or_insert(0);
+        let out = *slot;
+        *slot = slot.wrapping_add(1);
+        out
+    }
+}
+
+impl FftU8BridgeSink for BroadcastFftU8Sink {
+    fn push_fft_u8(&self, stream_id: u32, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let stream_id_u16 = u16::try_from(stream_id).unwrap_or(u16::MAX);
+        let seq = self.next_seq(stream_id_u16);
+        let header = FrameHeader {
+            version: PROTOCOL_VERSION,
+            payload_type: PayloadType::FftU8,
+            stream_id: stream_id_u16,
+            seq,
+            timestamp_ns: now_ns(),
+        };
+        let frame = encode(&header, bytes);
         let _ = self.tx.send(std::sync::Arc::new(frame));
     }
 }
@@ -164,5 +215,52 @@ mod tests {
         drop(rx);
         sink.push_iq_f32(1000, &[Complex::new(1.0, 1.0)]);
         // No panic = pass.
+    }
+
+    use super::BroadcastFftU8Sink;
+    use ferrite_blocks::ws_bridge::FftU8BridgeSink;
+
+    #[tokio::test]
+    async fn fft_push_encodes_as_fft_u8_frame() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let sink: Arc<dyn FftU8BridgeSink> = Arc::new(BroadcastFftU8Sink::new(tx));
+        let bins = vec![0u8, 1, 2, 3, 255];
+        sink.push_fft_u8(1, &bins);
+        let bytes = rx.recv().await.unwrap();
+        let (header, payload) = decode(&bytes).unwrap();
+        assert_eq!(header.payload_type, PayloadType::FftU8);
+        assert_eq!(header.stream_id, 1);
+        assert_eq!(header.seq, 0);
+        assert_eq!(payload, bins.as_slice());
+    }
+
+    #[tokio::test]
+    async fn fft_seq_counter_is_per_stream_and_independent_of_iq() {
+        // Same FrameTx feeds both sinks. The FftU8 sink's seqs are
+        // independent from the IQ sink's, so pushing on stream 1 from
+        // each yields seq=0 for both (not seq=0 then seq=1).
+        let (tx, mut rx) = broadcast::channel(16);
+        let iq: Arc<dyn IqBridgeSink> = Arc::new(BroadcastIqSink::new(tx.clone()));
+        let fft: Arc<dyn FftU8BridgeSink> = Arc::new(BroadcastFftU8Sink::new(tx));
+        iq.push_iq_f32(1, &[Complex::new(1.0, 0.0)]);
+        fft.push_fft_u8(1, &[0, 1, 2]);
+        let (h0, _) = decode(&rx.recv().await.unwrap()).unwrap();
+        let (h1, _) = decode(&rx.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            (h0.payload_type, h0.stream_id, h0.seq),
+            (PayloadType::IqF32, 1, 0)
+        );
+        assert_eq!(
+            (h1.payload_type, h1.stream_id, h1.seq),
+            (PayloadType::FftU8, 1, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn fft_empty_push_sends_nothing() {
+        let (tx, mut rx) = broadcast::channel(4);
+        let sink: Arc<dyn FftU8BridgeSink> = Arc::new(BroadcastFftU8Sink::new(tx));
+        sink.push_fft_u8(1, &[]);
+        assert!(rx.try_recv().is_err());
     }
 }
