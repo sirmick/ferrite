@@ -6,13 +6,12 @@
   "environments": ["node", "browser"],
   "blocks": {
     "src": {
-      "type": "SoapySource",
+      "type": "Source",
+      "placement": "node",
       "params": {
-        "args": "driver=rtlsdr",
-        "sample_rate_hz": 2400000.0,
         "center_freq_hz": 100100000.0,
-        "bandwidth_hz": 2000000.0,
-        "channel": 0
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
       }
     },
     "chan": {

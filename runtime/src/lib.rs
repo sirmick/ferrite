@@ -12,6 +12,7 @@
 //! on either side. The TS package will be deleted at milestone M4.
 
 pub mod block_registry;
+pub mod compose;
 pub mod doc;
 pub mod env_split;
 pub mod instantiate;
@@ -24,6 +25,7 @@ pub mod validate;
 pub mod wasm;
 
 pub use block_registry::{instantiate_blocks, BlockMap, InventorySpecRegistry};
+pub use compose::{compose_source, ComposeError, SourceConfig, SOURCE_ID, SOURCE_SENTINEL_TYPE};
 pub use doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
 pub use env_split::{split_for_environment, SplitError, CROSS_ENV_STREAM_BASE};
 pub use instantiate::{instantiate_flowgraph, SpecMap, SpecRegistry};

@@ -51,11 +51,11 @@ describe('rust runtime wasm shim', () => {
     expect(() => parseAndValidateDoc(JSON.stringify(bad))).toThrow(/ghost/);
   });
 
-  // The full wbfm preset starts with SoapySource, which is feature-gated
-  // on native only and therefore not in the browser's inventory — the
-  // real split happens on the server and the browser just runs its half.
-  // These tests use a browser-only fixture (every block type compiles
-  // into the wasm build) to exercise the wasm-bindgen plumbing.
+  // The full wbfm preset uses a `Source` placeholder that the server
+  // composes with a concrete hardware source before splitting — the
+  // browser just runs its half. These tests use a browser-only fixture
+  // (every block type compiles into the wasm build) to exercise the
+  // wasm-bindgen plumbing.
   it('splits a browser-only doc into the same doc (trivial identity case)', () => {
     const doc = {
       name: 'sine-audio',
