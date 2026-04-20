@@ -24,6 +24,7 @@ use tower_http::{
 };
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+mod block_schema;
 mod bridge_sink;
 mod device;
 mod log_stream;
@@ -156,7 +157,11 @@ async fn main() -> Result<()> {
             "/api/device/:id/vfo/:vfo_id",
             patch(routes::patch_vfo).delete(routes::delete_vfo),
         )
-        .route("/api/flowgraph", patch(routes::patch_flowgraph))
+        .route(
+            "/api/flowgraph",
+            get(routes::get_flowgraph).patch(routes::patch_flowgraph),
+        )
+        .route("/api/blocks", get(routes::list_block_schemas))
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
         .route("/ws/:id", get(routes::ws_session))

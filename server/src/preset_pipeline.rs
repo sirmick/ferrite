@@ -62,6 +62,12 @@ pub struct PresetMount {
     /// `WsBridgeTx` instances that a rebuild produces — the sinks on
     /// the old instances don't carry over.
     sink: Arc<dyn IqBridgeSink>,
+    /// Last-applied cross-env doc as-authored (pre-split). The node
+    /// runtime only carries the node half; this is what the HTTP
+    /// `GET /api/flowgraph` endpoint surfaces so the UI can render the
+    /// full preset (including browser-side blocks) without re-reading
+    /// the original JSON from disk.
+    full_doc: Arc<Mutex<FlowgraphDoc>>,
 }
 
 impl PresetMount {
@@ -79,6 +85,11 @@ impl PresetMount {
         let mut rt = self.runtime.lock().await;
         let plan = rt.reconfigure(&node_half).context("runtime reconfigure")?;
         if plan.is_noop() {
+            // Even on a noop (identical node half) the cross-env doc
+            // may have changed — e.g. a browser-side param tweak. Keep
+            // the stored full doc in sync so `GET /api/flowgraph`
+            // reflects the latest user intent.
+            *self.full_doc.lock().await = new_doc.clone();
             return Ok(plan);
         }
         let bridge_ids: Vec<String> = node_half
@@ -93,7 +104,13 @@ impl PresetMount {
             })?;
             tx.attach_sink(Arc::clone(&self.sink));
         }
+        *self.full_doc.lock().await = new_doc.clone();
         Ok(plan)
+    }
+
+    /// Snapshot the currently-applied cross-env flowgraph doc.
+    pub async fn current_doc(&self) -> FlowgraphDoc {
+        self.full_doc.lock().await.clone()
     }
 }
 
@@ -163,6 +180,7 @@ pub fn spawn_preset(
         },
         runtime,
         sink,
+        full_doc: Arc::new(Mutex::new(doc.clone())),
     })
 }
 

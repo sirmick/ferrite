@@ -40,6 +40,10 @@ mod device;
 #[allow(dead_code)]
 mod soapy_source;
 
+#[path = "../src/block_schema.rs"]
+#[allow(dead_code)]
+mod block_schema;
+
 #[path = "../src/routes.rs"]
 #[allow(dead_code, clippy::unused_async)]
 mod routes;

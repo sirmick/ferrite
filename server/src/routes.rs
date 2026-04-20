@@ -539,6 +539,33 @@ pub async fn patch_flowgraph(
     }))
 }
 
+/// `GET /api/flowgraph` — snapshot the currently-applied preset doc as
+/// JSON. Returns 409 when the server isn't in preset mode.
+pub async fn get_flowgraph(
+    State(state): State<AppState>,
+) -> Result<Json<ferrite_runtime::FlowgraphDoc>, (StatusCode, Json<ApiError>)> {
+    state.applied_flowgraph().await.map(Json).ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    code: "NOT_PRESET_MODE",
+                    message: "ferrited was started without --flowgraph; \
+                              GET /api/flowgraph only works in preset mode"
+                        .into(),
+                },
+            }),
+        )
+    })
+}
+
+/// `GET /api/blocks` — every registered block's capability schema as a
+/// sorted array. Client uses this to render the flowgraph options dialog
+/// without hard-coding field shapes per block type.
+pub async fn list_block_schemas() -> Json<Vec<crate::block_schema::BlockSchemaDto>> {
+    Json(crate::block_schema::all_block_schemas())
+}
+
 /// `GET /ws/preset` — single WebSocket endpoint exposed when `ferrited`
 /// is started with `--flowgraph <path>`. Subscribes to the preset
 /// pipeline's broadcast channel and forwards every frame as a binary

@@ -603,6 +603,14 @@ impl AppState {
         let mount = inner.preset.as_ref()?;
         Some(mount.reconfigure(new_doc).await)
     }
+
+    /// Snapshot the currently-applied cross-env flowgraph doc. Returns
+    /// `None` when the server is not in preset mode.
+    pub async fn applied_flowgraph(&self) -> Option<ferrite_runtime::FlowgraphDoc> {
+        let inner = self.inner.read().await;
+        let mount = inner.preset.as_ref()?;
+        Some(mount.current_doc().await)
+    }
 }
 
 /// Tear down a session, sending a final `session_closed` JSON event to

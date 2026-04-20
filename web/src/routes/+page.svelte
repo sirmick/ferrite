@@ -5,6 +5,7 @@
   import SignalCatalog from '$lib/presets/SignalCatalog.svelte';
   import SourceDialog from '$lib/controls/SourceDialog.svelte';
   import DeviceOptions from '$lib/controls/DeviceOptions.svelte';
+  import FlowgraphDialog from '$lib/controls/FlowgraphDialog.svelte';
   import SessionSettings from '$lib/controls/SessionSettings.svelte';
   import type { DeviceCapabilities } from '$lib/api/devices';
   import { demoAddInWorker } from '$lib/workers/demo-client';
@@ -22,6 +23,7 @@
   let showOptions = $state(false);
   let optionsCaps = $state<DeviceCapabilities | null>(null);
   let showSettings = $state(false);
+  let showFlowgraph = $state(false);
   let leftTab = $state<'bands' | 'catalog'>('bands');
 
   // Initial sine-source defaults the SourceModal seeds from. The session
@@ -131,6 +133,13 @@
       >
         Source…
       </button>
+      <button
+        type="button"
+        class="rounded border border-slate-700 px-2 py-0.5 text-xs text-[color:var(--color-fg)] hover:border-slate-600"
+        onclick={() => (showFlowgraph = true)}
+      >
+        Flowgraph…
+      </button>
     </div>
   </header>
   <div class="flex min-h-0 flex-1">
@@ -198,6 +207,8 @@
 />
 
 <SessionSettings bind:open={showSettings} onClose={() => (showSettings = false)} />
+
+<FlowgraphDialog bind:open={showFlowgraph} onClose={() => (showFlowgraph = false)} />
 
 <style>
   .tab-active {
