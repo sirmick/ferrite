@@ -21,6 +21,7 @@ import {
   stopPipeline,
   type PipelineStatus,
 } from '$lib/api/pipeline';
+import { fetchUiSinks, type UiSink } from '$lib/api/uiSinks';
 import { FrameClient, type ClientStatus } from '$lib/ws/client';
 import { initFrameDecoder } from '$lib/ws/frame';
 import { logs } from '$lib/logs/store.svelte';
@@ -35,6 +36,9 @@ class PipelineStore {
 
   flowgraph = $state<FlowgraphDoc | null>(null);
   source = $state<SourceConfig | null>(null);
+  /** Server-allocated stream_ids for every `ui:<name>` sink, keyed by
+   *  name. Populated on `init()` and re-fetched on preset/source patch. */
+  uiSinks = $state<Record<string, UiSink>>({});
 
   /** Shared WebSocket client feeding `/ws/preset`. Always open while
    *  the store is alive — callers multiplex by stream id. */
@@ -51,14 +55,16 @@ class PipelineStore {
     this.errorMessage = null;
     try {
       await initFrameDecoder();
-      const [fg, src, st] = await Promise.all([
+      const [fg, src, st, sinks] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
+        fetchUiSinks(),
       ]);
       this.flowgraph = fg;
       this.source = src;
       this.status = st;
+      this.uiSinks = indexByName(sinks);
       this.client = new FrameClient({
         url: wsUrlFor('/ws/preset'),
         onStatus: (s) => {
@@ -97,6 +103,7 @@ class PipelineStore {
     return this.withBusy(async () => {
       const resp = await patchSource(next);
       this.source = next;
+      this.uiSinks = indexByName(await fetchUiSinks());
       return resp;
     }, 'patch source');
   }
@@ -117,6 +124,7 @@ class PipelineStore {
     return this.withBusy(async () => {
       const resp = await patchFlowgraph(doc);
       this.flowgraph = doc;
+      this.uiSinks = indexByName(await fetchUiSinks());
       return resp;
     }, 'patch flowgraph');
   }
@@ -150,6 +158,12 @@ class PipelineStore {
       return null;
     }
   }
+}
+
+function indexByName(sinks: UiSink[]): Record<string, UiSink> {
+  const out: Record<string, UiSink> = {};
+  for (const s of sinks) out[s.name] = s;
+  return out;
 }
 
 export const pipeline = new PipelineStore();

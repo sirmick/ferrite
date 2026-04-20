@@ -97,6 +97,7 @@ async fn spawn_app(auto_start: bool) -> SocketAddr {
         .route("/api/pipeline", get(routes::pipeline_status))
         .route("/api/pipeline/start", post(routes::pipeline_start))
         .route("/api/pipeline/stop", post(routes::pipeline_stop))
+        .route("/api/ui-sinks", get(routes::list_ui_sinks))
         .route("/api/blocks", get(routes::list_block_schemas))
         .route("/ws/preset", get(routes::ws_preset))
         .with_state(state);
@@ -201,6 +202,45 @@ async fn patch_source_while_running_reports_applied() {
     )
     .await;
     assert!(body.contains("\"applied\":true"), "patch: {body}");
+}
+
+#[tokio::test]
+async fn ui_sinks_returns_fft_stream_id_for_server_side_tap() {
+    // Preset with a single `ui:fft` sink from a node-side logmag chain.
+    // env_split assigns stream_id=1000 on the first slot, payload=FftU8.
+    let preset: FlowgraphDoc = serde_json::from_value(json!({
+        "name": "ui_sinks_smoke",
+        "environments": ["node", "browser"],
+        "blocks": {
+            "src":    { "type": "Source", "placement": "node",
+                        "params": { "center_freq_hz": 0.0, "sample_rate_hz": 1000.0 } },
+            "fft":    { "type": "FFT", "placement": "node",
+                        "params": { "size": 64, "window": "hann" } },
+            "logmag": { "type": "LogMagU8", "placement": "node",
+                        "params": { "size": 64, "floor_dbfs": -100.0,
+                                    "ceil_dbfs": 0.0, "alpha": 0.3 } }
+        },
+        "wires": [
+            ["src.out",    "fft.in"],
+            ["fft.out",    "logmag.in"],
+            ["logmag.out", "ui:fft"]
+        ]
+    }))
+    .unwrap();
+    let state = app_state::AppState::new(preset, test_source(), Duration::from_millis(5));
+    let app = Router::new()
+        .route("/api/ui-sinks", get(routes::list_ui_sinks))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let body = http_get(&format!("http://{addr}/api/ui-sinks")).await;
+    assert!(body.contains("\"name\":\"fft\""), "body: {body}");
+    assert!(body.contains("\"stream_id\":1000"), "body: {body}");
+    assert!(body.contains("\"payload_type\":\"FftU8\""), "body: {body}");
 }
 
 /// `GET /api/devices` shape depends on build configuration:

@@ -2,16 +2,17 @@
   import { onMount } from 'svelte';
   import { pixelToFreqLinear, WaterfallRenderer } from './waterfall';
   import type { FrameClient } from '$lib/ws/client';
-  import { FFT_STREAM, PayloadType } from '$lib/ws/frame';
+  import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
 
   interface Props {
     client: FrameClient;
-    streamId?: number;
     rows?: number;
   }
 
-  let { client, streamId = FFT_STREAM, rows = 512 }: Props = $props();
+  let { client, rows = 512 }: Props = $props();
+
+  let fftStreamId = $derived(pipeline.uiSinks.fft?.stream_id);
 
   let canvas: HTMLCanvasElement | undefined = $state();
   let wrap: HTMLDivElement | undefined = $state();
@@ -66,20 +67,28 @@
     dragX = null;
   }
 
+  let renderer: WaterfallRenderer | undefined;
+
   onMount(() => {
     if (!canvas) return;
-    const renderer = new WaterfallRenderer(canvas, { rows });
-    const unsub = client.subscribe(streamId, (frame) => {
-      if (frame.header.payloadType !== PayloadType.FftU8) return;
-      renderer.pushRow(frame.payload);
-    });
-    const ro = new ResizeObserver(() => renderer.resize());
+    renderer = new WaterfallRenderer(canvas, { rows });
+    const ro = new ResizeObserver(() => renderer?.resize());
     ro.observe(canvas);
     return () => {
-      unsub();
       ro.disconnect();
-      renderer.destroy();
+      renderer?.destroy();
+      renderer = undefined;
     };
+  });
+
+  $effect(() => {
+    const sid = fftStreamId;
+    if (sid === undefined) return;
+    const unsub = client.subscribe(sid, (frame) => {
+      if (frame.header.payloadType !== PayloadType.FftU8) return;
+      renderer?.pushRow(frame.payload);
+    });
+    return unsub;
   });
 </script>
 

@@ -2,16 +2,20 @@
   import { onMount } from 'svelte';
   import { SpectrumRenderer } from './spectrum';
   import type { FrameClient } from '$lib/ws/client';
-  import { FFT_STREAM, PayloadType } from '$lib/ws/frame';
+  import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import Nixie from '$lib/controls/Nixie.svelte';
 
   interface Props {
     client: FrameClient;
-    streamId?: number;
   }
 
-  let { client, streamId = FFT_STREAM }: Props = $props();
+  let { client }: Props = $props();
+
+  // stream_id for the preset's `ui:fft` sink — env_split allocates it
+  // from 1000+ in doc order, so the server tells us which one to
+  // subscribe to rather than the client guessing.
+  let fftStreamId = $derived(pipeline.uiSinks.fft?.stream_id);
 
   let canvas: HTMLCanvasElement | undefined = $state();
   let renderer: SpectrumRenderer | undefined;
@@ -62,18 +66,23 @@
   onMount(() => {
     if (!canvas) return;
     renderer = new SpectrumRenderer(canvas);
-    const unsub = client.subscribe(streamId, (frame) => {
-      if (frame.header.payloadType !== PayloadType.FftU8) return;
-      renderer!.setRow(frame.payload);
-    });
     const ro = new ResizeObserver(() => renderer?.resize());
     ro.observe(canvas);
     return () => {
-      unsub();
       ro.disconnect();
       renderer?.destroy();
       renderer = undefined;
     };
+  });
+
+  $effect(() => {
+    const sid = fftStreamId;
+    if (sid === undefined) return;
+    const unsub = client.subscribe(sid, (frame) => {
+      if (frame.header.payloadType !== PayloadType.FftU8) return;
+      renderer?.setRow(frame.payload);
+    });
+    return unsub;
   });
 
   // Display-axis and flags propagate to the renderer on every change.

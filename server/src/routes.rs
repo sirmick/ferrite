@@ -19,7 +19,7 @@ use http::StatusCode;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::app_state::{AppState, PipelineStatus};
+use crate::app_state::{AppState, PipelineStatus, UiSink};
 
 #[derive(Serialize)]
 pub struct Hello {
@@ -276,6 +276,19 @@ pub async fn pipeline_start(
     Ok(Json(PipelineStatusResponse {
         status: PipelineStatus::Running,
     }))
+}
+
+/// `GET /api/ui-sinks` — enumerate every `ui:<name>` sink in the
+/// composed preset and the `stream_id` env_split allocates for it. The
+/// client uses this to subscribe to the right frame streams.
+pub async fn list_ui_sinks(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<UiSink>>, (StatusCode, Json<ApiError>)> {
+    state
+        .ui_sinks()
+        .await
+        .map(Json)
+        .map_err(|e| bad_request("UI_SINKS_FAILED", format!("{e:#}")))
 }
 
 /// `POST /api/pipeline/stop` — tear the runtime down. Returns the

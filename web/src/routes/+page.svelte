@@ -10,7 +10,6 @@
   import type { DeviceCapabilities } from '$lib/api/devices';
   import type { SourceConfig } from '$lib/api/source';
   import { demoAddInWorker } from '$lib/workers/demo-client';
-  import { FFT_STREAM } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { patchConsole } from '$lib/logs/store.svelte';
   import { connectServerLogs } from '$lib/logs/client';
@@ -47,13 +46,14 @@
   // Count frames per second against whichever client is current.
   $effect(() => {
     const c = pipeline.client;
-    if (!c) {
+    const fftSid = pipeline.uiSinks.fft?.stream_id;
+    if (!c || fftSid === undefined) {
       frameRate = 0;
       return;
     }
     let counter = 0;
     let windowStart = performance.now();
-    const unsub = c.subscribe(FFT_STREAM, (frame) => {
+    const unsub = c.subscribe(fftSid, (frame) => {
       counter += 1;
       lastFrameSize = frame.payload.length;
     });

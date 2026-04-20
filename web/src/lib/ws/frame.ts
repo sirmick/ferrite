@@ -9,10 +9,6 @@
 
 import initWasm, { decodeFrame as wasmDecodeFrame } from '../wasm/blocks/ferrite_blocks';
 
-export const CONTROL_STREAM = 0;
-export const FFT_STREAM = 1;
-export const VFO_STREAM_BASE = 2;
-
 export const PayloadType = {
   FftU8: 0x01,
   IqF32: 0x11,
