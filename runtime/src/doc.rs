@@ -83,6 +83,7 @@ mod tests {
     use super::*;
 
     const WBFM: &[u8] = include_bytes!("../../flowgraphs/wbfm.json");
+    const WBAM: &[u8] = include_bytes!("../../flowgraphs/wbam.json");
 
     #[test]
     fn parses_shipped_wbfm_preset() {
@@ -112,6 +113,42 @@ mod tests {
             Some(Environment::Node)
         );
         assert_eq!(doc.blocks.get("audio").unwrap().placement, None);
+    }
+
+    #[test]
+    fn parses_shipped_wbam_preset() {
+        let doc = FlowgraphDoc::from_json(WBAM).expect("wbam.json parses");
+        assert_eq!(doc.name, "wbam");
+        // Same cross-env shape as wbfm: Soapy source on node, demod +
+        // audio on browser — the receivers pane toggle relies on this
+        // symmetry for a clean demod-only reconfigure.
+        assert_eq!(
+            doc.environments,
+            vec![Environment::Node, Environment::Browser]
+        );
+        assert_eq!(
+            doc.blocks.keys().cloned().collect::<Vec<_>>(),
+            vec!["audio", "chan", "decim", "demod", "src"],
+        );
+        let demod = doc.blocks.get("demod").expect("demod block present");
+        assert_eq!(demod.type_name, "AmDemod");
+        let params = demod.params.as_ref().expect("demod has params");
+        assert_eq!(params["sample_rate_hz"].as_f64(), Some(48_000.0));
+        assert_eq!(params["bias_tau_ms"].as_f64(), Some(100.0));
+    }
+
+    #[test]
+    fn wbfm_and_wbam_have_identical_source_blocks() {
+        // Receivers-pane toggle contract: swapping wbfm↔wbam must
+        // leave `src` byte-identical so the runtime's diff plan
+        // scopes the reconfigure to the browser half.
+        let fm = FlowgraphDoc::from_json(WBFM).unwrap();
+        let am = FlowgraphDoc::from_json(WBAM).unwrap();
+        let fm_src = fm.blocks.get("src").expect("wbfm has src");
+        let am_src = am.blocks.get("src").expect("wbam has src");
+        assert_eq!(fm_src.type_name, am_src.type_name);
+        assert_eq!(fm_src.params, am_src.params);
+        assert_eq!(fm_src.placement, am_src.placement);
     }
 
     #[test]
