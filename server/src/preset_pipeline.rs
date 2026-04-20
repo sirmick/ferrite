@@ -14,7 +14,7 @@
 //! handle keeps the runtime alive, the tx is what `/ws/preset`
 //! subscribes to.
 //!
-//! [`AppState`]: crate::session::AppState
+//! [`AppState`]: crate::app_state::AppState
 
 use std::{sync::Arc, time::Duration};
 
@@ -29,7 +29,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{bridge_sink::BroadcastSink, session::FrameTx};
+use crate::{app_state::FrameTx, bridge_sink::BroadcastSink};
 
 /// Handle to a running preset pipeline. Callers can either drop the
 /// handle (which cancels the runtime task via the `oneshot` sender
@@ -43,16 +43,13 @@ pub struct PresetHandle {
     join: JoinHandle<Result<()>>,
 }
 
-/// Preset-mode slot stored inside [`AppState`]. Bundles the broadcast
-/// `FrameTx` that [`BroadcastSink`] publishes to with the
-/// [`PresetHandle`] that keeps the runtime task alive. Dropping the
-/// mount closes the broadcast channel and cancels the runtime task
-/// (the `oneshot` on `shutdown` fires via drop).
+/// Preset-mode slot stored inside [`AppState`]. Owns the runtime task
+/// via [`PresetHandle`] and keeps a handle on the shared bridge sink
+/// so `reconfigure` can re-attach it to fresh bridge-Tx instances
+/// after a rebuild.
 ///
-/// [`AppState`]: crate::session::AppState
+/// [`AppState`]: crate::app_state::AppState
 pub struct PresetMount {
-    pub frames: FrameTx,
-    #[allow(dead_code)] // held so the runtime task stays alive
     pub handle: PresetHandle,
     /// Shared with the driver task so HTTP handlers can call
     /// [`Self::reconfigure`] between ticks. The mutex is held only for
@@ -64,12 +61,6 @@ pub struct PresetMount {
     /// block regardless of port type; the sink discriminates by the
     /// `Frame` variant it receives on each push.
     bridge_sink: Arc<dyn BridgeSink>,
-    /// Last-applied cross-env doc as-authored (pre-split). The node
-    /// runtime only carries the node half; this is what the HTTP
-    /// `GET /api/flowgraph` endpoint surfaces so the UI can render the
-    /// full preset (including browser-side blocks) without re-reading
-    /// the original JSON from disk.
-    full_doc: Arc<Mutex<FlowgraphDoc>>,
 }
 
 impl PresetMount {
@@ -87,21 +78,10 @@ impl PresetMount {
         let mut rt = self.runtime.lock().await;
         let plan = rt.reconfigure(&node_half).context("runtime reconfigure")?;
         if plan.is_noop() {
-            // Even on a noop (identical node half) the cross-env doc
-            // may have changed — e.g. a browser-side param tweak. Keep
-            // the stored full doc in sync so `GET /api/flowgraph`
-            // reflects the latest user intent.
-            *self.full_doc.lock().await = new_doc.clone();
             return Ok(plan);
         }
         attach_bridge_sinks(&mut rt, &node_half, &self.bridge_sink)?;
-        *self.full_doc.lock().await = new_doc.clone();
         Ok(plan)
-    }
-
-    /// Snapshot the currently-applied cross-env flowgraph doc.
-    pub async fn current_doc(&self) -> FlowgraphDoc {
-        self.full_doc.lock().await.clone()
     }
 }
 
@@ -150,14 +130,12 @@ pub fn spawn_preset(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join = tokio::spawn(drive(Arc::clone(&runtime), tick_period, shutdown_rx));
     Ok(PresetMount {
-        frames,
         handle: PresetHandle {
             shutdown: Some(shutdown_tx),
             join,
         },
         runtime,
         bridge_sink,
-        full_doc: Arc::new(Mutex::new(doc.clone())),
     })
 }
 

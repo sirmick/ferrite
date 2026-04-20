@@ -1,21 +1,25 @@
 //! HTTP and WebSocket route handlers.
+//!
+//! Ferrited is preset-first: the server holds exactly one flowgraph
+//! preset, one [`SourceConfig`], and one (optional) running pipeline.
+//! The routes below surface each of those as a small REST resource —
+//! no session ids, no per-request pipeline spawning. `/ws/preset` is
+//! the only WebSocket stream for sample data.
 
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        State,
     },
     response::IntoResponse,
     Json,
 };
+use ferrite_runtime::{FlowgraphDoc, SourceConfig};
 use http::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::session::{
-    AppState, OpenSpec, PatchRequest, PatchVfoRequest, SessionState, SourceKind, VfoDescriptor,
-    VfoError,
-};
+use crate::app_state::{AppState, PipelineStatus};
 
 #[derive(Serialize)]
 pub struct Hello {
@@ -32,8 +36,30 @@ pub async fn hello() -> Json<Hello> {
     })
 }
 
-/// Streams every `tracing` log line as a text WS message. Lets the UI
-/// show server-side logs alongside its own client-side ones.
+#[derive(Serialize)]
+pub struct ApiError {
+    pub error: ApiErrorBody,
+}
+
+#[derive(Serialize)]
+pub struct ApiErrorBody {
+    pub code: &'static str,
+    pub message: String,
+}
+
+fn bad_request(code: &'static str, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError {
+            error: ApiErrorBody {
+                code,
+                message: message.into(),
+            },
+        }),
+    )
+}
+
+/// Streams every `tracing` log line as a text WS message.
 pub async fn ws_logs(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     let Some(logs) = state.logs().cloned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "logs disabled").into_response();
@@ -63,54 +89,6 @@ async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroa
     }
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-pub struct OpenRequest {
-    pub sample_rate_hz: Option<f64>,
-    pub center_freq_hz: Option<f64>,
-    pub tone_freq_abs_hz: Option<f64>,
-    pub amplitude: Option<f32>,
-    pub fft_size: Option<usize>,
-    pub fft_rate_hz: Option<f32>,
-    pub floor_dbfs: Option<f32>,
-    pub ceil_dbfs: Option<f32>,
-    pub alpha: Option<f32>,
-    /// `SoapySDR` device args (e.g. `driver=rtlsdr,serial=00000001`).
-    /// When set, this session opens that device instead of the CLI
-    /// default source. Requires the `soapysdr` feature on the server.
-    pub device_args: Option<String>,
-    pub antenna: Option<String>,
-    pub gain_db: Option<f64>,
-    pub agc: Option<bool>,
-    pub bandwidth_hz: Option<f64>,
-}
-
-#[derive(Serialize)]
-pub struct StreamDescriptor {
-    pub stream_id: u16,
-    pub payload_type: &'static str,
-    pub size: usize,
-    pub rate_hz: f32,
-}
-
-#[derive(Serialize)]
-pub struct OpenResponse {
-    pub session_id: String,
-    pub ws_url: String,
-    pub fft: StreamDescriptor,
-}
-
-#[derive(Serialize)]
-pub struct ApiError {
-    pub error: ApiErrorBody,
-}
-
-#[derive(Serialize)]
-pub struct ApiErrorBody {
-    pub code: &'static str,
-    pub message: String,
-}
-
 /// One row in the `GET /api/devices` response. Probing can fail per-device
 /// (e.g. driver loaded but hardware already held by another process), so
 /// each entry is either `Available` with the full capability schema or
@@ -130,10 +108,6 @@ pub enum DeviceEntry {
 /// one for its full capability schema. Returns 501 on builds without the
 /// `soapysdr` feature so the web UI can render a clear "server built
 /// without hardware support" state instead of hitting a 404.
-///
-/// Probing opens + closes every device in turn. Soapy serialises device
-/// access, so an in-use device's entry will be `Unavailable` rather than
-/// failing the whole response.
 #[cfg(feature = "soapysdr")]
 pub async fn list_devices() -> Result<Json<Vec<DeviceEntry>>, (StatusCode, Json<ApiError>)> {
     let entries = tokio::task::spawn_blocking(probe_all_devices)
@@ -188,285 +162,9 @@ pub async fn list_devices() -> (StatusCode, Json<ApiError>) {
     )
 }
 
-pub async fn open_session(
-    State(state): State<AppState>,
-    Json(req): Json<OpenRequest>,
-) -> Result<Json<OpenResponse>, (StatusCode, Json<ApiError>)> {
-    if state.has_preset().await {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "PRESET_MODE",
-                    message: "ferrited was started with --flowgraph; open/close \
-                              endpoints are disabled — subscribe to /ws/preset"
-                        .into(),
-                },
-            }),
-        ));
-    }
-    let d = state.default_spec();
-    let spec = OpenSpec {
-        sample_rate_hz: req.sample_rate_hz.unwrap_or(d.sample_rate_hz),
-        center_freq_hz: req.center_freq_hz.unwrap_or(d.center_freq_hz),
-        tone_freq_abs_hz: req.tone_freq_abs_hz.unwrap_or(d.tone_freq_abs_hz),
-        amplitude: req.amplitude.unwrap_or(d.amplitude),
-        fft_size: req.fft_size.unwrap_or(d.fft_size),
-        fft_rate_hz: req.fft_rate_hz.unwrap_or(d.fft_rate_hz),
-        floor_dbfs: req.floor_dbfs.unwrap_or(d.floor_dbfs),
-        ceil_dbfs: req.ceil_dbfs.unwrap_or(d.ceil_dbfs),
-        alpha: req.alpha.unwrap_or(d.alpha),
-    };
-    let override_kind = source_override(&req).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "FEATURE_DISABLED",
-                    message: e,
-                },
-            }),
-        )
-    })?;
-    let opened = state.open(spec, override_kind).await.map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "INVALID_SETTINGS",
-                    message: e.to_string(),
-                },
-            }),
-        )
-    })?;
-    let ws_url = format!("/ws/{}", opened.id);
-    Ok(Json(OpenResponse {
-        session_id: opened.id,
-        ws_url,
-        fft: StreamDescriptor {
-            stream_id: ferrite_blocks::frame::FFT_STREAM,
-            payload_type: "fft_u8",
-            size: opened.fft_size,
-            rate_hz: opened.fft_rate_hz,
-        },
-    }))
-}
-
-/// Translate the request's `device_args` (and friends) into a per-session
-/// [`SourceKind`] override. Returns `Ok(None)` when the request keeps the
-/// CLI default; returns `Err` when the user asked for a Soapy device but
-/// the server was built without the feature.
-//
-// The `Result` is structurally needed by the feature-disabled stub but
-// is never an error in this build; clippy correctly notices that and we
-// suppress it here so the call site stays uniform across configs.
-#[cfg(feature = "soapysdr")]
-#[allow(clippy::unnecessary_wraps)]
-fn source_override(req: &OpenRequest) -> Result<Option<SourceKind>, String> {
-    let Some(args) = req.device_args.clone().filter(|s| !s.trim().is_empty()) else {
-        return Ok(None);
-    };
-    Ok(Some(SourceKind::Soapy {
-        args,
-        antenna: req.antenna.clone(),
-        gain_db: req.gain_db,
-        agc: req.agc,
-        bandwidth_hz: req.bandwidth_hz,
-    }))
-}
-
-/// Feature-disabled stub: any non-empty `device_args` is rejected up front.
-#[cfg(not(feature = "soapysdr"))]
-fn source_override(req: &OpenRequest) -> Result<Option<SourceKind>, String> {
-    if req
-        .device_args
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty())
-    {
-        return Err("ferrited was built without the `soapysdr` feature; \
-                    rebuild with `--features soapysdr` to open hardware devices"
-            .into());
-    }
-    Ok(None)
-}
-
-pub async fn close_session(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
-    if state.close(&id).await {
-        StatusCode::NO_CONTENT
-    } else {
-        StatusCode::NOT_FOUND
-    }
-}
-
-/// `GET /api/device/:id/state` — current session settings snapshot.
-/// Returns 404 if the id does not match the active session.
-pub async fn session_state(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<SessionState>, StatusCode> {
-    state
-        .state(&id)
-        .await
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
-}
-
-/// `PATCH /api/device/:id/settings` — apply a partial settings update.
-/// Returns the post-apply state snapshot (200), or 404 if the id is
-/// stale. Hardware errors are logged and surfaced via the next snapshot
-/// reflecting whatever the device actually accepted.
-pub async fn patch_settings(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<PatchRequest>,
-) -> Result<Json<SessionState>, StatusCode> {
-    state
-        .patch(&id, req)
-        .await
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
-}
-
-/// Body of `POST /api/device/:id/vfo` — all three fields required.
-/// `offset_hz` is relative to the active session's centre frequency, per
-/// `docs/02-protocol.md`.
-#[derive(Deserialize)]
-#[allow(clippy::struct_field_names)] // every field is a Hz quantity
-pub struct AddVfoRequest {
-    pub offset_hz: f64,
-    pub rate_hz: f64,
-    pub filter_bw_hz: f64,
-}
-
-/// `POST /api/device/:id/vfo` — allocate a channelized narrowband slice.
-/// Returns the descriptor for the new stream (`stream_id ≥ 2`, `iq_f32`
-/// payload) or 404 if the id doesn't match the active session, or 400 if
-/// the requested spec can't be synthesised against the current input
-/// rate (e.g. `filter_bw_hz` ≥ `sample_rate_hz`).
-pub async fn add_vfo(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<AddVfoRequest>,
-) -> Result<Json<VfoDescriptor>, (StatusCode, Json<ApiError>)> {
-    let spec = crate::session::VfoSpec {
-        offset_hz: req.offset_hz,
-        rate_hz: req.rate_hz,
-        filter_bw_hz: req.filter_bw_hz,
-    };
-    match state.add_vfo(&id, spec).await {
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "SESSION_NOT_FOUND",
-                    message: format!("no active session with id {id}"),
-                },
-            }),
-        )),
-        Some(Err(err)) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "INVALID_SETTINGS",
-                    message: err.to_string(),
-                },
-            }),
-        )),
-        Some(Ok(desc)) => Ok(Json(desc)),
-    }
-}
-
-/// `DELETE /api/device/:id/vfo/:vfo_id` — tear down a VFO. Emits a
-/// `vfo_removed` JSON event on the control stream so clients can clean
-/// up without polling.
-pub async fn delete_vfo(
-    State(state): State<AppState>,
-    Path((id, vfo_id)): Path<(String, String)>,
-) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    match state.remove_vfo(&id, &vfo_id).await {
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "SESSION_NOT_FOUND",
-                    message: format!("no active session with id {id}"),
-                },
-            }),
-        )),
-        Some(Err(VfoError::NotFound)) => Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "VFO_NOT_FOUND",
-                    message: format!("no vfo {vfo_id} on session {id}"),
-                },
-            }),
-        )),
-        Some(Err(VfoError::Invalid(err))) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "INTERNAL",
-                    message: err.to_string(),
-                },
-            }),
-        )),
-        Some(Ok(())) => Ok(StatusCode::NO_CONTENT),
-    }
-}
-
-/// `PATCH /api/device/:id/vfo/:vfo_id` — retune (and eventually resize)
-/// an existing VFO mid-stream. Today only `offset_hz` is honoured; the
-/// channelizer's mixer phase stays continuous across the change so the
-/// retune is glitch-free.
-pub async fn patch_vfo(
-    State(state): State<AppState>,
-    Path((id, vfo_id)): Path<(String, String)>,
-    Json(req): Json<PatchVfoRequest>,
-) -> Result<Json<VfoDescriptor>, (StatusCode, Json<ApiError>)> {
-    match state.patch_vfo(&id, &vfo_id, req).await {
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "SESSION_NOT_FOUND",
-                    message: format!("no active session with id {id}"),
-                },
-            }),
-        )),
-        Some(Err(VfoError::NotFound)) => Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "VFO_NOT_FOUND",
-                    message: format!("no vfo {vfo_id} on session {id}"),
-                },
-            }),
-        )),
-        Some(Err(VfoError::Invalid(err))) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "INVALID_SETTINGS",
-                    message: err.to_string(),
-                },
-            }),
-        )),
-        Some(Ok(desc)) => Ok(Json(desc)),
-    }
-}
-
-pub async fn ws_session(
-    ws: WebSocketUpgrade,
-    Path(id): Path<String>,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_session(socket, id, state))
-}
-
-/// One entry in the `changes` array returned by `PATCH /api/flowgraph`.
-/// Mirrors `ferrite_runtime::ParamChange` — the wire shape matches the
-/// internal type so a future TS client can deserialize it directly.
+/// One entry in the `changes` array returned by a reconfigure. Mirrors
+/// `ferrite_runtime::ParamChange` on the wire so a TS client can
+/// deserialize it directly.
 #[derive(Serialize)]
 pub struct ParamChangeDto {
     pub block_id: String,
@@ -476,110 +174,137 @@ pub struct ParamChangeDto {
     pub scope: &'static str,
 }
 
-/// `PATCH /api/flowgraph` response: the plan the server just applied.
-/// `overall` uses the wire-format scope strings (`self`, `downstream`,
-/// `sourceRestart`).
+/// Reconfigure result returned by `PATCH /api/flowgraph` and
+/// `PATCH /api/source`. `applied=false` means the patch was stored but
+/// no pipeline was running, so there was nothing to reconfigure.
 #[derive(Serialize)]
-pub struct FlowgraphPatchResponse {
-    pub overall: &'static str,
+pub struct ReconfigureResponse {
+    pub applied: bool,
+    pub overall: Option<&'static str>,
     pub changes: Vec<ParamChangeDto>,
     pub structural_count: usize,
     pub noop: bool,
 }
 
-/// `PATCH /api/flowgraph` — apply a new preset to the running pipeline.
-/// Returns the `ReconfigurePlan` the server computed (200), or 409 when
-/// the server isn't in preset mode (no pipeline to target), or 400 when
-/// the new doc fails to parse / validate / build. Rollback is atomic:
-/// a 400 response guarantees the running graph is untouched.
-pub async fn patch_flowgraph(
-    State(state): State<AppState>,
-    Json(new_doc): Json<ferrite_runtime::FlowgraphDoc>,
-) -> Result<Json<FlowgraphPatchResponse>, (StatusCode, Json<ApiError>)> {
-    let Some(result) = state.reconfigure_preset(&new_doc).await else {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "NOT_PRESET_MODE",
-                    message: "ferrited was started without --flowgraph; \
-                              PATCH /api/flowgraph only works in preset mode"
-                        .into(),
-                },
-            }),
-        ));
-    };
-    let plan = result.map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "RECONFIGURE_FAILED",
-                    message: format!("{e:#}"),
-                },
-            }),
-        )
-    })?;
-    let changes = plan
-        .changes
-        .iter()
-        .map(|c| ParamChangeDto {
-            block_id: c.block_id.clone(),
-            param_key: c.param_key.clone(),
-            old_value: c.old_value.clone(),
-            new_value: c.new_value.clone(),
-            scope: c.scope.as_wire_str(),
-        })
-        .collect();
-    Ok(Json(FlowgraphPatchResponse {
-        noop: plan.is_noop(),
-        overall: plan.overall.as_wire_str(),
-        changes,
-        structural_count: plan.structural.len(),
-    }))
+fn reconfigure_response(plan: Option<ferrite_runtime::ReconfigurePlan>) -> ReconfigureResponse {
+    match plan {
+        None => ReconfigureResponse {
+            applied: false,
+            overall: None,
+            changes: Vec::new(),
+            structural_count: 0,
+            noop: true,
+        },
+        Some(p) => ReconfigureResponse {
+            applied: true,
+            overall: Some(p.overall.as_wire_str()),
+            changes: p
+                .changes
+                .iter()
+                .map(|c| ParamChangeDto {
+                    block_id: c.block_id.clone(),
+                    param_key: c.param_key.clone(),
+                    old_value: c.old_value.clone(),
+                    new_value: c.new_value.clone(),
+                    scope: c.scope.as_wire_str(),
+                })
+                .collect(),
+            structural_count: p.structural.len(),
+            noop: p.is_noop(),
+        },
+    }
 }
 
-/// `GET /api/flowgraph` — snapshot the currently-applied preset doc as
-/// JSON. Returns 409 when the server isn't in preset mode.
-pub async fn get_flowgraph(
+/// `GET /api/flowgraph` — snapshot the preset doc as JSON.
+pub async fn get_flowgraph(State(state): State<AppState>) -> Json<FlowgraphDoc> {
+    Json(state.get_flowgraph().await)
+}
+
+/// `PATCH /api/flowgraph` — store a new preset. Reconfigures the
+/// running pipeline if there is one; otherwise the doc is queued for
+/// the next `start`.
+pub async fn patch_flowgraph(
     State(state): State<AppState>,
-) -> Result<Json<ferrite_runtime::FlowgraphDoc>, (StatusCode, Json<ApiError>)> {
-    state.applied_flowgraph().await.map(Json).ok_or_else(|| {
-        (
-            StatusCode::CONFLICT,
-            Json(ApiError {
-                error: ApiErrorBody {
-                    code: "NOT_PRESET_MODE",
-                    message: "ferrited was started without --flowgraph; \
-                              GET /api/flowgraph only works in preset mode"
-                        .into(),
-                },
-            }),
-        )
+    Json(new_doc): Json<FlowgraphDoc>,
+) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
+    let plan = state
+        .patch_flowgraph(new_doc)
+        .await
+        .map_err(|e| bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
+    Ok(Json(reconfigure_response(plan)))
+}
+
+/// `GET /api/source` — snapshot the current `SourceConfig`.
+pub async fn get_source(State(state): State<AppState>) -> Json<SourceConfig> {
+    Json(state.get_source().await)
+}
+
+/// `PATCH /api/source` — store a new source config. Same rules as
+/// `PATCH /api/flowgraph`.
+pub async fn patch_source(
+    State(state): State<AppState>,
+    Json(new_source): Json<SourceConfig>,
+) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
+    let plan = state
+        .patch_source(new_source)
+        .await
+        .map_err(|e| bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
+    Ok(Json(reconfigure_response(plan)))
+}
+
+#[derive(Serialize)]
+pub struct PipelineStatusResponse {
+    pub status: PipelineStatus,
+}
+
+/// `GET /api/pipeline` — report whether the pipeline is running.
+pub async fn pipeline_status(State(state): State<AppState>) -> Json<PipelineStatusResponse> {
+    Json(PipelineStatusResponse {
+        status: state.status().await,
     })
 }
 
-/// `GET /api/blocks` — every registered block's capability schema as a
-/// sorted array. Client uses this to render the flowgraph options dialog
-/// without hard-coding field shapes per block type.
+/// `POST /api/pipeline/start` — compose preset+source, spawn the
+/// runtime. Idempotent: already-running returns 200.
+pub async fn pipeline_start(
+    State(state): State<AppState>,
+) -> Result<Json<PipelineStatusResponse>, (StatusCode, Json<ApiError>)> {
+    state
+        .start()
+        .await
+        .map_err(|e| bad_request("PIPELINE_START_FAILED", format!("{e:#}")))?;
+    Ok(Json(PipelineStatusResponse {
+        status: PipelineStatus::Running,
+    }))
+}
+
+/// `POST /api/pipeline/stop` — tear the runtime down. Returns the
+/// post-stop status (always `stopped`).
+pub async fn pipeline_stop(State(state): State<AppState>) -> Json<PipelineStatusResponse> {
+    state.stop().await;
+    Json(PipelineStatusResponse {
+        status: PipelineStatus::Stopped,
+    })
+}
+
+/// `GET /api/blocks` — every registered block's capability schema as
+/// a sorted array. Client uses this to render the flowgraph options
+/// dialog without hard-coding field shapes per block type.
 pub async fn list_block_schemas() -> Json<Vec<crate::block_schema::BlockSchemaDto>> {
     Json(crate::block_schema::all_block_schemas())
 }
 
-/// `GET /ws/preset` — single WebSocket endpoint exposed when `ferrited`
-/// is started with `--flowgraph <path>`. Subscribes to the preset
-/// pipeline's broadcast channel and forwards every frame as a binary
-/// message. Closes immediately with no payload if the server is not in
-/// preset mode.
+/// `GET /ws/preset` — single WebSocket endpoint for preset sample
+/// frames. Subscribes to the AppState's broadcast channel and
+/// forwards every frame as a binary message. Survives pipeline
+/// start/stop cycles — a subscriber connected while stopped picks up
+/// frames the moment the pipeline spins up.
 pub async fn ws_preset(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_preset(socket, state))
 }
 
 async fn handle_preset(mut socket: WebSocket, state: AppState) {
-    let Some(mut rx) = state.preset_subscribe().await else {
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    };
+    let mut rx = state.subscribe();
     tracing::debug!("ws preset subscribed");
     loop {
         tokio::select! {
@@ -605,44 +330,6 @@ async fn handle_preset(mut socket: WebSocket, state: AppState) {
                 Err(broadcast::error::RecvError::Closed) => return,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(skipped = n, "ws preset subscriber lagged");
-                }
-            }
-        }
-    }
-}
-
-async fn handle_session(mut socket: WebSocket, id: String, state: AppState) {
-    let Some(mut rx) = state.subscribe(&id).await else {
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    };
-    tracing::debug!(session = %id, "ws subscribed");
-    loop {
-        tokio::select! {
-            client = socket.recv() => {
-                match client {
-                    None | Some(Ok(Message::Close(_))) => return,
-                    Some(Err(err)) => {
-                        tracing::debug!(?err, "ws recv");
-                        return;
-                    }
-                    Some(Ok(Message::Ping(p))) => {
-                        if socket.send(Message::Pong(p)).await.is_err() { return; }
-                    }
-                    // The protocol is server-push only for now. Ignore
-                    // text/binary/pong from the client.
-                    _ => {}
-                }
-            }
-            frame = rx.recv() => match frame {
-                Ok(bytes) => {
-                    if socket.send(Message::Binary((*bytes).clone())).await.is_err() {
-                        return;
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => return,
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(skipped = n, "ws subscriber lagged");
                 }
             }
         }

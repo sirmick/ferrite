@@ -25,7 +25,7 @@ use std::{
 
 use ferrite_blocks::{frame::Frame, ws_bridge::BridgeSink};
 
-use crate::session::FrameTx;
+use crate::app_state::FrameTx;
 
 /// Adapter from the runtime's transport-free [`BridgeSink`] trait to
 /// the session's [`FrameTx`] broadcast channel. One instance serves
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn send_without_receivers_does_not_panic() {
-        let (tx, rx) = broadcast::channel::<crate::session::FrameBytes>(4);
+        let (tx, rx) = broadcast::channel::<crate::app_state::FrameBytes>(4);
         let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(tx));
         drop(rx);
         sink.push(Frame::IqF32 {
