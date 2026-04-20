@@ -205,6 +205,111 @@ async fn patch_source_while_running_reports_applied() {
 }
 
 #[tokio::test]
+async fn patch_source_rate_change_triggers_source_restart() {
+    // `rate_hz` is the one SineSource param scoped as `SourceRestart`
+    // (see blocks/src/sine.rs). Changing it exercises the same hot-
+    // reconfigure machinery a full type-swap would trip, without needing
+    // a second no-hardware source type.
+    let addr = spawn_app(true).await;
+    let new_source = json!({
+        "type": "SineSource",
+        "params": {
+            "rate_hz": 2000.0, "tone_freq_abs_hz": 100.0,
+            "center_freq_hz": 0.0, "amplitude": 0.5
+        }
+    });
+    let body = http_patch(
+        &format!("http://{addr}/api/source"),
+        &serde_json::to_string(&new_source).unwrap(),
+    )
+    .await;
+    assert!(body.contains("\"applied\":true"), "patch: {body}");
+    assert!(
+        body.contains("\"overall\":\"sourceRestart\""),
+        "expected sourceRestart scope, got: {body}"
+    );
+    // After the restart, streaming should still be alive on /ws/preset.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/preset"))
+        .await
+        .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("frame within 2s after source restart")
+        .expect("ws stream open")
+        .expect("ws ok");
+    assert!(matches!(msg, Message::Binary(_)), "got {msg:?}");
+}
+
+#[tokio::test]
+async fn patch_source_invalid_type_returns_error_and_preserves_state() {
+    // compose_source accepts any `type_name` (string substitution), but
+    // the downstream reconfigure rejects unregistered types. The PATCH
+    // should fail with RECONFIGURE_FAILED and leave the stored source
+    // config unchanged — a rollback the UI depends on.
+    let addr = spawn_app(true).await;
+    let bad_source = json!({
+        "type": "NoSuchSourceType",
+        "params": { "rate_hz": 1000.0 }
+    });
+    let (status, body) = raw_request_with_status(
+        &format!("http://{addr}/api/source"),
+        "PATCH",
+        &serde_json::to_string(&bad_source).unwrap(),
+    )
+    .await;
+    assert!(
+        status >= 400 && status < 500,
+        "status: {status}, body: {body}"
+    );
+    assert!(body.contains("RECONFIGURE_FAILED"), "body: {body}");
+
+    // GET /api/source must still return the original SineSource.
+    let after = http_get(&format!("http://{addr}/api/source")).await;
+    assert!(after.contains("\"type\":\"SineSource\""), "after: {after}");
+    assert!(
+        after.contains("\"tone_freq_abs_hz\":100"),
+        "rollback lost original params: {after}"
+    );
+}
+
+#[tokio::test]
+async fn patch_flowgraph_invalid_returns_error_and_preserves_state() {
+    // Same rollback contract for PATCH /api/flowgraph: a bad preset
+    // (here: a block of an unregistered type) must 4xx and leave the
+    // stored doc intact.
+    let addr = spawn_app(true).await;
+    let bad_doc = json!({
+        "name": "bad",
+        "environments": ["node", "browser"],
+        "blocks": {
+            "src":  { "type": "Source", "placement": "node",
+                      "params": { "center_freq_hz": 0.0, "sample_rate_hz": 1000.0 } },
+            "sink": { "type": "NoSuchBlockType", "placement": "browser" }
+        },
+        "wires": [["src.out", "sink.in"]]
+    });
+    let (status, body) = raw_request_with_status(
+        &format!("http://{addr}/api/flowgraph"),
+        "PATCH",
+        &serde_json::to_string(&bad_doc).unwrap(),
+    )
+    .await;
+    assert!(
+        status >= 400 && status < 500,
+        "status: {status}, body: {body}"
+    );
+    assert!(body.contains("RECONFIGURE_FAILED"), "body: {body}");
+
+    // GET /api/flowgraph must still be the original smoke preset.
+    let after = http_get(&format!("http://{addr}/api/flowgraph")).await;
+    assert!(after.contains("\"name\":\"smoke\""), "after: {after}");
+    assert!(
+        !after.contains("NoSuchBlockType"),
+        "bad doc leaked into stored state: {after}"
+    );
+}
+
+#[tokio::test]
 async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
     // End-to-end smoke: load the shipped wbfm preset, feed it a
     // SineSource (no hardware required), connect to /ws/preset, and
@@ -361,6 +466,12 @@ async fn http_patch(url: &str, body: &str) -> String {
 }
 
 async fn raw_request(url: &str, method: &str, body: &str) -> String {
+    raw_request_with_status(url, method, body).await.1
+}
+
+/// Returns `(status_code, body)`. Status is parsed from the HTTP/1.1
+/// status line so tests can assert 4xx paths without pulling reqwest in.
+async fn raw_request_with_status(url: &str, method: &str, body: &str) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let url = url.trim_start_matches("http://");
     let (host, path) = url.split_once('/').map_or((url, "/"), |(h, p)| (h, p));
@@ -374,6 +485,13 @@ async fn raw_request(url: &str, method: &str, body: &str) -> String {
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await.unwrap();
     let text = String::from_utf8_lossy(&buf).to_string();
-    text.split_once("\r\n\r\n")
-        .map_or(text.clone(), |(_, body)| body.to_string())
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let body = text
+        .split_once("\r\n\r\n")
+        .map_or(text.clone(), |(_, b)| b.to_string());
+    (status, body)
 }
