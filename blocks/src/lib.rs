@@ -60,7 +60,8 @@ pub use soapy_source::{SoapySource, SoapySourceParams};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use tee_iq_f32::TeeIqF32;
 pub use ws_bridge::{
-    BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx, WsBridgeTxFftU8,
+    BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx,
+    WsBridgeTxFftU8,
 };
 
 /// Marks an `impl Block for T` so `T` is added to [`registry`].

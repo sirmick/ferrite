@@ -124,13 +124,23 @@ pub fn split_for_environment(
             }
             let tx_type = pick_ui_tx_type(doc, registry, &wire.src, ui_name)?;
             let bridge_id = format!("__ui_{ui_name}_{sid}");
+            let mut bridge_params = json!({ "stream_id": sid, "ui_name": ui_name });
+            // WsBridgeTxFftU8 emits one Frame::FftU8 per `frame_size`
+            // bytes. Without this hint the block falls back to a 4096
+            // default; with it, multi-window scheduling never concats
+            // two FFT rows into one UI frame.
+            if tx_type == "WsBridgeTxFftU8" {
+                if let Some(size) = producer_frame_size(doc, &wire.src) {
+                    bridge_params["frame_size"] = json!(size);
+                }
+            }
             insert_bridge(
                 &mut new_blocks,
                 doc,
                 bridge_id.clone(),
                 tx_type,
                 env,
-                json!({ "stream_id": sid, "ui_name": ui_name }),
+                bridge_params,
             )?;
             new_wires.push(Wire::new(wire.src.clone(), format!("{bridge_id}.in")));
             continue;
@@ -186,6 +196,19 @@ pub fn split_for_environment(
         blocks: new_blocks,
         wires: new_wires,
     })
+}
+
+/// Peek at the FftU8 producer's `params.size` so the inserted Tx can
+/// frame its output one window at a time. LogMagU8 is the only FftU8
+/// producer today — its `size` is the number of bins per frame. Returns
+/// `None` if the producer doesn't declare a size (Tx falls back to its
+/// default then).
+fn producer_frame_size(doc: &FlowgraphDoc, source_endpoint: &str) -> Option<usize> {
+    let (block_id, _) = split_endpoint(source_endpoint);
+    let decl = doc.blocks.get(block_id)?;
+    let params = decl.params.as_ref()?;
+    let size = params.get("size")?.as_u64()?;
+    usize::try_from(size).ok()
 }
 
 /// Resolve the source port's type and map it to the matching WsBridgeTx
@@ -818,6 +841,49 @@ mod tests {
         let tx_id = format!("__ui_fft_{CROSS_ENV_STREAM_BASE}");
         let tx = node.blocks.get(&tx_id).expect("ui-side bridge inserted");
         assert_eq!(tx.type_name, "WsBridgeTxFftU8");
+    }
+
+    #[test]
+    fn ui_sink_fft_tx_inherits_frame_size_from_producer() {
+        // LogMagU8 declares `size` on its params; the inserted
+        // WsBridgeTxFftU8 must pick it up so scheduler-batched windows
+        // never get concatenated into one UI frame.
+        let doc = doc_from(
+            r#"{
+                "name": "ui-fft-sized",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src": {"type": "FftHwSrc", "params": { "size": 2048 }}
+                },
+                "wires": [["src.out", "ui:fft"]]
+            }"#,
+        );
+        let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
+        let tx_id = format!("__ui_fft_{CROSS_ENV_STREAM_BASE}");
+        let tx = node.blocks.get(&tx_id).expect("ui-side bridge inserted");
+        let params = tx.params.as_ref().expect("bridge params recorded");
+        assert_eq!(params["frame_size"].as_u64(), Some(2048));
+    }
+
+    #[test]
+    fn ui_sink_fft_tx_without_producer_size_omits_frame_size() {
+        // A producer that doesn't declare `size` falls through — the
+        // bridge default (4096) kicks in at block construction.
+        let doc = doc_from(
+            r#"{
+                "name": "ui-fft-unsized",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src": {"type": "FftHwSrc"}
+                },
+                "wires": [["src.out", "ui:fft"]]
+            }"#,
+        );
+        let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
+        let tx_id = format!("__ui_fft_{CROSS_ENV_STREAM_BASE}");
+        let tx = node.blocks.get(&tx_id).expect("ui-side bridge inserted");
+        let params = tx.params.as_ref().expect("bridge params recorded");
+        assert!(params.get("frame_size").is_none());
     }
 
     #[test]

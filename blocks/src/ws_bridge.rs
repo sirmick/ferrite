@@ -73,6 +73,29 @@ pub struct WsBridgeParams {
     pub stream_id: u32,
 }
 
+/// `WsBridgeTxFftU8` params — adds a `frame_size` on top of the shared
+/// stream id. One `Frame::FftU8` is pushed per `frame_size` bytes of
+/// input; partial trailing bytes stay on the wire for the next tick.
+///
+/// The default matches [`crate::log_mag_u8::LogMagU8`]'s default size;
+/// `env_split` reads the upstream producer's `size` param at insertion
+/// time so the usual zero-config case "just works".
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct WsBridgeFftU8Params {
+    pub stream_id: u32,
+    pub frame_size: usize,
+}
+
+impl Default for WsBridgeFftU8Params {
+    fn default() -> Self {
+        Self {
+            stream_id: 0,
+            frame_size: 4096,
+        }
+    }
+}
+
 /// Stream-id param schema — inlined into both bridge specs below. The
 /// transport id is fixed once a bridge pair is wired; a reconfigure
 /// that changes it is really a re-plumb, not a knob.
@@ -366,19 +389,24 @@ impl BlockFactory for WsBridgeRx {
 // ---------------------------------------------------------------------------
 
 pub struct WsBridgeTxFftU8 {
-    params: WsBridgeParams,
+    params: WsBridgeFftU8Params,
     sink: Option<Arc<dyn BridgeSink>>,
 }
 
 impl WsBridgeTxFftU8 {
     #[must_use]
-    pub const fn new(params: WsBridgeParams) -> Self {
+    pub const fn new(params: WsBridgeFftU8Params) -> Self {
         Self { params, sink: None }
     }
 
     #[must_use]
     pub const fn stream_id(&self) -> u32 {
         self.params.stream_id
+    }
+
+    #[must_use]
+    pub const fn frame_size(&self) -> usize {
+        self.params.frame_size
     }
 
     /// Wire a transport sink — mirrors [`WsBridgeTx::attach_sink`]. The
@@ -400,7 +428,22 @@ impl Block for WsBridgeTxFftU8 {
                 port_type: PortType::FftU8,
             }],
             outputs: &[],
-            params: &[STREAM_ID_PARAM],
+            params: &[
+                STREAM_ID_PARAM,
+                ParamSpec {
+                    key: "frame_size",
+                    label: "FFT frame size",
+                    kind: ParamKind::EnumNumeric {
+                        values: &[1024.0, 2048.0, 4096.0, 8192.0, 16384.0],
+                        default: 4096.0,
+                        unit: "bins",
+                    },
+                    // Changing the chunk size changes the wire framing —
+                    // downstream consumers that pin the FFT size must
+                    // re-init.
+                    reconfig_scope: ReconfigureScope::SourceRestart,
+                },
+            ],
         }
     }
 
@@ -410,17 +453,25 @@ impl Block for WsBridgeTxFftU8 {
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
         let mut w = Work::new();
+        let frame_size = self.params.frame_size.max(1);
         if let Some(port) = io.inputs.iter().find(|p| p.name == "in") {
             if let InBuf::FftU8(slice) = &port.buf {
-                if let Some(sink) = &self.sink {
-                    sink.push(Frame::FftU8 {
-                        stream_id: stream_id_u16(self.params.stream_id),
-                        seq: 0,
-                        timestamp_ns: 0,
-                        payload: slice.to_vec(),
-                    });
+                let whole = slice.len() / frame_size;
+                if whole > 0 {
+                    if let Some(sink) = &self.sink {
+                        for i in 0..whole {
+                            let start = i * frame_size;
+                            let end = start + frame_size;
+                            sink.push(Frame::FftU8 {
+                                stream_id: stream_id_u16(self.params.stream_id),
+                                seq: 0,
+                                timestamp_ns: 0,
+                                payload: slice[start..end].to_vec(),
+                            });
+                        }
+                    }
+                    w.consumed[0] = whole * frame_size;
                 }
-                w.consumed[0] = slice.len();
             }
         }
         Ok(w)
@@ -429,7 +480,7 @@ impl Block for WsBridgeTxFftU8 {
 
 impl BlockFactory for WsBridgeTxFftU8 {
     fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
-        let p: WsBridgeParams = crate::block::deserialize_params(params)?;
+        let p: WsBridgeFftU8Params = crate::block::deserialize_params(params)?;
         Ok(Box::new(WsBridgeTxFftU8::new(p)))
     }
 }
@@ -437,8 +488,8 @@ impl BlockFactory for WsBridgeTxFftU8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx, WsBridgeTxFftU8,
-        DEFAULT_RX_BUFFER_SAMPLES,
+        BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx,
+        WsBridgeTxFftU8, DEFAULT_RX_BUFFER_SAMPLES,
     };
     use crate::{
         block::{Block, BlockIo, InBuf, InitCtx, InputPort, OutBuf, OutputPort, PortMeta, Work},
@@ -716,8 +767,12 @@ mod tests {
 
     #[test]
     fn fft_tx_pushes_fft_u8_frame() {
+        // One window fits the input exactly — one frame out.
         let sink = Arc::new(CapturingSink::default());
-        let mut tx = WsBridgeTxFftU8::new(WsBridgeParams { stream_id: 1 });
+        let mut tx = WsBridgeTxFftU8::new(WsBridgeFftU8Params {
+            stream_id: 1,
+            frame_size: 32,
+        });
         tx.attach_sink(sink.clone());
 
         let input: Vec<u8> = (0..32).collect();
@@ -747,6 +802,76 @@ mod tests {
     }
 
     #[test]
+    fn fft_tx_chunks_by_frame_size_one_frame_per_window() {
+        // Three full windows + a partial remainder: expect three frames,
+        // each of `frame_size` bytes, and the remainder left on the wire
+        // for a later tick.
+        let sink = Arc::new(CapturingSink::default());
+        let mut tx = WsBridgeTxFftU8::new(WsBridgeFftU8Params {
+            stream_id: 7,
+            frame_size: 8,
+        });
+        tx.attach_sink(sink.clone());
+
+        let input: Vec<u8> = (0..28).collect();
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::FftU8(&input),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut [],
+        };
+        let w: Work = tx.process(&mut io).unwrap();
+
+        // 3 × 8 = 24 consumed; 4 bytes of partial window stay on wire.
+        assert_eq!(w.consumed[0], 24);
+
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        for (i, call) in calls.iter().enumerate() {
+            let Frame::FftU8 {
+                stream_id, payload, ..
+            } = call
+            else {
+                panic!("expected FftU8 frame, got {call:?}");
+            };
+            assert_eq!(*stream_id, 7);
+            assert_eq!(payload.len(), 8);
+            let expected: Vec<u8> = (i as u8 * 8..i as u8 * 8 + 8).collect();
+            assert_eq!(payload, &expected);
+        }
+    }
+
+    #[test]
+    fn fft_tx_with_partial_window_alone_consumes_nothing() {
+        // A tick where only half a window has accumulated — the Tx should
+        // wait. Under the old behavior this byte slice would be flushed
+        // as a runt frame and the UI would render garbage.
+        let sink = Arc::new(CapturingSink::default());
+        let mut tx = WsBridgeTxFftU8::new(WsBridgeFftU8Params {
+            stream_id: 1,
+            frame_size: 16,
+        });
+        tx.attach_sink(sink.clone());
+
+        let input: Vec<u8> = (0..10).collect();
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::FftU8(&input),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut [],
+        };
+        let w: Work = tx.process(&mut io).unwrap();
+        assert_eq!(w.consumed[0], 0);
+        assert!(sink.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn one_sink_instance_serves_both_tx_block_types() {
         // The point of the unified trait: a single `Arc<dyn BridgeSink>`
         // can be attached to every Tx block in a preset regardless of
@@ -757,7 +882,10 @@ mod tests {
 
         let mut iq_tx = WsBridgeTx::new(WsBridgeParams { stream_id: 1000 });
         iq_tx.attach_sink(Arc::clone(&sink_dyn));
-        let mut fft_tx = WsBridgeTxFftU8::new(WsBridgeParams { stream_id: 1 });
+        let mut fft_tx = WsBridgeTxFftU8::new(WsBridgeFftU8Params {
+            stream_id: 1,
+            frame_size: 4,
+        });
         fft_tx.attach_sink(Arc::clone(&sink_dyn));
 
         let iq_input = vec![Complex::new(0.5_f32, -0.5)];
@@ -773,7 +901,7 @@ mod tests {
             })
             .unwrap();
 
-        let fft_input: Vec<u8> = vec![1, 2, 3];
+        let fft_input: Vec<u8> = vec![1, 2, 3, 4];
         let mut fft_inputs = [InputPort {
             name: "in",
             meta: PortMeta::default(),
