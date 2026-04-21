@@ -314,7 +314,7 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
     // End-to-end smoke: load the shipped wbfm preset, feed it a
     // SineSource (no hardware required), connect to /ws/preset, and
     // confirm both crossings light up:
-    //   - stream 1000: IQ crossing on `tee.out0 → decim.in`
+    //   - stream 1000: IQ crossing on `chan.out → decim.in`
     //   - stream 1001: FFT tap on `logmag.out → ui:fft`
     // This exercises the full pipeline compose → env_split → runtime
     // → broadcast → WS path against the same preset the web UI ships.
@@ -353,9 +353,10 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
         .expect("ws connect");
 
     // Collect frames for up to 2s, tagging each with its stream id.
-    // wbfm's FFT fires every FFT_SIZE (4096) samples at 240 kS/s post-
-    // channelizer, and IQ crossings fire every runtime tick, so we
-    // should see both stream ids well within the window.
+    // wbfm's FFT now runs on the raw 2.4 MS/s source, so it fires
+    // every FFT_SIZE (4096) samples ≈ 1.7 ms; IQ crossings fire every
+    // runtime tick. Both stream ids should appear well within the
+    // window.
     let mut saw_iq = false;
     let mut saw_fft = false;
     let mut counts: std::collections::BTreeMap<(u16, &'static str), usize> =

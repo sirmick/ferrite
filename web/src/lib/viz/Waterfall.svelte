@@ -3,7 +3,7 @@
   import { pixelToFreqLinear, WaterfallRenderer, type WaterfallPalette } from './waterfall';
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
-  import { pipeline, fftAxes } from '$lib/pipeline.svelte';
+  import { pipeline, currentAxes } from '$lib/pipeline.svelte';
 
   interface Props {
     client: FrameClient;
@@ -23,7 +23,7 @@
   let canvas: HTMLCanvasElement | undefined = $state();
   let wrap: HTMLDivElement | undefined = $state();
 
-  let axes = $derived(fftAxes(pipeline));
+  let axes = $derived(currentAxes(pipeline));
 
   // Pointer drag state: `dragX` is the current pointer CSS-X relative to
   // the canvas. While null the cursor sits at geometric centre — the VFO

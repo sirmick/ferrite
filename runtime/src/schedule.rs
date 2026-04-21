@@ -165,13 +165,14 @@ mod tests {
         let doc = FlowgraphDoc::from_json(WBFM).unwrap();
         let v = validate_doc(&doc).unwrap();
         let s = Schedule::from_validated(&v).unwrap();
-        // wbfm.json has two parallel chains after the tee: an FFT tap
-        // (fft → logmag → ui:fft) and the audio chain (decim → demod →
-        // audio). Producers land before consumers; sibling ties break
-        // alphabetically. ui:fft has no real block so it doesn't appear.
+        // wbfm.json fans the raw source through a tee into two parallel
+        // chains: an FFT tap (fft → logmag → ui:fft) and the audio
+        // chain (chan → decim → demod → audio). Producers land before
+        // consumers; sibling ties break alphabetically. ui:fft has no
+        // real block so it doesn't appear.
         assert_eq!(
             s.order,
-            vec!["src", "chan", "tee", "decim", "demod", "audio", "fft", "logmag"]
+            vec!["src", "tee", "chan", "decim", "demod", "audio", "fft", "logmag"]
         );
     }
 
@@ -183,11 +184,12 @@ mod tests {
         let demod = &s.wire_plan["demod"];
         assert_eq!(demod["in"].source_block, "decim");
         assert_eq!(demod["in"].source_port, "out");
-        // decim now reads from `tee.out0`, not `chan.out`, since the
-        // tee fans IQ to both the audio chain and the FFT tap.
+        // decim reads from `chan.out` — the channelizer now lives on
+        // the audio leg of the tee fan-out, narrowing 2.4 MS/s → 240
+        // kS/s before the 5× decim drops it to 48 kHz.
         let decim = &s.wire_plan["decim"];
-        assert_eq!(decim["in"].source_block, "tee");
-        assert_eq!(decim["in"].source_port, "out0");
+        assert_eq!(decim["in"].source_block, "chan");
+        assert_eq!(decim["in"].source_port, "out");
         // src has no inputs — still present with an empty map.
         assert!(s.wire_plan["src"].is_empty());
     }
