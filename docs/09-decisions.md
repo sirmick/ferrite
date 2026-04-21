@@ -480,6 +480,210 @@ instant (targeted, surgical). That matches the cost tiers.
   this UX — `freq_shift_hz` must be `Self`-scope so right-click feels
   instant. That's a concrete acceptance test for the scope machinery.
 
+## D22 — Unify `WsIqSource` into `WsBridgeRx`
+
+**Context.** `WsIqSource` and `WsBridgeRx` were developed on separate
+tracks:
+
+- `WsIqSource` shipped first — a `WasmOnly` IQ ingress block with an
+  `IqRing`, `push_interleaved`, and a wasm-bindgen `pushIq` API. The
+  JS host owns the WebSocket (via `FrameClient`), decodes frames, and
+  pushes samples into the block's ring; the block emits onto its
+  typed `IqF32` output at tick time. Originally a reskin of the TS
+  `wsIqSourceBlock.ts` for preset-authored browser ingress.
+- `WsBridgeRx` landed as the consuming half of the bridge pair that
+  `env_split` auto-inserts on `node → browser` crossings. Its
+  `process` body is a placeholder returning `Ok(Work::new())` — no
+  transport. The first commit message said *"once M2 lands, this
+  fills the output buffer from decoded WS frames"*; M2 landed for the
+  Tx side (`IqBridgeSink` → `BridgeSink` unification → `FftU8` Tx →
+  postcard `Frame` transport) but Rx was never paired up.
+
+Both declare `Placement::WasmOnly` with a single `IqF32` output and a
+`stream_id` param; both consume decoded samples pushed by a JS-side
+transport. They are the same block wearing two names. That's exactly
+what D19's "one runtime, one block inventory" position forbids.
+
+**Decision.** Merge them. Keep the `WsBridgeRx` name — it's what
+`env_split` synthesizes, it's what D19 names as the browser-half
+"source", and the docs already reference it. Body becomes
+`WsIqSource`'s verbatim: `IqRing` + `push_interleaved` + typed
+`IqF32` output. Params: `stream_id` + `buffer_samples`.
+
+The transport split stays the same — `FrameClient` + postcard decode
+on the JS side, typed ring inside the block. The wasm-bindgen
+`pushIq(blockId, floats)` keeps its JS name and signature; internally
+it dispatches to `block_typed::<WsBridgeRx>`. The browser runner
+iterates every `WsBridgeRx` instance at preset-load time, reads each
+one's `stream_id` param, subscribes through `FrameClient`, and routes
+incoming `IqF32` payloads through `pushIq`.
+
+Future non-`IqF32` cross-env wires get parallel types — `WsBridgeRxFftU8`
+and `WsBridgeRxEvents`, each a ~30-line clone with a different output
+port type. The block framework's port types are static; the transport
+itself (`Frame` enum + `to_postcard`/`from_postcard` + `decodeFrame`)
+is already type-agnostic, so the duplication is an adapter, not a
+parallel transport.
+
+**Rejected.**
+
+- Keep both blocks. No added capability; `WsIqSource` has no
+  `env_split` synthesis path and `WsBridgeRx` has no transport.
+  Duplication with zero leverage.
+- Single polymorphic `WsBridgeRx` whose output-port type is set
+  per-instance via a param. Would require changes to `BlockSpec`
+  (today a type-level const method) and the runtime's port-type
+  dispatch. Disproportionate cost for the modest three-variant
+  family that replaces it.
+- Generic byte-port type + downstream decoder adapter block per
+  variant. Adds a block per variant *plus* a decoder — N+1 instead of
+  N. No gain.
+
+**Consequence.**
+
+- `blocks/src/ws_iq_source.rs` is deleted; `blocks/src/ws_bridge.rs`
+  grows the `IqRing` + push API on `WsBridgeRx`.
+- Any code referencing `"WsIqSource"` (blocks re-export, runtime
+  wasm facade, env_split tests, sample-preset JSON) becomes
+  `"WsBridgeRx"`.
+- The task-14 vitest E2E becomes implementable — the DTMF canary's
+  browser half finally has a working IQ ingress.
+- When a preset needs server→browser `FftU8` or `Events` delivery,
+  add `WsBridgeRxFftU8` / `WsBridgeRxEvents` at that time. Not
+  speculative.
+
+## D23 — Rate-aware scheduler with accumulating ring buffers
+
+**Context.** Today's `Runtime::tick` walks blocks in topological order
+and calls each block's `process` exactly once per tick. Every output
+port owns a pre-allocated buffer of size `max(frames_hint,
+output_capacity_hints[i])`. The scheduler hands each block the full
+output buffer; the block writes `Work.produced[i]` samples, and
+downstream consumers see a slice trimmed to that count.
+`Work.consumed[i]` is reported but *not honored* — unconsumed input
+samples vanish when the upstream producer overwrites its output
+buffer on the next tick.
+
+This is correct for rate-reducing chains (wideband capture → narrow
+channelizer → demod → audio) because consumers are always cheaper
+than producers — there are no unconsumed samples to lose. Every
+preset that ships today has this shape.
+
+It is **silently wrong** for rate-expanding chains. The DTMF-e2e
+canary's `AmModulator` takes 8 kS/s real audio and produces 2.4 MS/s
+IQ (300× upsample). With `frames_hint = 1024`: the upstream source
+emits 1024 real samples; `AmModulator`'s output-driven loop (`while
+produced < dst.len()` with `step = 1/300`) consumes ~4 of them to
+fill its 1024-IQ output buffer; the other ~1020 samples are
+overwritten when `DtmfAudioSource` runs again on the next tick. The
+effective audio rate reaching the AM modulator is ≈ 27 Hz, which
+aliases the DTMF tones to noise. The downstream decoder cannot
+recover what the scheduler threw away.
+
+The issue isn't `frames_hint` (that's just a sizing knob, already
+per-port via `output_capacity_hints`). It isn't even the buffer
+sizes — a 300× buffer costs 2.4 MB per port and scales poorly. The
+issue is the scheduler has no concept of "block X needs more input
+before producing more output" — no back-pressure mechanism, no rate
+awareness, no way for `Work.consumed` to mean anything.
+
+**Decision.** Rebuild the scheduler on a GNU Radio-shaped foundation:
+accumulating ring buffers per wire, per-block rate declarations, and a
+demand-driven work loop that re-runs blocks as long as they can make
+progress. The outer contract stays the same — one `tick()` per
+`AudioWorklet` batch on the browser, one per reader batch natively —
+but internally `tick()` is a loop, not a single pass.
+
+**Block trait additions.**
+
+- `fn relative_rate(&self, in_port: usize, out_port: usize) -> (u32, u32)` —
+  returns `(output_samples, input_samples)` for a production step.
+  Default `(1, 1)`. A `sync_decimator(N)` returns `(1, N)`; a
+  `sync_interpolator(L)` returns `(L, 1)`; a source returns `(1, 0)`
+  on the input-less side. `(0, 0)` means "unconstrained" — event
+  blocks whose output rate isn't a function of input rate.
+- `fn forecast(&self, noutput_items: usize) -> [usize; MAX_PORTS]` —
+  answers *"to produce this many outputs, how many inputs do I need
+  on each port?"*. Default derives from `relative_rate` for sync
+  blocks; override for variable-rate blocks (e.g. `DtmfDecoder`
+  emits events only on tone transitions, not per-input-sample).
+- `Work.consumed[i]` becomes load-bearing. The scheduler advances
+  each input ring's read pointer by `consumed[i]`; unconsumed
+  samples remain for the next call to the same block. Today's
+  blocks already populate `consumed` honestly, so the API shape
+  doesn't change — only the scheduler's use of it does.
+
+**Buffer model.** Each wire owns one `TypedRing` — a power-of-two
+circular buffer. Fan-out wires (one producer, N consumers) have one
+writer pointer and N independent reader pointers, so a slow
+consumer doesn't stall the others on the same wire. Ring capacity
+is derived at init time from the downstream's maximum forecasted
+demand × a safety factor, with a floor at `frames_hint` (preserving
+today's "at least one tick of headroom" guarantee). `TypedBuf` is
+retired; `output_capacity_hints` folds into the ring-sizing math.
+
+**Scheduler loop.** `Runtime::tick()` becomes:
+
+```text
+loop:
+  progress = false
+  for block in topo_order:
+    nout = min(output_ring_free, block.forecast_max_output())
+    if nout == 0: continue          # output backed up — skip
+    if !block.has_enough_input(nout): continue  # starved — skip
+    work = block.process(io_with_ring_views)
+    advance rings by work.consumed[*] / work.produced[*]
+    if work.consumed > 0 || work.produced > 0: progress = true
+  if !progress: break               # quiescent
+  if tick_budget_exhausted: break   # keep WASM ticks bounded
+```
+
+`tick_budget_exhausted` counts samples processed on the
+highest-rate output and caps one `tick()`'s total work. Keeps the
+`AudioWorklet` batch predictable and prevents runaway loops if a
+rate declaration is buggy.
+
+**Rejected.**
+
+- **Per-port `output_capacity_hints = frames_hint × rate_ratio`.**
+  Works up to some ratio ceiling but the 300× IQ case is 2.4 MB per
+  port, and the overwrite-on-next-tick semantics still mean
+  back-pressure isn't real — just delayed. Fixes a symptom, leaves
+  the root cause (scheduler ignores `consumed`).
+- **Per-block `frames_hint`.** Already exists as
+  `output_capacity_hints`. A sizing knob, not a rate-awareness
+  mechanism. Doesn't touch the scheduler's "overwrite" assumption.
+- **Thread-per-block scheduler (GR's TPB).** Not viable in the
+  single-worker WASM model; native benefits don't justify the
+  complexity for any graph we have or plan to have.
+- **Synchronous dataflow compile (compute a static schedule at init
+  and tick each block K_i times per outer tick).** Elegant but
+  requires every block's rate to be rational and known at init;
+  variable-rate blocks (`DtmfDecoder`) break the premise. The
+  demand-driven loop handles variable rates naturally.
+
+**Consequence.**
+
+- `runtime/src/runtime.rs` gets a new `TypedRing` type and a
+  rewritten `tick()`. The module doc's "back-pressure is coarse"
+  disclaimer disappears.
+- Every block migrates. Most are 1:1 sync and keep the default
+  `relative_rate`. Explicit overrides for `DtmfAudioSource` (source
+  rate), `AmModulator` (`(L, 1)`), `Channelizer` / `Decimator`
+  (`(1, N)`), `FFT` / `LogMagU8` (fixed-chunker — already using
+  `output_capacity_hints`, folds into `forecast`), `DtmfDecoder`
+  (variable — custom `forecast`).
+- Per-block unit tests that stand up `InputPort { buf:
+  InBuf::…(&slice) }` change shape. A small `TestRing` harness
+  keeps them terse.
+- `output_capacity_hints` is retired; ring sizing derives from rate
+  declarations + `frames_hint`.
+- DTMF-e2e's AM round-trip becomes runnable in-process, validating
+  the full canary end-to-end rather than a rate-sidestepping variant.
+- Lands after D22 (WsBridgeRx unification), because D22 unblocks a
+  reduced DTMF E2E today while D23 is being built; the "before" and
+  "after" states are each testable.
+
 ## Revisiting decisions
 
 Decisions here are not immutable — they are **load-bearing assumptions**.

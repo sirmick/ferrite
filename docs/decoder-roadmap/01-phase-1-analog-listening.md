@@ -222,6 +222,14 @@ Browser (parity):
 `events` bridge works before Phase 2 loads it with multimon-ng's five
 decoders.
 
+**Lands early as a pre-Phase-1 E2E canary.** See `docs/10-commits.md`
+"Pre-Phase-1 — DTMF events-bridge E2E canary" for the commit list.
+The canary wires `DtmfAudioSource → AmModulator → Channelizer →
+Decimator → WsBridge → AmDemod → DtmfDecoder → EventsSink` across the
+server/browser split, so the events bridge is proven before the rest
+of the Phase 1 demod blocks (`SsbDemod`, `Deemphasis`, `Squelch`,
+`Agc`, `Resample`) get built against it.
+
 ## Preset flowgraphs to ship
 
 One JSON file per preset under `flowgraphs/presets/`. These are the

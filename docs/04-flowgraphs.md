@@ -89,7 +89,7 @@ the real source inherits unless the `SourceConfig` overrides them.
 | type              | direction | notes                                                   |
 |-------------------|-----------|---------------------------------------------------------|
 | `AudioSink`       | sink      | feeds the AudioWorklet ring buffer (SAB)                |
-| `WsIqSource`      | source    | subscribes to a `stream_id` on `/ws/preset`             |
+| `WsBridgeRx`      | source    | subscribes to a `stream_id` on `/ws/preset` (also auto-inserted by `env_split`; see below) |
 
 ### Either (DSP; pin with per-instance `placement`)
 

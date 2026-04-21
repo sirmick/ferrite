@@ -282,9 +282,8 @@ Post-M5, the registered blocks are:
 | `FmDemod`       | iq_f32 → real_f32                  | WBFM listening                                 | shipped |
 | `AmDemod`       | iq_f32 → real_f32                  | AM listening                                   | shipped |
 | `AudioSink`     | real_f32 → —                       | feeds AudioWorklet ring (SAB) in the browser   | shipped |
-| `WsIqSource`    | — → iq_f32                         | subscribes to a `stream_id` on `/ws/preset`    | shipped |
 | `WsBridgeTx`    | * → —                              | auto-inserted by `env_split` on crossings      | shipped |
-| `WsBridgeRx`    | — → *                              | auto-inserted by `env_split` on crossings      | shipped |
+| `WsBridgeRx`    | — → iq_f32                         | auto-inserted by `env_split`; also subscribes to a `stream_id` on `/ws/preset` when authored directly | shipped |
 
 Planned (see `docs/decoder-roadmap/`):
 

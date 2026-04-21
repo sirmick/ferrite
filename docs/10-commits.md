@@ -307,6 +307,89 @@ backed pipeline and the source independently patchable.
       machinery. Multi-VFO extension: right-click menu grows a "set
       VFO<n>" submenu; drag behaviour unchanged.
 
+## Pre-Phase-1 — DTMF events-bridge E2E canary
+
+A single hardcore end-to-end test that exercises every Post-M5 layer
+(preset compose + env-split, `WsBridge`, postcard `Frame` transport,
+browser runtime in Node, cross-env events delivery) before Phase 1
+starts building the full analog-listening block set. DTMF is the
+simplest real digital mode and has no external fixture dependency —
+test audio is generated in-graph.
+
+Architecture (locked):
+
+- Single-client. No multi-client decimator compromise.
+- Server-half: `DtmfAudioSource(8 kS/s real) → AmModulator(offset=+50 kHz,
+  out=2.4 MS/s) → TeeIqF32 → { Channelizer(factor=10, shift=+50 kHz) →
+  Decimator(factor=30) → WsBridgeTx, FFT(4096) → LogMagU8 → ui:fft }`.
+- Browser-half: `WsBridgeRx(8 kS/s IQ) → AmDemod → DtmfDecoder →
+  EventsSink`.
+- Server-side decimation — wire carries 8 kS/s IQ, not 240 kS/s.
+
+Commits:
+
+- [ ] `feat(blocks): DtmfAudioSource — programmatic DTMF tone generator (digits, hold_ms, gap_ms)`
+- [ ] `feat(blocks): AmModulator — real_f32 → iq_f32 with offset_hz, mod_depth, out_rate_hz`
+- [ ] `feat(blocks): DtmfDecoder — 8-Goertzel digit detector, real_f32 → events`
+- [ ] `feat(blocks): EventsSink — native mpsc + browser postMessage + test drain API`
+- [ ] `feat(server): ferrited prints actual listen addr on stdout for ephemeral-port harnesses`
+- [ ] `flowgraphs: presets/dtmf-e2e.json — AM-upmixed DTMF source + split chain`
+- [ ] `test(blocks): cross-env preset runs both halves in one Runtime, events arrive`
+- [ ] `test(web): dtmfE2E — spawn ferrited, drive blocks.wasm in Node, assert "1234"`
+
+**Done when:** `pnpm -C web test dtmfE2E` boots `ferrited`, runs the
+browser half via the Rust runtime WASM in Node, and drains the four
+expected digit events off the browser-side `EventsSink` queue. The
+native integration test covers the same chain without the WS hop, as
+a faster regression signal.
+
+## Post-canary — Cross-env transport round-trip + scheduler rewrite
+
+Two pieces of work fell out of the DTMF canary effort. The canary
+shook out a transport gap (browser ingress was never wired) and a
+scheduler limitation (rate-expansion chains silently drop samples).
+Rationale in D22 (WsBridgeRx unification) and D23 (rate-aware
+scheduler).
+
+### Track A — Unify `WsIqSource` into `WsBridgeRx`
+
+Close the browser ingress half of `env_split`. Every `node → browser`
+wire carrying `IqF32` should actually deliver samples. Unblocks any
+future preset with an `IqF32` crossing. Scope is ~1-2 days; see D22.
+
+- [x] `refactor(blocks): merge WsIqSource body into WsBridgeRx; delete WsIqSource`
+- [x] `refactor(runtime): pushIq wasm method dispatches to WsBridgeRx instead of WsIqSource`
+- [x] `feat(web): runner routes FrameClient IqF32 frames to WsBridgeRx instances by stream_id`
+
+**Done when:** native + wasm32 both build with the unified `WsBridgeRx`
+block, every workspace test passes, and `pnpm test` stays green after
+the type-string rename.
+
+The cross-env `dtmfE2E` vitest was originally planned as a fourth
+Track A commit against a reduced DTMF preset (matched-rate AM to
+sidestep the scheduler gap). Deferred into Track B's final item
+instead — Track B's rate-aware scheduler lets the canary run the real
+authored preset, so we write the vitest once against the full chain
+rather than shipping a reduced variant first.
+
+### Track B — Rate-aware scheduler
+
+Replace the one-tick-one-process scheduler with accumulating ring
+buffers + demand-driven re-run. See D23 for the design. Scope is
+~1-2 weeks.
+
+- [ ] `feat(runtime): TypedRing — per-wire circular buffer with multi-reader pointers`
+- [ ] `feat(blocks): Block::relative_rate + Block::forecast trait additions with sync defaults`
+- [ ] `refactor(runtime): scheduler work loop — demand-driven re-run until quiescent or budget exhausted`
+- [ ] `refactor(blocks): migrate rate-changing blocks (Channelizer, Decimator, AmModulator, FFT, LogMagU8, DtmfAudioSource, DtmfDecoder)`
+- [ ] `refactor(blocks): retire output_capacity_hints — ring sizing derives from rate declarations`
+- [ ] `test(runtime): rate-expansion chains (AM upsample, resampler) don't drop samples`
+- [ ] `test(web): dtmfE2E vitest — spawn ferrited serving the full dtmf-e2e.json, drive the browser half via the runner, assert "1234"`
+
+**Done when:** the DTMF canary runs the full authored preset (no
+rate-sidestepping) both natively and cross-env, and a synthetic test
+confirms arbitrary rate topologies produce correct sample counts.
+
 ## How this file stays honest
 
 - **PRs update it.** Each PR that lands a commit here crosses that item off
