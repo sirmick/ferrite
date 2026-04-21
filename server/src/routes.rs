@@ -340,6 +340,75 @@ pub async fn patch_pipeline_block(
     Ok(Json(reconfigure_response(plan)))
 }
 
+/// `GET /api/source/capabilities` — probe the currently-active source
+/// and return whatever the hardware exposes (discrete sample rates,
+/// gain elements, antennas, frequency ranges). Software sources return
+/// `{kind: "software"}` with no capability blob so the UI can hide the
+/// hardware-only controls (sample-rate dropdown, antenna picker, gain).
+///
+/// This sits alongside `GET /api/devices` — that enumerates every
+/// attached device, this asks "what can the source I'm actually using
+/// do right now?". Avoids the UI re-probing on every SourceConfig
+/// change and keeps args-string parsing on the server.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum SourceCapabilitiesResponse {
+    #[cfg(feature = "soapysdr")]
+    Hardware {
+        type_name: String,
+        capabilities: Box<crate::device::DeviceCapabilities>,
+    },
+    Software {
+        type_name: String,
+    },
+    #[cfg(feature = "soapysdr")]
+    Unavailable {
+        type_name: String,
+        error: String,
+    },
+}
+
+#[cfg(feature = "soapysdr")]
+pub async fn get_source_capabilities(
+    State(state): State<AppState>,
+) -> Result<Json<SourceCapabilitiesResponse>, (StatusCode, Json<ApiError>)> {
+    let source = state.get_source().await;
+    let type_name = source.type_name.clone();
+    if type_name != "SoapySource" {
+        return Ok(Json(SourceCapabilitiesResponse::Software { type_name }));
+    }
+    let args = source
+        .params
+        .get("args")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let probe = tokio::task::spawn_blocking(move || crate::device::probe(&args))
+        .await
+        .map_err(|e| internal(format!("device probe task panicked: {e}")))?;
+    let response = match probe {
+        Ok(caps) => SourceCapabilitiesResponse::Hardware {
+            type_name,
+            capabilities: Box::new(caps),
+        },
+        Err(err) => SourceCapabilitiesResponse::Unavailable {
+            type_name,
+            error: format!("{err:#}"),
+        },
+    };
+    Ok(Json(response))
+}
+
+#[cfg(not(feature = "soapysdr"))]
+pub async fn get_source_capabilities(
+    State(state): State<AppState>,
+) -> Json<SourceCapabilitiesResponse> {
+    let source = state.get_source().await;
+    Json(SourceCapabilitiesResponse::Software {
+        type_name: source.type_name,
+    })
+}
+
 /// `GET /api/presets` — enumerate every `*.json` preset the server can
 /// load. Returns an empty list when no presets dir is configured.
 pub async fn list_presets(

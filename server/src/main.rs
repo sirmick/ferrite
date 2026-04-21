@@ -225,6 +225,10 @@ async fn main() -> Result<()> {
             "/api/source",
             get(routes::get_source).patch(routes::patch_source),
         )
+        .route(
+            "/api/source/capabilities",
+            get(routes::get_source_capabilities),
+        )
         .route("/api/pipeline", get(routes::pipeline_status))
         .route("/api/pipeline/start", post(routes::pipeline_start))
         .route("/api/pipeline/stop", post(routes::pipeline_stop))

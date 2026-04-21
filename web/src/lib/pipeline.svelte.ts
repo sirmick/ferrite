@@ -24,6 +24,7 @@ import {
 import { fetchUiSinks, type UiSink } from '$lib/api/uiSinks';
 import { fetchPipelineBlocks, patchBlockParams, type PipelineBlock } from '$lib/api/pipelineBlocks';
 import { fetchPresets, loadPreset, type PresetEntry } from '$lib/api/presets';
+import { fetchSourceCapabilities, type SourceCapabilitiesResponse } from '$lib/api/sourceCaps';
 import { FrameClient, type ClientStatus } from '$lib/ws/client';
 import { initFrameDecoder } from '$lib/ws/frame';
 import { logs } from '$lib/logs/store.svelte';
@@ -51,6 +52,11 @@ class PipelineStore {
    *  stable for the session (the presets dir isn't watched). */
   presets = $state<PresetEntry[]>([]);
 
+  /** Hardware/software capabilities of the currently-active source.
+   *  Refreshed whenever `source` changes. Hardware sources carry the
+   *  full `DeviceCapabilities`; software sources just their type_name. */
+  sourceCaps = $state<SourceCapabilitiesResponse | null>(null);
+
   /** Shared WebSocket client feeding `/ws/preset`. Always open while
    *  the store is alive — callers multiplex by stream id. */
   client = $state<FrameClient | undefined>(undefined);
@@ -66,13 +72,14 @@ class PipelineStore {
     this.errorMessage = null;
     try {
       await initFrameDecoder();
-      const [fg, src, st, sinks, blocks, presets] = await Promise.all([
+      const [fg, src, st, sinks, blocks, presets, caps] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
         fetchUiSinks(),
         fetchPipelineBlocks(),
         fetchPresets(),
+        fetchSourceCapabilities(),
       ]);
       this.flowgraph = fg;
       this.source = src;
@@ -80,6 +87,7 @@ class PipelineStore {
       this.uiSinks = indexByName(sinks);
       this.blocks = indexById(blocks);
       this.presets = presets;
+      this.sourceCaps = caps;
       this.client = new FrameClient({
         url: wsUrlFor('/ws/preset'),
         onStatus: (s) => {
@@ -119,6 +127,7 @@ class PipelineStore {
       const resp = await patchSource(next);
       this.source = next;
       await this.refreshComposed();
+      this.sourceCaps = await fetchSourceCapabilities();
       return resp;
     }, 'patch source');
   }
