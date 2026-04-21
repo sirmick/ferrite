@@ -422,7 +422,7 @@ capability-first, not project-first (see
   phase doc; the preset JSON + block source are then the living
   documentation.
 
-## D21 — Waterfall tuning interactions: click-drag = SDR centre (expensive); right-click = VFO offset (cheap)
+## D21 — Waterfall tuning interactions: click-drag = SDR centre (expensive); right-click = VFO offset (cheap) [superseded by D25]
 
 **Context.** There are two frequency knobs in every preset that carries
 a `Channelizer`: the SDR's hardware LO (`source.center_freq_hz`, set
@@ -683,6 +683,228 @@ rate declaration is buggy.
 - Lands after D22 (WsBridgeRx unification), because D22 unblocks a
   reduced DTMF E2E today while D23 is being built; the "before" and
   "after" states are each testable.
+
+## D24 — Generic block-params pipe: one dispatcher, one component, spec-driven
+
+**Context.** The UI needs to wire controls to three structurally
+different targets: pure-UI state (waterfall colormap, fade, max-hold),
+backend block params (`Channelizer.center_freq_hz`,
+`SoapySource.sample_rate_hz`), and browser-WASM block params
+(`FmDemod.deemphasis_us`, `AudioSink.volume`). Today only the source
+has a write path (`PUT /api/source`); every other param is either
+inaccessible from the UI or hardcoded in a Svelte component. Naïvely
+scaling this — a bespoke REST endpoint and bespoke control per param —
+turns every new block into days of UI plumbing. The WBFM E2E target
+alone wants ~8 new controls (Nixies, sample rate, floor, ceil,
+deemphasis, volume, VFO click, SDR right-click); the decoder roadmap
+in D20 projects dozens more. Without a general pattern the UI becomes
+the bottleneck.
+
+**Decision.** Make the `ParamSpec` the single source of truth and
+route all DSP-affecting writes through one dispatcher that branches
+on `Placement`. Concretely:
+
+- **Block trait already carries everything.** Each block declares
+  `&[ParamSpec]` with `name`, `kind`, `scope`, and (new fields)
+  `min`, `max`, `step`, `unit`. `Block::reconfigure(delta, scope)` is
+  the uniform sink for changes on both native and WASM.
+- **Two endpoints on the server.**
+  `GET /api/pipeline/blocks` → `[{ id, type_name, placement, spec, values }]` —
+  everything the UI needs to render controls.
+  `POST /api/pipeline/blocks/{id}/params` → JSON delta; dispatches
+  on `ReconfigureScope` (`SelfBlock` direct; `Downstream` invalidates
+  caches; `SourceRestart` reuses the existing `set_source` tear/rebuild
+  path).
+- **One WASM method mirrors the REST one.**
+  `RuntimeHandle.reconfigureBlock(id, deltaJson)` calls the same
+  `Block::reconfigure` trait method. The WASM facade stops adding
+  per-type methods (`drain_audio`, `push_iq`, …) for new reconfigurable
+  surface; those existing methods stay but remain the exception.
+- **One Svelte dispatcher.** `setBlockParam(id, key, value)` inspects
+  `pipeline.blocks[id].placement` and routes to REST or WASM. UI code
+  never branches on where a block lives.
+- **One Svelte component.** `<BlockParams spec={...} values={...}
+  onChange={setBlockParam} />` reads `ParamKind` and picks the right
+  control widget per param. New block in Rust → its controls appear
+  automatically; no per-block Svelte code.
+- **Test for which bucket a param is in.** *Does it change DSP
+  output?* If yes, it's a block param and goes through the pipe. If
+  no, it's a plain Svelte store. Waterfall contrast is UI. LogMagU8
+  floor is DSP. No ambiguity.
+- **Initial state-sync via echoed value.** `setBlockParam` returns
+  the confirmed post-reconfigure value; the store updates from the
+  return, not optimistic-local-then-maybe-revert. Multi-client WS
+  broadcast is a later-only concern — single browser tab is the v0.1
+  target.
+
+**Rejected.**
+
+- **Bespoke REST endpoint per writable param** (`PATCH
+  /api/channelizer/offset`, `PATCH /api/fm/deemphasis`, …).
+  Linear-in-params backend surface area; every new block needs new
+  handlers, new Svelte components, new stores. Doesn't touch the
+  browser-WASM half at all.
+- **Optimistic local store with eventual consistency.** Complicates
+  rejection flow (out-of-range values, scope restart failing); the
+  echoed-value pattern gives the same UX with simpler state.
+- **Proto/Cap'n Proto-style IDL over the wire.** Overkill for the
+  current surface; JSON + `ParamSpec` already carry enough. Revisit
+  if we ever expose the DSP graph to external clients.
+- **Runtime-dynamic `ParamKind::Custom { type_name }` for every
+  non-primitive.** Most blocks are primitive-only today. We add the
+  `Custom` escape hatch when the first non-primitive lands (likely
+  Channelizer FIR taps); until then it's `Float`, `Int`, `Bool`,
+  `Enum`, `FreqHz`.
+
+**Consequence.**
+
+- Four pieces of foundation work land together, one commit each:
+  (1) server endpoints + `ParamSpec` extension; (2) `RuntimeHandle.reconfigureBlock`;
+  (3) Svelte dispatcher + store reshape; (4) `<BlockParams>` component.
+- After the foundation, every subsequent UI feature (Nixies, FFT
+  click handlers, receiver panel, sample-rate dropdown, band-click
+  retune) is wired through `setBlockParam`. Pure UI features
+  (waterfall contrast, max-hold) stay in local stores.
+- The `ReconfigureScope` contract graduates from a design note to a
+  runtime-enforced invariant — its first real exercise (beyond
+  `SourceRestart` on source changes) is the spectrum-click path in
+  D25.
+- `output_capacity_hints` retirement (D23's last checkbox) has to land
+  before or alongside this, because `ParamSpec` extension shares the
+  same `BlockSpec` surface.
+
+## D25 — Spectrum interaction inversion: left-click = VFO (cheap), right-click = SDR centre (expensive) [supersedes D21]
+
+**Context.** D21 mapped drag = SDR-centre retune (motion-weighted,
+expensive) and right-click = VFO offset (point-weighted, cheap). Field
+trial of the WBFM UI surfaced two problems with that mapping. First,
+users overwhelmingly interpret "click on a spectrum feature" as *"tune
+there"* — the natural tuning gesture is a left-click on a peak, not a
+right-click. Second, the drag interaction conflates two gestures (pan
+vs. retune) and the "heavy" visual affordance for drag-to-retune
+confuses more than it helps: users wanting to nudge the waterfall
+unintentionally trigger a hardware LO move. The cost-vs-gesture
+argument in D21 is still valid — VFO is cheap, SDR centre is
+expensive — but the primary/secondary mapping to mouse buttons was
+backwards for user intent.
+
+**Decision.** Invert the mapping:
+
+- **Left-click on the spectrum ≡ set VFO.** Places the Channelizer at
+  the clicked absolute frequency. `SelfBlock`-scope reconfigure on
+  `channelizer[0].center_freq_hz`. The primary tuning gesture. No
+  visual "heavy" affordance — it's meant to feel instant.
+- **Right-click on the spectrum ≡ set SDR centre.** Moves the
+  hardware LO to the clicked frequency. `SourceRestart`-scope;
+  commits via `setBlockParam` on `source.center_freq_hz`. The
+  secondary "I need a different band" gesture, explicitly
+  non-primary so accidental triggers are rare.
+- **No drag behaviour.** Drag on the spectrum/waterfall is reserved
+  for future interactions (pan-the-waterfall-view, span-select-for-zoom);
+  it does not retune anything in v0.1.
+
+Multi-VFO lands later — left-click menu gains "set VFO<n>" when more
+than one Channelizer exists in the preset. For the foreseeable future
+all presets have exactly one Channelizer, so left-click goes
+unambiguously to index 0.
+
+**Rejected.**
+
+- **Drag-to-retune in either direction.** The gesture is ambiguous
+  with spectrum panning (a feature we will want) and frequently
+  triggers accidentally. A discrete click + confirmation-by-Nixie is
+  unambiguous.
+- **Single button that switches on modifier (shift, ctrl).** Modifier
+  discoverability is poor; touch devices cannot produce modifiers.
+
+**Consequence.**
+
+- D21 is marked superseded; its rationale re-emerges here inverted.
+- The click handlers are one-liners calling `setBlockParam` from
+  D24 — the interaction is trivial once the pipe exists.
+- Post-M5 commit-plan item `feat(web): waterfall tuning — drag =
+  source center, right-click = channelizer offset` is replaced by
+  `feat(web): spectrum click-to-tune — left = VFO, right = SDR centre`.
+
+## D26 — Preset-first UX: dir-based registry, bands.json `preset` field, fixed layout
+
+**Context.** `--flowgraph` is a boot-time argument — the preset is
+effectively frozen until ferrited restarts. The UI has no concept of
+multiple presets; the "receiver" is implicit in whichever flowgraph
+was launched. The BandsPanel is decoupled from demodulation: clicking
+a band entry patches the SDR centre frequency and nothing else — no
+preset switch, no VFO alignment, so clicking "100.1 WFM" while the
+loaded preset is `wbam` just points a mis-configured demod at the
+station. The user's mental model is *"pick a decoder for the mode I
+want; then tune a station"* — today's UX reverses that.
+
+Additionally, the current layout ships movable/dockable spectrum and
+waterfall panes; usage shows users never reorganise them and the
+machinery is dead weight that conflicts with a future fixed
+FFT-click-to-tune interaction (hit-testing a draggable pane is
+harder).
+
+**Decision.** Three coupled changes that together make the preset
+first-class:
+
+- **Dir-based preset registry.**
+  `GET /api/presets` enumerates `flowgraphs/*.json` at runtime.
+  `POST /api/preset { name }` atomically loads the named preset,
+  tears down the current graph, and brings the new one up. Retains
+  `source.center_freq_hz` and `channelizer[0].center_freq_hz` across
+  the swap (user intent: *"I changed decoder, not station"*). A
+  preset-selector dropdown lives on the header and is the canonical
+  way to change receivers; the Receivers panel collapses into that
+  dropdown.
+- **`bands.json` entry gains optional `preset` field.**
+  `{ label, hz, mode, preset? }`. Clicking a band entry (a) if
+  `preset` differs from current, calls `POST /api/preset`; (b)
+  writes `source.center_freq_hz = entry.hz`; (c) writes
+  `channelizer[0].center_freq_hz = entry.hz`. The entry is now "tune
+  to this station with this decoder", not "move the SDR centre". The
+  existing FM-broadcast group gets filled out to every US channel
+  (88.1–107.9 odd decimals, 100 entries) all with `preset: "wbfm"`;
+  AM-broadcast group gets `preset: "wbam"`. Other groups (ham,
+  aviation, WX) remain `preset`-less until their matching presets
+  (`nfm`, `am-narrow`, `ssb`) exist.
+- **Fixed spectrum/waterfall layout.** Kill the movable-pane
+  machinery. The spectrum pane is pinned at the top, the waterfall
+  below it, separated by a resizable vertical divider. This matches
+  every SDR UI users are familiar with and simplifies the FFT
+  click-to-tune hit-test in D25.
+
+**Rejected.**
+
+- **Preset as another block param (`meta.preset = "wbfm"`).**
+  Elegant but breaks scope semantics — a preset swap is a whole-graph
+  rebuild, not a `ReconfigureScope::SourceRestart`. Better to keep
+  the endpoint explicit.
+- **Reset VFO/centre on preset swap.** User feedback: "user thinks
+  decoder changed, not radio" — retaining tuning matches intent.
+  Explicit user action (band click, dropdown, number entry) is the
+  only way to move the radio.
+- **Compiled-in preset list.** `flowgraphs/*.json` is a config
+  directory; runtime scan lets a preset drop in without a rebuild.
+  The scan cost is negligible.
+- **Retained moveable panes.** The "some user might want to
+  re-dock" argument doesn't hold up — the workload has been zero
+  uses. Deleting the code simplifies D25's hit-testing.
+
+**Consequence.**
+
+- Two new REST endpoints (`GET /api/presets`, `POST /api/preset`)
+  land alongside the D24 endpoints; conceptually separable commits
+  but scheduled together since the UI work reaches for both.
+- `web/src/lib/presets/bands.json` schema bumps — additive change,
+  no migration needed (missing `preset` = frequency-only jump).
+- The WBFM FM-broadcast group expansion is mechanical (generate
+  88.1→107.9 step 0.2 MHz).
+- Layout rewrite in Svelte is local: the pane-container component
+  is replaced with a fixed-stack component. Receiver pane content
+  becomes an auto-rendered `<BlockParams>` collection driven by the
+  current preset's non-source blocks.
+- This decision defines the scope of the **UX-1 — WBFM E2E** phase
+  being added to `docs/10-commits.md`.
 
 ## Revisiting decisions
 

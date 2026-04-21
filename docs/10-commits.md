@@ -390,6 +390,43 @@ buffers + demand-driven re-run. See D23 for the design. Scope is
 rate-sidestepping) both natively and cross-env, and a synthetic test
 confirms arbitrary rate topologies produce correct sample counts.
 
+## UX-1 — WBFM end-to-end with real controls
+
+Push the WBFM preset from "pipeline runs, FFT draws" to "a real SDR
+app": click-to-tune, preset switching, receiver panel, working
+controls end-to-end. Built on the generic block-params pipe from D24,
+the spectrum click inversion from D25, and the preset-first UX from
+D26. Scope is ~1–2 weeks of web-heavy work; backend additions are
+concentrated in the first three commits, the rest is Svelte.
+
+The foundation is everything in D24 — without it, each subsequent
+item needs bespoke plumbing. Ship the foundation first; every
+follow-up is a spec-declaration-plus-glue commit.
+
+- [ ] `feat(blocks): ParamSpec extension — min, max, step, unit`
+- [ ] `feat(server): GET /api/pipeline/blocks + POST /api/pipeline/blocks/{id}/params — generic reconfigure dispatch`
+- [ ] `feat(runtime): RuntimeHandle.reconfigureBlock — WASM mirror of the REST params endpoint`
+- [ ] `feat(web): setBlockParam dispatcher + pipelineStore.blocks reshape`
+- [ ] `feat(web): <BlockParams> component driven by ParamSpec[]`
+- [ ] `feat(server): GET /api/presets + POST /api/preset — dir-based preset registry with tuning-retention swap`
+- [ ] `feat(server): GET /api/source/capabilities — SoapySDR-reported rates/antennas/bandwidths`
+- [ ] `feat(web): bands.json gains preset field; fill WBFM FM-broadcast group (88.1–107.9 step 0.2); click-to-tune routes through setBlockParam`
+- [ ] `refactor(web): fixed spectrum-over-waterfall layout with resize handle; delete movable-pane machinery`
+- [ ] `feat(web): green SDR-centre Nixie + orange VFO Nixie — bound to source and channelizer[0] via setBlockParam`
+- [ ] `feat(web): spectrum click handlers — left=VFO, right=SDR centre (D25)`
+- [ ] `feat(web): sample-rate dropdown populated from /api/source/capabilities`
+- [ ] `feat(web): receiver panel renders <BlockParams> for every non-source, non-channelizer, non-FFT block in current preset`
+- [ ] `feat(web): FFT controls strip — floor/ceil (LogMagU8 params), max-hold/fade/auto-range (UI-only state)`
+- [ ] `feat(web): waterfall controls — sensitivity/contrast/scroll-speed (all UI-only)`
+- [ ] `test(web): wbfmE2E vitest — boot ferrited with wbfm, click band entry, verify SDR + VFO retuned via API, audio ring drains, FFT frames arrive`
+
+**Done when:** a user loads the UI, picks "100.1" from the FM
+broadcast group, hears FM audio, sees the green Nixie on 100.1 MHz
+and orange Nixie on 100.1 MHz, can right-click to move the SDR
+centre elsewhere, can swap to another preset (e.g. `wbam`) via the
+header dropdown without losing the tuning frequency, and a vitest
+covers the click-through end to end.
+
 ## How this file stays honest
 
 - **PRs update it.** Each PR that lands a commit here crosses that item off
