@@ -26,16 +26,17 @@ samples in, produce samples out. Anything else is a **source** or **sink**
 Ports carry one of a fixed set of sample streams. The set is small and
 deliberate — extending it is a breaking change.
 
-| id          | payload                                   | notes                                  |
-|-------------|-------------------------------------------|----------------------------------------|
-| `iq_f32`    | complex 32-bit float (native endian)       | primary IQ path                         |
-| `iq_s16`    | complex 16-bit int                         | RTL-SDR-native; avoids a float step    |
-| `real_f32`  | real-valued 32-bit float                   | audio, envelope, magnitude             |
-| `real_i16`  | real-valued 16-bit int                     | PCM audio                              |
-| `fft_f32`   | FFT magnitude bins, 32-bit float           | log-magnitude in dB                    |
-| `bits`      | packed bit stream                          | demodulated bitstreams; HDLC input     |
-| `frames`    | discrete framed packets (opaque bytes)     | HDLC / AX.25 / Mode-S / FT8 payloads   |
-| `events`    | structured JSON events                     | decoder outputs bound for the UI       |
+| id (Rust variant) | payload                                | notes                                         |
+|-------------------|----------------------------------------|-----------------------------------------------|
+| `IqF32`           | complex 32-bit float, interleaved I,Q  | primary IQ path                               |
+| `IqS16`           | complex 16-bit int, interleaved I,Q    | RTL-SDR-native; avoids a float step           |
+| `RealF32`         | real-valued 32-bit float               | audio, envelope, magnitude                    |
+| `RealI16`         | real-valued 16-bit int                 | PCM audio                                     |
+| `FftF32`          | FFT magnitude bins, 32-bit float (dB)  | raw-magnitude (pre-quantisation)              |
+| `FftU8`           | FFT bins quantised to `u8` (0..=255)   | **display-ready**; output of `LogMagU8`, wire format for the waterfall |
+| `Bits`            | packed bit stream                      | demodulated bitstreams; HDLC input            |
+| `Frames`          | discrete framed packets (opaque bytes) | HDLC / AX.25 / Mode-S / FT8 payloads          |
+| `Events`          | structured JSON events                 | decoder outputs bound for the UI              |
 
 Sample rate and center frequency are **metadata on the port** — carried in a
 lightweight struct alongside the buffer. A block's port schema declares which
@@ -63,27 +64,45 @@ change.
 ## Rust block trait
 
 ```rust
-pub trait Block: Send {
+pub trait Block: Send + AsAny {
     /// Static type metadata — introspectable at registry time.
     fn spec() -> BlockSpec where Self: Sized;
 
-    /// Called once, before any samples flow.
-    fn init(&mut self, ctx: &mut InitCtx) -> Result<()>;
+    /// Called once, after construction, before any samples flow.
+    /// The scheduler supplies negotiated rates and the nominal
+    /// per-call frame budget via `ctx`.
+    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()>;
 
-    /// Producer: called when output ports need samples.
-    /// Consumer: called when input ports have samples.
-    /// Process returns how many input/output samples were consumed/produced.
+    /// One scheduling tick. Reads from declared inputs, writes to
+    /// declared outputs, reports what moved via `Work`. Must not
+    /// allocate on the hot path.
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work>;
 
+    /// Per-step rate ratio between one input and one output
+    /// (`(out_samples, in_samples)`). Default `(1, 1)`. Used by the
+    /// scheduler to size rings.
+    fn relative_rate(&self, _in_port: usize, _out_port: usize) -> (u32, u32) { (1, 1) }
+
+    /// Optional: minimum input on each port for one `process` call to
+    /// make progress. Return `None` for "1 sample is fine". Used by
+    /// the scheduler to skip blocks whose inputs are too shallow.
+    fn forecast(&self, _noutput_items: usize) -> Option<[usize; MAX_PORTS]> { None }
+
     /// Clean release. Must be idempotent.
-    fn stop(&mut self) -> Result<()>;
+    fn stop(&mut self) -> Result<()> { Ok(()) }
 }
 ```
 
-`BlockIo` gives the block ergonomic access to input buffers (slices of the
-declared port types) and output buffers (pre-allocated, the block fills and
-reports how much it wrote). `Work` tells the scheduler how many items the
-block consumed and produced so it can advance buffer cursors.
+`BlockIo` gives the block ergonomic access to input buffers (typed
+slices matching each port's `PortType`) and output buffers
+(pre-allocated, the block fills and reports how much it wrote via
+`Work`). `Work` carries `consumed: [usize; MAX_PORTS]` and `produced:
+[usize; MAX_PORTS]` index-parallel to the spec's port arrays. Returning
+`consumed[i] = 0` is how a block says "I need more input on port *i*
+before I can run again this tick."
+
+There is no separate `start()` — `init()` is the one-shot setup call,
+and the scheduler drives `process()` directly after.
 
 Ctor signature:
 
@@ -99,23 +118,27 @@ versa) is a cross-cutting detail — see `04-flowgraphs.md`.
 
 ## Block registration
 
-Blocks register with the runtime via an inventory pattern:
+Blocks register with the runtime via the `inventory` crate:
 
 ```rust
-#[ferrite_block(type_name = "FmDemod")]
+#[ferrite_block]
 impl Block for FmDemod { /* ... */ }
 ```
 
-The `#[ferrite_block]` attribute:
+The `#[ferrite_block]` attribute takes **no arguments** — the type name
+comes from the block's own `spec().type_name`. The macro:
 
-- Emits a static descriptor (`BlockSpec`) into a registry.
-- Exports a WASM-visible constructor (`#[wasm_bindgen]`-generated glue for the
-  browser build; plain extern `"C"` for native).
-- Checks at compile time that the block's ports + params match the JSON schema
-  we ship.
+- Emits an `inventory::submit!` descriptor so the block is registered
+  at binary link time (no init-order hazards).
+- Wires up the `BlockFactory` trait so the runtime can construct the
+  block from its JSON params without a manual match arm.
+- Resolves both from downstream crates and from inside `blocks/` itself
+  via `extern crate self as ferrite_blocks`.
 
-Browser and Node runtimes call `registry.instantiate("FmDemod", params)` to
-produce an instance. Name collisions are a compile-time error.
+The runtime calls `registry::find("FmDemod")` to look up a block type
+then `BlockFactory::construct(&params)` to instantiate. Name
+collisions are a runtime error at registry-walk time and are asserted
+by the `registry_contains_every_shipped_block` test.
 
 ## Lifecycle
 
@@ -135,62 +158,87 @@ across flowgraphs is not supported.
 
 ## Scheduling model
 
-The flowgraph runtime runs inside a Worker. Inside that Worker:
+The `ferrite-runtime` scheduler is **synchronous and single-threaded**.
+One `tick()` call:
 
-- Each block gets a small amount of input-buffer and output-buffer space
-  (typically a few thousand samples).
-- The scheduler walks the DAG in topological order, calling `process()` on
-  each block with the samples currently available to its inputs.
-- A block is **ready** when all its inputs have ≥1 item and all its outputs
-  have ≥1 slot. Non-ready blocks are skipped this tick.
-- When no block is ready, the scheduler parks on the input source's "new
-  samples" signal (a `MessageChannel` post from the WS worker for browser
-  runtime; a `fs.read` or loopback WS read for Node runtime).
+- Walks blocks in pre-computed topological order (computed once at
+  graph load by `topological_order()`).
+- Calls `process()` on each block that has available input and
+  available output slots.
+- Re-walks the topology (up to 1024 passes per tick) until no block
+  reports further progress. Sources run at most once per tick to
+  prevent starvation of downstream blocks.
 
-One flowgraph = one Worker. Multiple flowgraphs (e.g. a second VFO with its
-own demod chain) run in separate Workers. The main thread never blocks.
+Wires between blocks are **power-of-two SPSC rings** (`TypedRing` over
+`SpscRing<T>`). Samples not consumed in one tick **persist in the ring
+for the next tick** — the FFT block uses exactly this to accumulate an
+N-sample frame across many ticks of small-batch input.
 
-Realtime is handled at the sink side: the AudioWorklet's consumer ring buffer
-provides backpressure; when the sink falls behind, the block upstream of it
-stops being "ready" and naturally pauses. No allocations occur inside
-`process()`.
+The **only extra OS thread** in the native runtime is the `SoapySource`
+reader thread, which owns the blocking Soapy `stream.read()` call and
+pushes into an `Arc<Mutex<IqRing>>` that the scheduler pops from.
+Nothing else runs off the tick thread.
+
+Blocks **must not allocate on the hot path**. Scratch buffers live as
+`Vec<u8>` / `Vec<Complex<f32>>` fields on the block, grown once in
+`init()` or lazily on first call, then reused.
+
+### Browser side (transitional)
+
+Today the browser's Web Worker runs a small TS flowgraph runtime; the
+main thread receives frames from `/ws/preset` directly (no Worker hop
+for data). The M1–M5 plan replaces this with a WASM build of
+`ferrite-runtime` so the same scheduler runs on both sides. When that
+lands, the Worker gains a data plane and browser-side blocks (WASM
+compiles of the same `ferrite-blocks` crate) run inside it, with a
+`SharedArrayBuffer` ring between the Worker and the AudioWorklet.
 
 ## Rust → WASM build
 
-One crate, two targets. `blocks/Cargo.toml`:
+One crate, two targets. Shape of `blocks/Cargo.toml`:
 
 ```toml
 [package]
 name = "ferrite-blocks"
 
-[features]
-default = []
-wasm = ["wasm-bindgen"]
-
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+[features]
+default  = []
+# Enables wasm-bindgen + serde-wasm-bindgen glue for browser targets.
+wasm     = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen",
+            "dep:serde_bytes", "dep:js-sys"]
+# Links libSoapySDR and registers `SoapySource`. Native only —
+# blocks with this feature panic at monomorphization on wasm32.
+soapysdr = ["dep:soapysdr", "dep:tracing"]
+
 [dependencies]
-rustfft = "..."
-num-complex = "..."
-anyhow = "..."
-wasm-bindgen = { version = "...", optional = true }
+anyhow                = "1"
+ferrite-blocks-macros = { path = "../blocks-macros" }
+inventory             = "0.3"
+num-complex           = "0.4"
+postcard              = { version = "1", default-features = false, features = ["alloc"] }
+rustfft               = "6"
+serde                 = { version = "1", features = ["derive"] }
+serde_json            = "1"
+# …optional deps gated by feature flags above
 ```
 
-Native link into `ferrited`:
+Native link into `ferrited` (with hardware support):
 
 ```
-cargo build -p ferrite-blocks
+cargo build -p ferrited --features soapysdr
 ```
 
-Browser/Node WASM:
+Browser WASM (future — built by the M5 worker-unification step):
 
 ```
 wasm-pack build blocks --target web --features wasm
 ```
 
-Identical source, same `cargo test` (the test binary runs natively; WASM
-parity is verified separately — see `05-testing.md`).
+Identical source, same `cargo test` (native binary); WASM parity is
+verified separately — see `05-testing.md`.
 
 ## C/C++ decoder port strategy
 
@@ -266,24 +314,48 @@ sink does with them.
 
 ## Shipped blocks
 
-Post-M5, the registered blocks are:
+Registered blocks (asserted by
+`registry_contains_every_shipped_block` in `blocks/src/lib.rs`):
 
-| block           | ports                              | purpose                                        | status  |
-|-----------------|------------------------------------|------------------------------------------------|---------|
-| `Source`        | — → iq_f32                         | placeholder resolved to a real source via `compose_source` | shipped |
-| `SoapySource`   | — → iq_f32                         | RTL-SDR / SDRPlay / any Soapy device           | shipped |
-| `FileIqSource`  | — → iq_f32                         | reads IQ from a local file                     | shipped |
-| `SineSource`    | — → iq_f32                         | synthetic tone — test fixture                  | shipped |
-| `Channelizer`   | iq_f32 → iq_f32                    | frequency shift + FIR + decimate, one VFO      | shipped |
-| `Decimator`     | iq_f32 → iq_f32                    | FIR + decimate                                 | shipped |
-| `TeeIqF32`      | iq_f32 → 2 × iq_f32                | 1→2 IQ fan-out                                 | shipped |
-| `FFT`           | iq_f32 → iq_f32 (bins)             | windowed DFT, with input accumulation          | shipped |
-| `LogMagU8`      | iq_f32 (bins) → bytes              | log-magnitude scale → `u8` bins for waterfall  | shipped |
-| `FmDemod`       | iq_f32 → real_f32                  | WBFM listening                                 | shipped |
-| `AmDemod`       | iq_f32 → real_f32                  | AM listening                                   | shipped |
-| `AudioSink`     | real_f32 → —                       | feeds AudioWorklet ring (SAB) in the browser   | shipped |
-| `WsBridgeTx`    | * → —                              | auto-inserted by `env_split` on crossings      | shipped |
-| `WsBridgeRx`    | — → iq_f32                         | auto-inserted by `env_split`; also subscribes to a `stream_id` on `/ws/preset` when authored directly | shipped |
+### Sources
+
+| block              | ports               | placement    | purpose                                                                    |
+|--------------------|---------------------|--------------|----------------------------------------------------------------------------|
+| `Source`           | — → IqF32           | author-pinned| placeholder resolved by `compose_source` at load time (see flowgraphs doc) |
+| `SoapySource`      | — → IqF32           | NativeOnly   | RTL-SDR / SDRPlay / any Soapy device (requires `soapysdr` feature)         |
+| `FileIqSource`     | — → IqF32           | NativeOnly   | reads IQ from a local file (`cf32` raw or `wav-s16`)                       |
+| `SineSource`       | — → IqF32           | Either       | synthetic tone — test fixture                                              |
+| `DtmfAudioSource`  | — → RealF32         | Either       | synthetic DTMF generator (tests / demos)                                   |
+
+### DSP
+
+| block          | ports                       | placement | purpose                                                 |
+|----------------|-----------------------------|-----------|---------------------------------------------------------|
+| `Channelizer`  | IqF32 → IqF32               | Either    | frequency shift + FIR + decimate, one VFO               |
+| `Decimator`    | IqF32 → IqF32               | Either    | FIR + decimate                                          |
+| `TeeIqF32`     | IqF32 → 2 × IqF32           | Either    | 1 → 2 IQ fan-out                                        |
+| `FFT`          | IqF32 → IqF32 (bins)        | Either    | windowed DFT with input accumulation to size N          |
+| `LogMagU8`     | IqF32 (bins) → FftU8        | Either    | log-magnitude → dBFS → smooth → `u8` 0..=255            |
+| `FmDemod`      | IqF32 → RealF32             | Either    | phase-discriminator WBFM demod                          |
+| `AmDemod`      | IqF32 → RealF32             | Either    | envelope AM demod                                       |
+| `AmModulator`  | RealF32 → IqF32             | Either    | AM modulator (test fixture / loopback)                  |
+| `DtmfDecoder`  | RealF32 → Events            | Either    | Goertzel-based DTMF digit detector                      |
+
+### Sinks
+
+| block            | ports                 | placement    | purpose                                                             |
+|------------------|-----------------------|--------------|---------------------------------------------------------------------|
+| `AudioSink`      | RealF32 → —           | WasmOnly     | feeds AudioWorklet ring (SAB) in the browser                        |
+| `FileIqSink`     | IqF32 → —             | NativeOnly   | capture mode — writes `cf32` or `wav-s16` + JSON sidecar            |
+| `EventsSink`     | Events → —            | NativeOnly   | terminal decoder events (logs today; MQTT / HTTP webhook planned)   |
+
+### Cross-env bridges (auto-inserted by `env_split`)
+
+| block               | ports            | placement  | notes                                                                                                 |
+|---------------------|------------------|------------|-------------------------------------------------------------------------------------------------------|
+| `WsBridgeTx`        | IqF32 → —        | NativeOnly | egress side of an IQ crossing                                                                         |
+| `WsBridgeTxFftU8`   | FftU8 → —        | NativeOnly | egress side for FFT streams (waterfall feed)                                                          |
+| `WsBridgeRx`        | — → IqF32        | WasmOnly   | browser-side ingress; also authored directly when a preset subscribes to a server-published stream_id |
 
 Planned (see `docs/decoder-roadmap/`):
 

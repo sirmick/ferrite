@@ -324,16 +324,39 @@ All events are `{ "type": "...", ... }`. Known types:
 ## Subscription semantics
 
 All `/ws/preset` streams are **push** — the server emits frames as they
-are produced, and a client cannot throttle individual streams. Clients
-that can't keep up will see the outbound buffer saturate; backpressure
-is handled at the WS layer (TCP's flow control). Dropped frames surface
-as gaps in a stream's `seq` counter (per-stream, monotonic, wraps at
-`u32::MAX`) — clients should detect this and either reset their local
-state or ignore the gap depending on what the stream carries.
+are produced, and a client cannot throttle individual streams. Dropped
+frames surface as gaps in a stream's `seq` counter (per-stream,
+monotonic, wraps at `u32::MAX`). Clients should detect gaps and either
+reset their local state (FFT frames: fine to skip) or flag the stream
+as unreliable (IQ: the decoder downstream may glitch).
 
 For power saving or tab-visibility throttling, clients should just
 unsubscribe from streams they aren't rendering. The server side is
 where the FFT cost lives.
+
+### Current backpressure behaviour — **lossy by construction**
+
+The `BridgeSink` trait that `WsBridgeTx` uses to hand frames to the
+outbound WS writer is documented as "lossy-latest or backpressure-free"
+(`blocks/src/ws_bridge.rs`). In practice today: **the Tx block always
+consumes its input regardless of sink state**, and if the outbound WS
+queue saturates faster than the network drains it, frames are dropped
+at the network-egress boundary. From a subscriber's perspective this
+shows up as `seq` gaps with no other warning.
+
+This is an **explicit known limitation** slated for a near-term fix
+(see `09-decisions.md` and `08-roadmap.md`). The planned replacement
+surfaces counters (equivalent to the three `SoapySource` counters
+— `dropped_frames`, `bytes_pending_hwm`, so on — exposed through a
+control-stream `warning` event) so drops become observable rather than
+silent. Until then: clients should treat missing FFT rows as a UI
+hiccup, but treat `seq` gaps on audio/IQ streams as a genuine decode
+risk and surface a "network-saturated" indicator rather than assuming
+TCP flow control pushed back upstream.
+
+`WsBridgeRx` on the browser side is separately bounded (default 65,536
+samples ≈ 650 ms at 100 kS/s) and tallies its own drops in
+`dropped_samples`.
 
 ## Protocol versioning
 

@@ -2,14 +2,16 @@
 
 ## What is a flowgraph
 
-A **flowgraph** is a JSON document describing a graph of block instances and
-their wiring. The flowgraph runtime (browser Worker or Node sidecar) reads
-this document, instantiates blocks from the registry, validates ports and
-params, wires them, and runs them.
+A **flowgraph** is a JSON document describing a graph of block instances
+and their wiring. The `ferrite-runtime` reads this document (`FlowgraphDoc`),
+instantiates blocks from the registry, validates ports and params, wires
+them, and runs them. Today the runtime lives server-side in `ferrited`;
+post-M5 the same runtime (compiled to WASM) also drives the browser-side
+half of cross-env presets.
 
-Flowgraphs are the unit of "here is a new decoder" — adding ADS-B is a
-`flowgraphs/adsb.json` file plus whatever blocks it needs. No UI code, no
-server code.
+Flowgraphs are the unit of "here is a new decoder" — adding ADS-B will be
+a `flowgraphs/adsb.json` file plus whatever blocks it needs. No UI code,
+no server code.
 
 ## Top-level schema
 
@@ -173,10 +175,11 @@ Errors look like:
 }
 ```
 
-The browser UI renders these inline next to the offending flowgraph file in
-the Signal Catalog panel when a preset fails to instantiate. The Node sidecar
-logs them and exits non-zero (so `systemctl` restart policy behaves
-sensibly).
+The browser UI renders these inline next to the offending flowgraph file
+in the Signal Catalog panel when a preset fails to instantiate. When
+`ferrited` is launched headless (`--flowgraph <path>`) and the preset
+fails to instantiate, it logs the error and exits non-zero so
+`systemctl` restart policy behaves sensibly.
 
 ## Runtime parameter updates
 
@@ -187,22 +190,24 @@ API for the environment to push updates:
 runtime.update("demod", { bandwidth: 15000 });
 ```
 
-- In the browser, the UI calls this when the user drags a filter edge or
-  adjusts a slider.
-- In Node, a sidecar configuration reloader can call it when the flowgraph
-  file changes (optional feature, off by default).
+- The UI calls this when the user drags a filter edge or adjusts a
+  slider (routed to the server as `PATCH /api/flowgraph` against the
+  single block; the runtime applies it without stopping the graph if
+  the param's `reconfig_scope` is `SelfBlock`).
+- Headless `ferrited` with file-watch enabled applies diffs the same
+  way when the preset file changes on disk.
 
 Non-updatable param changes require restarting the flowgraph.
 
 ## Example: WBFM (cross-env)
 
-The shipped `flowgraphs/wbfm.json`: node half reads 2.4 MS/s IQ from
-the `Source` placeholder (resolved to whatever device is current), runs
-a `Channelizer` to 240 kS/s, and fans the channelizer output through a
-`TeeIqF32` — one leg heads to a server-side `FFT → LogMagU8` chain
-that terminates at the `ui:fft` sentinel sink (so the waterfall gets
-its stream), the other leg crosses the env boundary into a browser-side
-`Decimator → FmDemod → AudioSink`.
+The shipped `flowgraphs/wbfm.json`: the node half reads 2.4 MS/s IQ
+from the `Source` placeholder (resolved to whatever device
+`SourceConfig` currently names), fans the raw source through a
+`TeeIqF32` so **one** leg drives a server-side `FFT → LogMagU8` chain
+into the `ui:fft` sentinel (feeding the waterfall at full 2.4 MHz
+span), and **the other** leg runs a `Channelizer` to 240 kS/s before
+crossing into the browser for `Decimator → FmDemod → AudioSink`.
 
 ```json
 {
@@ -213,15 +218,16 @@ its stream), the other leg crosses the env boundary into a browser-side
                 "params": { "center_freq_hz": 100100000,
                             "sample_rate_hz": 2400000,
                             "bandwidth_hz": 2000000 } },
-    "chan":   { "type": "Channelizer", "placement": "node",
-                "params": { "input_rate_hz": 2400000, "factor": 10,
-                            "num_taps": 81, "cutoff_normalized": 0.03125 } },
     "tee":    { "type": "TeeIqF32", "placement": "node" },
     "fft":    { "type": "FFT", "placement": "node",
-                "params": { "size": 4096, "window": "hann" } },
+                "params": { "size": 16384, "window": "hann" } },
     "logmag": { "type": "LogMagU8", "placement": "node",
-                "params": { "size": 4096, "floor_dbfs": -100.0,
+                "params": { "size": 16384, "floor_dbfs": -100.0,
                             "ceil_dbfs": 0.0, "alpha": 0.3 } },
+    "chan":   { "type": "Channelizer", "placement": "node",
+                "params": { "input_rate_hz": 2400000, "freq_shift_hz": 0.0,
+                            "factor": 10, "num_taps": 81,
+                            "cutoff_normalized": 0.03125 } },
     "decim":  { "type": "Decimator", "placement": "browser",
                 "params": { "factor": 5, "num_taps": 41,
                             "cutoff_normalized": 0.08 } },
@@ -232,12 +238,12 @@ its stream), the other leg crosses the env boundary into a browser-side
                 "params": { "buffer_samples": 8192 } }
   },
   "wires": [
-    ["src.out",    "chan.in"],
-    ["chan.out",   "tee.in"],
-    ["tee.out0",   "decim.in"],
+    ["src.out",    "tee.in"],
+    ["tee.out0",   "chan.in"],
     ["tee.out1",   "fft.in"],
     ["fft.out",    "logmag.in"],
     ["logmag.out", "ui:fft"],
+    ["chan.out",   "decim.in"],
     ["decim.out",  "demod.in"],
     ["demod.out",  "audio.in"]
   ]
@@ -245,37 +251,21 @@ its stream), the other leg crosses the env boundary into a browser-side
 ```
 
 `audio` omits `placement` (its `BlockSpec` is `WasmOnly`); everything
-else pins explicitly. The `tee.out0 → decim.in` wire crosses the
-env boundary — `env_split` inserts a `WsBridgeTx`/`WsBridgeRx` pair on
-`stream_id = 1000`. The `logmag.out → ui:fft` wire allocates
-`stream_id = 1001` and the browser learns the id via
-`GET /api/ui-sinks`.
-
-### Deployment overrides
-
-The sidecar supports per-deployment override files that swap sinks without
-editing the preset:
-
-```json
-{
-  "name": "adsb-headless",
-  "extends": "adsb",
-  "overrides": {
-    "blocks": {
-      "out": { "type": "MqttSink", "params": { "topic": "ferrite/adsb" } }
-    }
-  }
-}
-```
-
-Overrides are resolved client-side (or sidecar-side) before validation.
+else pins explicitly. The `chan.out → decim.in` wire crosses the env
+boundary — `env_split` inserts a `WsBridgeTx`/`WsBridgeRx` pair on a
+freshly allocated `stream_id` from the `CROSS_ENV_STREAM_BASE` (1000)
+range. The `logmag.out → ui:fft` wire is rewritten to a
+`WsBridgeTxFftU8` on the server side only; the browser learns the
+allocated id via `GET /api/ui-sinks`.
 
 ## Shipped presets
 
-| file                      | purpose                                |
-|---------------------------|----------------------------------------|
-| `flowgraphs/wbfm.json`    | WBFM listening, Phase D smoke target   |
-| `flowgraphs/wbam.json`    | AM listening (AM variant of wbfm)      |
+| file                          | purpose                                                                 |
+|-------------------------------|-------------------------------------------------------------------------|
+| `flowgraphs/wbfm.json`        | WBFM listening, Phase D smoke target                                    |
+| `flowgraphs/wbam.json`        | AM listening (AM variant of wbfm)                                       |
+| `flowgraphs/dtmf-e2e.json`    | `DtmfAudioSource → AmModulator → AmDemod → DtmfDecoder → EventsSink` end-to-end smoke |
+| `flowgraphs/capture_fm.json`  | all-native capture to `/tmp/ferrite-fm-*.wav` + sidecar (no browser)    |
 
 NBFM, SSB/CW, APRS, ADS-B, FT8, M17 presets land alongside their
 respective blocks — see `docs/decoder-roadmap/` for the sequence.
@@ -291,7 +281,8 @@ pipeline the source and flowgraph dialogs use.
 
 ## Hot reload (dev only)
 
-In the browser, Vite HMR reloads a flowgraph JSON file when edited — the
-runtime stops the old graph and starts the new one, transferring subscribed
-VFO state where compatible. In Node, the sidecar watches its configured
-flowgraph directory and reloads on file change (opt-in via config).
+`ferrited --flowgraph <path>` watches the file (opt-in) and applies the
+new preset through `PATCH /api/flowgraph`'s reconfigure plan — hot
+where the diff allows, cold-restart otherwise. The browser side picks
+up the new stream_ids via `GET /api/ui-sinks` after any cold restart
+without reloading the page.

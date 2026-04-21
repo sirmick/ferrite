@@ -10,47 +10,58 @@ sides. Headless decoders run as a second `ferrited` instance with
 ## Diagram
 
 ```
-           ┌───────────────────────────────────┐
-           │  Browser                          │
-           │  ┌───────────────────────────┐    │
-           │  │ Svelte UI (Bits UI,       │    │
-           │  │ Tailwind, Dockview)       │    │
-           │  └─────────────┬─────────────┘    │
-           │                │                  │
-           │  ┌─────────────▼─────────────┐    │
-           │  │ Flowgraph runtime         │    │
-           │  │  + block instances        │    │
-           │  │  (Workers, WASM blocks,   │    │
-           │  │   SAB ring buffers)       │    │
-           │  └─────────────┬─────────────┘    │
-           │                │                  │
-           │  ┌─────────────▼─────────────┐    │
-           │  │ AudioWorklet  + WebGL     │    │
-           │  │ waterfall/spectrum        │    │
-           │  └───────────────────────────┘    │
-           └──────────────────▲────────────────┘
-                              │ WS (binary, multiplexed)
-                              │ REST /api  (JSON control)
-                              │
-                ┌─────────────▼────────────────┐
-                │  ferrited (Rust)             │
-                │  ┌────────────────────────┐  │
-                │  │ Soapy device I/O       │  │
-                │  └───────────┬────────────┘  │
-                │              ▼                │
-                │  ┌────────────────────────┐  │
-                │  │ Wideband FFT           │  │
-                │  └───────────┬────────────┘  │
-                │              ▼                │
-                │  ┌────────────────────────┐  │
-                │  │ Channelizer pool       │  │
-                │  └───────────┬────────────┘  │
-                │              ▼                │
-                │  ┌────────────────────────┐  │
-                │  │ WS transport +         │  │
-                │  │ REST control           │  │
-                │  └────────────────────────┘  │
-                └───────────────────────────────┘
+           ┌──────────────────────────────────────────────┐
+           │  Browser                                     │
+           │  ┌────────────────────────────────────────┐  │
+           │  │ Svelte UI (Bits UI, Tailwind,          │  │
+           │  │ Dockview)                              │  │
+           │  └──────────────────┬─────────────────────┘  │
+           │                     │                        │
+           │  ┌──────────────────▼─────────────────────┐  │
+           │  │ FrameClient (main thread)              │  │
+           │  │  • decodes postcard Frame              │  │
+           │  │  • dispatches by stream_id             │  │
+           │  └──────┬──────────────────────┬──────────┘  │
+           │         │                      │             │
+           │  ┌──────▼──────┐      ┌────────▼──────────┐  │
+           │  │ Waterfall   │      │ AudioWorklet +    │  │
+           │  │ (WebGL2) +  │      │ browser-side DSP  │  │
+           │  │ Spectrum    │      │ (WASM blocks —    │  │
+           │  │ (Canvas 2D) │      │ post M5)          │  │
+           │  └─────────────┘      └───────────────────┘  │
+           │  ┌────────────────────────────────────────┐  │
+           │  │ Worker (control plane today;           │  │
+           │  │ WASM runtime + blocks post-M5)         │  │
+           │  └────────────────────────────────────────┘  │
+           └──────────────────────▲───────────────────────┘
+                                  │ WS (binary, multiplexed, postcard frames)
+                                  │ REST /api (JSON, preset-first)
+                                  │
+                ┌─────────────────▼──────────────────────┐
+                │  ferrited (Rust)                       │
+                │  ┌──────────────────────────────────┐  │
+                │  │ AppState: FlowgraphDoc +         │  │
+                │  │ SourceConfig                     │  │
+                │  └────────────────┬─────────────────┘  │
+                │                   ▼                    │
+                │  ┌──────────────────────────────────┐  │
+                │  │ ferrite-runtime scheduler (sync, │  │
+                │  │ single-thread, SPSC rings)       │  │
+                │  │  ├─ Source (resolved)            │  │
+                │  │  ├─ Channelizer / Decimator /    │  │
+                │  │  │  FFT / LogMagU8 / Tee …       │  │
+                │  │  └─ WsBridgeTx / FileIqSink /    │  │
+                │  │     EventsSink                   │  │
+                │  └────────────────┬─────────────────┘  │
+                │                   ▼                    │
+                │  ┌──────────────────────────────────┐  │
+                │  │ axum: WS /ws/preset + REST /api  │  │
+                │  │ (static-asset serving for web)   │  │
+                │  └──────────────────────────────────┘  │
+                │                                        │
+                │  + SoapySource reader thread (only     │
+                │    extra OS thread; pushes into ring)  │
+                └────────────────────────────────────────┘
 ```
 
 A second `ferrited` with `--flowgraph <preset.json>` covers the
@@ -91,18 +102,37 @@ flowgraph runtime.
 
 ### Concurrency model
 
-Typical Rust realtime-streaming shape:
+Deliberately simple: **one synchronous, single-threaded scheduler**
+drives the whole block graph.
 
-- A dedicated thread owns the Soapy read callback and pushes IQ into a
-  lock-free SPSC ring buffer.
-- A worker thread consumes from that ring, runs the FFT + channelizer stage,
-  and publishes fan-out to N per-client ring buffers.
-- The tokio runtime handles HTTP + WS; WS writer tasks pull from their
-  per-client rings.
+- The scheduler (`runtime::Runtime`) walks blocks in pre-computed
+  topological order once per `tick`, calling `process()` on each.
+  It re-walks up to 1024 passes per tick until no block makes further
+  progress. Blocks signal "need more input" by returning
+  `Work { consumed: 0, … }` or by overriding `forecast()`.
+- Wires between blocks are **power-of-two SPSC rings** (`TypedRing`
+  over `SpscRing<T>`). Unconsumed samples persist across ticks, so a
+  block that needs an FFT's worth of input just buffers until there
+  is enough.
+- The **only other OS thread** is `SoapySource`'s reader thread, which
+  owns the blocking `stream.read()` call and pushes into an
+  `Arc<Mutex<IqRing>>` the scheduler pops from. Everything else runs
+  on the scheduler's tick thread.
+- `tokio` runs in `ferrited` **only for HTTP/WS plumbing** (`axum`) and
+  the outbound WS writer tasks — never for DSP.
 
-Rust's ownership + `Send`/`Sync` make the hand-offs data-race-safe by
-construction. `tokio` for async I/O, `crossbeam`/`rtrb` for the rings,
-`axum` for HTTP/WS.
+Why sync + single-thread: deterministic, easy to reason about,
+trivially testable (feed known samples in, assert samples out), and
+fast enough for the bandwidths Phase B targets. When a real
+multi-channelizer workload exceeds one core, the scheduler grows
+parallelism; until then, single-threaded is a feature.
+
+Drops inside the DSP graph are not possible — rings accumulate. Drops
+are confined to three explicit, counted boundaries: `SoapySource`
+(driver overflow, ring full, timestamp gap), `WsBridgeTx` (lossy-latest
+at the network egress — see [02-protocol.md](02-protocol.md) and
+[09-decisions.md](09-decisions.md)), and `WsBridgeRx` (bounded ring
+on the browser side).
 
 ### SDRPlay note
 
@@ -132,19 +162,32 @@ production.
 
 ### DSP / data path in the browser
 
-- **WebGL** canvas renders the waterfall and spectrum. Driven imperatively
-  from a Svelte component (the reactivity model is for state around the canvas,
-  not for every frame).
-- **Web Workers** host flowgraph pipelines. The main thread never blocks on
-  DSP.
-- **WebAssembly** hosts block implementations — Rust blocks compiled to WASM,
-  ported C decoders compiled via `clang --target=wasm32`.
-- **SharedArrayBuffer** ring buffers carry samples between Workers and the
-  **AudioWorklet**, avoiding per-frame copies. Requires
+- **WebGL2** renders the waterfall via a column-ring R8 texture and a
+  `fract(head - v_uv.y)` unwrap shader. The **spectrum** is Canvas 2D
+  today (line plot + optional max-hold); moving it onto the same GL
+  context is a later unification, not a perf need.
+- **`FrameClient`** on the main thread owns the single WebSocket to
+  `ferrited`, decodes `postcard`-framed `Frame` values, and dispatches
+  by `stream_id` to per-stream subscribers. FFT frames go to the
+  waterfall/spectrum, audio-IQ frames go to the AudioWorklet pipeline.
+- **Web Worker** exists (`FlowgraphRunner` → worker) but is currently
+  **control-plane only**: it hosts the TS flowgraph runtime that takes
+  `load/start/stop/state` messages via `postMessage`. Data does **not**
+  flow through it — frames come from the server over WS directly to
+  the main thread. This is a transition state. The M1–M5 milestone
+  replaces the TS worker runtime with a WASM build of the same
+  `ferrite-runtime` crate the server uses, at which point browser-side
+  blocks run inside the worker and data will flow through it.
+- **SharedArrayBuffer** ring buffers carry samples between the
+  worker-side runtime (post-M5) and the **AudioWorklet**, avoiding
+  per-frame copies. SAB requires
   `Cross-Origin-Opener-Policy: same-origin` +
-  `Cross-Origin-Embedder-Policy: require-corp` in both dev and prod.
-- **OPFS** (Origin Private File System) for short IQ recordings and any local
-  bulk storage.
+  `Cross-Origin-Embedder-Policy: require-corp` in both dev and prod —
+  already set on both.
+- **WebAssembly** will host Rust block implementations built from the
+  `ferrite-blocks` crate (same source as server-native). Ported C
+  decoders compile via `clang --target=wasm32-unknown-unknown`.
+- **OPFS** (planned) for short IQ recordings and local bulk storage.
 - **localStorage** for prefs and bookmarks.
 
 ### Frontend dev stack
@@ -191,32 +234,56 @@ for FT8, etc.) are C. Strategy:
 Per-decoder porting is typically a day's focused work, after which it runs
 identically on both sides.
 
-## Flowgraph runtime: shared TS, environment-agnostic
+## Flowgraph runtime
 
-The **flowgraph runtime** is the thing that reads a JSON flowgraph file,
-instantiates block instances, wires their ports together, and drives them.
+The **flowgraph runtime** reads a `FlowgraphDoc` JSON document,
+instantiates blocks from the registry, wires their ports together,
+validates, and drives them. It lives in the `ferrite-runtime` Rust
+crate.
 
-It lives in its own workspace package and depends only on `WebAssembly` and
-`Worker` — both available in modern browsers and Node ≥14 (Node 20+ for our
-feature floor). Nothing environment-specific is in the core.
+Today there is **one production runtime** — the Rust one, linked into
+`ferrited`. The server owns the whole graph; the browser's Worker
+currently runs a TS runtime as a transitional scaffold. The M1–M5
+milestone (see [project memory](../)) unifies on `ferrite-runtime`
+compiled for WASM so the browser runs the **same** runtime source the
+server does; at that point there is one runtime, two compile targets,
+and TS runtime code is deleted.
+
+A preset names its source as `"type": "Source"` — a **placeholder**
+resolved at load time by `compose_source`, which reads the current
+`SourceConfig` (held on `AppState`, mutated via `PATCH /api/source`)
+and substitutes the real source block. This keeps preset files stable
+across device swaps: changing hardware is a `PATCH /api/source` call,
+not a preset rewrite.
 
 Environment-specific bits are **sources** (where samples come from) and
-**sinks** (where block output goes):
+**sinks** (where block output goes). Today:
 
-- **Browser sources:** WS binary stream from `ferrited`.
-- **Browser sinks:** AudioWorklet, OPFS file writer, Svelte store update,
-  UI event (map marker for ADS-B, message list append, identify-card render).
-- **Node sources:** WS binary stream from `ferrited` (loopback).
-- **Node sinks:** filesystem, MQTT, syslog, SQLite.
+- **Native sources:** `SoapySource`, `FileIqSource`, `SineSource`,
+  `DtmfAudioSource`.
+- **Native sinks:** `FileIqSink`, `WsBridgeTx` / `WsBridgeTxFftU8`
+  (network egress toward the browser), `EventsSink`.
+- **Browser sources:** `WsBridgeRx` (subscribes to a `stream_id` on
+  `/ws/preset`).
+- **Browser sinks:** `AudioSink` (AudioWorklet), plus the implicit
+  waterfall/spectrum renderers fed by `ui:<name>` sentinel sinks.
 
-Flowgraphs are JSON:
+Cross-env wires are rewritten at load time: `env_split` inserts a
+`WsBridgeTx` / `WsBridgeRx` pair (or just a `WsBridgeTx` for
+`ui:<name>` UI-bound sinks) and allocates a `stream_id` from the
+`CROSS_ENV_STREAM_BASE` (1000) range. Authors never hand-wire bridges
+or pick ids. See `04-flowgraphs.md` for the full schema.
+
+Example preset skeleton:
 
 ```json
 {
   "name": "wbfm",
   "environments": ["node", "browser"],
   "blocks": {
-    "src":   { "type": "SoapySource", "params": { "args": "driver=rtlsdr" } },
+    "src":   { "type": "Source",      "placement": "node",
+               "params": { "center_freq_hz": 100100000,
+                           "sample_rate_hz": 2400000 } },
     "chan":  { "type": "Channelizer", "placement": "node",    "params": { ... } },
     "demod": { "type": "FmDemod",     "placement": "browser", "params": { ... } },
     "audio": { "type": "AudioSink",   "params": { "buffer_samples": 8192 } }
@@ -229,27 +296,22 @@ Flowgraphs are JSON:
 }
 ```
 
-Cross-env wires are rewritten at load time: `env_split` inserts a
-`WsBridgeTx` / `WsBridgeRx` pair and allocates a `stream_id` from the
-`CROSS_ENV_STREAM_BASE` (1000) range. Authors never hand-wire bridges or
-pick ids. See `04-flowgraphs.md` for the full schema.
-
 ## Process model
 
 ### `ferrited` (Rust) — always runs
 
-Single binary. Owns the device, FFT, channelizer pool, WS transport, REST
-control, and static file serving. Stateless aside from the current device
-session. Configured via a small TOML file (Soapy prefs, LLM API key for the
-identify feature).
+Single binary. Owns exactly one preset-backed pipeline: the
+`FlowgraphDoc` plus its resolved `SourceConfig`, held on `AppState`.
+No session IDs, no device-open handle, no per-VFO REST — a VFO is just
+a `Channelizer` in the preset. CLI knobs mutate `AppState` before the
+scheduler starts (e.g. `--source-type`, `--source-args`,
+`--source-bandwidth-hz`, `--agc`, `--start`).
 
 ### Headless flowgraph runs
 
-Launch `ferrited --flowgraph <preset.json>` and the daemon skips the
-interactive per-session REST path, loads the preset through the Rust
-runtime, and publishes the bridged IQ stream on `/ws/preset`. A
-second instance on a different port covers "run ADS-B to MQTT with no
-browser" — same binary, same blocks, same wire format.
+Launch a second `ferrited --flowgraph <preset.json>` on a different
+port for "run ADS-B to MQTT with no browser" — same binary, same
+blocks, same wire format. No separate sidecar binary.
 
 ## Transport
 
@@ -279,14 +341,23 @@ See `02-protocol.md` for full details, including `payload_type` values
 
 ### REST
 
-JSON over HTTP. Small surface:
+JSON over HTTP. Preset-first surface (full detail in `02-protocol.md`):
 
-- `GET  /api/devices` — enumerate with full capability schema.
-- `POST /api/device/open` — take ownership; returns `{session_id, ws_url}`.
-- `GET  /api/device/{id}/state` — current values.
-- `PATCH /api/device/{id}/settings` — mutate while streaming.
-- `POST /api/device/{id}/close` — release.
-- `POST /api/identify` — (Phase F) vision + RAG signal identification.
+- `GET   /api/devices` — enumerate Soapy devices with their capability
+  schemas.
+- `GET   /api/flowgraph`, `PATCH /api/flowgraph` — read / replace /
+  patch the preset; server computes a minimal reconfigure plan.
+- `GET   /api/source`, `PATCH /api/source` — the `SourceConfig`
+  subresource so device/tuning changes don't re-serialise the whole
+  preset.
+- `GET   /api/pipeline`, `POST /api/pipeline/{start,stop}` — idempotent
+  lifecycle toggles.
+- `GET   /api/ui-sinks` — resolve `ui:<name>` sentinel sinks to
+  allocated `stream_id`s so the browser finds the FFT stream without
+  hard-coding.
+- `GET   /api/blocks` — dump registry param schemas (drives the
+  generic block-config dialog).
+- `POST  /api/identify` — (Phase F) vision + RAG signal identification.
 
 ## Cross-origin isolation
 
@@ -307,21 +378,23 @@ no-op and the audio path just doesn't work — worth calling out.
 
 ```
 ferrite/
-  server/                      # Rust backend (cargo workspace member)
-  blocks/                      # Rust DSP blocks (cargo + wasm-pack)
-  decoders/                    # vendored C sources (dump1090, codec2, ft8_lib)
-  packages/
-    flowgraph-runtime/         # env-agnostic TS runtime
-    flowgraph-blocks/          # TS wrappers around WASM blocks
+  server/                      # `ferrited` Rust binary (cargo workspace member)
+  runtime/                     # `ferrite-runtime` — scheduler, graph, loader
+  blocks/                      # `ferrite-blocks` — DSP blocks (dual-compile: native + WASM)
+  blocks-macros/               # `#[ferrite_block]` proc-macro crate
+  flowgraphs/                  # shipped preset JSON (wbfm, wbam, dtmf-e2e, capture_fm)
   web/                         # SvelteKit app (pnpm workspace member)
-  flowgraphs/                  # shipped preset flowgraph JSON
-  data/                        # generated: sigidwiki.json, band plans
-  tools/                       # scrapers, codegen
+  headless/                    # (transitional) Node-side workspace
+  research/                    # vendored reference sources for decoder ports
+  samples/                     # captured IQ + sidecars for offline dev & tests
+  soapysdr/                    # user-local Soapy install (gitignored)
+  scripts/                     # build-soapysdr etc.
   docs/                        # this tree
   Cargo.toml                   # workspace
   pnpm-workspace.yaml
 ```
 
 One git history, one CI pipeline. Contributors need both Rust and pnpm
-toolchains; that is a conscious choice — the symmetry of shared blocks is
-worth it.
+toolchains; that is a conscious choice — the symmetry of shared blocks
+is worth it. (Dirs not yet present — `decoders/`, `data/`, `tools/` —
+land as their phases do; see `08-roadmap.md`.)
