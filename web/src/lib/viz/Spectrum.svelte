@@ -137,6 +137,18 @@
   $effect(() => {
     renderer?.setFeatures({ fade, maxHold });
   });
+
+  // Vertical markers over the plot: green = SDR tuner LO, orange = VFO
+  // (only when the preset exposes a `freq_shift_hz` knob). They drop
+  // into the renderer so they redraw with every frame, not just on
+  // axes change.
+  $effect(() => {
+    if (!renderer) return;
+    renderer.setMarkers({
+      sdrCenterHz: axes?.center_freq_hz,
+      vfoHz: vfoBlock ? vfoAbsHz : undefined,
+    });
+  });
 </script>
 
 <div class="flex h-full w-full flex-col">

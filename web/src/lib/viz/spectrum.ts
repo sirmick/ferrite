@@ -23,6 +23,16 @@ export interface SpectrumOptions {
   fadeFrames?: number;
 }
 
+/** Vertical markers drawn over the plot. `sdrCenterHz` is the tuner LO
+ *  (shown in green, on the right of the pair when VFO < centre);
+ *  `vfoHz` is where demodulation is actually pulling a channel out
+ *  (shown in orange, on the left when VFO < centre). Either may be
+ *  undefined — the renderer skips that line. */
+export interface SpectrumMarkers {
+  sdrCenterHz?: number;
+  vfoHz?: number;
+}
+
 export interface SpectrumFeatures {
   /** Keep a fading trail of the last N rows behind the live trace. */
   fade: boolean;
@@ -63,6 +73,7 @@ export class SpectrumRenderer {
   private history: Uint8Array[] = [];
   private maxRow: Uint8Array | undefined;
   private statsListener: ((s: SpectrumStats) => void) | undefined;
+  private markers: SpectrumMarkers = {};
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -110,6 +121,12 @@ export class SpectrumRenderer {
   setAxes(axes: SpectrumAxes | undefined): void {
     if (this.disposed) return;
     this.axes = axes;
+    this.scheduleDraw();
+  }
+
+  setMarkers(next: SpectrumMarkers): void {
+    if (this.disposed) return;
+    this.markers = { ...next };
     this.scheduleDraw();
   }
 
@@ -258,6 +275,8 @@ export class SpectrumRenderer {
     ctx.lineTo(plot.x + plot.w, plot.y + plot.h - 0.5);
     ctx.stroke();
 
+    this.drawMarkers(plot);
+
     // Fade trail: older → dimmer.
     if (this.features.fade && this.history.length > 1) {
       const n = this.history.length;
@@ -284,6 +303,45 @@ export class SpectrumRenderer {
       this.strokeRow(this.row, plot);
     }
     ctx.restore();
+  }
+
+  private drawMarkers(plot: { x: number; y: number; w: number; h: number }): void {
+    if (!this.axes) return;
+    const { ctx } = this;
+    const half = this.axes.rateHz / 2;
+    const fMin = this.axes.centerHz - half;
+    const fMax = this.axes.centerHz + half;
+    const toX = (hz: number) => plot.x + ((hz - fMin) / (fMax - fMin)) * plot.w;
+    const clamp = (hz: number) => hz >= fMin && hz <= fMax;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    ctx.lineWidth = Math.max(1, Math.floor(dpr));
+
+    const sdr = this.markers.sdrCenterHz;
+    if (sdr !== undefined && clamp(sdr)) {
+      ctx.strokeStyle = 'rgba(88, 240, 160, 0.75)';
+      ctx.shadowColor = 'rgba(88, 240, 160, 0.45)';
+      ctx.shadowBlur = 6 * dpr;
+      const x = Math.floor(toX(sdr)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, plot.y);
+      ctx.lineTo(x, plot.y + plot.h);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    const vfo = this.markers.vfoHz;
+    if (vfo !== undefined && clamp(vfo)) {
+      ctx.strokeStyle = 'rgba(255, 157, 58, 0.85)';
+      ctx.shadowColor = 'rgba(255, 157, 58, 0.55)';
+      ctx.shadowBlur = 6 * dpr;
+      const x = Math.floor(toX(vfo)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, plot.y);
+      ctx.lineTo(x, plot.y + plot.h);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
   }
 
   private strokeRow(row: Uint8Array, plot: { x: number; y: number; w: number; h: number }): void {
