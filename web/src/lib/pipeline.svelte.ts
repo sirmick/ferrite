@@ -23,6 +23,7 @@ import {
 } from '$lib/api/pipeline';
 import { fetchUiSinks, type UiSink } from '$lib/api/uiSinks';
 import { fetchPipelineBlocks, patchBlockParams, type PipelineBlock } from '$lib/api/pipelineBlocks';
+import { fetchPresets, loadPreset, type PresetEntry } from '$lib/api/presets';
 import { FrameClient, type ClientStatus } from '$lib/ws/client';
 import { initFrameDecoder } from '$lib/ws/frame';
 import { logs } from '$lib/logs/store.svelte';
@@ -46,6 +47,10 @@ class PipelineStore {
    *  Feeds the receiver panel and the generic `<BlockParams>` component. */
   blocks = $state<Record<string, PipelineBlock>>({});
 
+  /** Browseable preset files the server can load. Populated on `init()`;
+   *  stable for the session (the presets dir isn't watched). */
+  presets = $state<PresetEntry[]>([]);
+
   /** Shared WebSocket client feeding `/ws/preset`. Always open while
    *  the store is alive — callers multiplex by stream id. */
   client = $state<FrameClient | undefined>(undefined);
@@ -61,18 +66,20 @@ class PipelineStore {
     this.errorMessage = null;
     try {
       await initFrameDecoder();
-      const [fg, src, st, sinks, blocks] = await Promise.all([
+      const [fg, src, st, sinks, blocks, presets] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
         fetchUiSinks(),
         fetchPipelineBlocks(),
+        fetchPresets(),
       ]);
       this.flowgraph = fg;
       this.source = src;
       this.status = st;
       this.uiSinks = indexByName(sinks);
       this.blocks = indexById(blocks);
+      this.presets = presets;
       this.client = new FrameClient({
         url: wsUrlFor('/ws/preset'),
         onStatus: (s) => {
@@ -159,6 +166,19 @@ class PipelineStore {
       await this.refreshComposed();
       return resp;
     }, 'patch flowgraph');
+  }
+
+  /** Load preset `name` from the server-side presets dir and swap it
+   *  in. The server returns the full reconfigure plan alongside the
+   *  doc's canonical name; we re-fetch the flowgraph + composed state
+   *  so local mirrors match the server's merged view. */
+  async loadPreset(name: string): Promise<ReconfigureResponse | null> {
+    return this.withBusy(async () => {
+      const resp = await loadPreset(name);
+      this.flowgraph = await fetchFlowgraph();
+      await this.refreshComposed();
+      return resp.reconfigure;
+    }, `load preset ${name}`);
   }
 
   /** Re-read derivatives of the composed preset (ui_sinks + blocks) in

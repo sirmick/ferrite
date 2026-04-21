@@ -41,3 +41,4 @@ soapysdr    = { version = "0.5", optional = true }
 [dev-dependencies]
 tokio-tungstenite = "0.24"
 futures-util      = "0.3"
+tempfile          = "3"

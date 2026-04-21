@@ -102,6 +102,14 @@ struct Args {
     #[arg(long = "start", default_value_t = false)]
     auto_start: bool,
 
+    /// Directory scanned by `GET /api/presets` and resolved by
+    /// `POST /api/preset`. When unset the browse endpoint returns an
+    /// empty list and the swap endpoint returns an error. Defaults to
+    /// the parent directory of `--flowgraph` when that's a `.json` file
+    /// inside a sibling `flowgraphs/` dir — the common dev layout.
+    #[arg(long = "presets-dir", value_name = "PATH")]
+    presets_dir: Option<PathBuf>,
+
     /// Runtime tick period, in microseconds. Defaults to 400µs
     /// (2.5kHz) which is fine for any source at 2MHz or below given
     /// `DEFAULT_FRAMES_HINT` of 1024 samples per tick.
@@ -188,7 +196,15 @@ async fn main() -> Result<()> {
         "ferrited starting"
     );
 
-    let state = app_state::AppState::new(preset, source, tick_period).with_logs(log_broadcast);
+    let mut state = app_state::AppState::new(preset, source, tick_period).with_logs(log_broadcast);
+    if let Some(dir) = args
+        .presets_dir
+        .clone()
+        .or_else(|| args.flowgraph.parent().map(std::path::Path::to_path_buf))
+    {
+        tracing::info!(path = %dir.display(), "presets browser enabled");
+        state = state.with_presets_dir(dir);
+    }
 
     if args.auto_start {
         state.start().await.context("auto-start pipeline")?;
@@ -219,6 +235,8 @@ async fn main() -> Result<()> {
         )
         .route("/api/ui-sinks", get(routes::list_ui_sinks))
         .route("/api/blocks", get(routes::list_block_schemas))
+        .route("/api/presets", get(routes::list_presets))
+        .route("/api/preset", post(routes::load_preset))
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
         .with_state(state);

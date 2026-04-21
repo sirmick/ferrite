@@ -19,7 +19,7 @@ use http::StatusCode;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::app_state::{AppState, PipelineBlock, PipelineStatus, UiSink};
+use crate::app_state::{AppState, PipelineBlock, PipelineStatus, PresetEntry, UiSink};
 
 #[derive(Serialize)]
 pub struct Hello {
@@ -338,6 +338,47 @@ pub async fn patch_pipeline_block(
         .await
         .map_err(|e| bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
     Ok(Json(reconfigure_response(plan)))
+}
+
+/// `GET /api/presets` — enumerate every `*.json` preset the server can
+/// load. Returns an empty list when no presets dir is configured.
+pub async fn list_presets(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PresetEntry>>, (StatusCode, Json<ApiError>)> {
+    state
+        .list_presets()
+        .await
+        .map(Json)
+        .map_err(|e| bad_request("LIST_PRESETS_FAILED", format!("{e:#}")))
+}
+
+#[derive(serde::Deserialize)]
+pub struct LoadPresetRequest {
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct LoadPresetResponse {
+    pub name: String,
+    pub reconfigure: ReconfigureResponse,
+}
+
+/// `POST /api/preset` — swap the active preset by basename. Body:
+/// `{"name": "wbfm"}`. Rejects names that aren't plain `[A-Za-z0-9_-]+`
+/// so the lookup cannot escape the presets dir. Running pipelines are
+/// hot-reconfigured; stopped ones just store the doc for next `start`.
+pub async fn load_preset(
+    State(state): State<AppState>,
+    Json(req): Json<LoadPresetRequest>,
+) -> Result<Json<LoadPresetResponse>, (StatusCode, Json<ApiError>)> {
+    let (doc, plan) = state
+        .load_preset_by_name(&req.name)
+        .await
+        .map_err(|e| bad_request("LOAD_PRESET_FAILED", format!("{e:#}")))?;
+    Ok(Json(LoadPresetResponse {
+        name: doc.name,
+        reconfigure: reconfigure_response(plan),
+    }))
 }
 
 /// `GET /ws/preset` — single WebSocket endpoint for preset sample

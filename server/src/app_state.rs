@@ -12,7 +12,7 @@
 //! The broadcast [`FrameTx`] outlives any one pipeline instance, so
 //! `/ws/preset` subscribers stay connected across start/stop cycles.
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
 use ferrite_blocks::registry;
@@ -41,6 +41,17 @@ pub struct UiSink {
     /// `"IqF32"` or `"FftU8"` — the frame payload type the client
     /// should decode for this stream.
     pub payload_type: &'static str,
+}
+
+/// One entry in the `GET /api/presets` response — a browsable preset
+/// file living under [`AppState::presets_dir`]. `name` is the on-disk
+/// basename without `.json`; it's what the client echoes back in
+/// `POST /api/preset`. `label`/`description` come straight from the doc.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PresetEntry {
+    pub name: String,
+    pub label: Option<String>,
+    pub description: Option<String>,
 }
 
 /// One block in the currently-loaded preset (post-compose, pre-split).
@@ -90,6 +101,10 @@ struct Inner {
 pub struct AppState {
     inner: Arc<Inner>,
     logs: Option<crate::log_stream::LogBroadcast>,
+    /// Directory scanned by [`Self::list_presets`] + resolved by
+    /// [`Self::load_preset_by_name`]. `None` means the browse/swap
+    /// endpoints return an empty list / 501 respectively.
+    presets_dir: Option<Arc<PathBuf>>,
 }
 
 impl AppState {
@@ -105,12 +120,21 @@ impl AppState {
                 tick_period,
             }),
             logs: None,
+            presets_dir: None,
         }
     }
 
     #[must_use]
     pub fn with_logs(mut self, logs: crate::log_stream::LogBroadcast) -> Self {
         self.logs = Some(logs);
+        self
+    }
+
+    /// Point the browse/swap endpoints at a filesystem directory of
+    /// preset JSON files.
+    #[must_use]
+    pub fn with_presets_dir(mut self, dir: PathBuf) -> Self {
+        self.presets_dir = Some(Arc::new(dir));
         self
     }
 
@@ -267,6 +291,49 @@ impl AppState {
         self.patch_flowgraph(new_doc).await
     }
 
+    /// Enumerate every `*.json` preset file in [`Self::presets_dir`].
+    /// Each entry carries the on-disk basename (minus `.json`) as
+    /// `name` plus the doc's `label`/`description`. Files that fail to
+    /// parse are skipped with a warning — one bad file shouldn't hide
+    /// the rest. Returns an empty list when no presets dir is set.
+    pub async fn list_presets(&self) -> Result<Vec<PresetEntry>> {
+        let Some(dir) = self.presets_dir.as_ref().map(|a| a.as_ref().clone()) else {
+            return Ok(Vec::new());
+        };
+        let entries = tokio::task::spawn_blocking(move || scan_presets(&dir))
+            .await
+            .map_err(|e| anyhow!("presets scan task panicked: {e}"))??;
+        Ok(entries)
+    }
+
+    /// Load preset `name` from [`Self::presets_dir`] and swap it in via
+    /// [`Self::patch_flowgraph`]. Rejects names that aren't plain
+    /// basenames (anything containing path separators or `..`).
+    pub async fn load_preset_by_name(
+        &self,
+        name: &str,
+    ) -> Result<(FlowgraphDoc, Option<ReconfigurePlan>)> {
+        let dir = self
+            .presets_dir
+            .as_ref()
+            .ok_or_else(|| anyhow!("presets browser not configured"))?
+            .as_ref()
+            .clone();
+        if !is_valid_preset_name(name) {
+            return Err(anyhow!(
+                "invalid preset name {name:?}: must match [A-Za-z0-9_-]+"
+            ));
+        }
+        let file = dir.join(format!("{name}.json"));
+        let bytes = tokio::task::spawn_blocking(move || std::fs::read(&file))
+            .await
+            .map_err(|e| anyhow!("preset read task panicked: {e}"))?
+            .map_err(|e| anyhow!("read preset {name:?}: {e}"))?;
+        let doc = FlowgraphDoc::from_json(&bytes).map_err(|e| anyhow!("parse preset: {e:#}"))?;
+        let plan = self.patch_flowgraph(doc.clone()).await?;
+        Ok((doc, plan))
+    }
+
     /// Apply a new preset. If the pipeline is running, reconfigures it
     /// in place (composed with the current source) and returns the
     /// plan; otherwise stores the doc and returns `None`.
@@ -334,12 +401,64 @@ impl AppState {
     }
 }
 
+/// Preset filenames come in via untrusted HTTP bodies. Accept only
+/// simple basenames — letters, digits, underscore, dash — so a value
+/// like `../../../etc/passwd` can never escape the presets dir.
+fn is_valid_preset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn scan_presets(dir: &std::path::Path) -> Result<Vec<PresetEntry>> {
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(anyhow!("read presets dir {}: {e}", dir.display())),
+    };
+    let mut out = Vec::new();
+    for entry in read {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::warn!(?err, "presets dir iteration error");
+                continue;
+            }
+        };
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !is_valid_preset_name(stem) {
+            continue;
+        }
+        match std::fs::read(&path).and_then(|b| {
+            FlowgraphDoc::from_json(&b)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:#}")))
+        }) {
+            Ok(doc) => out.push(PresetEntry {
+                name: stem.to_string(),
+                label: doc.label,
+                description: doc.description,
+            }),
+            Err(err) => tracing::warn!(path = %path.display(), ?err, "skipping bad preset"),
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ferrite_blocks::frame::Frame;
     use serde_json::json;
     use std::time::Duration;
+    use tempfile::tempdir;
 
     fn test_preset() -> FlowgraphDoc {
         serde_json::from_value(json!({
@@ -579,5 +698,82 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("JSON object"));
+    }
+
+    fn write_preset(dir: &std::path::Path, name: &str, label: &str) {
+        let doc = json!({
+            "name": name,
+            "label": label,
+            "description": format!("{name} preset"),
+            "environments": ["node", "browser"],
+            "blocks": {
+                "src":  { "type": "Source", "placement": "node",
+                          "params": { "center_freq_hz": 0.0, "sample_rate_hz": 1000.0 } },
+                "sink": { "type": "Decimator", "placement": "browser",
+                          "params": { "factor": 2, "num_taps": 17,
+                                      "cutoff_normalized": 0.2 } }
+            },
+            "wires": [["src.out", "sink.in"]]
+        });
+        std::fs::write(
+            dir.join(format!("{name}.json")),
+            serde_json::to_vec_pretty(&doc).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_presets_returns_empty_when_dir_unset() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        assert!(state.list_presets().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_presets_scans_dir_and_sorts_by_name() {
+        let dir = tempdir().unwrap();
+        write_preset(dir.path(), "alpha", "Alpha label");
+        write_preset(dir.path(), "beta", "Beta label");
+        std::fs::write(dir.path().join("notjson.txt"), b"ignored").unwrap();
+        std::fs::write(dir.path().join("bad.json"), b"not json").unwrap();
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5))
+            .with_presets_dir(dir.path().to_path_buf());
+        let entries = state.list_presets().await.unwrap();
+        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!(entries[0].label.as_deref(), Some("Alpha label"));
+    }
+
+    #[tokio::test]
+    async fn load_preset_by_name_swaps_active_doc() {
+        let dir = tempdir().unwrap();
+        write_preset(dir.path(), "wbfm_test", "FM test");
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5))
+            .with_presets_dir(dir.path().to_path_buf());
+        let (doc, plan) = state.load_preset_by_name("wbfm_test").await.unwrap();
+        assert_eq!(doc.name, "wbfm_test");
+        assert!(plan.is_none(), "no pipeline to reconfigure while stopped");
+        let current = state.get_flowgraph().await;
+        assert_eq!(current.name, "wbfm_test");
+    }
+
+    #[tokio::test]
+    async fn load_preset_by_name_rejects_path_traversal() {
+        let dir = tempdir().unwrap();
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5))
+            .with_presets_dir(dir.path().to_path_buf());
+        for bad in ["..", "../etc", "foo/bar", "a.b"] {
+            let err = state.load_preset_by_name(bad).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("invalid preset name"),
+                "name {bad:?} should be rejected, got: {err:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn load_preset_by_name_errors_when_dir_unset() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        let err = state.load_preset_by_name("wbfm").await.unwrap_err();
+        assert!(format!("{err:#}").contains("not configured"));
     }
 }
