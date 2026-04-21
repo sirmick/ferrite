@@ -4,6 +4,7 @@
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
+  import { rangesToChoices } from '$lib/controls/optionsModel';
   import Nixie from '$lib/controls/Nixie.svelte';
 
   interface Props {
@@ -52,6 +53,37 @@
 
   let fade = $state(false);
   let maxHold = $state(false);
+
+  // Sample-rate dropdown. Hardware sources give us explicit rate
+  // ladders via sourceCaps; software sources (sine, file) don't
+  // advertise any, so we fall back to a read-only display. The current
+  // rate is always included — devices sometimes report ranges that
+  // don't cover what the preset happens to ship with.
+  let rateChoices = $derived.by(() => {
+    const caps = pipeline.sourceCaps;
+    if (!caps || caps.kind !== 'hardware') return [] as number[];
+    const ch = caps.capabilities.rx_channels[0];
+    if (!ch) return [] as number[];
+    const choices = rangesToChoices(ch.sample_rate_ranges_hz);
+    const rate = axes?.sample_rate_hz;
+    if (rate !== undefined && !choices.some((c) => Math.abs(c - rate) < 1)) {
+      choices.push(rate);
+      choices.sort((a, b) => a - b);
+    }
+    return choices;
+  });
+
+  function fmtRate(hz: number): string {
+    if (hz >= 1e6) return `${(hz / 1e6).toFixed(3)} MS/s`;
+    if (hz >= 1e3) return `${(hz / 1e3).toFixed(1)} kS/s`;
+    return `${hz} S/s`;
+  }
+
+  function onRateChange(ev: Event) {
+    const v = Number((ev.target as HTMLSelectElement).value);
+    if (!Number.isFinite(v) || v === axes?.sample_rate_hz) return;
+    void pipeline.patchSourceParams({ sample_rate_hz: v });
+  }
 
   function commitCenter(hz: number) {
     if (axes && hz !== axes.center_freq_hz) {
@@ -192,10 +224,22 @@
         </select>
       </label>
 
-      <div class="flex items-center gap-1">
-        <span>span</span>
-        <span class="font-mono text-slate-300">{(axes.sample_rate_hz / 1e6).toFixed(3)} MHz</span>
-      </div>
+      <label class="flex items-center gap-1" title="sample rate / span">
+        <span>rate</span>
+        {#if rateChoices.length > 1}
+          <select
+            class="rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
+            value={axes.sample_rate_hz}
+            onchange={onRateChange}
+          >
+            {#each rateChoices as r (r)}
+              <option value={r}>{fmtRate(r)}</option>
+            {/each}
+          </select>
+        {:else}
+          <span class="font-mono text-slate-300">{fmtRate(axes.sample_rate_hz)}</span>
+        {/if}
+      </label>
 
       <div class="mx-1 h-4 border-l border-slate-800"></div>
 
