@@ -44,14 +44,14 @@ const SINE_DOC = {
   ],
 } as unknown as FlowgraphDoc;
 
-// Browser-only fixture with a WsIqSource feeding the same demod → sink
+// Browser-only fixture with a WsBridgeRx feeding the same demod → sink
 // chain. Exercises the FrameClient subscription + pushIq path.
 const WS_DOC = {
   name: 'ws-audio',
   environments: ['browser'],
   blocks: {
     rx: {
-      type: 'WsIqSource',
+      type: 'WsBridgeRx',
       placement: 'browser',
       params: { stream_id: 1234, buffer_samples: 4096 },
     },
@@ -218,7 +218,7 @@ describe('RunnerCore', () => {
     expect(b.id).toBe(99);
   });
 
-  it('subscribes to each WsIqSource stream and forwards frames via pushIq', async () => {
+  it('subscribes to each WsBridgeRx stream and forwards frames via pushIq', async () => {
     const { env, clients } = makeEnv();
     const core = new RunnerCore(env);
     const resp = await core.handle({ id: 1, kind: 'load', doc: WS_DOC, wsUrl: 'ws://x' });

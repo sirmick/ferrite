@@ -448,8 +448,75 @@ pub trait Block: Send + AsAny {
     /// bounded by `frames_hint`. Blocks that emit in fixed-size frames
     /// larger than `frames_hint` (FFT, LogMagU8) must override so the
     /// runtime provisions buffers big enough to hold one frame.
+    ///
+    /// Retired by the D23 scheduler rewrite: once every block declares
+    /// [`relative_rate`](Self::relative_rate) and overrides
+    /// [`forecast`](Self::forecast) where variable, the ring-sizing
+    /// math derives from those declarations instead. Kept here until
+    /// the migration is complete.
     fn output_capacity_hints(&self) -> [usize; MAX_PORTS] {
         [0; MAX_PORTS]
+    }
+
+    /// Declare the block's per-step rate relationship between one
+    /// input port and one output port as an `(out_samples,
+    /// in_samples)` ratio. Consulted by the scheduler when sizing
+    /// wire rings and when deciding how many output slots a block can
+    /// legally fill.
+    ///
+    /// - `(1, 1)` — sync 1:1. The default, and right for most DSP
+    ///   blocks (FmDemod, AmDemod, Channelizer at rate-matched
+    ///   configurations, TeeIqF32, …). Per-sample work.
+    /// - `(1, N)` — sync decimator. For every `N` input samples the
+    ///   block produces `1` output. `Decimator`, `Channelizer` (with
+    ///   decimation factor).
+    /// - `(L, 1)` — sync interpolator. For every `1` input sample the
+    ///   block produces `L` outputs. `AmModulator` (with
+    ///   input_rate:output_rate = 1:L), resamplers.
+    /// - `(1, 0)` — source. The input-less side of a source block;
+    ///   output rate is decoupled from any input.
+    /// - `(0, 0)` — unconstrained / variable-rate. The scheduler
+    ///   falls back entirely on [`forecast`](Self::forecast) for this
+    ///   pair. `DtmfDecoder` emits events only on tone transitions;
+    ///   `FFT` emits one bin block per `size` inputs (hybrid — can
+    ///   also be expressed as `(size, size)` with `forecast`
+    ///   overriding).
+    ///
+    /// `in_port` and `out_port` index into [`BlockSpec::inputs`] and
+    /// [`BlockSpec::outputs`] respectively. For single-input /
+    /// single-output blocks both are 0.
+    ///
+    /// Default is `(1, 1)` — matches today's scheduler behavior for
+    /// 1:1 DSP, so unmigrated blocks keep working.
+    fn relative_rate(&self, _in_port: usize, _out_port: usize) -> (u32, u32) {
+        (1, 1)
+    }
+
+    /// How many input samples, per input port, does this block need
+    /// to produce `noutput_items` on each output? Index-parallel to
+    /// [`BlockSpec::inputs`]; unused slots are 0.
+    ///
+    /// Returning `None` tells the scheduler "use the default derived
+    /// from [`relative_rate`](Self::relative_rate)" — i.e.
+    /// `in_samples = ceil(noutput_items * in_ratio / out_ratio)` for
+    /// each input port. The default is correct for every sync block
+    /// and most rate-changing blocks.
+    ///
+    /// Variable-rate blocks override with `Some(...)` to report a
+    /// fixed minimum that doesn't scale with `noutput_items`:
+    ///
+    /// - `DtmfDecoder` needs one block-size chunk regardless of
+    ///   output count (it emits events per tone transition, not per
+    ///   sample).
+    /// - `FFT` needs one `size`-sample window to produce one bin
+    ///   block.
+    ///
+    /// Called by the scheduler to decide whether a starved block has
+    /// enough upstream samples to run. A block forecasting
+    /// `[200, 0, ...]` will not be called until its `in_port=0` ring
+    /// has ≥ 200 available samples.
+    fn forecast(&self, _noutput_items: usize) -> Option<[usize; MAX_PORTS]> {
+        None
     }
 
     /// Flush and release. Must be idempotent.

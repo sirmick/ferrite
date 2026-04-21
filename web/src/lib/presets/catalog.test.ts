@@ -9,7 +9,7 @@ const wbfmDoc = {
   description: 'stereo WBFM demod',
   environments: ['browser'],
   blocks: {
-    src: { type: 'WsIqSource', params: { streamId: 2, bufferFloats: 131072 } },
+    src: { type: 'WsBridgeRx', params: { streamId: 2, bufferFloats: 131072 } },
     audio: { type: 'AudioSink', params: { bufferSamples: 8192 } },
   },
   wires: [['src.out', 'audio.in']],

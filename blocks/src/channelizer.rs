@@ -248,6 +248,12 @@ impl Block for Channelizer {
         }
     }
 
+    fn relative_rate(&self, _in_port: usize, _out_port: usize) -> (u32, u32) {
+        #[allow(clippy::cast_possible_truncation)]
+        let factor = self.factor as u32;
+        (1, factor.max(1))
+    }
+
     fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
         // If the scheduler knows the input rate, it wins — keeps the
         // mixer in sync even if construction-time params were stale.

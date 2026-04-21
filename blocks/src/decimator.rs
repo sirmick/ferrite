@@ -200,6 +200,12 @@ impl Block for Decimator {
         Ok(())
     }
 
+    fn relative_rate(&self, _in_port: usize, _out_port: usize) -> (u32, u32) {
+        #[allow(clippy::cast_possible_truncation)]
+        let factor = self.factor as u32;
+        (1, factor.max(1))
+    }
+
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
         let Some(src) = io
             .inputs

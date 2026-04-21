@@ -10,7 +10,7 @@
 //! it, native builds compile without any wasm-bindgen dependency pulled
 //! in.
 
-use ferrite_blocks::{AudioSink, WsIqSource};
+use ferrite_blocks::{AudioSink, WsBridgeRx};
 use wasm_bindgen::prelude::*;
 
 use crate::block_registry::InventorySpecRegistry;
@@ -173,23 +173,23 @@ impl RuntimeHandle {
     }
 
     /// Push a batch of interleaved `[i0, q0, i1, q1, …]` IQ floats into
-    /// the named `WsIqSource` block. The browser runner owns the
+    /// the named `WsBridgeRx` block. The browser runner owns the
     /// multiplexed WebSocket and forwards incoming frames through here;
     /// the block holds an internal ring and emits the samples on its
     /// `out` port at tick time. Odd-length buffers drop the trailing
     /// half-sample. Errors if the block doesn't exist or isn't a
-    /// `WsIqSource`.
+    /// `WsBridgeRx`.
     #[wasm_bindgen(js_name = pushIq)]
     pub fn push_iq(&mut self, block_id: &str, samples: &[f32]) -> Result<(), JsError> {
         let src = self
             .rt
-            .block_typed::<WsIqSource>(block_id)
-            .ok_or_else(|| JsError::new(&format!("no WsIqSource block named {block_id:?}")))?;
+            .block_typed::<WsBridgeRx>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no WsBridgeRx block named {block_id:?}")))?;
         src.push_interleaved(samples);
         Ok(())
     }
 
-    /// Complex samples currently buffered inside the named `WsIqSource`
+    /// Complex samples currently buffered inside the named `WsBridgeRx`
     /// — written by `pushIq` but not yet emitted on the output port.
     /// Useful for test assertions and for surfacing queue depth to the
     /// UI.
@@ -197,20 +197,20 @@ impl RuntimeHandle {
     pub fn iq_buffered_samples(&mut self, block_id: &str) -> Result<usize, JsError> {
         let src = self
             .rt
-            .block_typed::<WsIqSource>(block_id)
-            .ok_or_else(|| JsError::new(&format!("no WsIqSource block named {block_id:?}")))?;
+            .block_typed::<WsBridgeRx>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no WsBridgeRx block named {block_id:?}")))?;
         Ok(src.buffered_samples())
     }
 
-    /// Cumulative count of complex samples the named `WsIqSource` has
+    /// Cumulative count of complex samples the named `WsBridgeRx` has
     /// dropped because its ring was full. UI surfaces this as a
     /// packet-loss indicator for the WS transport.
     #[wasm_bindgen(js_name = iqDroppedSamples)]
     pub fn iq_dropped_samples(&mut self, block_id: &str) -> Result<u64, JsError> {
         let src = self
             .rt
-            .block_typed::<WsIqSource>(block_id)
-            .ok_or_else(|| JsError::new(&format!("no WsIqSource block named {block_id:?}")))?;
+            .block_typed::<WsBridgeRx>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no WsBridgeRx block named {block_id:?}")))?;
         Ok(src.dropped_samples())
     }
 }

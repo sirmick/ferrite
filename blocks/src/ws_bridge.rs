@@ -17,6 +17,21 @@
 //! `timestamp_ns = 0`, and pushes through the sink. The sink stamps the
 //! envelope and serializes with postcard; the block stays ignorant of
 //! the wire protocol.
+//!
+//! ### Rx-side transport split
+//!
+//! [`WsBridgeRx`] does **not** own the WebSocket. The browser runner
+//! keeps a single multiplexed `FrameClient` on the JS side; at preset
+//! load it subscribes each Rx block's `stream_id` and routes decoded
+//! `IqF32` payloads into the block's internal ring via the
+//! wasm-bindgen `pushIq(blockId, floats)` method. The block's
+//! `process` drains that ring onto its typed output at tick time.
+//!
+//! Keeping the transport on JS keeps the Rust code portable — no
+//! `web_sys` / `js_sys` dependency creeps into `ferrite-blocks`, and
+//! native tests drive the block by calling [`WsBridgeRx::push`]
+//! directly. See D22 for the history: this Rx absorbed the old
+//! `WsIqSource` block when the bridge transport was unified.
 
 use std::sync::Arc;
 
@@ -26,10 +41,11 @@ use serde::Deserialize;
 
 use crate::{
     block::{
-        Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, ParamKind, ParamSpec, Placement,
-        PortSpec, PortType, ReconfigureScope, Work,
+        Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, OutputPort, ParamKind, ParamSpec,
+        Placement, PortSpec, PortType, ReconfigureScope, Work,
     },
     frame::Frame,
+    spsc_ring::IqRing,
 };
 
 /// Transport contract shared by every `WsBridgeTx*` block. The runtime
@@ -181,23 +197,116 @@ impl BlockFactory for WsBridgeTx {
 }
 
 // ---------------------------------------------------------------------------
-// Rx — browser-side ingress. Emits samples it received from the WS
-// stream. WASM-only.
+// Rx — browser-side ingress. Holds an internal [`IqRing`]; the browser
+// runner pushes decoded frames into it over the wasm-bindgen
+// `pushIq` method, and `process` drains the ring onto the typed
+// `IqF32` output at tick time. WASM-only. See module doc for the
+// transport split.
 // ---------------------------------------------------------------------------
 
+/// Default ring capacity in **samples** (complex IQ pairs). 65 536
+/// samples ≈ 650 ms at 100 kS/s narrowband — plenty of headroom for
+/// scheduler jitter without adding meaningful latency.
+const DEFAULT_RX_BUFFER_SAMPLES: usize = 65_536;
+const DEFAULT_RX_BUFFER_SAMPLES_F64: f64 = 65_536.0;
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct WsBridgeRxParams {
+    /// `stream_id` the browser-side transport demultiplexes for this
+    /// block. The runner registers a [`FrameClient`] subscription for
+    /// this id on start and drops it on stop; the block itself just
+    /// consumes samples pushed in via [`WsBridgeRx::push_interleaved`].
+    ///
+    /// [`FrameClient`]: https://ferrite.example/frame-client
+    pub stream_id: u32,
+    /// Ring capacity in complex samples. Power of two recommended.
+    pub buffer_samples: usize,
+}
+
+impl Default for WsBridgeRxParams {
+    fn default() -> Self {
+        Self {
+            stream_id: 0,
+            buffer_samples: DEFAULT_RX_BUFFER_SAMPLES,
+        }
+    }
+}
+
+const RX_BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
+    key: "buffer_samples",
+    label: "Buffer capacity",
+    kind: ParamKind::Range {
+        min: 1_024.0,
+        max: 1_048_576.0,
+        step: 1.0,
+        default: DEFAULT_RX_BUFFER_SAMPLES_F64,
+        unit: "samples",
+    },
+    reconfig_scope: ReconfigureScope::SourceRestart,
+};
+
 pub struct WsBridgeRx {
-    params: WsBridgeParams,
+    params: WsBridgeRxParams,
+    ring: IqRing,
+    dropped_samples: u64,
 }
 
 impl WsBridgeRx {
     #[must_use]
-    pub const fn new(params: WsBridgeParams) -> Self {
-        Self { params }
+    pub fn new(params: WsBridgeRxParams) -> Self {
+        let ring = IqRing::new(params.buffer_samples);
+        Self {
+            params,
+            ring,
+            dropped_samples: 0,
+        }
     }
 
     #[must_use]
     pub const fn stream_id(&self) -> u32 {
         self.params.stream_id
+    }
+
+    #[must_use]
+    pub fn params(&self) -> &WsBridgeRxParams {
+        &self.params
+    }
+
+    /// Cumulative count of samples dropped because the ring was full.
+    /// The network clock wins over the flowgraph clock (losing IQ
+    /// samples beats stalling the WS reader).
+    #[must_use]
+    pub fn dropped_samples(&self) -> u64 {
+        self.dropped_samples
+    }
+
+    /// Samples currently buffered (written but not yet emitted).
+    #[must_use]
+    pub fn buffered_samples(&self) -> usize {
+        self.ring.available_read()
+    }
+
+    /// Push a batch of complex samples received from the transport.
+    /// Samples that don't fit are counted into `dropped_samples`.
+    pub fn push(&mut self, samples: &[Complex<f32>]) {
+        let written = self.ring.write(samples);
+        if written < samples.len() {
+            self.dropped_samples += (samples.len() - written) as u64;
+        }
+    }
+
+    /// Push a batch from an interleaved `[i0, q0, i1, q1, …]` float
+    /// slice. Convenience over [`push`] for callers that receive WS
+    /// frames as raw `Float32Array` payloads. Odd-length inputs drop
+    /// the trailing half-sample.
+    pub fn push_interleaved(&mut self, floats: &[f32]) {
+        let pair_count = floats.len() / 2;
+        let mut tmp = Vec::with_capacity(pair_count);
+        for chunk in floats[..pair_count * 2].chunks_exact(2) {
+            tmp.push(Complex::new(chunk[0], chunk[1]));
+        }
+        self.push(&tmp);
     }
 }
 
@@ -212,24 +321,40 @@ impl Block for WsBridgeRx {
                 name: "out",
                 port_type: PortType::IqF32,
             }],
-            params: &[STREAM_ID_PARAM],
+            params: &[STREAM_ID_PARAM, RX_BUFFER_SAMPLES_PARAM],
         }
     }
 
     fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
+        self.ring.reset();
+        self.dropped_samples = 0;
         Ok(())
     }
 
-    fn process(&mut self, _io: &mut BlockIo<'_>) -> Result<Work> {
-        // Placeholder: no transport yet, so produce nothing. Once M2
-        // lands, this fills the output buffer from decoded WS frames.
-        Ok(Work::new())
+    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+        let Some(out) = io
+            .outputs
+            .iter_mut()
+            .find(|p| p.name == "out")
+            .and_then(OutputPort::as_iq_f32_mut)
+        else {
+            return Ok(Work::new());
+        };
+        let got = self.ring.read(out);
+        let mut w = Work::new();
+        w.produced[0] = got;
+        Ok(w)
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        self.ring.reset();
+        Ok(())
     }
 }
 
 impl BlockFactory for WsBridgeRx {
     fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
-        let p: WsBridgeParams = crate::block::deserialize_params(params)?;
+        let p: WsBridgeRxParams = crate::block::deserialize_params(params)?;
         Ok(Box::new(WsBridgeRx::new(p)))
     }
 }
@@ -311,9 +436,12 @@ impl BlockFactory for WsBridgeTxFftU8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx, WsBridgeTxFftU8};
+    use super::{
+        BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx, WsBridgeTxFftU8,
+        DEFAULT_RX_BUFFER_SAMPLES,
+    };
     use crate::{
-        block::{Block, BlockIo, InBuf, InputPort, OutBuf, OutputPort, PortMeta, Work},
+        block::{Block, BlockIo, InBuf, InitCtx, InputPort, OutBuf, OutputPort, PortMeta, Work},
         frame::Frame,
     };
     use num_complex::Complex;
@@ -369,8 +497,11 @@ mod tests {
     }
 
     #[test]
-    fn rx_produces_nothing_until_transport_lands() {
-        let mut rx = WsBridgeRx::new(WsBridgeParams { stream_id: 3 });
+    fn rx_produces_nothing_when_ring_empty() {
+        let mut rx = WsBridgeRx::new(WsBridgeRxParams {
+            stream_id: 3,
+            buffer_samples: 64,
+        });
         let mut out = vec![Complex::new(0.0_f32, 0.0); 16];
         let mut outputs = [OutputPort {
             name: "out",
@@ -383,6 +514,138 @@ mod tests {
         };
         let w: Work = rx.process(&mut io).unwrap();
         assert_eq!(w.produced[0], 0);
+    }
+
+    #[test]
+    fn rx_defaults_match_canonical_shape() {
+        let p = WsBridgeRxParams::default();
+        assert_eq!(p.stream_id, 0);
+        assert_eq!(p.buffer_samples, DEFAULT_RX_BUFFER_SAMPLES);
+    }
+
+    #[test]
+    fn rx_params_round_trip_through_json() {
+        let value = serde_json::json!({ "stream_id": 1000, "buffer_samples": 1024 });
+        let p: WsBridgeRxParams = serde_json::from_value(value).unwrap();
+        assert_eq!(p.stream_id, 1000);
+        assert_eq!(p.buffer_samples, 1024);
+    }
+
+    #[test]
+    fn rx_pushed_samples_surface_on_output_port() {
+        let mut rx = WsBridgeRx::new(WsBridgeRxParams {
+            stream_id: 0,
+            buffer_samples: 8,
+        });
+        rx.push(&[
+            Complex::new(1.0, 2.0),
+            Complex::new(3.0, 4.0),
+            Complex::new(5.0, 6.0),
+        ]);
+        assert_eq!(rx.buffered_samples(), 3);
+
+        let mut out_buf = [Complex::new(0.0, 0.0); 8];
+        let mut outputs = [OutputPort {
+            name: "out",
+            meta: PortMeta::default(),
+            buf: OutBuf::IqF32(&mut out_buf),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut [],
+            outputs: &mut outputs,
+        };
+        let work = rx.process(&mut io).unwrap();
+        assert_eq!(work.produced[0], 3);
+        assert_eq!(
+            out_buf[..3],
+            [
+                Complex::new(1.0, 2.0),
+                Complex::new(3.0, 4.0),
+                Complex::new(5.0, 6.0),
+            ],
+        );
+        assert_eq!(rx.buffered_samples(), 0);
+    }
+
+    #[test]
+    fn rx_push_tallies_overflow_as_dropped_samples() {
+        let mut rx = WsBridgeRx::new(WsBridgeRxParams {
+            stream_id: 0,
+            buffer_samples: 2,
+        });
+        rx.push(&[
+            Complex::new(1.0, 0.0),
+            Complex::new(2.0, 0.0),
+            Complex::new(3.0, 0.0),
+        ]);
+        assert_eq!(rx.dropped_samples(), 1);
+        assert_eq!(rx.buffered_samples(), 2);
+    }
+
+    #[test]
+    fn rx_push_interleaved_converts_floats_to_complex_pairs() {
+        let mut rx = WsBridgeRx::new(WsBridgeRxParams {
+            stream_id: 0,
+            buffer_samples: 4,
+        });
+        rx.push_interleaved(&[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(rx.buffered_samples(), 2);
+
+        let mut out_buf = [Complex::new(0.0, 0.0); 2];
+        let mut outputs = [OutputPort {
+            name: "out",
+            meta: PortMeta::default(),
+            buf: OutBuf::IqF32(&mut out_buf),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut [],
+            outputs: &mut outputs,
+        };
+        rx.process(&mut io).unwrap();
+        assert_eq!(out_buf, [Complex::new(1.0, 2.0), Complex::new(3.0, 4.0)]);
+    }
+
+    #[test]
+    fn rx_push_interleaved_drops_trailing_half_sample() {
+        let mut rx = WsBridgeRx::new(WsBridgeRxParams {
+            stream_id: 0,
+            buffer_samples: 4,
+        });
+        rx.push_interleaved(&[0.1, 0.2, 0.3]);
+        assert_eq!(rx.buffered_samples(), 1);
+    }
+
+    #[test]
+    fn rx_init_resets_ring_and_dropped_count() {
+        let mut rx = WsBridgeRx::new(WsBridgeRxParams {
+            stream_id: 0,
+            buffer_samples: 2,
+        });
+        rx.push(&[
+            Complex::new(1.0, 0.0),
+            Complex::new(2.0, 0.0),
+            Complex::new(3.0, 0.0),
+        ]);
+        assert_eq!(rx.dropped_samples(), 1);
+        let mut ctx = InitCtx {
+            input_meta: &[],
+            output_meta: &[],
+            frames_hint: 1024,
+        };
+        rx.init(&mut ctx).unwrap();
+        assert_eq!(rx.dropped_samples(), 0);
+        assert_eq!(rx.buffered_samples(), 0);
+    }
+
+    #[test]
+    fn rx_stop_resets_ring() {
+        let mut rx = WsBridgeRx::new(WsBridgeRxParams {
+            stream_id: 0,
+            buffer_samples: 4,
+        });
+        rx.push(&[Complex::new(1.0, 2.0)]);
+        rx.stop().unwrap();
+        assert_eq!(rx.buffered_samples(), 0);
     }
 
     #[test]

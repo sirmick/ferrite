@@ -89,7 +89,7 @@ export function drainAudioFromSink(rt: RuntimeHandle, blockId: string, out: Floa
 }
 
 /**
- * Push a batch of interleaved IQ floats into the named `WsIqSource`
+ * Push a batch of interleaved IQ floats into the named `WsBridgeRx`
  * block. Typically called from the Worker that hosts the multiplexed
  * WebSocket: each incoming IQ frame for this stream id lands here, the
  * block's internal ring absorbs it, and the next `tick` emits the

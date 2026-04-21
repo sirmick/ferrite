@@ -200,7 +200,7 @@ describe('rust runtime wasm shim', () => {
     });
 
     // Browser-only fixture for the incoming-IQ side of the bridge —
-    // WsIqSource's ring is filled from JS via pushIq, then drained by
+    // WsBridgeRx's ring is filled from JS via pushIq, then drained by
     // process onto the IqF32 output. Pair it with FmDemod + AudioSink
     // so the end-to-end push → tick → drain pipeline is exercised.
     const wsIqToSinkDoc = JSON.stringify({
@@ -208,7 +208,7 @@ describe('rust runtime wasm shim', () => {
       environments: ['browser'],
       blocks: {
         src: {
-          type: 'WsIqSource',
+          type: 'WsBridgeRx',
           placement: 'browser',
           params: { stream_id: 42, buffer_samples: 4096 },
         },
@@ -275,12 +275,12 @@ describe('rust runtime wasm shim', () => {
       }
     });
 
-    it('rejects pushIq for a non-WsIqSource block', () => {
+    it('rejects pushIq for a non-WsBridgeRx block', () => {
       const rt = new RuntimeHandle(wsIqToSinkDoc, 'browser');
       try {
         rt.init();
         const samples = new Float32Array([0, 0]);
-        expect(() => rt.pushIq('demod', samples)).toThrow(/WsIqSource/);
+        expect(() => rt.pushIq('demod', samples)).toThrow(/WsBridgeRx/);
         expect(() => rt.pushIq('ghost', samples)).toThrow(/ghost/);
       } finally {
         rt.free();

@@ -7,7 +7,7 @@
 // under jsdom.
 //
 // Transport shape: the WebSocket is JS-owned (one multiplexed
-// `FrameClient` per session). Each `WsIqSource` block in the graph is
+// `FrameClient` per session). Each `WsBridgeRx` block in the graph is
 // wired to its configured `stream_id` subscription, and every incoming
 // IQ frame lands via `RuntimeHandle.pushIq`. Audio flows the other way
 // — each `tick` is followed by `drainAudio` into a SAB-backed
@@ -186,7 +186,7 @@ function wireBlocks(
   const audioSabs: Record<string, SharedArrayBuffer> = {};
   for (const [blockId, raw] of Object.entries(doc.blocks ?? {})) {
     const block = raw as { type?: string; params?: Record<string, unknown> };
-    if (block.type === 'WsIqSource') {
+    if (block.type === 'WsBridgeRx') {
       const streamId = Number(block.params?.stream_id ?? 0);
       const unsub = client.subscribe(streamId, (frame) => {
         if (frame.header.payloadType !== PayloadType.IqF32) return;

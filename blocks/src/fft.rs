@@ -170,6 +170,15 @@ impl Block for FftBlock {
         h
     }
 
+    fn relative_rate(&self, _in_port: usize, _out_port: usize) -> (u32, u32) {
+        // FFT consumes `size` samples to emit `size` bins — 1:1 on
+        // average. The block-oriented gating (only fire on a full
+        // window) is handled internally via `accum`, not via `forecast`,
+        // because upstream wires are typically sized to `frames_hint`
+        // and would never hold a full `size`-sample window all at once.
+        (1, 1)
+    }
+
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
         let n = self.params.size;
         let src = io

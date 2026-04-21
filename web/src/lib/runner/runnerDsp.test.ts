@@ -1,7 +1,7 @@
 // End-to-end DSP correctness test through the real Rust runtime.
 //
 // Synthesises an FM-modulated 1 kHz tone at 240 kHz sample rate, pushes
-// the interleaved-float IQ into a WsIqSource → FmDemod → AudioSink
+// the interleaved-float IQ into a WsBridgeRx → FmDemod → AudioSink
 // graph via the same `pushIq` path the browser Worker uses, lets the
 // RunnerCore tick loop drain audio into a SAB-backed AudioRingWriter,
 // then reads the demodulated audio back via AudioRingReader and checks
@@ -85,7 +85,7 @@ const DOC: FlowgraphDoc = {
   environments: ['browser'],
   blocks: {
     rx: {
-      type: 'WsIqSource',
+      type: 'WsBridgeRx',
       placement: 'browser',
       params: { stream_id: 42, buffer_samples: BUFFER_SAMPLES },
     },

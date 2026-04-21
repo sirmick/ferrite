@@ -1,7 +1,7 @@
 //! Generic SPSC ring — Rust port of the algorithm in
 //! `web/src/lib/audio/ringBuffer.ts`, parameterised over the element
 //! type so the same type covers `AudioSink` (f32 audio) and
-//! `WsIqSource` (complex IQ).
+//! `WsBridgeRx` (complex IQ).
 //!
 //! Producer-writer / consumer-reader semantics, both sides non-blocking:
 //! overruns drop samples (audio clock wins over flowgraph clock) and
@@ -115,7 +115,7 @@ impl<T: Copy + Default> SpscRing<T> {
 /// Ring of real f32 audio samples. Used by `AudioSink`.
 pub type AudioRing = SpscRing<f32>;
 
-/// Ring of complex IQ samples. Used by `WsIqSource`.
+/// Ring of complex IQ samples. Used by `WsBridgeRx`.
 pub type IqRing = SpscRing<num_complex::Complex<f32>>;
 
 #[cfg(test)]

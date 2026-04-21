@@ -31,7 +31,6 @@ pub mod soapy_source;
 pub mod spsc_ring;
 pub mod tee_iq_f32;
 pub mod ws_bridge;
-pub mod ws_iq_source;
 
 pub use am_demod::{AmDemod, AmDemodParams};
 pub use audio_sink::{AudioSink, AudioSinkParams};
@@ -52,8 +51,9 @@ pub use sine::{SineSource, SineSourceParams};
 pub use soapy_source::{SoapySource, SoapySourceParams};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use tee_iq_f32::TeeIqF32;
-pub use ws_bridge::{BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeTx, WsBridgeTxFftU8};
-pub use ws_iq_source::{WsIqSource, WsIqSourceParams};
+pub use ws_bridge::{
+    BridgeSink, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx, WsBridgeTxFftU8,
+};
 
 /// Marks an `impl Block for T` so `T` is added to [`registry`].
 ///
@@ -112,7 +112,6 @@ mod tests {
             "WsBridgeTxFftU8",
             "WsBridgeRx",
             "AudioSink",
-            "WsIqSource",
         ] {
             assert!(
                 names.contains(expected),

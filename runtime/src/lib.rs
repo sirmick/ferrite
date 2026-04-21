@@ -19,6 +19,7 @@ pub mod instantiate;
 pub mod reconfigure;
 pub mod runtime;
 pub mod schedule;
+pub mod typed_ring;
 pub mod validate;
 
 #[cfg(feature = "wasm")]
@@ -34,4 +35,5 @@ pub use reconfigure::{
 };
 pub use runtime::{Runtime, RuntimeState, DEFAULT_FRAMES_HINT};
 pub use schedule::{build_wire_plan, topological_order, InputSource, Schedule, WirePlan};
+pub use typed_ring::TypedRing;
 pub use validate::{validate_doc, FlowgraphValidationError, Phase, ValidatedDoc, ValidationError};

@@ -147,6 +147,17 @@ impl Block for LogMagU8 {
         h
     }
 
+    fn forecast(&self, _noutput_items: usize) -> Option<[usize; MAX_PORTS]> {
+        // LogMagU8 operates on whole FFT bin blocks: consume `size`
+        // cf32 bins and emit `size` u8 magnitudes, atomically. Tell the
+        // scheduler not to call us before a full window is available —
+        // upstream is `FftBlock` which emits exactly `size` samples at
+        // a time, so the wire fills in one shot.
+        let mut f = [0; MAX_PORTS];
+        f[0] = self.params.size;
+        Some(f)
+    }
+
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
         let n = self.params.size;
         let src = io
