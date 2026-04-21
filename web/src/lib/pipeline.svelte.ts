@@ -22,6 +22,7 @@ import {
   type PipelineStatus,
 } from '$lib/api/pipeline';
 import { fetchUiSinks, type UiSink } from '$lib/api/uiSinks';
+import { fetchPipelineBlocks, patchBlockParams, type PipelineBlock } from '$lib/api/pipelineBlocks';
 import { FrameClient, type ClientStatus } from '$lib/ws/client';
 import { initFrameDecoder } from '$lib/ws/frame';
 import { logs } from '$lib/logs/store.svelte';
@@ -40,6 +41,11 @@ class PipelineStore {
    *  name. Populated on `init()` and re-fetched on preset/source patch. */
   uiSinks = $state<Record<string, UiSink>>({});
 
+  /** Composed-preset blocks with their spec and current params, keyed by
+   *  block id. Populated on `init()` and re-fetched after any patch.
+   *  Feeds the receiver panel and the generic `<BlockParams>` component. */
+  blocks = $state<Record<string, PipelineBlock>>({});
+
   /** Shared WebSocket client feeding `/ws/preset`. Always open while
    *  the store is alive — callers multiplex by stream id. */
   client = $state<FrameClient | undefined>(undefined);
@@ -55,16 +61,18 @@ class PipelineStore {
     this.errorMessage = null;
     try {
       await initFrameDecoder();
-      const [fg, src, st, sinks] = await Promise.all([
+      const [fg, src, st, sinks, blocks] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
         fetchUiSinks(),
+        fetchPipelineBlocks(),
       ]);
       this.flowgraph = fg;
       this.source = src;
       this.status = st;
       this.uiSinks = indexByName(sinks);
+      this.blocks = indexById(blocks);
       this.client = new FrameClient({
         url: wsUrlFor('/ws/preset'),
         onStatus: (s) => {
@@ -103,9 +111,33 @@ class PipelineStore {
     return this.withBusy(async () => {
       const resp = await patchSource(next);
       this.source = next;
-      this.uiSinks = indexByName(await fetchUiSinks());
+      await this.refreshComposed();
       return resp;
     }, 'patch source');
+  }
+
+  /** Route one DSP knob change to the server's generic block-params
+   *  endpoint. `id` is the block id inside the composed preset; `key`
+   *  names the param on that block. The server merges the delta into
+   *  either `SourceConfig.params` (for `src`) or
+   *  `FlowgraphDoc.blocks[id].params` and hot-reconfigures.
+   *
+   *  This is the single entry point the receiver panel and
+   *  `<BlockParams>` component use — every slider, toggle, and select
+   *  calls through here. When the browser-half runtime lands the
+   *  dispatcher will branch on `PipelineBlock.placement` and call
+   *  `RuntimeHandle.reconfigureBlock` directly for browser-side blocks;
+   *  today every placement routes through REST. */
+  async setBlockParam(
+    id: string,
+    key: string,
+    value: unknown,
+  ): Promise<ReconfigureResponse | null> {
+    return this.withBusy(async () => {
+      const resp = await patchBlockParams(id, { [key]: value });
+      await this.refreshComposed();
+      return resp;
+    }, `set ${id}.${key}`);
   }
 
   /** Patch just the source's `params` object, preserving `type`. Shape
@@ -124,9 +156,18 @@ class PipelineStore {
     return this.withBusy(async () => {
       const resp = await patchFlowgraph(doc);
       this.flowgraph = doc;
-      this.uiSinks = indexByName(await fetchUiSinks());
+      await this.refreshComposed();
       return resp;
     }, 'patch flowgraph');
+  }
+
+  /** Re-read derivatives of the composed preset (ui_sinks + blocks) in
+   *  parallel. Called after every patch so local state stays coherent
+   *  with what the server is actually running. */
+  private async refreshComposed(): Promise<void> {
+    const [sinks, blocks] = await Promise.all([fetchUiSinks(), fetchPipelineBlocks()]);
+    this.uiSinks = indexByName(sinks);
+    this.blocks = indexById(blocks);
   }
 
   /** Close the WebSocket. Call on unmount; does NOT stop the server
@@ -163,6 +204,12 @@ class PipelineStore {
 function indexByName(sinks: UiSink[]): Record<string, UiSink> {
   const out: Record<string, UiSink> = {};
   for (const s of sinks) out[s.name] = s;
+  return out;
+}
+
+function indexById(blocks: PipelineBlock[]): Record<string, PipelineBlock> {
+  const out: Record<string, PipelineBlock> = {};
+  for (const b of blocks) out[b.id] = b;
   return out;
 }
 
