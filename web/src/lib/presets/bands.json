@@ -1,23 +1,23 @@
 {
-  "$comment": "Frequency presets surfaced in the Bands panel. Each group renders as a collapsible section. `hz` is centre; `mode` is advisory until demod lands. Expand freely — this file is user-editable.",
+  "$comment": "Frequency presets surfaced in the Bands panel. Each group renders as a collapsible section. `hz` is centre; `mode` is advisory until demod lands; `preset` names a server-side preset (matches GET /api/presets) that the click handler loads before tuning. Expand freely — this file is user-editable.",
   "groups": [
     {
       "name": "FM broadcast",
       "entries": [
-        { "label": "87.9 (band low)", "hz": 87900000, "mode": "WFM" },
-        { "label": "93.3", "hz": 93300000, "mode": "WFM" },
-        { "label": "96.9", "hz": 96900000, "mode": "WFM" },
-        { "label": "100.1", "hz": 100100000, "mode": "WFM" },
-        { "label": "105.7", "hz": 105700000, "mode": "WFM" },
-        { "label": "107.9 (band high)", "hz": 107900000, "mode": "WFM" }
+        { "label": "87.9 (band low)", "hz": 87900000, "mode": "WFM", "preset": "wbfm" },
+        { "label": "93.3", "hz": 93300000, "mode": "WFM", "preset": "wbfm" },
+        { "label": "96.9", "hz": 96900000, "mode": "WFM", "preset": "wbfm" },
+        { "label": "100.1", "hz": 100100000, "mode": "WFM", "preset": "wbfm" },
+        { "label": "105.7", "hz": 105700000, "mode": "WFM", "preset": "wbfm" },
+        { "label": "107.9 (band high)", "hz": 107900000, "mode": "WFM", "preset": "wbfm" }
       ]
     },
     {
       "name": "AM broadcast",
       "entries": [
-        { "label": "540 (band low)", "hz": 540000, "mode": "AM" },
-        { "label": "1040", "hz": 1040000, "mode": "AM" },
-        { "label": "1610 (band high)", "hz": 1610000, "mode": "AM" }
+        { "label": "540 (band low)", "hz": 540000, "mode": "AM", "preset": "wbam" },
+        { "label": "1040", "hz": 1040000, "mode": "AM", "preset": "wbam" },
+        { "label": "1610 (band high)", "hz": 1610000, "mode": "AM", "preset": "wbam" }
       ]
     },
     {
@@ -52,9 +52,9 @@
     {
       "name": "Aviation (118–137 MHz)",
       "entries": [
-        { "label": "Emergency (guard)", "hz": 121500000, "mode": "AM" },
-        { "label": "UNICOM", "hz": 122800000, "mode": "AM" },
-        { "label": "Air-to-air", "hz": 123450000, "mode": "AM" }
+        { "label": "Emergency (guard)", "hz": 121500000, "mode": "AM", "preset": "wbam" },
+        { "label": "UNICOM", "hz": 122800000, "mode": "AM", "preset": "wbam" },
+        { "label": "Air-to-air", "hz": 123450000, "mode": "AM", "preset": "wbam" }
       ]
     },
     {

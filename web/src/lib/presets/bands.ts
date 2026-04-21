@@ -9,6 +9,10 @@ export interface BandEntry {
   hz: number;
   /** Advisory demod mode — used by the panel display until demod lands. */
   mode?: string;
+  /** Preset basename to load before tuning. Names here must match a
+   *  file the server exposes via `GET /api/presets`; the click handler
+   *  swaps the preset first, then patches center_freq_hz. */
+  preset?: string;
 }
 
 export interface BandGroup {
