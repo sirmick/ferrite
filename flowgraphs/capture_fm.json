@@ -1,0 +1,31 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "capture_fm",
+  "label": "FM-band capture",
+  "description": "Writes a wideband slice of the FM broadcast band to /tmp/ferrite-fm-100.100mhz_iq-s16.wav (plus sidecar) for offline diagnosis. All-native graph: Source placeholder → FileIqSink, no browser side. Run via `ferrited --flowgraph capture_fm.json --source-type SoapySource --source-args \"driver=sdrplay\" --agc true --source-bandwidth-hz 1536000 --start`. Stop ferrited after ~10s — FileIqSink's max_seconds cap also truncates the write.",
+  "environments": ["node"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 100100000.0,
+        "sample_rate_hz": 2000000.0,
+        "bandwidth_hz": 1536000.0
+      }
+    },
+    "cap": {
+      "type": "FileIqSink",
+      "placement": "node",
+      "params": {
+        "path": "/tmp/ferrite-fm-100.100mhz_iq-s16.wav",
+        "format": "wav-s16",
+        "rate_hz": 2000000.0,
+        "center_freq_hz": 100100000.0,
+        "max_seconds": 10.0,
+        "write_sidecar": true
+      }
+    }
+  },
+  "wires": [["src.out", "cap.in"]]
+}

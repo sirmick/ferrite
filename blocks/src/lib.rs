@@ -24,6 +24,7 @@ pub mod dtmf_audio_source;
 pub mod dtmf_decoder;
 pub mod events_sink;
 pub mod fft;
+pub mod file_sink;
 pub mod file_source;
 pub mod fm_demod;
 pub mod frame;
@@ -50,6 +51,7 @@ pub use dtmf_audio_source::{DtmfAudioSource, DtmfAudioSourceParams};
 pub use dtmf_decoder::{DtmfDecoder, DtmfDecoderParams};
 pub use events_sink::{EventsSink, EventsSinkParams};
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
+pub use file_sink::{FileIqSink, FileIqSinkParams, IqSinkFormat, WriteSeek};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
@@ -110,6 +112,7 @@ mod tests {
         for expected in [
             "SineSource",
             "FFT",
+            "FileIqSink",
             "FileIqSource",
             "LogMagU8",
             "Decimator",

@@ -1,32 +1,36 @@
 //! Live `SoapySDR` IQ source — reads `Complex<f32>` samples off a real
-//! device (RTL-SDR, RSP1A, Airspy, …) and emits them on an `IqF32` port.
+//! device (RTL-SDR, RSP1A, RSPdx, Airspy, …) and emits them on an `IqF32`
+//! port.
 //!
 //! ## Architecture
 //!
-//! Hardware produces samples at whatever the driver delivers; the
-//! pipeline consumes `frames_hint` samples per [`process`] call. The
-//! two cadences rarely line up. To keep this block allocation-free on
-//! the hot path while absorbing driver bursts, a dedicated OS thread
-//! reads into a single `Mutex<Option<Vec<…>>>` slot, overwriting it
-//! with the most recent `frames_hint`-sized block. `process()` copies
-//! that slot into the output buffer on each tick — dropping older
-//! blocks the reader already replaced.
+//! A dedicated reader thread pulls from the Soapy `RxStream` and pushes
+//! every sample into a bounded SPSC ring. `process()` pops exactly what
+//! the downstream port asks for each tick. The ring sits between the
+//! driver's USB cadence (which delivers in fixed-size blocks every few
+//! milliseconds) and the scheduler's tick cadence (every 400µs at the
+//! current default), so steady-state flow is **sample-for-sample 1:1**
+//! with no dupes and no drops.
 //!
-//! This is the lossy-latest policy from the server's original
-//! `soapy_source.rs`: fine for a waterfall or a narrowband receiver,
-//! wrong for a decoder that needs every sample. A ring-buffer variant
-//! lands when a decoder preset actually needs it.
+//! When the scheduler does fall behind for long enough to fill the ring
+//! (GC, IO stall, whatever), the reader drops incoming samples and
+//! bumps [`SoapySource::ring_drops`] — explicit, countable, not silent.
+//! Driver-reported overflows land in [`SoapySource::overflow_drops`]
+//! and timestamp discontinuities (gaps between `stream.time_ns()`
+//! readings and the expected delta from `sample_rate_hz`) in
+//! [`SoapySource::timestamp_gaps`]. A capture that observes all three
+//! counters at zero is provably lossless.
 //!
 //! ## Lifetime
 //!
 //! - [`SoapySource::new`] opens the device, configures it, and
 //!   activates the Rx stream. Failure here surfaces at flowgraph
 //!   instantiation rather than first tick.
-//! - [`Block::init`] spawns the reader thread, sized to the
-//!   scheduler's `frames_hint`.
-//! - [`Block::process`] copies the latest block, zero-filling when the
-//!   reader hasn't produced one yet.
-//! - `Drop` flips a stop flag and joins the reader.
+//! - [`Block::init`] resets ring + counters and spawns the reader.
+//! - [`Block::process`] pops from the ring; short reads zero-fill and
+//!   bump [`SoapySource::underrun_samples`].
+//! - [`Block::stop`] / `Drop` flips a stop flag, joins the reader, and
+//!   deactivates the stream.
 //!
 //! ## Feature
 //!
@@ -55,6 +59,32 @@ use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, OutputPort, ParamKind, ParamSpec, Placement,
     PortSpec, PortType, ReconfigureScope, Work,
 };
+use crate::spsc_ring::IqRing;
+
+/// Ring capacity in samples. 512 k complex samples = 4 MiB.
+/// 256 ms of headroom at 2 MS/s, 26 ms at 20 MS/s — covers any
+/// realistic scheduler hiccup short of a swap storm.
+const RING_CAPACITY: usize = 524_288;
+
+/// Samples the reader pulls per `stream.read()` call. Balances syscall
+/// overhead against mutex-lock duration. 16 k samples ≈ 8 ms at
+/// 2 MS/s — mutex held for a few µs, plenty short for 2.5 kHz tickers.
+const READER_CHUNK: usize = 16_384;
+
+/// Read timeout passed to Soapy, microseconds. Long enough to absorb
+/// normal USB jitter, short enough that `stop` is responsive.
+const READ_TIMEOUT_US: i64 = 100_000;
+
+/// Counters bumped exclusively by the reader thread. `process()` reads
+/// them lock-free so diagnostics can sample at any tick rate without
+/// perturbing the hot path.
+#[derive(Debug, Default)]
+struct ReaderCounters {
+    overflow_drops: AtomicU64,
+    ring_drops: AtomicU64,
+    timestamp_gaps: AtomicU64,
+    samples_pushed: AtomicU64,
+}
 
 /// Construction-time params. All fields are optional in the JSON preset;
 /// missing fields fall back to [`Default`].
@@ -96,12 +126,9 @@ impl Default for SoapySourceParams {
     }
 }
 
-type LatestSlot = Arc<Mutex<Option<Vec<Complex<f32>>>>>;
+type RingHandle = Arc<Mutex<IqRing>>;
 
 pub struct SoapySource {
-    /// Cloneable handle to the open device. Held so retune / gain calls
-    /// can issue from the pipeline thread while the reader holds the
-    /// `RxStream`. Reconfigure hooks land in M3.
     #[allow(dead_code)]
     device: Device,
     #[allow(dead_code)]
@@ -111,17 +138,14 @@ pub struct SoapySource {
     /// Some before [`Block::init`]; taken and moved into the reader
     /// thread when init spawns it.
     stream: Option<RxStream<Complex<f32>>>,
-    latest: LatestSlot,
-    /// Bumped by the reader after every successful write to `latest`.
-    /// Pipeline compares it against `last_seen_version` to distinguish
-    /// fresh blocks from a re-served stale one.
-    version: Arc<AtomicU64>,
+    ring: RingHandle,
+    counters: Arc<ReaderCounters>,
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
-    last_seen_version: u64,
     ticks: u64,
-    gaps: u64,
-    stale: u64,
+    /// Samples the process() hot path could not deliver because the
+    /// ring was empty. Zero on a healthy run.
+    underrun_samples: u64,
 }
 
 impl SoapySource {
@@ -175,14 +199,12 @@ impl SoapySource {
             sample_rate_hz: actual_rate,
             center_freq_hz: actual_freq,
             stream: Some(stream),
-            latest: Arc::new(Mutex::new(None)),
-            version: Arc::new(AtomicU64::new(0)),
+            ring: Arc::new(Mutex::new(IqRing::new(RING_CAPACITY))),
+            counters: Arc::new(ReaderCounters::default()),
             stop: Arc::new(AtomicBool::new(false)),
             reader: None,
-            last_seen_version: 0,
             ticks: 0,
-            gaps: 0,
-            stale: 0,
+            underrun_samples: 0,
         })
     }
 
@@ -195,6 +217,46 @@ impl SoapySource {
     #[must_use]
     pub const fn center_freq_hz(&self) -> f64 {
         self.center_freq_hz
+    }
+
+    /// Samples dropped because the driver's internal ring overran
+    /// (`ErrorCode::Overflow` from `stream.read`). Nonzero means the
+    /// reader thread itself was too slow for the rate.
+    #[must_use]
+    pub fn overflow_drops(&self) -> u64 {
+        self.counters.overflow_drops.load(Ordering::Relaxed)
+    }
+
+    /// Samples dropped because our in-process ring was full — the
+    /// reader produced them but `process()` was too slow to consume.
+    /// Nonzero means the pipeline fell behind its real-time clock.
+    #[must_use]
+    pub fn ring_drops(&self) -> u64 {
+        self.counters.ring_drops.load(Ordering::Relaxed)
+    }
+
+    /// Count of reader reads whose timestamp drifted from the expected
+    /// monotonic delta by more than one sample period. Nonzero means
+    /// the driver believes it dropped samples between reads even when
+    /// it didn't report an `Overflow`.
+    #[must_use]
+    pub fn timestamp_gaps(&self) -> u64 {
+        self.counters.timestamp_gaps.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative samples the reader successfully pushed into the ring.
+    /// Useful to compute effective rate from outside the block.
+    #[must_use]
+    pub fn samples_pushed(&self) -> u64 {
+        self.counters.samples_pushed.load(Ordering::Relaxed)
+    }
+
+    /// Samples `process()` could not deliver because the ring was
+    /// empty — tick-side underruns. Nonzero typically means the
+    /// scheduler is ticking faster than the reader can feed.
+    #[must_use]
+    pub fn underrun_samples(&self) -> u64 {
+        self.underrun_samples
     }
 }
 
@@ -216,7 +278,6 @@ impl Block for SoapySource {
                     kind: ParamKind::Text {
                         default: "driver=rtlsdr",
                     },
-                    // Swapping devices = reopen the whole source.
                     reconfig_scope: ReconfigureScope::SourceRestart,
                 },
                 ParamSpec {
@@ -229,7 +290,6 @@ impl Block for SoapySource {
                         default: 2_400_000.0,
                         unit: "Hz",
                     },
-                    // Hardware clock parameter — must re-open the stream.
                     reconfig_scope: ReconfigureScope::SourceRestart,
                 },
                 ParamSpec {
@@ -242,7 +302,6 @@ impl Block for SoapySource {
                         default: 100_000_000.0,
                         unit: "Hz",
                     },
-                    // Tuning is live on Soapy devices — just call set_freq.
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
@@ -273,7 +332,7 @@ impl Block for SoapySource {
         }
     }
 
-    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+    fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
         if self.reader.is_some() {
             return Err(anyhow!("SoapySource::init called more than once"));
         }
@@ -281,19 +340,25 @@ impl Block for SoapySource {
             .stream
             .take()
             .ok_or_else(|| anyhow!("SoapySource stream missing at init — was new() called?"))?;
-        let block_size = ctx.frames_hint.max(1);
 
-        let reader_latest = self.latest.clone();
-        let reader_version = self.version.clone();
+        if let Ok(mut ring) = self.ring.lock() {
+            ring.reset();
+        }
+        self.ticks = 0;
+        self.underrun_samples = 0;
+
+        let reader_ring = self.ring.clone();
+        let reader_counters = self.counters.clone();
         let reader_stop = self.stop.clone();
+        let rate_hz = self.sample_rate_hz;
         let reader = thread::Builder::new()
             .name("soapy-rx".into())
             .spawn(move || {
                 run_reader(
                     stream,
-                    block_size,
-                    &reader_latest,
-                    &reader_version,
+                    rate_hz,
+                    &reader_ring,
+                    &reader_counters,
                     &reader_stop,
                 );
             })
@@ -312,33 +377,19 @@ impl Block for SoapySource {
             return Ok(Work::new());
         };
 
-        // Version snapshot before the lock so a racing reader write
-        // counts as "fresh" on the next tick rather than being missed.
-        let version = self.version.load(Ordering::Acquire);
-        let guard = self
-            .latest
-            .lock()
-            .map_err(|_| anyhow!("soapy latest mutex poisoned"))?;
         self.ticks = self.ticks.saturating_add(1);
+        let want = out.len();
+        let got = match self.ring.lock() {
+            Ok(mut ring) => ring.read(out),
+            Err(_) => return Err(anyhow!("soapy ring mutex poisoned")),
+        };
+        if got < want {
+            out[got..].fill(Complex::new(0.0, 0.0));
+            self.underrun_samples = self.underrun_samples.saturating_add((want - got) as u64);
+        }
 
         let mut w = Work::new();
-        if let Some(samples) = guard.as_ref() {
-            let n = out.len().min(samples.len());
-            out[..n].copy_from_slice(&samples[..n]);
-            if n < out.len() {
-                out[n..].fill(Complex::new(0.0, 0.0));
-            }
-            if version == self.last_seen_version {
-                self.stale = self.stale.saturating_add(1);
-            } else {
-                self.last_seen_version = version;
-            }
-            w.produced[0] = out.len();
-        } else {
-            out.fill(Complex::new(0.0, 0.0));
-            self.gaps = self.gaps.saturating_add(1);
-            w.produced[0] = out.len();
-        }
+        w.produced[0] = want;
         Ok(w)
     }
 
@@ -369,49 +420,81 @@ impl BlockFactory for SoapySource {
 
 fn run_reader(
     mut stream: RxStream<Complex<f32>>,
-    block_size: usize,
-    latest: &LatestSlot,
-    version: &Arc<AtomicU64>,
+    rate_hz: f64,
+    ring: &RingHandle,
+    counters: &Arc<ReaderCounters>,
     stop: &Arc<AtomicBool>,
 ) {
-    let mut buf = vec![Complex::new(0.0_f32, 0.0); block_size];
-    let read_timeout_us: i64 = 100_000;
+    let mut staging: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); READER_CHUNK];
+    // Timestamp bookkeeping: the expected next time_ns, updated after
+    // each successful read. Gap detection skips the first read and any
+    // read where the driver reports a zero timestamp (not all drivers
+    // populate it — RTL-SDR notably does not).
+    let mut expected_time_ns: i64 = 0;
+    let ns_per_sample = if rate_hz > 0.0 {
+        1_000_000_000.0_f64 / rate_hz
+    } else {
+        0.0
+    };
+    let gap_tolerance_ns = (ns_per_sample * 2.0) as i64;
+
     while !stop.load(Ordering::Relaxed) {
-        let mut filled = 0;
-        while filled < block_size && !stop.load(Ordering::Relaxed) {
-            let result = {
-                let dst: &mut [Complex<f32>] = &mut buf[filled..];
-                let mut buffers: [&mut [Complex<f32>]; 1] = [dst];
-                stream.read(&mut buffers, read_timeout_us)
-            };
-            match result {
-                Ok(0) => {
-                    thread::sleep(Duration::from_millis(2));
+        let result = {
+            let dst: &mut [Complex<f32>] = &mut staging[..];
+            let mut buffers: [&mut [Complex<f32>]; 1] = [dst];
+            stream.read(&mut buffers, READ_TIMEOUT_US)
+        };
+        match result {
+            Ok(0) => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(n) => {
+                let t = stream.time_ns();
+                if t > 0 {
+                    if expected_time_ns > 0 {
+                        let delta = (t - expected_time_ns).abs();
+                        if delta > gap_tolerance_ns {
+                            counters.timestamp_gaps.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    expected_time_ns = t + (n as f64 * ns_per_sample) as i64;
                 }
-                Ok(n) => filled += n,
-                Err(err) if err.code == ErrorCode::Timeout => {
-                    thread::sleep(Duration::from_millis(2));
-                }
-                Err(err) if err.code == ErrorCode::Overflow => {
-                    tracing::debug!("soapy overflow");
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "soapy read error; ending reader");
-                    let _ = stream.deactivate(None);
-                    return;
+
+                let pushed = match ring.lock() {
+                    Ok(mut r) => r.write(&staging[..n]),
+                    Err(_) => {
+                        tracing::warn!("soapy ring mutex poisoned; ending reader");
+                        let _ = stream.deactivate(None);
+                        return;
+                    }
+                };
+                counters
+                    .samples_pushed
+                    .fetch_add(pushed as u64, Ordering::Relaxed);
+                if pushed < n {
+                    counters
+                        .ring_drops
+                        .fetch_add((n - pushed) as u64, Ordering::Relaxed);
                 }
             }
-        }
-        if filled == block_size {
-            if let Ok(mut slot) = latest.lock() {
-                // Ping-pong scratch ↔ slot so steady-state does no allocation.
-                let prev = slot.replace(std::mem::take(&mut buf));
-                buf = prev.unwrap_or_else(|| vec![Complex::new(0.0, 0.0); block_size]);
-                if buf.len() != block_size {
-                    buf.resize(block_size, Complex::new(0.0, 0.0));
-                }
+            Err(err) if err.code == ErrorCode::Timeout => {
+                // Normal idle — try again. Brief sleep so the driver
+                // has a chance to fill its internal ring if the pipe
+                // was momentarily starved.
+                thread::sleep(Duration::from_millis(1));
             }
-            version.fetch_add(1, Ordering::Release);
+            Err(err) if err.code == ErrorCode::Overflow => {
+                counters.overflow_drops.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!("soapy overflow");
+                // Invalidate the expected-time tracker — we can't
+                // compute a sane delta across the gap.
+                expected_time_ns = 0;
+            }
+            Err(err) => {
+                tracing::warn!(?err, "soapy read error; ending reader");
+                let _ = stream.deactivate(None);
+                return;
+            }
         }
     }
     let _ = stream.deactivate(None);
