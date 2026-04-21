@@ -1,6 +1,20 @@
 // Canvas2D line plot of the most-recent FFT row, plus optional fading
 // persistence history, a max-hold trace, and a client-side auto-floor
 // that asks the server to re-scale floor/ceil.
+//
+// The CPU math — max-per-column bin collapse, elementwise max-hold,
+// p10/p99 row stats — lives in `ferrite-blocks::render` (Rust) and is
+// called through the wasm-bindgen bindings in `../wasm/blocks`. That
+// module is covered by native `cargo test`; this file stays a thin
+// canvas driver. `initFrameDecoder()` (awaited by SessionStore before
+// frames flow) initializes the same wasm instance, so the synchronous
+// calls below are safe from the first setRow onwards.
+
+import {
+  collapse_row_to_columns as wasmCollapseRow,
+  compute_spectrum_stats as wasmComputeStats,
+  update_max_hold as wasmUpdateMaxHold,
+} from '../wasm/blocks/ferrite_blocks';
 
 export interface SpectrumAxes {
   /** Centre RF frequency in Hz — drives the X-axis labels. */
@@ -74,6 +88,7 @@ export class SpectrumRenderer {
   private maxRow: Uint8Array | undefined;
   private statsListener: ((s: SpectrumStats) => void) | undefined;
   private markers: SpectrumMarkers = {};
+  private collapseBuf: Uint8Array | undefined;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -106,12 +121,9 @@ export class SpectrumRenderer {
 
     if (this.features.maxHold) {
       if (!this.maxRow || this.maxRow.length !== row.length) {
-        this.maxRow = new Uint8Array(row);
-      } else {
-        for (let i = 0; i < row.length; i++) {
-          if (row[i] > this.maxRow[i]) this.maxRow[i] = row[i];
-        }
+        this.maxRow = new Uint8Array(row.length);
       }
+      wasmUpdateMaxHold(this.maxRow, row);
     }
 
     if (this.statsListener) this.statsListener(computeStats(row));
@@ -356,18 +368,17 @@ export class SpectrumRenderer {
     // the same column — adjacent noisy bins jump in y and the canvas
     // renders that as visible vertical strokes (the "comb"). Collapse
     // each pixel column to its max bin so the trace is a clean envelope.
+    // The reduction runs in wasm (`ferrite-blocks::render`).
     const px = Math.max(1, Math.floor(plot.w));
     if (n > px) {
-      const binsPerPx = n / px;
+      if (!this.collapseBuf || this.collapseBuf.length !== px) {
+        this.collapseBuf = new Uint8Array(px);
+      }
+      wasmCollapseRow(row, this.collapseBuf);
+      const cols = this.collapseBuf;
       for (let i = 0; i < px; i++) {
-        const b0 = Math.floor(i * binsPerPx);
-        const b1 = Math.min(n, Math.floor((i + 1) * binsPerPx) + 1);
-        let maxV = 0;
-        for (let b = b0; b < b1; b++) {
-          if (row[b] > maxV) maxV = row[b];
-        }
         const x = plot.x + i;
-        const y = plot.y + plot.h - maxV * yScale;
+        const y = plot.y + plot.h - cols[i] * yScale;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
@@ -384,30 +395,16 @@ export class SpectrumRenderer {
   }
 }
 
-/** 10th / 99th percentile of a row's byte values. */
+/** 10th / 99th percentile of a row's byte values. Thin wrapper over
+ *  the wasm `compute_spectrum_stats`; frees the Rust-owned handle
+ *  before returning a plain-object snapshot. */
 export function computeStats(row: Uint8Array): SpectrumStats {
-  if (row.length === 0) return { p10: 0, p99: 255 };
-  const hist = new Uint32Array(256);
-  for (let i = 0; i < row.length; i++) hist[row[i]]++;
-  const n = row.length;
-  const t10 = Math.max(1, Math.floor(n * 0.1));
-  const t99 = Math.max(1, Math.floor(n * 0.99));
-  let cum = 0;
-  let p10 = 0;
-  let p99 = 255;
-  let seen10 = false;
-  for (let v = 0; v < 256; v++) {
-    cum += hist[v];
-    if (!seen10 && cum >= t10) {
-      p10 = v;
-      seen10 = true;
-    }
-    if (cum >= t99) {
-      p99 = v;
-      break;
-    }
+  const s = wasmComputeStats(row);
+  try {
+    return { p10: s.p10, p99: s.p99 };
+  } finally {
+    s.free();
   }
-  return { p10, p99 };
 }
 
 function niceTicks(lo: number, hi: number, target: number): number[] {

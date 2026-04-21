@@ -30,6 +30,7 @@ pub mod fm_demod;
 pub mod frame;
 pub mod log_mag_u8;
 pub mod registry;
+pub mod render;
 pub mod sine;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_source;
@@ -56,6 +57,7 @@ pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
+pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hold, SpectrumStats};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
 pub use soapy_source::{SoapySource, SoapySourceParams};
