@@ -22,6 +22,22 @@
 
   let axes = $derived(currentAxes(pipeline));
 
+  // The "VFO block" is whichever block in the composed preset exposes a
+  // `freq_shift_hz` param — that's the channelizer baseband-shift knob
+  // today. When present, it drives the orange Nixie; absent, we hide
+  // the VFO controls so bareband presets stay uncluttered.
+  let vfoBlock = $derived(
+    Object.values(pipeline.blocks).find((b) =>
+      b.spec.params.some((p) => p.key === 'freq_shift_hz'),
+    ),
+  );
+  let vfoShiftHz = $derived.by(() => {
+    if (!vfoBlock) return 0;
+    const v = (vfoBlock.values as Record<string, unknown> | null)?.freq_shift_hz;
+    return typeof v === 'number' ? v : 0;
+  });
+  let vfoAbsHz = $derived((axes?.center_freq_hz ?? 0) + vfoShiftHz);
+
   const STEPS = [
     { label: '1 Hz', hz: 1 },
     { label: '10 Hz', hz: 10 },
@@ -40,6 +56,20 @@
   function commitCenter(hz: number) {
     if (axes && hz !== axes.center_freq_hz) {
       void pipeline.patchSourceParams({ center_freq_hz: hz });
+    }
+  }
+
+  // Committing the VFO writes the offset (`freq_shift_hz = target −
+  // center`) so the absolute listening frequency matches what the user
+  // typed. Clamp to the visible span so the UI doesn't silently tune
+  // outside the channelizer's passband.
+  function commitVfo(hz: number) {
+    if (!axes || !vfoBlock) return;
+    const shift = hz - axes.center_freq_hz;
+    const half = axes.sample_rate_hz / 2;
+    const clamped = Math.max(-half, Math.min(half, shift));
+    if (clamped !== vfoShiftHz) {
+      void pipeline.setBlockParam(vfoBlock.id, 'freq_shift_hz', clamped);
     }
   }
 
@@ -114,14 +144,22 @@
     <div
       class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-800 bg-[color:var(--color-bg)] px-2 py-1 text-[11px] text-[color:var(--color-muted)]"
     >
-      <div class="flex items-center gap-1">
+      {#if vfoBlock}
+        <div class="flex items-center gap-1" title="VFO — what you're listening to">
+          <span class="mr-0.5 text-[9px] uppercase tracking-wider text-orange-400/70">vfo</span>
+          <Nixie hz={vfoAbsHz} onCommit={commitVfo} tone="orange" />
+        </div>
+      {/if}
+
+      <div class="flex items-center gap-1" title="SDR centre — the RF tuner LO">
+        <span class="mr-0.5 text-[9px] uppercase tracking-wider text-emerald-400/70">sdr</span>
         <button
           type="button"
           class="rounded border border-slate-700 px-1 leading-none hover:border-slate-500"
           onclick={() => nudge(-1)}
           aria-label="decrease centre frequency">−</button
         >
-        <Nixie hz={axes.center_freq_hz} onCommit={commitCenter} />
+        <Nixie hz={axes.center_freq_hz} onCommit={commitCenter} tone="green" />
         <button
           type="button"
           class="rounded border border-slate-700 px-1 leading-none hover:border-slate-500"
