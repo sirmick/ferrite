@@ -384,12 +384,16 @@ impl Block for SoapySource {
             Err(_) => return Err(anyhow!("soapy ring mutex poisoned")),
         };
         if got < want {
-            out[got..].fill(Complex::new(0.0, 0.0));
             self.underrun_samples = self.underrun_samples.saturating_add((want - got) as u64);
         }
 
+        // Report only the samples we actually produced. Zero-filling the
+        // tail and reporting `want` would splice periodic zero-runs into
+        // the stream — visible downstream as evenly-spaced FFT peaks
+        // ("picket fence"). Better to emit a short tick; the scheduler
+        // runs again next iteration with more ring data.
         let mut w = Work::new();
-        w.produced[0] = want;
+        w.produced[0] = got;
         Ok(w)
     }
 
