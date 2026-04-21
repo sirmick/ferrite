@@ -6,13 +6,17 @@
 // shader unwraps the ring with a single `fract()` using the normalised
 // head position, and indexes a 256×1 viridis LUT to get the final colour.
 
-import { makeDigiLut } from './colormap';
+import { makeDigiLut, makeViridisLut } from './colormap';
+
+export type WaterfallPalette = 'digi' | 'viridis';
 
 export interface WaterfallOptions {
   /** Number of history rows to keep. Default 512. */
   rows?: number;
   /** Smooth between texels (blurs bins/rows). Default true. */
   linearFilter?: boolean;
+  /** Colour palette. Default `'digi'`. */
+  palette?: WaterfallPalette;
 }
 
 const VERT_SRC = `#version 300 es
@@ -98,6 +102,7 @@ export class WaterfallRenderer {
   private head = 0;
   private rafPending = false;
   private disposed = false;
+  private palette: WaterfallPalette = 'digi';
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -145,9 +150,8 @@ export class WaterfallRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    const lut = makeDigiLut(256);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, lut);
+    this.palette = opts.palette ?? 'digi';
+    this.uploadPalette();
 
     const uData = gl.getUniformLocation(this.program, 'u_data');
     const uPalette = gl.getUniformLocation(this.program, 'u_palette');
@@ -173,6 +177,22 @@ export class WaterfallRenderer {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.head, this.cols, 1, gl.RED, gl.UNSIGNED_BYTE, row);
     this.head = (this.head + 1) % this.rows;
     this.scheduleDraw();
+  }
+
+  /** Swap the colour palette. Re-uploads the 256×1 LUT texture. */
+  setPalette(palette: WaterfallPalette): void {
+    if (this.disposed || this.palette === palette) return;
+    this.palette = palette;
+    this.uploadPalette();
+    this.scheduleDraw();
+  }
+
+  private uploadPalette(): void {
+    const gl = this.gl;
+    const lut = this.palette === 'viridis' ? makeViridisLut(256) : makeDigiLut(256);
+    gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, lut);
   }
 
   /** Resize the drawing buffer to the CSS size. Call on resize. */
