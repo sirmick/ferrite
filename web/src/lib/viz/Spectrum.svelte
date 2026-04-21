@@ -6,6 +6,7 @@
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { rangesToChoices } from '$lib/controls/optionsModel';
   import Nixie from '$lib/controls/Nixie.svelte';
+  import FftControls from './FftControls.svelte';
 
   interface Props {
     client: FrameClient;
@@ -148,10 +149,19 @@
   });
 
   // Display-axis and flags propagate to the renderer on every change.
-  // Floor/ceil come from the server-side logmag block; until the FFT
-  // flowgraph wiring lands we use a fixed visible range.
+  // Floor/ceil track the live logmag block's params so adjusting them
+  // via the FFT controls strip updates the y-axis labels in lockstep.
   const DEFAULT_FLOOR_DBFS = -100;
   const DEFAULT_CEIL_DBFS = 0;
+  let logmagValues = $derived(
+    (pipeline.blocks.logmag?.values as Record<string, unknown> | null | undefined) ?? null,
+  );
+  let floorDbfs = $derived(
+    typeof logmagValues?.floor_dbfs === 'number' ? logmagValues.floor_dbfs : DEFAULT_FLOOR_DBFS,
+  );
+  let ceilDbfs = $derived(
+    typeof logmagValues?.ceil_dbfs === 'number' ? logmagValues.ceil_dbfs : DEFAULT_CEIL_DBFS,
+  );
   $effect(() => {
     if (!renderer) return;
     if (!axes) {
@@ -161,8 +171,8 @@
     renderer.setAxes({
       centerHz: axes.center_freq_hz,
       rateHz: axes.sample_rate_hz,
-      floorDbfs: DEFAULT_FLOOR_DBFS,
-      ceilDbfs: DEFAULT_CEIL_DBFS,
+      floorDbfs,
+      ceilDbfs,
     });
   });
 
@@ -261,6 +271,7 @@
         </button>
       {/if}
     </div>
+    <FftControls />
   {/if}
   <canvas
     bind:this={canvas}
