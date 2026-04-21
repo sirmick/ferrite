@@ -9,7 +9,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Path, State,
     },
     response::IntoResponse,
     Json,
@@ -19,7 +19,7 @@ use http::StatusCode;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::app_state::{AppState, PipelineStatus, UiSink};
+use crate::app_state::{AppState, PipelineBlock, PipelineStatus, UiSink};
 
 #[derive(Serialize)]
 pub struct Hello {
@@ -305,6 +305,39 @@ pub async fn pipeline_stop(State(state): State<AppState>) -> Json<PipelineStatus
 /// dialog without hard-coding field shapes per block type.
 pub async fn list_block_schemas() -> Json<Vec<crate::block_schema::BlockSchemaDto>> {
     Json(crate::block_schema::all_block_schemas())
+}
+
+/// `GET /api/pipeline/blocks` — every block in the currently-loaded
+/// composed preset, with its full spec and current param values.
+/// Source for the generic `<BlockParams>` UI component. See D24 in
+/// `docs/09-decisions.md`.
+pub async fn list_pipeline_blocks(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PipelineBlock>>, (StatusCode, Json<ApiError>)> {
+    state
+        .list_blocks()
+        .await
+        .map(Json)
+        .map_err(|e| bad_request("LIST_PIPELINE_BLOCKS_FAILED", format!("{e:#}")))
+}
+
+/// `POST /api/pipeline/blocks/{id}/params` — apply a params delta to
+/// one block. The body is a JSON object of `{ param_key: new_value }`
+/// pairs; keys not in the delta are left alone. Writes against the
+/// `src` placeholder route to [`AppState::patch_source`]; everything
+/// else routes to [`AppState::patch_flowgraph`]. The returned plan
+/// shape matches `PATCH /api/flowgraph` and `PATCH /api/source` so
+/// the UI can share reconfigure-handling code.
+pub async fn patch_pipeline_block(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(delta): Json<serde_json::Value>,
+) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
+    let plan = state
+        .apply_block_params(&id, delta)
+        .await
+        .map_err(|e| bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
+    Ok(Json(reconfigure_response(plan)))
 }
 
 /// `GET /ws/preset` — single WebSocket endpoint for preset sample

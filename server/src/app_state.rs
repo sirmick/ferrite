@@ -15,13 +15,17 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
+use ferrite_blocks::registry;
 use ferrite_runtime::{
     compose_source, split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry,
-    ReconfigurePlan, SourceConfig,
+    ReconfigurePlan, SourceConfig, SOURCE_ID,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 
-use crate::preset_pipeline::{spawn_preset, PresetMount};
+use crate::{
+    block_schema::BlockSchemaDto,
+    preset_pipeline::{spawn_preset, PresetMount},
+};
 
 /// One UI-terminated sink in the active preset, paired with the
 /// `stream_id` `env_split` allocates for it. Returned from
@@ -37,6 +41,25 @@ pub struct UiSink {
     /// `"IqF32"` or `"FftU8"` — the frame payload type the client
     /// should decode for this stream.
     pub payload_type: &'static str,
+}
+
+/// One block in the currently-loaded preset (post-compose, pre-split).
+/// Surfaced by `GET /api/pipeline/blocks` so the UI can render controls
+/// for every param on every block without reading preset files directly.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PipelineBlock {
+    pub id: String,
+    pub type_name: String,
+    /// `"node"` or `"browser"` — where the block will run after env_split.
+    /// Sourced from the preset's explicit `placement` override, falling
+    /// back to the block spec's intrinsic `Placement`.
+    pub placement: &'static str,
+    /// Full capability schema for the block type — same shape as
+    /// `GET /api/blocks` entries.
+    pub spec: BlockSchemaDto,
+    /// Current param values as stored in the preset doc (post-compose).
+    /// `Null` when the preset omits params entirely (block uses defaults).
+    pub values: serde_json::Value,
 }
 
 pub type FrameBytes = Arc<Vec<u8>>;
@@ -151,6 +174,97 @@ impl AppState {
         }
         out.sort_by_key(|s| s.stream_id);
         Ok(out)
+    }
+
+    /// Walk the current composed preset (preset + source merged) and
+    /// surface every block with its full spec and current param values.
+    /// The list is pre-split, so both node and browser blocks appear —
+    /// the UI renders controls for all of them via one dispatcher.
+    ///
+    /// Iteration order follows `FlowgraphDoc::blocks` (a `BTreeMap`), so
+    /// the response is deterministic across calls.
+    pub async fn list_blocks(&self) -> Result<Vec<PipelineBlock>> {
+        let preset = self.inner.preset_doc.read().await.clone();
+        let source = self.inner.source_config.read().await.clone();
+        let composed =
+            compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
+        let mut out = Vec::with_capacity(composed.blocks.len());
+        for (id, decl) in &composed.blocks {
+            let Some(entry) = registry::find(&decl.type_name) else {
+                // Unregistered type — preset authoring error. Skip rather
+                // than fail; the `/api/pipeline` endpoint already reports
+                // compose/start errors through its own path.
+                tracing::warn!(block_id = %id, type_name = %decl.type_name,
+                    "block type not in registry — omitting from /api/pipeline/blocks");
+                continue;
+            };
+            let spec: BlockSchemaDto = entry.spec().into();
+            let placement = match decl.placement {
+                Some(Environment::Node) => "node",
+                Some(Environment::Browser) => "browser",
+                None => spec.placement,
+            };
+            out.push(PipelineBlock {
+                id: id.clone(),
+                type_name: decl.type_name.clone(),
+                placement,
+                spec,
+                values: decl.params.clone().unwrap_or(serde_json::Value::Null),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Apply a params delta to one block by id. Dispatches by id:
+    ///
+    /// - `id == "src"` — the `Source` placeholder. Delta merges into
+    ///   `SourceConfig.params` and routes through [`patch_source`] so
+    ///   the hardware restart path is preserved.
+    /// - any other id — delta merges into `preset_doc.blocks[id].params`
+    ///   and routes through [`patch_flowgraph`].
+    ///
+    /// The delta is a JSON object; keys present replace, keys absent
+    /// stay. Returns the same reconfigure plan shape as the other
+    /// patch paths so `POST /api/pipeline/blocks/{id}/params` can share
+    /// its response type.
+    pub async fn apply_block_params(
+        &self,
+        id: &str,
+        delta: serde_json::Value,
+    ) -> Result<Option<ReconfigurePlan>> {
+        let delta_obj = delta
+            .as_object()
+            .ok_or_else(|| anyhow!("params delta must be a JSON object"))?
+            .clone();
+
+        if id == SOURCE_ID {
+            let mut new_source = self.inner.source_config.read().await.clone();
+            let mut merged =
+                match std::mem::replace(&mut new_source.params, serde_json::Value::Null) {
+                    serde_json::Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+            for (k, v) in delta_obj {
+                merged.insert(k, v);
+            }
+            new_source.params = serde_json::Value::Object(merged);
+            return self.patch_source(new_source).await;
+        }
+
+        let mut new_doc = self.inner.preset_doc.read().await.clone();
+        let block = new_doc
+            .blocks
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("no block {id:?} in preset"))?;
+        let mut merged = match block.params.take() {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        for (k, v) in delta_obj {
+            merged.insert(k, v);
+        }
+        block.params = Some(serde_json::Value::Object(merged));
+        self.patch_flowgraph(new_doc).await
     }
 
     /// Apply a new preset. If the pipeline is running, reconfigures it
@@ -373,5 +487,97 @@ mod tests {
         // Stored source is still the original.
         assert_eq!(state.get_source().await.type_name, "SineSource");
         state.stop().await;
+    }
+
+    #[tokio::test]
+    async fn list_blocks_surfaces_every_composed_block_with_spec_and_values() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        let blocks = state.list_blocks().await.unwrap();
+        // test_preset has src + sink; compose_source replaces the Source
+        // placeholder with SineSource (as per SourceConfig.type_name) but
+        // keeps the id.
+        let ids: Vec<_> = blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, vec!["sink", "src"]);
+
+        let src = blocks.iter().find(|b| b.id == "src").unwrap();
+        assert_eq!(src.type_name, "SineSource");
+        assert_eq!(src.placement, "node");
+        assert_eq!(src.spec.type_name, "SineSource");
+        // SourceConfig values should have flowed through compose_source.
+        assert_eq!(src.values["tone_freq_abs_hz"].as_f64(), Some(100.0));
+        assert_eq!(src.values["amplitude"].as_f64(), Some(0.5));
+
+        let sink = blocks.iter().find(|b| b.id == "sink").unwrap();
+        assert_eq!(sink.type_name, "Decimator");
+        assert_eq!(sink.placement, "browser");
+        assert_eq!(sink.values["factor"].as_i64(), Some(2));
+        // Spec is the full schema — pick a param to confirm it came
+        // through.
+        assert!(sink.spec.params.iter().any(|p| p.key == "factor"));
+    }
+
+    #[tokio::test]
+    async fn apply_block_params_on_src_routes_to_source_config() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        let plan = state
+            .apply_block_params("src", json!({ "tone_freq_abs_hz": 250.0 }))
+            .await
+            .unwrap();
+        assert!(plan.is_none(), "no pipeline to reconfigure while stopped");
+        // Delta merged into SourceConfig.params — the original
+        // amplitude and center_freq_hz are preserved.
+        let source = state.get_source().await;
+        assert_eq!(source.params["tone_freq_abs_hz"].as_f64(), Some(250.0));
+        assert_eq!(source.params["amplitude"].as_f64(), Some(0.5));
+        assert_eq!(source.params["center_freq_hz"].as_f64(), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn apply_block_params_on_non_source_merges_into_preset_doc() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        let plan = state
+            .apply_block_params("sink", json!({ "factor": 4 }))
+            .await
+            .unwrap();
+        assert!(plan.is_none(), "no pipeline to reconfigure while stopped");
+        let doc = state.get_flowgraph().await;
+        let sink = doc.blocks.get("sink").unwrap();
+        let params = sink.params.as_ref().unwrap();
+        // Delta merged — factor updated, other params preserved.
+        assert_eq!(params["factor"].as_i64(), Some(4));
+        assert_eq!(params["num_taps"].as_i64(), Some(17));
+        assert_eq!(params["cutoff_normalized"].as_f64(), Some(0.2));
+    }
+
+    #[tokio::test]
+    async fn apply_block_params_hot_reconfigures_running_pipeline() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        state.start().await.unwrap();
+        let plan = state
+            .apply_block_params("src", json!({ "tone_freq_abs_hz": 300.0 }))
+            .await
+            .expect("reconfigure ok");
+        assert!(plan.is_some(), "running pipeline must return a plan");
+        state.stop().await;
+    }
+
+    #[tokio::test]
+    async fn apply_block_params_rejects_unknown_block_id() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        let err = state
+            .apply_block_params("not_a_block", json!({ "x": 1 }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("not_a_block"));
+    }
+
+    #[tokio::test]
+    async fn apply_block_params_rejects_non_object_delta() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        let err = state
+            .apply_block_params("sink", json!(42))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("JSON object"));
     }
 }
