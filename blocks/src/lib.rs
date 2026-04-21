@@ -24,11 +24,13 @@ pub mod dtmf_audio_source;
 pub mod dtmf_decoder;
 pub mod events_sink;
 pub mod fft;
+pub mod file_audio_sink;
 pub mod file_sink;
 pub mod file_source;
 pub mod fm_demod;
 pub mod frame;
 pub mod log_mag_u8;
+pub mod real_decimator;
 pub mod registry;
 pub mod render;
 pub mod sine;
@@ -52,11 +54,13 @@ pub use dtmf_audio_source::{DtmfAudioSource, DtmfAudioSourceParams};
 pub use dtmf_decoder::{DtmfDecoder, DtmfDecoderParams};
 pub use events_sink::{EventsSink, EventsSinkParams};
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
+pub use file_audio_sink::{FileAudioSink, FileAudioSinkParams};
 pub use file_sink::{FileIqSink, FileIqSinkParams, IqSinkFormat, WriteSeek};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
+pub use real_decimator::{RealF32Decimator, RealF32DecimatorParams};
 pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hold, SpectrumStats};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
@@ -65,7 +69,7 @@ pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use tee_iq_f32::TeeIqF32;
 pub use ws_bridge::{
     BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx,
-    WsBridgeTxFftU8,
+    WsBridgeTxEvents, WsBridgeTxFftU8,
 };
 
 /// Marks an `impl Block for T` so `T` is added to [`registry`].
@@ -114,10 +118,12 @@ mod tests {
         for expected in [
             "SineSource",
             "FFT",
+            "FileAudioSink",
             "FileIqSink",
             "FileIqSource",
             "LogMagU8",
             "Decimator",
+            "RealF32Decimator",
             "Channelizer",
             "FmDemod",
             "AmDemod",
@@ -128,6 +134,7 @@ mod tests {
             "TeeIqF32",
             "WsBridgeTx",
             "WsBridgeTxFftU8",
+            "WsBridgeTxEvents",
             "WsBridgeRx",
             "AudioSink",
         ] {

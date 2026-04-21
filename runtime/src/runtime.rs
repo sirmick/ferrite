@@ -164,6 +164,19 @@ fn state_error(op: &'static str, state: RuntimeState) -> anyhow::Error {
     anyhow!("runtime: {op} not allowed from state {state:?}")
 }
 
+/// Pull a readable message out of a `catch_unwind` payload. `panic!` with
+/// a string literal or formatted string comes through as `&'static str`
+/// or `String`; anything else falls back to a generic tag.
+fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 /// Dangling-input view — a zero-length slice of the right type so the
 /// block can downcast cleanly without special-casing "no producer".
 fn empty_in_buf(pt: PortType) -> InBuf<'static> {
@@ -582,10 +595,21 @@ impl Runtime {
                     inputs: &mut inputs,
                     outputs: &mut outputs,
                 };
-                entry_mut
-                    .block
-                    .process(&mut io)
-                    .with_context(|| format!("process block {:?}", entry_mut.id))?
+                // Catch panics so one buggy block can't kill the whole
+                // runtime — we surface them as a normal error with the
+                // block id in context. `AssertUnwindSafe` is sound here
+                // because the runtime halts on error; the block's
+                // internal state may be corrupt but we won't reuse it.
+                let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    entry_mut.block.process(&mut io)
+                }));
+                match panic_result {
+                    Ok(res) => res.with_context(|| format!("process block {:?}", entry_mut.id))?,
+                    Err(payload) => {
+                        let msg = panic_payload_message(&payload);
+                        return Err(anyhow!("block {:?} panicked: {msg}", entry_mut.id));
+                    }
+                }
             };
             // inputs/outputs/input_borrows/output_borrows all drop at
             // scope end, releasing the ring borrows before step 6.
@@ -1483,5 +1507,23 @@ mod tests {
             totals["fft"], expected_frames, totals["src"], size,
         );
         assert!(totals["fft"] > 0, "FFT should have fired at least once");
+    }
+
+    #[test]
+    fn panic_message_decodes_str_literal_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+        assert_eq!(panic_payload_message(&payload), "boom");
+    }
+
+    #[test]
+    fn panic_message_decodes_string_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("kaboom"));
+        assert_eq!(panic_payload_message(&payload), "kaboom");
+    }
+
+    #[test]
+    fn panic_message_falls_back_for_non_string_payloads() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42_u32);
+        assert_eq!(panic_payload_message(&payload), "non-string panic payload");
     }
 }

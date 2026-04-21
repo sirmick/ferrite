@@ -122,6 +122,14 @@ struct Args {
     #[arg(long = "list-devices", default_value_t = false)]
     list_devices: bool,
 
+    /// Run the pipeline for this many seconds and exit — no HTTP/WS
+    /// server is started. Implies `--start`. Intended for headless
+    /// recording presets (`fm-audio-record`, `capture_fm`, …) driven
+    /// straight from the CLI. `Ctrl-C` before the timer elapses also
+    /// triggers a graceful stop.
+    #[arg(long = "run-for-secs", value_name = "SECS")]
+    run_for_secs: Option<f64>,
+
     /// Probe one device's capabilities and exit.
     #[arg(long = "probe-device", value_name = "ARGS")]
     probe_device: Option<String>,
@@ -212,6 +220,10 @@ async fn main() -> Result<()> {
         tracing::info!("pipeline auto-started");
     }
 
+    if let Some(secs) = args.run_for_secs {
+        return run_headless_for(state, secs, args.auto_start).await;
+    }
+
     let static_root: PathBuf = std::env::var_os("FERRITE_STATIC_ROOT")
         .map_or_else(|| PathBuf::from("./web-dist"), PathBuf::from);
 
@@ -272,6 +284,49 @@ async fn main() -> Result<()> {
     // ephemeral port without parsing tracing output.
     println!("ferrited listening addr={local}");
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Headless recording mode: start the pipeline, sleep `secs` (or until
+/// Ctrl-C), then stop. No HTTP/WS server is bound, so this is the
+/// right shape for capture-to-disk presets driven by the CLI.
+async fn run_headless_for(
+    state: app_state::AppState,
+    secs: f64,
+    already_started: bool,
+) -> Result<()> {
+    if !already_started {
+        state.start().await.context("start pipeline")?;
+        tracing::info!("pipeline started for headless run");
+    }
+    let duration = if secs > 0.0 {
+        Duration::from_secs_f64(secs)
+    } else {
+        Duration::ZERO
+    };
+    tracing::info!(
+        secs = secs,
+        "running headless — pipeline will stop on timer or Ctrl-C"
+    );
+    // Stable line for test harnesses that spawn ferrited and want to
+    // know the pipeline is live without parsing tracing output.
+    println!("ferrited headless run_for_secs={secs}");
+
+    tokio::select! {
+        () = tokio::time::sleep(duration) => {
+            tracing::info!("headless timer elapsed");
+        }
+        res = tokio::signal::ctrl_c() => {
+            if let Err(e) = res {
+                tracing::warn!(?e, "ctrl-c handler failed");
+            } else {
+                tracing::info!("received Ctrl-C");
+            }
+        }
+    }
+
+    let was_running = state.stop().await;
+    tracing::info!(was_running, "headless run complete");
     Ok(())
 }
 

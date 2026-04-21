@@ -168,9 +168,10 @@ mod tests {
         let doc = FlowgraphDoc::from_json(WBFM).expect("wbfm.json parses");
         assert_eq!(doc.name, "wbfm");
         // wbfm.json is authored cross-env: SoapySource + channelizer +
-        // FFT tap on node, FM demod + AudioSink on browser. The FFT
-        // tap terminates at `ui:fft`; env_split synthesizes the Tx on
-        // load. `tee.out0 → decim.in` is the env crossing.
+        // FFT tap on node, FM demod + RealF32Decimator + AudioSink on
+        // browser. The FFT tap terminates at `ui:fft`; env_split
+        // synthesizes the Tx on load. `chan.out → demod.in` is the env
+        // crossing (still IQ at 240 kS/s).
         assert_eq!(
             doc.environments,
             vec![Environment::Node, Environment::Browser]
@@ -180,11 +181,13 @@ mod tests {
             vec!["audio", "chan", "decim", "demod", "fft", "logmag", "src", "tee"],
         );
         assert_eq!(doc.wires.len(), 8);
-        // Spot-check one block's params survived the round-trip.
+        // Spot-check one block's params survived the round-trip. Demod
+        // now runs at the 240 kHz channel rate, not the 48 kHz audio
+        // rate — the RealF32Decimator handles the final drop.
         let demod = doc.blocks.get("demod").expect("demod block present");
         assert_eq!(demod.type_name, "FmDemod");
         let params = demod.params.as_ref().expect("demod has params");
-        assert_eq!(params["sample_rate_hz"].as_f64(), Some(48_000.0));
+        assert_eq!(params["sample_rate_hz"].as_f64(), Some(240_000.0));
         assert_eq!(params["max_deviation_hz"].as_f64(), Some(75_000.0));
         // Spot-check placements: chan pinned to node, audio inherits
         // browser from its WasmOnly spec (placement omitted in JSON).

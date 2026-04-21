@@ -61,7 +61,8 @@
       "placement": "browser",
       "params": {
         "sample_rate_hz": 48000,
-        "bias_tau_ms": 100
+        "bias_tau_ms": 100,
+        "audio_gain": 20.0
       }
     },
     "audio": {

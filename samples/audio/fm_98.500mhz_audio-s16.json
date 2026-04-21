@@ -1,0 +1,27 @@
+{
+  "name": "FM broadcast — 98.5 MHz demodulated audio (San Francisco Bay Area)",
+  "file": "fm_98.500mhz_audio-s16.wav",
+  "format": "wav-pcm-s16-mono-audio",
+  "sample_rate_hz": 48000,
+  "center_freq_hz": 98500000,
+  "duration_s": 12.0,
+  "modulation": "wideband FM (±75 kHz deviation) demodulated through Ferrite's shipped fm-audio-record preset",
+  "signal_chain": "SoapySource (SDRplay RSPdx, 2.4 MS/s) → Channelizer (×10 → 240 kHz) → FmDemod @ 240 kHz → RealF32Decimator (×5 → 48 kHz) → FileAudioSink",
+  "quality": {
+    "level_rms_dbfs": -7.0,
+    "stereo_pilot_detected": true,
+    "pilot_freq_hz": 18998.3,
+    "pilot_snr_db": 35.7
+  },
+  "source": {
+    "origin": "captured at home",
+    "hardware": "SDRplay RSPdx",
+    "captured": "2026-04-21",
+    "location": "San Francisco Bay Area, CA"
+  },
+  "license": {
+    "name": "CC0",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "note": "Demodulated audio of a terrestrial FM broadcast; included as a Ferrite pipeline regression fixture. The underlying broadcast content may be copyrighted — do not redistribute as music/programme content."
+  }
+}

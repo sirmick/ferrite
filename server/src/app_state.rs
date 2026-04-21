@@ -180,6 +180,7 @@ impl AppState {
             let payload_type = match decl.type_name.as_str() {
                 "WsBridgeTx" => "IqF32",
                 "WsBridgeTxFftU8" => "FftU8",
+                "WsBridgeTxEvents" => "JsonEvent",
                 _ => continue,
             };
             let params = decl.params.as_ref().and_then(|p| p.as_object());
@@ -592,6 +593,37 @@ mod tests {
         assert_eq!(sinks[0].name, "fft");
         assert_eq!(sinks[0].stream_id, 1000);
         assert_eq!(sinks[0].payload_type, "FftU8");
+    }
+
+    #[tokio::test]
+    async fn ui_sinks_reports_json_event_payload_for_events_stream() {
+        // A decoder produces `Events`; a `ui:events` terminus must surface
+        // in the API as `payload_type: "JsonEvent"` so the browser knows
+        // to decode the payload as JSON instead of IQ or FFT bytes. The
+        // `src` placeholder is present but unused here — compose_source
+        // requires it to exist; validate_doc tolerates isolated blocks.
+        let preset: FlowgraphDoc = serde_json::from_value(json!({
+            "name": "ev",
+            "environments": ["node", "browser"],
+            "blocks": {
+                "src":     { "type": "Source", "placement": "node",
+                             "params": { "center_freq_hz": 0.0, "sample_rate_hz": 8000.0 } },
+                "audio":   { "type": "DtmfAudioSource", "placement": "node",
+                             "params": { "digits": "1", "sample_rate_hz": 8000.0 } },
+                "decoder": { "type": "DtmfDecoder", "placement": "node",
+                             "params": { "sample_rate_hz": 8000.0 } }
+            },
+            "wires": [
+                ["audio.out",   "decoder.in"],
+                ["decoder.out", "ui:events"]
+            ]
+        }))
+        .unwrap();
+        let state = AppState::new(preset, test_source(), Duration::from_millis(5));
+        let sinks = state.ui_sinks().await.unwrap();
+        assert_eq!(sinks.len(), 1);
+        assert_eq!(sinks[0].name, "events");
+        assert_eq!(sinks[0].payload_type, "JsonEvent");
     }
 
     #[tokio::test]

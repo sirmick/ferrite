@@ -212,9 +212,9 @@ fn producer_frame_size(doc: &FlowgraphDoc, source_endpoint: &str) -> Option<usiz
 }
 
 /// Resolve the source port's type and map it to the matching WsBridgeTx
-/// variant. Only the two Tx variants that exist today are supported
-/// (IqF32 → `WsBridgeTx`, FftU8 → `WsBridgeTxFftU8`); other port types
-/// would need their own Tx block before a `ui:<name>` wire can carry them.
+/// variant. Supported today: IqF32 → `WsBridgeTx`, FftU8 → `WsBridgeTxFftU8`,
+/// Events → `WsBridgeTxEvents`. Other port types would need their own Tx
+/// block before a `ui:<name>` wire can carry them.
 fn pick_ui_tx_type(
     doc: &FlowgraphDoc,
     registry: &dyn SpecRegistry,
@@ -240,6 +240,7 @@ fn pick_ui_tx_type(
     match port.port_type {
         PortType::IqF32 => Ok("WsBridgeTx"),
         PortType::FftU8 => Ok("WsBridgeTxFftU8"),
+        PortType::Events => Ok("WsBridgeTxEvents"),
         other => Err(SplitError::UnsupportedUiPortType {
             ui_name: ui_name.to_string(),
             endpoint: source.to_string(),
@@ -458,6 +459,17 @@ mod tests {
         outputs: REAL_OUT,
         params: NO_PARAMS,
     };
+    const EVENTS_OUT: &[PortSpec] = &[PortSpec {
+        name: "out",
+        port_type: PortType::Events,
+    }];
+    const EVENTS_HW_SRC: BlockSpec = BlockSpec {
+        type_name: "EventsHwSrc",
+        placement: Placement::NativeOnly,
+        inputs: NO_PORTS,
+        outputs: EVENTS_OUT,
+        params: NO_PARAMS,
+    };
 
     fn stub() -> StubRegistry {
         StubRegistry(vec![
@@ -468,6 +480,7 @@ mod tests {
             ("WsBridgeRx", &WS_RX),
             ("FftHwSrc", &FFT_HW_SRC),
             ("RealHwSrc", &REAL_HW_SRC),
+            ("EventsHwSrc", &EVENTS_HW_SRC),
         ])
     }
 
@@ -884,6 +897,24 @@ mod tests {
         let tx = node.blocks.get(&tx_id).expect("ui-side bridge inserted");
         let params = tx.params.as_ref().expect("bridge params recorded");
         assert!(params.get("frame_size").is_none());
+    }
+
+    #[test]
+    fn ui_sink_on_events_source_synthesizes_events_tx() {
+        let doc = doc_from(
+            r#"{
+                "name": "ui-events",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src": {"type": "EventsHwSrc"}
+                },
+                "wires": [["src.out", "ui:events"]]
+            }"#,
+        );
+        let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
+        let tx_id = format!("__ui_events_{CROSS_ENV_STREAM_BASE}");
+        let tx = node.blocks.get(&tx_id).expect("ui-side bridge inserted");
+        assert_eq!(tx.type_name, "WsBridgeTxEvents");
     }
 
     #[test]

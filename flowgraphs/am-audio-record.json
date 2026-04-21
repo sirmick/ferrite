@@ -1,0 +1,62 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "am-audio-record",
+  "label": "AM audio record (headless)",
+  "description": "All-native AM receiver that writes demodulated mono audio to /tmp/ferrite-am-audio.wav. Source → Channelizer (10×, tight filter) → Decimator (5×) → AmDemod @ 48 kHz with post-demod gain → FileAudioSink. AM has a 10 kHz channel so the discriminator stays at audio rate — no aliasing concern. The envelope detector leaves a small AC residual after the DC blocker, so audio_gain ≈ 20 brings a strong station to a playable level. Tune center_freq_hz to the station of interest (AM broadcast is 530–1700 kHz; shortwave lives higher) before invoking `ferrited --flowgraph am-audio-record.json --source-type SoapySource --source-args driver=sdrplay --run-for-secs 30 --start`.",
+  "environments": ["node"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 1000000.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "freq_shift_hz": 0.0,
+        "factor": 10,
+        "num_taps": 161,
+        "cutoff_normalized": 0.01
+      }
+    },
+    "decim": {
+      "type": "Decimator",
+      "placement": "node",
+      "params": {
+        "factor": 5,
+        "num_taps": 81,
+        "cutoff_normalized": 0.04
+      }
+    },
+    "demod": {
+      "type": "AmDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 48000,
+        "bias_tau_ms": 100,
+        "audio_gain": 20.0
+      }
+    },
+    "audio": {
+      "type": "FileAudioSink",
+      "placement": "node",
+      "params": {
+        "path": "/tmp/ferrite-am-audio.wav",
+        "rate_hz": 48000.0,
+        "max_seconds": 60.0
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "chan.in"],
+    ["chan.out", "decim.in"],
+    ["decim.out", "demod.in"],
+    ["demod.out", "audio.in"]
+  ]
+}

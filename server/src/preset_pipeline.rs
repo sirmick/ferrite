@@ -20,7 +20,7 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use ferrite_blocks::ws_bridge::{BridgeSink, WsBridgeTx, WsBridgeTxFftU8};
+use ferrite_blocks::ws_bridge::{BridgeSink, WsBridgeTx, WsBridgeTxEvents, WsBridgeTxFftU8};
 use ferrite_runtime::{
     split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry, ReconfigurePlan,
     Runtime, DEFAULT_FRAMES_HINT,
@@ -161,6 +161,12 @@ fn attach_bridge_sinks(
             "WsBridgeTxFftU8" => {
                 let tx = runtime.block_typed::<WsBridgeTxFftU8>(id).ok_or_else(|| {
                     anyhow!("runtime is missing expected WsBridgeTxFftU8 {id:?} after load")
+                })?;
+                tx.attach_sink(Arc::clone(sink));
+            }
+            "WsBridgeTxEvents" => {
+                let tx = runtime.block_typed::<WsBridgeTxEvents>(id).ok_or_else(|| {
+                    anyhow!("runtime is missing expected WsBridgeTxEvents {id:?} after load")
                 })?;
                 tx.attach_sink(Arc::clone(sink));
             }

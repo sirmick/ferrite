@@ -1,0 +1,26 @@
+{
+  "name": "AM broadcast — 810 kHz demodulated audio (San Francisco Bay Area, likely KGO)",
+  "file": "am_0.810mhz_audio-s16.wav",
+  "format": "wav-pcm-s16-mono-audio",
+  "sample_rate_hz": 48000,
+  "center_freq_hz": 810000,
+  "duration_s": 12.0,
+  "modulation": "double-sideband AM with carrier, envelope-detected through Ferrite's shipped am-audio-record preset (100 ms DC blocker, 20× post-demod gain)",
+  "signal_chain": "SoapySource (SDRplay RSPdx, 2.4 MS/s) → Channelizer (×10, tight filter → 240 kHz) → Decimator (×5 → 48 kHz IQ) → AmDemod (envelope + DC blocker + 20× gain) → FileAudioSink",
+  "quality": {
+    "level_rms_dbfs": -23.6,
+    "spectral_centroid_hz": 1457,
+    "classifier": "midrange-dominant, consistent with speech"
+  },
+  "source": {
+    "origin": "captured at home",
+    "hardware": "SDRplay RSPdx",
+    "captured": "2026-04-21",
+    "location": "San Francisco Bay Area, CA"
+  },
+  "license": {
+    "name": "CC0",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "note": "Demodulated audio of a terrestrial AM broadcast; included as a Ferrite pipeline regression fixture. The underlying broadcast content may be copyrighted — do not redistribute as programme content."
+  }
+}

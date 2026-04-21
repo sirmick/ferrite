@@ -50,6 +50,12 @@ pub struct AmDemodParams {
     /// long enough to keep audio content under a few Hz, short enough to
     /// recover from carrier fades.
     pub bias_tau_ms: f32,
+    /// Linear gain applied after the DC blocker. Envelope detection of a
+    /// typical AGC'd broadcast leaves audio well below full-scale because
+    /// the DC removed (the carrier) dwarfs the AC residual; a post-demod
+    /// gain of ≈20 (26 dB) brings a strong station near −6 dBFS. Default
+    /// 1.0 — unchanged behaviour unless the preset overrides it.
+    pub audio_gain: f32,
 }
 
 impl Default for AmDemodParams {
@@ -57,12 +63,14 @@ impl Default for AmDemodParams {
         Self {
             sample_rate_hz: 48_000.0,
             bias_tau_ms: 100.0,
+            audio_gain: 1.0,
         }
     }
 }
 
 pub struct AmDemod {
     alpha: f32,
+    gain: f32,
     bias: f32,
 }
 
@@ -82,10 +90,20 @@ impl AmDemod {
                 params.bias_tau_ms
             );
         }
+        if !(params.audio_gain.is_finite() && params.audio_gain > 0.0) {
+            bail!(
+                "am_demod audio_gain must be > 0 (got {})",
+                params.audio_gain
+            );
+        }
         let tau_s = params.bias_tau_ms * 1e-3;
         let dt = 1.0 / params.sample_rate_hz;
         let alpha = 1.0 - (-dt / tau_s).exp();
-        Ok(Self { alpha, bias: 0.0 })
+        Ok(Self {
+            alpha,
+            gain: params.audio_gain,
+            bias: 0.0,
+        })
     }
 
     /// DC-blocker coefficient used by `process`.
@@ -138,6 +156,18 @@ impl Block for AmDemod {
                     // Downstream stays running at the same rate.
                     reconfig_scope: ReconfigureScope::Downstream,
                 },
+                ParamSpec {
+                    key: "audio_gain",
+                    label: "Post-demod gain",
+                    kind: ParamKind::Range {
+                        min: 0.01,
+                        max: 1_000.0,
+                        step: 0.01,
+                        default: 1.0,
+                        unit: "×",
+                    },
+                    reconfig_scope: ReconfigureScope::Downstream,
+                },
             ],
         }
     }
@@ -169,7 +199,7 @@ impl Block for AmDemod {
             let x = src[i];
             let env = x.re.hypot(x.im);
             self.bias += self.alpha * (env - self.bias);
-            dst[i] = env - self.bias;
+            dst[i] = (env - self.bias) * self.gain;
         }
 
         let mut w = Work::new();
@@ -220,17 +250,22 @@ mod tests {
     fn constructor_rejects_bad_params() {
         assert!(AmDemod::new(AmDemodParams {
             sample_rate_hz: 0.0,
-            bias_tau_ms: 100.0,
+            ..Default::default()
         })
         .is_err());
         assert!(AmDemod::new(AmDemodParams {
-            sample_rate_hz: 48_000.0,
             bias_tau_ms: 0.0,
+            ..Default::default()
         })
         .is_err());
         assert!(AmDemod::new(AmDemodParams {
             sample_rate_hz: f32::NAN,
-            bias_tau_ms: 100.0,
+            ..Default::default()
+        })
+        .is_err());
+        assert!(AmDemod::new(AmDemodParams {
+            audio_gain: 0.0,
+            ..Default::default()
         })
         .is_err());
     }
@@ -244,6 +279,7 @@ mod tests {
         let params = AmDemodParams {
             sample_rate_hz: 48_000.0,
             bias_tau_ms: 5.0,
+            audio_gain: 1.0,
         };
         let mut demod = AmDemod::new(params).unwrap();
         let input = vec![Complex::new(0.6_f32, -0.8); 4096];
@@ -277,6 +313,7 @@ mod tests {
         let params = AmDemodParams {
             sample_rate_hz: fs,
             bias_tau_ms: 5.0,
+            audio_gain: 1.0,
         };
         let mut demod = AmDemod::new(params).unwrap();
         let out = run(&mut demod, &input);
@@ -297,6 +334,7 @@ mod tests {
         let params = AmDemodParams {
             sample_rate_hz: 48_000.0,
             bias_tau_ms: 100.0,
+            audio_gain: 1.0,
         };
         let n = 2048;
         let mut real = AmDemod::new(params).unwrap();
@@ -321,12 +359,53 @@ mod tests {
     }
 
     #[test]
+    fn audio_gain_scales_output() {
+        // Same modulator, two gains — output RMS should differ by the gain
+        // ratio. The envelope detector and DC blocker are identical; only
+        // the post-demod multiplier changes.
+        let fs = 48_000.0_f32;
+        let f_m = 1_000.0_f32;
+        let m = 0.3_f32;
+        let n = 4096;
+        let input: Vec<Complex<f32>> = (0..n)
+            .map(|i| {
+                let t = i as f32 / fs;
+                let env = 1.0 + m * (TAU * f_m * t).cos();
+                Complex::new(env, 0.0)
+            })
+            .collect();
+        let mk = |g| {
+            AmDemod::new(AmDemodParams {
+                sample_rate_hz: fs,
+                bias_tau_ms: 5.0,
+                audio_gain: g,
+            })
+            .unwrap()
+        };
+        let mut unity = mk(1.0);
+        let mut loud = mk(10.0);
+        let out_1 = run(&mut unity, &input);
+        let out_10 = run(&mut loud, &input);
+        // Post-settling RMS ratio must be ~10×.
+        let rms =
+            |x: &[f32]| -> f32 { (x.iter().map(|y| y * y).sum::<f32>() / x.len() as f32).sqrt() };
+        let r1 = rms(&out_1[2048..]);
+        let r10 = rms(&out_10[2048..]);
+        let ratio = r10 / r1;
+        assert!(
+            (ratio - 10.0).abs() < 0.01,
+            "gain=10 should give 10× RMS, got ratio={ratio}"
+        );
+    }
+
+    #[test]
     fn bias_state_persists_across_process_calls() {
         // A tone split across two calls must match one long call — the
         // join-point would glitch if `bias` were not carried over.
         let params = AmDemodParams {
             sample_rate_hz: 48_000.0,
             bias_tau_ms: 100.0,
+            audio_gain: 1.0,
         };
         let n = 512;
         let input: Vec<Complex<f32>> = (0..n)
