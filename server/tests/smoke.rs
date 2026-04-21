@@ -353,10 +353,9 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
         .expect("ws connect");
 
     // Collect frames for up to 2s, tagging each with its stream id.
-    // wbfm's FFT now runs on the raw 2.4 MS/s source, so it fires
-    // every FFT_SIZE (4096) samples ≈ 1.7 ms; IQ crossings fire every
-    // runtime tick. Both stream ids should appear well within the
-    // window.
+    // wbfm's FFT runs on the raw 2.4 MS/s source at size 16384, so it
+    // fires every ~6.8 ms; IQ crossings fire every runtime tick. Both
+    // stream ids should appear well within the window.
     let mut saw_iq = false;
     let mut saw_fft = false;
     let mut counts: std::collections::BTreeMap<(u16, &'static str), usize> =
@@ -383,7 +382,7 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
             } => {
                 *counts.entry((stream_id, "FftU8")).or_default() += 1;
                 if stream_id == 1001 {
-                    assert_eq!(payload.len(), 4096, "expected 4096 FFT bins");
+                    assert_eq!(payload.len(), 16384, "expected 16384 FFT bins");
                     saw_fft = true;
                 }
             }

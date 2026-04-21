@@ -2,7 +2,7 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "wbam",
   "label": "AM broadcast",
-  "description": "Wideband AM receiver authored as one cross-env doc. Structurally a mirror of wbfm.json — same node-side Soapy source, Channelizer, and TeeIqF32-fanned FFT waterfall tap terminating at ui:fft. The browser half decimates to 48 kHz, runs an envelope-detector AM demod with a 100 ms DC-blocker time constant, and feeds the AudioSink ring. The source block params match wbfm.json so a receivers-pane toggle can swap just the demod chain.",
+  "description": "Wideband AM receiver authored as one cross-env doc. Structurally a mirror of wbfm.json — TeeIqF32 fans the raw 2.4 MS/s source into a server-side FFT → LogMagU8 → ui:fft tap (full-RF view) and an audio chain where a Channelizer picks the listening frequency, a 5× decim brings it to 48 kHz, and an envelope-detector AM demod with a 100 ms DC-blocker feeds the AudioSink. The source block params match wbfm.json so a receivers-pane toggle can swap just the demod chain.",
   "environments": ["node", "browser"],
   "blocks": {
     "src": {
@@ -33,7 +33,7 @@
       "type": "FFT",
       "placement": "node",
       "params": {
-        "size": 4096,
+        "size": 16384,
         "window": "hann"
       }
     },
@@ -41,7 +41,7 @@
       "type": "LogMagU8",
       "placement": "node",
       "params": {
-        "size": 4096,
+        "size": 16384,
         "floor_dbfs": -100.0,
         "ceil_dbfs": 0.0,
         "alpha": 0.3
@@ -72,10 +72,10 @@
     }
   },
   "wires": [
-    ["src.out", "chan.in"],
-    ["chan.out", "tee.in"],
-    ["tee.out0", "decim.in"],
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
     ["tee.out1", "fft.in"],
+    ["chan.out", "decim.in"],
     ["fft.out", "logmag.in"],
     ["logmag.out", "ui:fft"],
     ["decim.out", "demod.in"],

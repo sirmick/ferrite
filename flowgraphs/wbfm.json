@@ -33,7 +33,7 @@
       "type": "FFT",
       "placement": "node",
       "params": {
-        "size": 4096,
+        "size": 16384,
         "window": "hann"
       }
     },
@@ -41,7 +41,7 @@
       "type": "LogMagU8",
       "placement": "node",
       "params": {
-        "size": 4096,
+        "size": 16384,
         "floor_dbfs": -100.0,
         "ceil_dbfs": 0.0,
         "alpha": 0.3

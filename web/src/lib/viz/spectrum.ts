@@ -348,14 +348,37 @@ export class SpectrumRenderer {
     if (row.length === 0) return;
     const { ctx } = this;
     const n = row.length;
-    ctx.beginPath();
-    const xScale = plot.w / (n - 1);
     const yScale = plot.h / 255;
-    for (let i = 0; i < n; i++) {
-      const x = plot.x + i * xScale;
-      const y = plot.y + plot.h - row[i] * yScale;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+    ctx.beginPath();
+
+    // When the FFT has more bins than pixels (e.g. 16384 bins across a
+    // ~1200 px plot), drawing a lineTo per bin paints multiple bins into
+    // the same column — adjacent noisy bins jump in y and the canvas
+    // renders that as visible vertical strokes (the "comb"). Collapse
+    // each pixel column to its max bin so the trace is a clean envelope.
+    const px = Math.max(1, Math.floor(plot.w));
+    if (n > px) {
+      const binsPerPx = n / px;
+      for (let i = 0; i < px; i++) {
+        const b0 = Math.floor(i * binsPerPx);
+        const b1 = Math.min(n, Math.floor((i + 1) * binsPerPx) + 1);
+        let maxV = 0;
+        for (let b = b0; b < b1; b++) {
+          if (row[b] > maxV) maxV = row[b];
+        }
+        const x = plot.x + i;
+        const y = plot.y + plot.h - maxV * yScale;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+    } else {
+      const xScale = plot.w / (n - 1);
+      for (let i = 0; i < n; i++) {
+        const x = plot.x + i * xScale;
+        const y = plot.y + plot.h - row[i] * yScale;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
     }
     ctx.stroke();
   }
