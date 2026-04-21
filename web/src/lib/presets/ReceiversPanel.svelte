@@ -3,20 +3,18 @@
   import BlockParams from '$lib/controls/BlockParams.svelte';
   import { RECEIVERS, applyRecipe, detectReceiver, findRecipe, type ReceiverId } from './receivers';
 
-  // The source block carries the sample-rate / gain / frequency knobs
-  // that belong in the top-of-spectrum toolbar and the source dialog,
-  // not the receiver pane. Everything else in the composed preset is
-  // fair game for per-block BlockParams editing here.
-  const SOURCE_ID = 'src';
+  // The receiver pane is for the *demodulator's* knobs only — the
+  // mode-defining block at id `demod`. Source/channelizer/FFT/audio
+  // controls live in their own dedicated UI surfaces (source dialog,
+  // spectrum toolbar, FFT controls strip). Showing every non-source
+  // block here was overwhelming and duplicated controls that belong
+  // elsewhere.
+  const DEMOD_ID = 'demod';
 
   let activeId = $derived(detectReceiver(pipeline.flowgraph));
   let applying = $state(false);
 
-  let blockList = $derived(
-    Object.values(pipeline.blocks)
-      .filter((b) => b.id !== SOURCE_ID)
-      .sort((a, b) => a.id.localeCompare(b.id)),
-  );
+  let demodBlock = $derived(pipeline.blocks[DEMOD_ID]);
 
   async function swapTo(id: ReceiverId) {
     if (applying || !pipeline.flowgraph) return;
@@ -61,21 +59,21 @@
       </select>
     </label>
 
-    {#each blockList as block (block.id)}
+    {#if demodBlock}
       <section class="flex flex-col gap-1">
         <header class="flex items-baseline justify-between">
           <span class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]"
-            >{block.id}</span
+            >demod</span
           >
-          <span class="font-mono text-[10px] text-slate-500">{block.type_name}</span>
+          <span class="font-mono text-[10px] text-slate-500">{demodBlock.type_name}</span>
         </header>
-        {#if block.spec.params.length === 0}
+        {#if demodBlock.spec.params.length === 0}
           <p class="text-[10px] text-slate-600">no params</p>
         {:else}
-          <BlockParams {block} hideSourceRestart />
+          <BlockParams block={demodBlock} hideSourceRestart />
         {/if}
       </section>
-    {/each}
+    {/if}
 
     {#if pipeline.errorMessage}
       <p class="text-rose-400">{pipeline.errorMessage}</p>
