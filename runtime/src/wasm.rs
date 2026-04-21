@@ -10,7 +10,7 @@
 //! it, native builds compile without any wasm-bindgen dependency pulled
 //! in.
 
-use ferrite_blocks::{AudioSink, WsBridgeRx};
+use ferrite_blocks::{AudioSink, EventsSink, WsBridgeRx};
 use wasm_bindgen::prelude::*;
 
 use crate::block_registry::InventorySpecRegistry;
@@ -212,5 +212,40 @@ impl RuntimeHandle {
             .block_typed::<WsBridgeRx>(block_id)
             .ok_or_else(|| JsError::new(&format!("no WsBridgeRx block named {block_id:?}")))?;
         Ok(src.dropped_samples())
+    }
+
+    /// Drain every buffered event from the named `EventsSink` as an
+    /// array of UTF-8 JSON strings (one event per entry, no trailing
+    /// newline). Mirrors [`Self::drain_audio`] — the JS host calls this
+    /// after each tick and forwards the events to whatever consumer the
+    /// preset defines (vitest harness, `postMessage` to the page, …).
+    /// Errors if no block with that id exists, or if it exists but
+    /// isn't an `EventsSink`.
+    #[wasm_bindgen(js_name = drainEvents)]
+    pub fn drain_events(&mut self, block_id: &str) -> Result<Vec<JsValue>, JsError> {
+        let sink = self
+            .rt
+            .block_typed::<EventsSink>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no EventsSink block named {block_id:?}")))?;
+        let raw = sink.drain_events();
+        let mut out = Vec::with_capacity(raw.len());
+        for bytes in raw {
+            let s = String::from_utf8(bytes)
+                .map_err(|e| JsError::new(&format!("EventsSink emitted non-UTF8 bytes: {e}")))?;
+            out.push(JsValue::from_str(&s));
+        }
+        Ok(out)
+    }
+
+    /// Cumulative count of events the named `EventsSink` has dropped
+    /// because its buffer was full. Surfaced to tests/UIs as a health
+    /// signal.
+    #[wasm_bindgen(js_name = eventsDropped)]
+    pub fn events_dropped(&mut self, block_id: &str) -> Result<u64, JsError> {
+        let sink = self
+            .rt
+            .block_typed::<EventsSink>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no EventsSink block named {block_id:?}")))?;
+        Ok(sink.dropped())
     }
 }

@@ -236,9 +236,13 @@ async fn main() -> Result<()> {
         .layer(TraceLayer::new_for_http());
 
     let addr: SocketAddr = args.bind.parse().context("parse --bind")?;
-    tracing::info!(%addr, "ferrited listening");
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local = listener.local_addr().context("listener local_addr")?;
+    tracing::info!(addr = %local, "ferrited listening");
+    // Stable machine-parseable line for test harnesses that spawn
+    // ferrited with `--bind 127.0.0.1:0` and need to discover the
+    // ephemeral port without parsing tracing output.
+    println!("ferrited listening addr={local}");
     axum::serve(listener, app).await?;
     Ok(())
 }

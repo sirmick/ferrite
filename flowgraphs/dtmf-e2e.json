@@ -1,0 +1,111 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "dtmf-e2e",
+  "label": "DTMF events-bridge canary",
+  "description": "Pre-Phase-1 end-to-end canary. Node half generates DTMF tones at 8 kS/s, upmixes to IQ@2.4 MS/s with a +50 kHz AM carrier, channelizes the +50 kHz VFO to baseband at 240 kS/s, decimates 30× to 8 kS/s, and hands the low-rate IQ to the browser via env_split's auto-inserted WsBridge. Browser half AM-demods, runs a DTMF Goertzel decoder, and terminates at EventsSink whose buffer the vitest harness drains. A sibling TeeIqF32 → FFT → LogMagU8 → ui:fft tap keeps the waterfall populated so the canary exercises the same transports as a real preset. Cross-env wire is `decim.out → demod.in`; stream_ids allocate from CROSS_ENV_STREAM_BASE (1000).",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "DtmfAudioSource",
+      "placement": "node",
+      "params": {
+        "rate_hz": 8000.0,
+        "digits": "1234",
+        "hold_ms": 200,
+        "gap_ms": 80,
+        "amplitude": 0.9,
+        "loop_sequence": false
+      }
+    },
+    "ammod": {
+      "type": "AmModulator",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 8000.0,
+        "output_rate_hz": 2400000.0,
+        "offset_hz": 50000.0,
+        "mod_depth": 0.7
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "freq_shift_hz": 50000.0,
+        "factor": 10,
+        "num_taps": 81,
+        "cutoff_normalized": 0.03125
+      }
+    },
+    "decim": {
+      "type": "Decimator",
+      "placement": "node",
+      "params": {
+        "factor": 30,
+        "num_taps": 81,
+        "cutoff_normalized": 0.0125
+      }
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 4096,
+        "window": "hann"
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 4096,
+        "floor_dbfs": -100.0,
+        "ceil_dbfs": 0.0,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "AmDemod",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 8000,
+        "bias_tau_ms": 100
+      }
+    },
+    "dtmf": {
+      "type": "DtmfDecoder",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 8000.0,
+        "block_size": 200,
+        "hold_ms": 40,
+        "off_ms": 40,
+        "dominance": 4.0
+      }
+    },
+    "events": {
+      "type": "EventsSink",
+      "placement": "browser",
+      "params": {
+        "capacity": 1024
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "ammod.in"],
+    ["ammod.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["chan.out", "decim.in"],
+    ["decim.out", "demod.in"],
+    ["demod.out", "dtmf.in"],
+    ["dtmf.out", "events.in"]
+  ]
+}

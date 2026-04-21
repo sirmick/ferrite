@@ -15,10 +15,14 @@ extern crate self as ferrite_blocks;
 use wasm_bindgen::prelude::*;
 
 pub mod am_demod;
+pub mod am_modulator;
 pub mod audio_sink;
 pub mod block;
 pub mod channelizer;
 pub mod decimator;
+pub mod dtmf_audio_source;
+pub mod dtmf_decoder;
+pub mod events_sink;
 pub mod fft;
 pub mod file_source;
 pub mod fm_demod;
@@ -33,6 +37,7 @@ pub mod tee_iq_f32;
 pub mod ws_bridge;
 
 pub use am_demod::{AmDemod, AmDemodParams};
+pub use am_modulator::{AmModulator, AmModulatorParams};
 pub use audio_sink::{AudioSink, AudioSinkParams};
 pub use block::{
     AsAny, Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort,
@@ -41,6 +46,9 @@ pub use block::{
 };
 pub use channelizer::{Channelizer, ChannelizerParams};
 pub use decimator::{Decimator, DecimatorParams};
+pub use dtmf_audio_source::{DtmfAudioSource, DtmfAudioSourceParams};
+pub use dtmf_decoder::{DtmfDecoder, DtmfDecoderParams};
+pub use events_sink::{EventsSink, EventsSinkParams};
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use fm_demod::{FmDemod, FmDemodParams};
@@ -107,6 +115,10 @@ mod tests {
             "Channelizer",
             "FmDemod",
             "AmDemod",
+            "AmModulator",
+            "DtmfAudioSource",
+            "DtmfDecoder",
+            "EventsSink",
             "TeeIqF32",
             "WsBridgeTx",
             "WsBridgeTxFftU8",
