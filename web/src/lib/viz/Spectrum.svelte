@@ -3,7 +3,7 @@
   import { SpectrumRenderer } from './spectrum';
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
-  import { pipeline, currentAxes } from '$lib/pipeline.svelte';
+  import { pipeline, currentAxes, fftAxes } from '$lib/pipeline.svelte';
   import { rangesToChoices } from '$lib/controls/optionsModel';
   import Nixie from '$lib/controls/Nixie.svelte';
   import FftControls from './FftControls.svelte';
@@ -22,7 +22,13 @@
   let canvas: HTMLCanvasElement | undefined = $state();
   let renderer: SpectrumRenderer | undefined;
 
+  // `axes` follows the source (used for the SDR-centre Nixie + rate
+  // dropdown). `display` follows the FFT chain — for wbfm-style
+  // presets that's the channelizer's narrow output, not the source's
+  // wide span. The renderer, click-to-tune, and the visible markers
+  // all use `display` so the labels match the data the user sees.
   let axes = $derived(currentAxes(pipeline));
+  let display = $derived(fftAxes(pipeline));
 
   // The "VFO block" is whichever block in the composed preset exposes a
   // `freq_shift_hz` param — that's the channelizer baseband-shift knob
@@ -94,8 +100,8 @@
 
   // Committing the VFO writes the offset (`freq_shift_hz = target −
   // center`) so the absolute listening frequency matches what the user
-  // typed. Clamp to the visible span so the UI doesn't silently tune
-  // outside the channelizer's passband.
+  // typed. Clamp to the source span so the UI doesn't silently tune
+  // outside what the channelizer can reach.
   function commitVfo(hz: number) {
     if (!axes || !vfoBlock) return;
     const shift = hz - axes.center_freq_hz;
@@ -119,11 +125,18 @@
   }
 
   function onClick(ev: MouseEvent) {
-    if (!renderer || !canvas || !axes) return;
+    if (!renderer || !canvas) return;
     const rect = canvas.getBoundingClientRect();
     const f = renderer.pixelToFreq(ev.clientX - rect.left);
     if (f === undefined) return;
-    void pipeline.patchSourceParams({ center_freq_hz: Math.round(f) });
+    // With a channelizer, click moves the VFO inside the visible
+    // band — the source stays put. Without one, click re-tunes the
+    // source itself (the FFT centre IS the source centre).
+    if (vfoBlock && axes) {
+      commitVfo(Math.round(f));
+    } else {
+      void pipeline.patchSourceParams({ center_freq_hz: Math.round(f) });
+    }
   }
 
   onMount(() => {
@@ -164,13 +177,13 @@
   );
   $effect(() => {
     if (!renderer) return;
-    if (!axes) {
+    if (!display) {
       renderer.setAxes(undefined);
       return;
     }
     renderer.setAxes({
-      centerHz: axes.center_freq_hz,
-      rateHz: axes.sample_rate_hz,
+      centerHz: display.center_freq_hz,
+      rateHz: display.sample_rate_hz,
       floorDbfs,
       ceilDbfs,
     });
@@ -191,6 +204,13 @@
       vfoHz: vfoBlock ? vfoAbsHz : undefined,
     });
   });
+
+  // Click-to-tune: the renderer's pixel→freq inverse uses whatever
+  // axes were last set, which is the FFT (display) span. So clicking
+  // returns an absolute Hz inside the visible band; we patch the
+  // source's centre to land that there. With a channelizer the source
+  // jumps by (clicked − display.center) and the FFT band re-centres
+  // on the new spot, keeping the VFO offset constant.
 </script>
 
 <div class="flex h-full w-full flex-col">
