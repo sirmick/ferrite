@@ -334,25 +334,28 @@ For power saving or tab-visibility throttling, clients should just
 unsubscribe from streams they aren't rendering. The server side is
 where the FFT cost lives.
 
-### Current backpressure behaviour — **lossy by construction**
+### Current backpressure behaviour — per-subscriber drop-only
 
 The `BridgeSink` trait that `WsBridgeTx` uses to hand frames to the
 outbound WS writer is documented as "lossy-latest or backpressure-free"
 (`blocks/src/ws_bridge.rs`). In practice today: **the Tx block always
-consumes its input regardless of sink state**, and if the outbound WS
-queue saturates faster than the network drains it, frames are dropped
-at the network-egress boundary. From a subscriber's perspective this
-shows up as `seq` gaps with no other warning.
+consumes its input regardless of sink state**, and the server-side
+adapter (`server::frame_bus::FrameBus`) fans frames out to every
+`/ws/preset` subscriber through a per-subscriber bounded mpsc queue
+(default capacity 1024 frames). A slow subscriber's queue filling up
+drops **only its own** copy of the frame — the scheduler never blocks,
+and other subscribers keep receiving without interruption. From the
+affected subscriber's perspective this still shows up as `seq` gaps
+with a server-side `frame bus: subscriber full` warning in the log.
 
-This is an **explicit known limitation** slated for a near-term fix
-(see `09-decisions.md` and `08-roadmap.md`). The planned replacement
-surfaces counters (equivalent to the three `SoapySource` counters
-— `dropped_frames`, `bytes_pending_hwm`, so on — exposed through a
-control-stream `warning` event) so drops become observable rather than
-silent. Until then: clients should treat missing FFT rows as a UI
-hiccup, but treat `seq` gaps on audio/IQ streams as a genuine decode
-risk and surface a "network-saturated" indicator rather than assuming
-TCP flow control pushed back upstream.
+Counters that surface drops at the network-egress boundary (equivalent
+to the three `SoapySource` counters — `dropped_frames`,
+`bytes_pending_hwm`, so on — exposed through a control-stream
+`warning` event) are still on the roadmap (see `09-decisions.md` and
+`08-roadmap.md`). Until those land: clients should treat missing FFT
+rows as a UI hiccup, but treat `seq` gaps on audio/IQ streams as a
+genuine decode risk and surface a "network-saturated" indicator rather
+than assuming TCP flow control pushed back upstream.
 
 `WsBridgeRx` on the browser side is separately bounded (default 65,536
 samples ≈ 650 ms at 100 kS/s) and tallies its own drops in

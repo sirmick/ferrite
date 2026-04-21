@@ -32,6 +32,10 @@ use ferrite_runtime::{
 #[allow(dead_code)]
 mod log_stream;
 
+#[path = "../src/frame_bus.rs"]
+#[allow(dead_code)]
+mod frame_bus;
+
 #[path = "../src/bridge_sink.rs"]
 #[allow(dead_code)]
 mod bridge_sink;
@@ -91,26 +95,26 @@ async fn dtmf_e2e_preset_round_trips_digits_across_cross_env_bridge() {
         .expect("CROSS_ENV_STREAM_BASE+1 fits u16 — Frame::IqF32.stream_id is u16");
     let cross_rx_id = format!("__bridge_rx_{}", CROSS_ENV_STREAM_BASE + 1);
 
-    // --- Node half: spawn_preset with a broadcast we own --------------
+    // --- Node half: spawn_preset with a FrameBus we own ---------------
     // A 5 ms tick period is ferrited's default; at DEFAULT_FRAMES_HINT
     // samples per tick that's a healthy drive rate for a 2.4 MS/s
     // source-side pipeline running as fast as the CPU will oblige.
-    // Broadcast capacity sized to hold a generous slack of in-flight
-    // frames so the node half never stalls waiting for us to drain.
-    let (frames, mut rx) = tokio::sync::broadcast::channel(1024);
+    // Subscriber capacity sized to hold a generous slack of in-flight
+    // frames so this test's sub never drops under its own pump latency.
+    let frames = frame_bus::FrameBus::new();
+    let mut rx = frames.subscribe(1024);
     let mount = preset_pipeline::spawn_preset(&doc, frames, Duration::from_millis(5))
         .expect("node half spawns");
 
     // --- Pump loop ----------------------------------------------------
     // Alternate between:
-    //   1. Draining any frames queued on the broadcast receiver,
+    //   1. Draining any frames queued on our per-sub mpsc receiver,
     //      routing stream-1001 IQ into the browser's WsBridgeRx.
     //   2. Ticking the browser runtime so buffered samples flow.
     //   3. Draining the EventsSink and recording any decoded digits.
     // Bail early once we've collected 4 digits; otherwise run until the
     // deadline and fail with a descriptive diagnostic.
     let mut digits: Vec<String> = Vec::new();
-    let mut dropped_frames: u64 = 0;
     let mut ticks_without_data = 0_u32;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline && digits.len() < 4 {
@@ -118,7 +122,7 @@ async fn dtmf_e2e_preset_round_trips_digits_across_cross_env_bridge() {
         // even when the node half is momentarily quiet.
         let mut saw_any = false;
         match tokio::time::timeout(Duration::from_millis(5), rx.recv()).await {
-            Ok(Ok(bytes)) => {
+            Ok(Some(bytes)) => {
                 saw_any = true;
                 if let Ok(Frame::IqF32 {
                     stream_id, payload, ..
@@ -129,13 +133,7 @@ async fn dtmf_e2e_preset_round_trips_digits_across_cross_env_bridge() {
                     }
                 }
             }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                // If we can't keep up, the test's bridge drops samples
-                // and decoding may miss digits. Surface it so a flake
-                // points at capacity, not a logic bug.
-                dropped_frames += n;
-            }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+            Ok(None) => break,
             Err(_) => {}
         }
 
@@ -183,8 +181,7 @@ async fn dtmf_e2e_preset_round_trips_digits_across_cross_env_bridge() {
     assert_eq!(
         digits,
         vec!["1".to_string(), "2".into(), "3".into(), "4".into()],
-        "expected [1,2,3,4] across the cross-env bridge; got {digits:?} \
-         (dropped_frames_on_broadcast={dropped_frames})",
+        "expected [1,2,3,4] across the cross-env bridge; got {digits:?}",
     );
 }
 

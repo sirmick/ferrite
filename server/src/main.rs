@@ -35,6 +35,7 @@ mod app_state;
 mod block_schema;
 mod bridge_sink;
 mod device;
+mod frame_bus;
 mod log_stream;
 mod preset_pipeline;
 mod routes;

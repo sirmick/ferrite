@@ -1,13 +1,13 @@
 //! `BroadcastSink` — the one transport hook the runtime's bridge-Tx
 //! blocks push through. Stamps the envelope on every incoming [`Frame`]
-//! and pipes the postcard-serialized bytes onto the session's broadcast
-//! channel.
+//! and fans the postcard-serialized bytes out on the shared
+//! [`FrameBus`].
 //!
 //! The runtime instantiates a `WsBridgeTx` or `WsBridgeTxFftU8` for
 //! each cross-env wire in the node half of a preset. Every Tx block
 //! publishes through the shared [`BridgeSink`] trait; this struct owns
 //! the per-variant `seq` counter, the `timestamp_ns` clock, and the
-//! broadcast-channel hop into the outbound WS fanout.
+//! per-subscriber fan-out into the outbound WS connections.
 //!
 //! Blocks do their own payload encoding (IQ → interleaved LE f32,
 //! FftU8 → raw bytes) before wrapping in a [`Frame`]. The sink fills
@@ -25,16 +25,16 @@ use std::{
 
 use ferrite_blocks::{frame::Frame, ws_bridge::BridgeSink};
 
-use crate::app_state::FrameTx;
+use crate::frame_bus::FrameBus;
 
 /// Adapter from the runtime's transport-free [`BridgeSink`] trait to
-/// the session's [`FrameTx`] broadcast channel. One instance serves
+/// the server's shared [`FrameBus`] fan-out. One instance serves
 /// every bridge-Tx block in a preset, regardless of port type.
 ///
-/// Cloneable by `Arc`: wrap in `Arc::new(BroadcastSink::new(tx))` and
+/// Cloneable by `Arc`: wrap in `Arc::new(BroadcastSink::new(bus))` and
 /// hand that arc to every Tx block's `attach_sink`.
 pub struct BroadcastSink {
-    tx: FrameTx,
+    bus: FrameBus,
     /// Per-`(variant, stream_id)` monotonic seq counter. Keyed by the
     /// pair so two streams that share a stream id but differ in Frame
     /// variant each keep their own sequence — a subscriber that filters
@@ -44,9 +44,9 @@ pub struct BroadcastSink {
 
 impl BroadcastSink {
     #[must_use]
-    pub fn new(tx: FrameTx) -> Self {
+    pub fn new(bus: FrameBus) -> Self {
         Self {
-            tx,
+            bus,
             seqs: Mutex::new(HashMap::new()),
         }
     }
@@ -79,9 +79,11 @@ impl BridgeSink for BroadcastSink {
                 return;
             }
         };
-        // send() only fails when there are no live receivers; drop
-        // silently so a pre-subscribe startup doesn't log-spam.
-        let _ = self.tx.send(std::sync::Arc::new(bytes));
+        // Per-subscriber try_send inside the bus — a full queue drops
+        // only that subscriber's copy; a missing subscriber is a
+        // silent no-op. Sync by design: the scheduler thread must
+        // never await here.
+        self.bus.send(std::sync::Arc::new(bytes));
     }
 }
 
@@ -106,14 +108,15 @@ fn now_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::BroadcastSink;
+    use crate::frame_bus::FrameBus;
     use ferrite_blocks::{frame::Frame, ws_bridge::BridgeSink};
     use std::sync::Arc;
-    use tokio::sync::broadcast;
 
     #[tokio::test]
     async fn iq_push_encodes_as_iq_f32_frame() {
-        let (tx, mut rx) = broadcast::channel(8);
-        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(tx));
+        let bus = FrameBus::new();
+        let mut rx = bus.subscribe(8);
+        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(bus));
         let payload: Vec<u8> = [1.0_f32, 2.0, 3.0, 4.0]
             .iter()
             .flat_map(|f| f.to_le_bytes())
@@ -143,8 +146,9 @@ mod tests {
 
     #[tokio::test]
     async fn fft_push_encodes_as_fft_u8_frame() {
-        let (tx, mut rx) = broadcast::channel(8);
-        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(tx));
+        let bus = FrameBus::new();
+        let mut rx = bus.subscribe(8);
+        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(bus));
         let bins = vec![0u8, 1, 2, 3, 255];
         sink.push(Frame::FftU8 {
             stream_id: 1,
@@ -171,8 +175,9 @@ mod tests {
 
     #[tokio::test]
     async fn seq_counter_is_per_stream() {
-        let (tx, mut rx) = broadcast::channel(16);
-        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(tx));
+        let bus = FrameBus::new();
+        let mut rx = bus.subscribe(16);
+        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(bus));
         let sample: Vec<u8> = [0.0_f32, 0.0]
             .iter()
             .flat_map(|f| f.to_le_bytes())
@@ -207,8 +212,9 @@ mod tests {
         // Two Frame variants on the same stream id keep independent
         // sequence counters — a subscriber filtering by variant sees a
         // clean 0,1,2,… even when both variants share a stream id.
-        let (tx, mut rx) = broadcast::channel(16);
-        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(tx));
+        let bus = FrameBus::new();
+        let mut rx = bus.subscribe(16);
+        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(bus));
         let iq: Vec<u8> = [0.0_f32, 0.0]
             .iter()
             .flat_map(|f| f.to_le_bytes())
@@ -247,8 +253,9 @@ mod tests {
 
     #[tokio::test]
     async fn empty_push_sends_nothing() {
-        let (tx, mut rx) = broadcast::channel(4);
-        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(tx));
+        let bus = FrameBus::new();
+        let mut rx = bus.subscribe(4);
+        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(bus));
         sink.push(Frame::IqF32 {
             stream_id: 1000,
             seq: 0,
@@ -269,9 +276,8 @@ mod tests {
 
     #[test]
     fn send_without_receivers_does_not_panic() {
-        let (tx, rx) = broadcast::channel::<crate::app_state::FrameBytes>(4);
-        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(tx));
-        drop(rx);
+        let bus = FrameBus::new();
+        let sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(bus));
         sink.push(Frame::IqF32 {
             stream_id: 1000,
             seq: 0,

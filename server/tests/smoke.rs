@@ -18,6 +18,10 @@ use tokio_tungstenite::tungstenite::Message;
 #[allow(dead_code)]
 mod log_stream;
 
+#[path = "../src/frame_bus.rs"]
+#[allow(dead_code)]
+mod frame_bus;
+
 #[path = "../src/bridge_sink.rs"]
 #[allow(dead_code)]
 mod bridge_sink;
@@ -317,7 +321,7 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
     //   - stream 1000: IQ crossing on `chan.out → decim.in`
     //   - stream 1001: FFT tap on `logmag.out → ui:fft`
     // This exercises the full pipeline compose → env_split → runtime
-    // → broadcast → WS path against the same preset the web UI ships.
+    // → frame bus → WS path against the same preset the web UI ships.
     let preset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()

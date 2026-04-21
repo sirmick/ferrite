@@ -9,7 +9,7 @@
 //! spawns; `stop` tears that back down without disturbing the
 //! WebSocket fan-out.
 //!
-//! The broadcast [`FrameTx`] outlives any one pipeline instance, so
+//! The shared [`FrameBus`] outlives any one pipeline instance, so
 //! `/ws/preset` subscribers stay connected across start/stop cycles.
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -20,10 +20,11 @@ use ferrite_runtime::{
     compose_source, split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry,
     ReconfigurePlan, SourceConfig, SOURCE_ID,
 };
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::{
     block_schema::BlockSchemaDto,
+    frame_bus::{FrameBus, DEFAULT_SUBSCRIBER_CAPACITY},
     preset_pipeline::{spawn_preset, PresetMount},
 };
 
@@ -74,7 +75,6 @@ pub struct PipelineBlock {
 }
 
 pub type FrameBytes = Arc<Vec<u8>>;
-pub type FrameTx = broadcast::Sender<FrameBytes>;
 
 /// Pipeline lifecycle. The server-side runtime is either running or
 /// stopped; transitions go through [`AppState::start`] / [`stop`].
@@ -86,10 +86,10 @@ pub enum PipelineStatus {
 }
 
 struct Inner {
-    /// Shared broadcast channel. Survives start/stop cycles so a
-    /// subscriber connected while stopped picks up frames the moment
-    /// the pipeline spins back up.
-    frames: FrameTx,
+    /// Shared frame bus. Survives start/stop cycles so a subscriber
+    /// connected while stopped picks up frames the moment the pipeline
+    /// spins back up.
+    frames: FrameBus,
     preset_doc: RwLock<FlowgraphDoc>,
     source_config: RwLock<SourceConfig>,
     /// `Some` while the pipeline is running.
@@ -110,7 +110,7 @@ pub struct AppState {
 impl AppState {
     #[must_use]
     pub fn new(preset: FlowgraphDoc, source: SourceConfig, tick_period: Duration) -> Self {
-        let (frames, _) = broadcast::channel(32);
+        let frames = FrameBus::new();
         Self {
             inner: Arc::new(Inner {
                 frames,
@@ -144,8 +144,8 @@ impl AppState {
     }
 
     #[must_use]
-    pub fn subscribe(&self) -> broadcast::Receiver<FrameBytes> {
-        self.inner.frames.subscribe()
+    pub fn subscribe(&self) -> mpsc::Receiver<FrameBytes> {
+        self.inner.frames.subscribe(DEFAULT_SUBSCRIBER_CAPACITY)
     }
 
     pub async fn status(&self) -> PipelineStatus {

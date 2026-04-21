@@ -451,10 +451,17 @@ pub async fn load_preset(
 }
 
 /// `GET /ws/preset` — single WebSocket endpoint for preset sample
-/// frames. Subscribes to the AppState's broadcast channel and
+/// frames. Subscribes to the AppState's shared [`FrameBus`] and
 /// forwards every frame as a binary message. Survives pipeline
 /// start/stop cycles — a subscriber connected while stopped picks up
 /// frames the moment the pipeline spins up.
+///
+/// Per-subscriber backpressure: each WS connection gets its own
+/// 1024-frame bounded queue. A slow consumer loses only its own
+/// frames (surfaces as a `seq` gap) and cannot stall the scheduler
+/// or starve other subscribers.
+///
+/// [`FrameBus`]: crate::frame_bus::FrameBus
 pub async fn ws_preset(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_preset(socket, state))
 }
@@ -478,15 +485,12 @@ async fn handle_preset(mut socket: WebSocket, state: AppState) {
                 }
             }
             frame = rx.recv() => match frame {
-                Ok(bytes) => {
+                Some(bytes) => {
                     if socket.send(Message::Binary((*bytes).clone())).await.is_err() {
                         return;
                     }
                 }
-                Err(broadcast::error::RecvError::Closed) => return,
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(skipped = n, "ws preset subscriber lagged");
-                }
+                None => return,
             }
         }
     }

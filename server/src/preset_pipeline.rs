@@ -1,6 +1,6 @@
 //! Preset-driven pipeline — drives the Rust `Runtime` loaded from a
 //! flowgraph doc, bridging its auto-inserted `WsBridgeTx` blocks onto
-//! the session's WebSocket `FrameTx`.
+//! the shared server-side [`FrameBus`].
 //!
 //! Flow: parse doc → `split_for_environment(.., Node)` → load runtime
 //! → find every bridge-Tx in the split doc and attach a shared
@@ -9,12 +9,13 @@
 //! `env_split` from `CROSS_ENV_STREAM_BASE` (1000+); the node half
 //! and browser half agree on those ids without any negotiation.
 //!
-//! [`PresetMount`] bundles the preset's broadcast `FrameTx` with the
+//! [`PresetMount`] bundles the shared [`FrameBus`] with the
 //! [`PresetHandle`] so [`AppState`] can own both in one slot — the
-//! handle keeps the runtime alive, the tx is what `/ws/preset`
+//! handle keeps the runtime alive, the bus is what `/ws/preset`
 //! subscribes to.
 //!
 //! [`AppState`]: crate::app_state::AppState
+//! [`FrameBus`]: crate::frame_bus::FrameBus
 
 use std::{sync::Arc, time::Duration};
 
@@ -29,7 +30,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{app_state::FrameTx, bridge_sink::BroadcastSink};
+use crate::{bridge_sink::BroadcastSink, frame_bus::FrameBus};
 
 /// Handle to a running preset pipeline. Callers can either drop the
 /// handle (which cancels the runtime task via the `oneshot` sender
@@ -111,7 +112,7 @@ impl PresetHandle {
 /// on the runtime's internal back-pressure (idle ticks are cheap).
 pub fn spawn_preset(
     doc: &FlowgraphDoc,
-    frames: FrameTx,
+    frames: FrameBus,
     tick_period: Duration,
 ) -> Result<PresetMount> {
     let node_half = split_for_environment(doc, Environment::Node, &InventorySpecRegistry)
@@ -120,7 +121,7 @@ pub fn spawn_preset(
     let mut runtime = Runtime::load_doc(&node_half, Environment::Node, DEFAULT_FRAMES_HINT)
         .context("runtime load_doc")?;
 
-    let bridge_sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(frames.clone()));
+    let bridge_sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(frames));
     attach_bridge_sinks(&mut runtime, &node_half, &bridge_sink)?;
 
     runtime.init().context("runtime init")?;
@@ -201,10 +202,10 @@ async fn drive(
 #[cfg(test)]
 mod tests {
     use super::spawn_preset;
+    use crate::frame_bus::FrameBus;
     use ferrite_blocks::frame::Frame;
     use ferrite_runtime::FlowgraphDoc;
     use std::time::Duration;
-    use tokio::sync::broadcast;
 
     const CROSS_ENV_DOC: &str = r#"{
         "name": "test_cross_env",
@@ -223,13 +224,14 @@ mod tests {
     #[tokio::test]
     async fn crossing_emits_iq_f32_on_allocated_stream_id() {
         let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
-        let (frames, mut rx) = broadcast::channel(32);
+        let frames = FrameBus::new();
+        let mut rx = frames.subscribe(32);
         let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
         // First crossing gets CROSS_ENV_STREAM_BASE = 1000.
         let bytes = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("a frame within 1s")
-            .expect("broadcast ok");
+            .expect("recv ok");
         match Frame::from_postcard(&bytes).unwrap() {
             Frame::IqF32 {
                 stream_id, payload, ..
@@ -259,7 +261,8 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let (frames, mut rx) = broadcast::channel(4);
+        let frames = FrameBus::new();
+        let mut rx = frames.subscribe(4);
         let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
         // Give the task a couple of ticks to run.
         tokio::time::sleep(Duration::from_millis(30)).await;
@@ -273,7 +276,8 @@ mod tests {
     #[tokio::test]
     async fn shutdown_joins_cleanly() {
         let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
-        let (frames, _rx) = broadcast::channel(8);
+        let frames = FrameBus::new();
+        let _rx = frames.subscribe(8);
         let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
         let t0 = std::time::Instant::now();
         mount.handle.shutdown().await.unwrap();
@@ -288,14 +292,15 @@ mod tests {
         // reconfigure, amplitude drops to 0.1 — frames keep arriving on
         // the same stream id with no reconnect.
         let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
-        let (frames, mut rx) = broadcast::channel(32);
+        let frames = FrameBus::new();
+        let mut rx = frames.subscribe(32);
         let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
 
         // Drain at least one frame so we know the bridge is alive.
         let _ = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("pre-reconfigure frame within 1s")
-            .expect("broadcast ok");
+            .expect("recv ok");
 
         let new_doc: FlowgraphDoc = serde_json::from_str(
             r#"{
@@ -323,7 +328,7 @@ mod tests {
         let bytes = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("post-reconfigure frame within 1s")
-            .expect("broadcast ok");
+            .expect("recv ok");
         match Frame::from_postcard(&bytes).unwrap() {
             Frame::IqF32 { stream_id, .. } => {
                 // Same bridge pair — same stream id.
@@ -337,7 +342,8 @@ mod tests {
     #[tokio::test]
     async fn reconfigure_noop_returns_empty_plan() {
         let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
-        let (frames, _rx) = broadcast::channel(8);
+        let frames = FrameBus::new();
+        let _rx = frames.subscribe(8);
         let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
         let plan = mount.reconfigure(&doc).await.unwrap();
         assert!(plan.is_noop());
@@ -350,13 +356,14 @@ mod tests {
         // After the failed reconfigure, frames must still flow on the
         // original pipeline — rollback is end-to-end.
         let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
-        let (frames, mut rx) = broadcast::channel(32);
+        let frames = FrameBus::new();
+        let mut rx = frames.subscribe(32);
         let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
         // Wait for one frame first.
         let _ = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("pre-reconfigure frame within 1s")
-            .expect("broadcast ok");
+            .expect("recv ok");
         let bad_doc: FlowgraphDoc = serde_json::from_str(
             r#"{
                 "name": "test_cross_env",
@@ -381,7 +388,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("post-rollback frame within 1s")
-            .expect("broadcast ok");
+            .expect("recv ok");
         mount.handle.shutdown().await.unwrap();
     }
 }
