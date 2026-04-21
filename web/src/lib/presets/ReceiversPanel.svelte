@@ -1,48 +1,33 @@
 <script lang="ts">
-  import { fetchFlowgraph, patchFlowgraph, type ReconfigureResponse } from '$lib/api/flowgraph';
+  import { pipeline } from '$lib/pipeline.svelte';
+  import BlockParams from '$lib/controls/BlockParams.svelte';
   import { RECEIVERS, applyRecipe, detectReceiver, findRecipe, type ReceiverId } from './receivers';
-  import { onMount } from 'svelte';
 
-  let status = $state<'idle' | 'loading' | 'error' | 'ready' | 'applying'>('idle');
-  let errorMessage = $state<string | null>(null);
-  let activeId = $state<ReceiverId | null>(null);
-  let lastPlan = $state<ReconfigureResponse | null>(null);
+  // The source block carries the sample-rate / gain / frequency knobs
+  // that belong in the top-of-spectrum toolbar and the source dialog,
+  // not the receiver pane. Everything else in the composed preset is
+  // fair game for per-block BlockParams editing here.
+  const SOURCE_ID = 'src';
 
-  onMount(() => {
-    void refresh();
-  });
+  let activeId = $derived(detectReceiver(pipeline.flowgraph));
+  let applying = $state(false);
 
-  async function refresh() {
-    status = 'loading';
-    errorMessage = null;
-    try {
-      activeId = detectReceiver(await fetchFlowgraph());
-      status = 'ready';
-    } catch (err) {
-      status = 'error';
-      errorMessage = err instanceof Error ? err.message : String(err);
-    }
-  }
+  let blockList = $derived(
+    Object.values(pipeline.blocks)
+      .filter((b) => b.id !== SOURCE_ID)
+      .sort((a, b) => a.id.localeCompare(b.id)),
+  );
 
   async function swapTo(id: ReceiverId) {
-    if (status === 'applying') return;
+    if (applying || !pipeline.flowgraph) return;
     const recipe = findRecipe(id);
-    status = 'applying';
-    errorMessage = null;
+    applying = true;
     try {
-      const doc = await fetchFlowgraph();
-      const next = applyRecipe(doc, recipe);
-      if (next === null) {
-        status = 'error';
-        errorMessage = 'live preset has no demod block — cannot swap receiver';
-        return;
-      }
-      lastPlan = await patchFlowgraph(next);
-      activeId = id;
-      status = 'ready';
-    } catch (err) {
-      status = 'error';
-      errorMessage = err instanceof Error ? err.message : String(err);
+      const next = applyRecipe(pipeline.flowgraph, recipe);
+      if (next === null) return;
+      await pipeline.patchFlowgraph(next);
+    } finally {
+      applying = false;
     }
   }
 </script>
@@ -51,48 +36,49 @@
   class="flex h-full w-full flex-col border-r border-slate-800 bg-[color:var(--color-bg)] text-xs"
 >
   <div class="flex items-center justify-between border-b border-slate-800 px-2 py-1">
-    <span class="font-semibold text-[color:var(--color-muted)]">Receivers</span>
-    <span class="text-[10px] text-[color:var(--color-muted)]">swap demod chain</span>
+    <span class="font-semibold text-[color:var(--color-muted)]">Receiver</span>
+    <span class="text-[10px] text-[color:var(--color-muted)]">demod + chain knobs</span>
   </div>
 
-  <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3">
-    {#if status === 'loading' || status === 'idle'}
-      <p class="text-[color:var(--color-muted)]">Loading…</p>
-    {:else}
-      <label class="grid gap-1">
-        <span class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">Mode</span
-        >
-        <select
-          class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
-          value={activeId ?? ''}
-          onchange={(e) => {
-            const next = (e.currentTarget as HTMLSelectElement).value as ReceiverId;
-            void swapTo(next);
-          }}
-          disabled={status === 'applying'}
-        >
-          {#if activeId === null}
-            <option value="" disabled>— custom —</option>
-          {/if}
-          {#each RECEIVERS as r (r.id)}
-            <option value={r.id}>{r.label}</option>
-          {/each}
-        </select>
-      </label>
+  <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3">
+    <label class="grid gap-1">
+      <span class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">Mode</span>
+      <select
+        class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
+        value={activeId ?? ''}
+        onchange={(e) => {
+          const next = (e.currentTarget as HTMLSelectElement).value as ReceiverId;
+          void swapTo(next);
+        }}
+        disabled={applying || pipeline.phase === 'busy'}
+      >
+        {#if activeId === null}
+          <option value="" disabled>— custom —</option>
+        {/if}
+        {#each RECEIVERS as r (r.id)}
+          <option value={r.id}>{r.label}</option>
+        {/each}
+      </select>
+    </label>
 
-      {#if status === 'applying'}
-        <p class="text-[color:var(--color-muted)]">Applying…</p>
-      {:else if lastPlan}
-        <p class="text-[11px] text-emerald-400">
-          {lastPlan.noop ? 'no-op' : !lastPlan.applied ? 'queued' : (lastPlan.overall ?? 'applied')} —
-          {lastPlan.changes.length} param change{lastPlan.changes.length === 1 ? '' : 's'},
-          {lastPlan.structural_count} structural
-        </p>
-      {/if}
-    {/if}
+    {#each blockList as block (block.id)}
+      <section class="flex flex-col gap-1">
+        <header class="flex items-baseline justify-between">
+          <span class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]"
+            >{block.id}</span
+          >
+          <span class="font-mono text-[10px] text-slate-500">{block.type_name}</span>
+        </header>
+        {#if block.spec.params.length === 0}
+          <p class="text-[10px] text-slate-600">no params</p>
+        {:else}
+          <BlockParams {block} hideSourceRestart />
+        {/if}
+      </section>
+    {/each}
 
-    {#if status === 'error'}
-      <p class="text-rose-400">{errorMessage}</p>
+    {#if pipeline.errorMessage}
+      <p class="text-rose-400">{pipeline.errorMessage}</p>
     {/if}
   </div>
 </div>
