@@ -1,6 +1,7 @@
 <script lang="ts">
   import Workspace from '$lib/layout/Workspace.svelte';
   import LogPanel from '$lib/layout/LogPanel.svelte';
+  import Split from '$lib/layout/Split.svelte';
   import BandsPanel from '$lib/presets/BandsPanel.svelte';
   import ReceiversPanel from '$lib/presets/ReceiversPanel.svelte';
   import SignalCatalog from '$lib/presets/SignalCatalog.svelte';
@@ -149,53 +150,71 @@
     </div>
   </header>
   <div class="flex min-h-0 flex-1">
-    <aside class="flex w-80 shrink-0 flex-col">
-      <div class="flex h-1/2 min-h-0 flex-col border-b border-slate-800">
-        <div class="flex border-b border-slate-800 text-[11px]">
-          <button
-            type="button"
-            class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
-            class:tab-active={leftTab === 'bands'}
-            onclick={() => (leftTab = 'bands')}>Bands</button
-          >
-          <button
-            type="button"
-            class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
-            class:tab-active={leftTab === 'catalog'}
-            onclick={() => (leftTab = 'catalog')}>Catalog</button
-          >
-          <button
-            type="button"
-            class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
-            class:tab-active={leftTab === 'receivers'}
-            onclick={() => (leftTab = 'receivers')}>Receivers</button
-          >
-        </div>
-        <div class="min-h-0 flex-1">
-          {#if leftTab === 'bands'}
-            <BandsPanel />
-          {:else if leftTab === 'catalog'}
-            <SignalCatalog />
+    <Split
+      direction="row"
+      defaultFraction={0.22}
+      min={0.12}
+      max={0.5}
+      storageKey="ferrite.split.aside-main"
+    >
+      {#snippet a()}
+        <aside class="flex h-full w-full flex-col">
+          <Split direction="column" defaultFraction={0.5} storageKey="ferrite.split.aside-internal">
+            {#snippet a()}
+              <div class="flex h-full min-h-0 flex-col">
+                <div class="flex border-b border-slate-800 text-[11px]">
+                  <button
+                    type="button"
+                    class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+                    class:tab-active={leftTab === 'bands'}
+                    onclick={() => (leftTab = 'bands')}>Bands</button
+                  >
+                  <button
+                    type="button"
+                    class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+                    class:tab-active={leftTab === 'catalog'}
+                    onclick={() => (leftTab = 'catalog')}>Catalog</button
+                  >
+                  <button
+                    type="button"
+                    class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+                    class:tab-active={leftTab === 'receivers'}
+                    onclick={() => (leftTab = 'receivers')}>Receivers</button
+                  >
+                </div>
+                <div class="min-h-0 flex-1">
+                  {#if leftTab === 'bands'}
+                    <BandsPanel />
+                  {:else if leftTab === 'catalog'}
+                    <SignalCatalog />
+                  {:else}
+                    <ReceiversPanel />
+                  {/if}
+                </div>
+              </div>
+            {/snippet}
+            {#snippet b()}
+              <div class="h-full min-h-0">
+                <LogPanel />
+              </div>
+            {/snippet}
+          </Split>
+        </aside>
+      {/snippet}
+      {#snippet b()}
+        <div class="h-full min-w-0 w-full">
+          {#if pipeline.client}
+            <Workspace client={pipeline.client} />
           {:else}
-            <ReceiversPanel />
+            <div
+              class="flex h-full items-center justify-center text-sm text-[color:var(--color-muted)]"
+            >
+              connecting…
+            </div>
           {/if}
         </div>
-      </div>
-      <div class="h-1/2 min-h-0">
-        <LogPanel />
-      </div>
-    </aside>
-    <div class="min-w-0 flex-1">
-      {#if pipeline.client}
-        <Workspace client={pipeline.client} />
-      {:else}
-        <div
-          class="flex h-full items-center justify-center text-sm text-[color:var(--color-muted)]"
-        >
-          connecting…
-        </div>
-      {/if}
-    </div>
+      {/snippet}
+    </Split>
   </div>
 </div>
 
