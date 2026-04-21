@@ -11,11 +11,13 @@
 //! in.
 
 use ferrite_blocks::{AudioSink, EventsSink, WsBridgeRx};
+use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 
 use crate::block_registry::InventorySpecRegistry;
 use crate::doc::{Environment, FlowgraphDoc};
 use crate::env_split::split_for_environment;
+use crate::reconfigure::ReconfigurePlan;
 use crate::runtime::{Runtime, DEFAULT_FRAMES_HINT};
 use crate::validate::validate_doc;
 
@@ -248,4 +250,45 @@ impl RuntimeHandle {
             .ok_or_else(|| JsError::new(&format!("no EventsSink block named {block_id:?}")))?;
         Ok(sink.dropped())
     }
+
+    /// Apply a params delta to one browser-side block and reconfigure
+    /// in place. `delta_json` is a JSON-encoded object (`{"key":value…}`);
+    /// keys present replace, keys absent stay. Returns a JSON string
+    /// with the same wire shape as the REST `POST /api/pipeline/blocks/:id/params`
+    /// response so the web dispatcher can handle node-side and browser-side
+    /// reconfigures uniformly.
+    ///
+    /// The runtime's rollback contract carries through — if the merged
+    /// doc fails to build, the browser runtime is left untouched.
+    #[wasm_bindgen(js_name = reconfigureBlock)]
+    pub fn reconfigure_block(&mut self, id: &str, delta_json: &str) -> Result<String, JsError> {
+        let delta: Value = serde_json::from_str(delta_json)
+            .map_err(|e| JsError::new(&format!("delta JSON parse error: {e}")))?;
+        let plan = self
+            .rt
+            .reconfigure_block(id, delta)
+            .map_err(|e| JsError::new(&format!("{e:#}")))?;
+        let body = reconfigure_response_json(&plan);
+        serde_json::to_string(&body)
+            .map_err(|e| JsError::new(&format!("reconfigure response serialize: {e}")))
+    }
+}
+
+/// Build the JSON body emitted by `reconfigureBlock`. Shape matches
+/// `ReconfigureResponse` in `server/src/routes.rs` so the TS dispatcher
+/// can treat REST and WASM replies with a single type.
+fn reconfigure_response_json(plan: &ReconfigurePlan) -> Value {
+    json!({
+        "applied": true,
+        "overall": plan.overall.as_wire_str(),
+        "changes": plan.changes.iter().map(|c| json!({
+            "block_id": c.block_id,
+            "param_key": c.param_key,
+            "old_value": c.old_value,
+            "new_value": c.new_value,
+            "scope": c.scope.as_wire_str(),
+        })).collect::<Vec<_>>(),
+        "structural_count": plan.structural.len(),
+        "noop": plan.is_noop(),
+    })
 }

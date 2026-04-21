@@ -760,6 +760,45 @@ impl Runtime {
         }
         Ok(plan)
     }
+
+    /// Apply a params delta to one block by id, then reconfigure. Merges
+    /// `delta` into the applied doc's `blocks[id].params` (keys present
+    /// in `delta` replace; other keys stay) and delegates to
+    /// [`Self::reconfigure`].
+    ///
+    /// `delta` must be a JSON object. Errors when the runtime has no
+    /// applied doc, the id is missing, or `delta` is a non-object JSON
+    /// value. The merged doc is passed through `reconfigure`, so the
+    /// same rollback guarantees apply — a build-time failure leaves the
+    /// runtime unchanged.
+    pub fn reconfigure_block(
+        &mut self,
+        id: &str,
+        delta: serde_json::Value,
+    ) -> Result<ReconfigurePlan> {
+        let delta_obj = delta
+            .as_object()
+            .ok_or_else(|| anyhow!("params delta must be a JSON object"))?
+            .clone();
+        let mut new_doc = self
+            .applied_doc
+            .as_ref()
+            .ok_or_else(|| anyhow!("runtime: reconfigure_block requires a load_doc-built runtime"))?
+            .clone();
+        let block = new_doc
+            .blocks
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("no block {id:?} in applied doc"))?;
+        let mut merged = match block.params.take() {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        for (k, v) in delta_obj {
+            merged.insert(k, v);
+        }
+        block.params = Some(serde_json::Value::Object(merged));
+        self.reconfigure(&new_doc)
+    }
 }
 
 fn scratch_capacity(buf: &TypedBuf) -> usize {
@@ -1209,6 +1248,83 @@ mod tests {
         let mut rt = Runtime::from_parts(blocks, &specs, &schedule, 16).unwrap();
         let err = rt.reconfigure(&doc).unwrap_err();
         assert!(format!("{err}").contains("reconfigure"));
+    }
+
+    #[test]
+    fn reconfigure_block_merges_delta_preserving_other_params() {
+        let mut rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource","params":{"rate_hz":4,"tone_freq_abs_hz":1,"center_freq_hz":0,"amplitude":0.5}}},
+                "wires":[]
+            }"#,
+            8,
+        );
+        rt.init().unwrap();
+        let plan = rt
+            .reconfigure_block("src", serde_json::json!({ "amplitude": 0.25 }))
+            .unwrap();
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.changes[0].param_key, "amplitude");
+        // Untouched keys survived the merge.
+        let params = rt.applied_doc().unwrap().blocks["src"]
+            .params
+            .as_ref()
+            .unwrap();
+        assert_eq!(params["amplitude"].as_f64(), Some(0.25));
+        assert_eq!(params["tone_freq_abs_hz"].as_f64(), Some(1.0));
+        assert_eq!(params["rate_hz"].as_f64(), Some(4.0));
+    }
+
+    #[test]
+    fn reconfigure_block_noop_when_delta_matches_current() {
+        let mut rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource","params":{"amplitude":0.5}}},
+                "wires":[]
+            }"#,
+            8,
+        );
+        rt.init().unwrap();
+        let plan = rt
+            .reconfigure_block("src", serde_json::json!({ "amplitude": 0.5 }))
+            .unwrap();
+        assert!(plan.is_noop());
+    }
+
+    #[test]
+    fn reconfigure_block_rejects_unknown_block_id() {
+        let mut rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource"}},
+                "wires":[]
+            }"#,
+            8,
+        );
+        rt.init().unwrap();
+        let err = rt
+            .reconfigure_block("ghost", serde_json::json!({ "x": 1 }))
+            .unwrap_err();
+        assert!(format!("{err}").contains("ghost"));
+    }
+
+    #[test]
+    fn reconfigure_block_rejects_non_object_delta() {
+        let mut rt = load(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{"src":{"type":"SineSource"}},
+                "wires":[]
+            }"#,
+            8,
+        );
+        rt.init().unwrap();
+        let err = rt
+            .reconfigure_block("src", serde_json::json!(42))
+            .unwrap_err();
+        assert!(format!("{err}").contains("JSON object"));
     }
 
     // --- B5: rate-expansion correctness ---------------------------------
