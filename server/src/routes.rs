@@ -104,21 +104,26 @@ pub enum DeviceEntry {
 }
 
 /// `GET /api/devices` — enumerate every `SoapySDR` device and probe each
-/// one for its full capability schema.
-pub async fn list_devices() -> Result<Json<Vec<DeviceEntry>>, (StatusCode, Json<ApiError>)> {
-    let entries = tokio::task::spawn_blocking(probe_all_devices)
-        .await
-        .map_err(|e| internal(format!("device probe task panicked: {e}")))?
-        .map_err(|e| internal(format!("{e:#}")))?;
-    Ok(Json(entries))
-}
+/// one for its full capability schema. Probes go through the per-process
+/// [`DeviceCache`](crate::device_cache::DeviceCache); only the very
+/// first hit per device touches the driver, and cache entries for
+/// devices no longer enumerated are pruned.
+pub async fn list_devices(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<DeviceEntry>>, (StatusCode, Json<ApiError>)> {
+    let devices = tokio::task::spawn_blocking(|| {
+        crate::device::list_devices_with_timeout(crate::device::DEFAULT_PROBE_TIMEOUT)
+    })
+    .await
+    .map_err(|e| internal(format!("device enumerate task panicked: {e}")))?
+    .map_err(|e| internal(format!("{e:#}")))?;
 
-fn probe_all_devices() -> anyhow::Result<Vec<DeviceEntry>> {
-    let devices = crate::device::list_devices_with_timeout(crate::device::DEFAULT_PROBE_TIMEOUT)?;
+    let cache = state.device_cache();
+    let mut present = std::collections::HashSet::with_capacity(devices.len());
     let mut entries = Vec::with_capacity(devices.len());
     for info in devices {
-        let args = info.args_string();
-        match crate::device::probe_with_timeout(&args, crate::device::DEFAULT_PROBE_TIMEOUT) {
+        present.insert(crate::device_cache::key_for(&info));
+        match cache.ensure(&info).await {
             Ok(caps) => entries.push(DeviceEntry::Available(Box::new(caps))),
             Err(err) => entries.push(DeviceEntry::Unavailable {
                 info,
@@ -126,7 +131,8 @@ fn probe_all_devices() -> anyhow::Result<Vec<DeviceEntry>> {
             }),
         }
     }
-    Ok(entries)
+    cache.prune(&present).await;
+    Ok(Json(entries))
 }
 
 fn internal(message: String) -> (StatusCode, Json<ApiError>) {
@@ -359,12 +365,7 @@ pub async fn get_source_capabilities(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let probe = tokio::task::spawn_blocking(move || {
-        crate::device::probe_with_timeout(&args, crate::device::DEFAULT_PROBE_TIMEOUT)
-    })
-    .await
-    .map_err(|e| internal(format!("device probe task panicked: {e}")))?;
-    let response = match probe {
+    let response = match state.device_cache().ensure_args(&args).await {
         Ok(caps) => SourceCapabilitiesResponse::Hardware {
             type_name,
             capabilities: Box::new(caps),

@@ -36,6 +36,10 @@ mod app_state;
 #[allow(dead_code)]
 mod device;
 
+#[path = "../src/device_cache.rs"]
+#[allow(dead_code)]
+mod device_cache;
+
 #[path = "../src/soapy_source.rs"]
 #[allow(dead_code)]
 mod soapy_source;

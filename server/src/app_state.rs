@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::{
     block_schema::BlockSchemaDto,
+    device_cache::DeviceCache,
     frame_bus::{FrameBus, DEFAULT_SUBSCRIBER_CAPACITY},
     preset_pipeline::{spawn_preset, PresetMount},
 };
@@ -95,6 +96,10 @@ struct Inner {
     /// `Some` while the pipeline is running.
     pipeline: Mutex<Option<PresetMount>>,
     tick_period: Duration,
+    /// Per-process cache of device capabilities. Populated by
+    /// `/api/devices` and `/api/source/capabilities`; pruned when a
+    /// device disappears from `enumerate`.
+    device_cache: DeviceCache,
 }
 
 #[derive(Clone)]
@@ -118,10 +123,16 @@ impl AppState {
                 source_config: RwLock::new(source),
                 pipeline: Mutex::new(None),
                 tick_period,
+                device_cache: DeviceCache::new(),
             }),
             logs: None,
             presets_dir: None,
         }
+    }
+
+    #[must_use]
+    pub fn device_cache(&self) -> &DeviceCache {
+        &self.inner.device_cache
     }
 
     #[must_use]

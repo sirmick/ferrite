@@ -35,6 +35,7 @@ mod app_state;
 mod block_schema;
 mod bridge_sink;
 mod device;
+mod device_cache;
 mod frame_bus;
 mod log_stream;
 mod preset_pipeline;
@@ -135,6 +136,15 @@ struct Args {
     #[arg(long = "probe-device", value_name = "ARGS")]
     probe_device: Option<String>,
 
+    /// Enumerate every `SoapySDR` device, probe each one, and print the
+    /// full capability schema (including driver settings) to stdout
+    /// before exiting. Same per-device output as `--probe-device <args>`,
+    /// looped over the enumeration. Intended as a CLI debug tool —
+    /// confirms what the server-side capability cache would see for
+    /// every attached device.
+    #[arg(long = "probe-all", default_value_t = false)]
+    probe_all: bool,
+
     /// Hard timeout for `--list-devices` and `--probe-device`. Defaults
     /// to 10s — enough for slow drivers (SDRplay first probe is ~2.3s)
     /// while still bailing long before a wedged SoapySDR daemon would
@@ -202,6 +212,10 @@ async fn main() -> Result<()> {
 
     if let Some(probe_args) = args.probe_device.as_deref() {
         return run_probe_device(probe_args, probe_timeout);
+    }
+
+    if args.probe_all {
+        return run_probe_all(probe_timeout);
     }
 
     let flowgraph_path = args
@@ -353,6 +367,35 @@ fn run_list_devices(timeout: Duration) -> Result<()> {
 fn run_probe_device(args: &str, timeout: Duration) -> Result<()> {
     let caps = device::probe_with_timeout(args, timeout)?;
     device::print_capabilities(&caps);
+    Ok(())
+}
+
+/// Enumerate every device and print its capability schema. A failed
+/// probe for one device does not abort the run — the failure is printed
+/// and the next device is tried. Exit status is non-zero only when at
+/// least one device failed to probe.
+fn run_probe_all(timeout: Duration) -> Result<()> {
+    let devices = device::list_devices_with_timeout(timeout)?;
+    if devices.is_empty() {
+        println!("No SoapySDR devices found.");
+        return Ok(());
+    }
+    println!("Found {} SoapySDR device(s):", devices.len());
+    let mut failures = 0_usize;
+    for (i, info) in devices.iter().enumerate() {
+        println!();
+        println!("=== [{i}] {} ({}) ===", info.label, info.args_string());
+        match device::probe_with_timeout(&info.args_string(), timeout) {
+            Ok(caps) => device::print_capabilities(&caps),
+            Err(err) => {
+                eprintln!("probe failed: {err:#}");
+                failures += 1;
+            }
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures} of {} device(s) failed to probe", devices.len());
+    }
     Ok(())
 }
 
