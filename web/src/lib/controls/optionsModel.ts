@@ -36,8 +36,17 @@ export interface GainState {
 export interface OptionsState {
   channel: number;
   sample_rate_hz: number;
-  /** Available discrete sample rates (or synthesised quantised ladder). */
+  /**
+   * Full discrete list from the device probe, clamped by the preset's
+   * `max_sample_rate_hz` where set. Bound by the advanced panel.
+   */
   sample_rate_choices: number[];
+  /**
+   * Short curated list from the preset — the headline dropdown next to
+   * the main tuning display shows just these. Empty when the preset
+   * defines no curated list (falls back to `sample_rate_choices`).
+   */
+  sample_rate_quick_choices: number[];
   center_freq_hz: number;
   freq_range: NumericKnob;
   bandwidth_hz: number | null;
@@ -85,6 +94,26 @@ export function firstChannel(caps: DeviceCapabilities): RxChannelCapabilities | 
   return caps.rx_channels[0] ?? null;
 }
 
+/**
+ * True when `target` is reachable from the advertised ranges. Continuous
+ * ranges (step null) count any value in `[min, max]`; stepped ranges are
+ * expanded via `rangesToChoices`. Used to filter curated preset rates
+ * against whatever the device probe actually reports.
+ */
+function rateContains(ranges: RangeSpec[], target: number): boolean {
+  for (const r of ranges) {
+    if (!r.step || r.step <= 0) {
+      if (target >= r.min && target <= r.max) return true;
+    } else {
+      const offset = target - r.min;
+      if (offset < 0 || target > r.max) continue;
+      const grid = offset % r.step;
+      if (grid < 1 || r.step - grid < 1) return true;
+    }
+  }
+  return false;
+}
+
 function spanCenter(ranges: RangeSpec[], fallback: number): number {
   const r = ranges[0];
   if (!r) return fallback;
@@ -96,19 +125,44 @@ export function defaultsFor(caps: DeviceCapabilities): OptionsState | null {
   const ch = firstChannel(caps);
   if (!ch) return null;
 
+  const preset = PRESETS[caps.driver_key];
   // Inject the per-driver sweet-spot rate as a choice when it falls
   // inside an advertised continuous range. SDRplay advertises only
   // `[62.5k, 10.66M]` endpoints; without injection 2 MS/s would never
   // appear in the dropdown even though the device fully supports it.
-  const rateChoices = withPreferredInjected(
+  const rateChoicesRaw = withPreferredInjected(
     rangesToChoices(ch.sample_rate_ranges_hz),
     ch.sample_rate_ranges_hz,
     PREFERRED_RATE_BY_DRIVER[caps.driver_key],
   );
+  // Clamp to the preset's practical upper bound when set — SDRplay
+  // advertises 10.66 MS/s but activateStream() fails for anything above
+  // 10 MS/s.
+  const rateChoices = preset?.max_sample_rate_hz
+    ? rateChoicesRaw.filter((c) => c <= preset.max_sample_rate_hz!)
+    : rateChoicesRaw;
   const sample_rate_hz = preferredRate(rateChoices, caps.driver_key);
+  // Curated quick list — nixie dropdown binds here. Falls back to the
+  // full probe list when the preset doesn't curate. Entries must be
+  // reachable from the advertised ranges (continuous ranges count
+  // anything inside [min, max], discrete ranges need an exact match)
+  // and under `max_sample_rate_hz` if set — so a stale preset can't
+  // offer an unreachable rate.
+  const maxRate = preset?.max_sample_rate_hz ?? Number.POSITIVE_INFINITY;
+  const sample_rate_quick_choices =
+    preset?.sample_rate_choices_hz?.filter(
+      (c) => c <= maxRate && rateContains(ch.sample_rate_ranges_hz, c),
+    ) ?? rateChoices;
 
   const bandwidthChoices = rangesToChoices(ch.bandwidth_ranges_hz);
-  const bandwidth_hz = preferredBandwidth(bandwidthChoices, sample_rate_hz, caps.driver_key);
+  // Driver-specific: some drivers (SDRplay) need an explicit IF filter
+  // picked for them because the driver default is either too narrow
+  // (brick-walls the waterfall) or too wide (silent upclock of Fs).
+  // Others (HackRF, RTL-SDR) do the right thing without a
+  // `set_bandwidth` call. The ladder lives in the per-driver preset
+  // file so the rule is "has a ladder? derive; missing? skip", with no
+  // per-driver code paths.
+  const bandwidth_hz = pickFromLadder(preset?.if_filter_ladder_hz, sample_rate_hz);
 
   const freqRange = ch.frequency_ranges_hz[0] ?? { min: 0, max: 6e9, step: null };
 
@@ -122,6 +176,7 @@ export function defaultsFor(caps: DeviceCapabilities): OptionsState | null {
     channel: ch.index,
     sample_rate_hz,
     sample_rate_choices: rateChoices,
+    sample_rate_quick_choices,
     center_freq_hz: spanCenter(ch.frequency_ranges_hz, 100e6),
     freq_range: knobFromRange(freqRange),
     bandwidth_hz,
@@ -162,17 +217,50 @@ function withPreferredInjected(
 
 /**
  * Per-driver opening presets, loaded eagerly from `sdr-presets/*.json`.
- * Each file is one driver's sweet-spot rate plus optional pinned
- * bandwidth — see `sdr-presets/README.md`.
+ * One file per driver pins a sweet-spot sample rate and, when the
+ * driver's IF filter behaviour warrants it, an ordered ladder of filter
+ * widths. See `sdr-presets/README.md`.
  *
  * Vite's `import.meta.glob({ eager: true })` inlines the JSON at build
  * time, so this is just a static lookup at runtime.
  */
 interface SdrPreset {
   driver_key: string;
+  /** Default sample rate on dialog-open. Must be in the advertised caps. */
   sample_rate_hz: number;
-  bandwidth_hz?: number;
+  /**
+   * Curated short list for the main "quick" dropdown. Every entry must
+   * also be reachable from the device probe — entries outside the
+   * advertised ranges are filtered out so a stale preset can't offer an
+   * unreachable rate.
+   */
+  sample_rate_choices_hz?: number[];
+  /**
+   * Practical upper bound, tighter than the device's advertised max.
+   * SDRplay's `[2M, 10.66M]` range is clamped here because the driver
+   * rejects activateStream() above ~10 MS/s.
+   */
+  max_sample_rate_hz?: number;
+  /** IF filter ladder for drivers where BW must track Fs — see `pickFromLadder`. */
+  if_filter_ladder_hz?: number[];
 }
+
+/**
+ * Pick the largest ladder entry that does not exceed `fs`. A filter
+ * wider than Fs either aliases (HackRF) or makes the driver silently
+ * raise Fs to match (SDRplay); staying ≤ Fs avoids both. Returns `null`
+ * when the ladder is absent or empty, which the source block treats as
+ * "skip `set_bandwidth`" (rtlsdr, hackrf).
+ */
+function pickFromLadder(ladder: number[] | undefined, fs: number): number | null {
+  if (!ladder || ladder.length === 0) return null;
+  let best: number | null = null;
+  for (const bw of ladder) {
+    if (bw <= fs && (best === null || bw > best)) best = bw;
+  }
+  return best;
+}
+
 const PRESETS: Record<string, SdrPreset> = (() => {
   const files = import.meta.glob<{ default: SdrPreset }>('./sdr-presets/*.json', {
     eager: true,
@@ -204,31 +292,6 @@ function preferredRate(choices: number[], driverKey: string): number {
   if (above !== undefined) return above;
   const above1m = choices.find((c) => c >= 1_000_000);
   return above1m ?? choices[choices.length - 1];
-}
-
-const PREFERRED_BANDWIDTH_BY_DRIVER: Record<string, number> = Object.fromEntries(
-  Object.entries(PRESETS)
-    .filter(([, p]) => typeof p.bandwidth_hz === 'number')
-    .map(([k, p]) => [k, p.bandwidth_hz!]),
-);
-
-/**
- * Pick a sane default analog bandwidth for the chosen sample rate.
- * Prefer a per-driver pinned value (`PREFERRED_BANDWIDTH_BY_DRIVER`)
- * if the device advertises it; otherwise the smallest choice that's
- * ≥ 0.8 × sample rate (so the filter doesn't brick-wall a wider
- * capture); fall back to the largest if nothing meets that, and
- * `null` (driver default) if no choices exist.
- */
-function preferredBandwidth(choices: number[], rate: number, driverKey: string): number | null {
-  if (choices.length === 0) return null;
-  const pinned = PREFERRED_BANDWIDTH_BY_DRIVER[driverKey];
-  if (pinned !== undefined) {
-    const exact = choices.find((c) => Math.abs(c - pinned) < 1);
-    if (exact !== undefined) return exact;
-  }
-  const target = rate * 0.8;
-  return choices.find((c) => c >= target) ?? choices[choices.length - 1];
 }
 
 /** True when `state` is internally consistent (freq in range, gains in range). */

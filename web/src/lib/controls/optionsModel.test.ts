@@ -95,12 +95,43 @@ describe('defaultsFor — SDRPlay', () => {
     expect(state.gains.map((g) => g.name)).toEqual(['IFGR', 'RFGR']);
   });
 
-  it('pins the per-driver preferred 5 MHz analog filter', () => {
-    // SDRplay's filter ladder includes 5 MHz; the per-driver preset
-    // pins it (a sane wide-but-not-everything-open default for a
-    // 2 MS/s open).
-    expect(state.bandwidth_hz).toBe(5_000_000);
+  it('picks the IF filter from the preset ladder (largest ≤ Fs)', () => {
+    // sdrplay.json carries an `if_filter_ladder_hz` ending …1.536M, 5M.
+    // At the preset Fs of 2 Ms/s, 1.536 MHz is the largest entry ≤ Fs.
+    expect(state.bandwidth_hz).toBe(1_536_000);
     expect(state.bandwidth_choices).toContain(5_000_000);
+    expect(state.bandwidth_choices).toContain(1_536_000);
+  });
+
+  it('clamps advertised choices by max_sample_rate_hz', () => {
+    // SDRplay probe reports [62.5k, 10.66M]; sdrplay.json caps at 10 Ms/s
+    // because activateStream() fails above that. Advanced panel list
+    // should therefore stop at 10 Ms/s.
+    expect(state.sample_rate_choices.every((c) => c <= 10_000_000)).toBe(true);
+    expect(state.sample_rate_choices).not.toContain(10_660_000);
+  });
+
+  it('exposes a curated quick list from the preset', () => {
+    // The nixie dropdown binds to this list — short + opinionated.
+    expect(state.sample_rate_quick_choices).toEqual([
+      500_000, 1_000_000, 2_000_000, 4_000_000, 6_000_000, 8_000_000, 10_000_000,
+    ]);
+  });
+});
+
+describe('defaultsFor — quick list filtering', () => {
+  it('falls back to the full probe list when the preset defines no curated list', () => {
+    // rtlsdr.json DOES now define a curated list, but entries outside
+    // the advertised caps are dropped; the RTLSDR fixture advertises
+    // discrete non-round values (e.g. 1_024_000) so a curated `1_000_000`
+    // would be filtered out. Verify the advanced list is used as-is when
+    // needed.
+    const state = defaultsFor(RTLSDR_CAPS)!;
+    expect(state.sample_rate_quick_choices.length).toBeGreaterThan(0);
+    // Every quick choice must exist in the advanced choices (consistency).
+    for (const q of state.sample_rate_quick_choices) {
+      expect(state.sample_rate_choices).toContain(q);
+    }
   });
 });
 
@@ -145,15 +176,19 @@ describe('toSourceConfig', () => {
     expect(toSourceConfig(SDRPLAY_CAPS, state).params.gain_db).toBe(43);
   });
 
-  it('omits bandwidth_hz when the device has no bandwidth ladder', () => {
-    const state = defaultsFor(RTLSDR_CAPS)!;
-    const cfg = toSourceConfig(RTLSDR_CAPS, state);
-    expect(cfg.params.bandwidth_hz).toBeUndefined();
+  it('omits bandwidth_hz for drivers without a preset ladder', () => {
+    // rtlsdr.json has no if_filter_ladder_hz — defaultsFor leaves
+    // bandwidth_hz null, toSourceConfig skips the field, and the
+    // server never calls set_bandwidth.
+    expect(
+      toSourceConfig(RTLSDR_CAPS, defaultsFor(RTLSDR_CAPS)!).params.bandwidth_hz,
+    ).toBeUndefined();
   });
 
-  it('includes the per-driver pinned bandwidth on SDRplay', () => {
-    const state = defaultsFor(SDRPLAY_CAPS)!;
-    const cfg = toSourceConfig(SDRPLAY_CAPS, state);
-    expect(cfg.params.bandwidth_hz).toBe(5_000_000);
+  it('forwards the ladder-derived bandwidth for SDRplay', () => {
+    // sdrplay.json has a ladder; defaultsFor picks 1.536 MHz at 2 Ms/s,
+    // toSourceConfig sends it on to the server.
+    const cfg = toSourceConfig(SDRPLAY_CAPS, defaultsFor(SDRPLAY_CAPS)!);
+    expect(cfg.params.bandwidth_hz).toBe(1_536_000);
   });
 });

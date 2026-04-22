@@ -28,21 +28,38 @@ pub type ProbeFn =
     Arc<dyn Fn(&str, Duration) -> Result<DeviceCapabilities> + Send + Sync + 'static>;
 
 /// Stable id for one device — preferred form is `serial=<…>` so the
-/// key survives the user reformatting an args string. Falls back to
-/// the canonicalised args (sorted `k=v,k=v`) when no serial is known.
-fn cache_key_from_info(info: &DeviceInfo) -> String {
+/// key survives the user reformatting an args string. Falls back to a
+/// canonicalised `k=v,k=v` representation of the args when no serial
+/// is known. This is the public keying rule; [`stable_device_key`] and
+/// [`stable_device_key_from_args`] both produce it, and callers that
+/// need to interop with the cache (e.g. building the `present` set
+/// for [`DeviceCache::prune`]) should use one of those two.
+fn canonical_key_from_map(map: &BTreeMap<String, String>) -> String {
+    if let Some(serial) = map.get("serial").filter(|s| !s.is_empty()) {
+        return format!("serial={serial}");
+    }
+    map.iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Stable cache key derived from a `DeviceInfo` (the enumerate output).
+#[must_use]
+pub fn stable_device_key(info: &DeviceInfo) -> String {
     if let Some(serial) = info.serial.as_deref().filter(|s| !s.is_empty()) {
         return format!("serial={serial}");
     }
     info.args_string()
 }
 
-/// Same key as [`cache_key_from_info`] but derived from a raw args
-/// string — used when we only have the user-supplied `args` (e.g. on
-/// `/api/source/capabilities`). Re-parses + canonicalises so the result
-/// matches what an enumerate-derived key would produce for the same
-/// device.
-pub fn cache_key_from_args(args: &str) -> String {
+/// Stable cache key derived from a raw SoapySDR args string — used
+/// when the caller has no [`DeviceInfo`] (e.g. `/api/source/capabilities`
+/// only knows the source's args). Re-parses + canonicalises so the
+/// result matches [`stable_device_key`] for the same device regardless
+/// of arg ordering.
+#[must_use]
+pub fn stable_device_key_from_args(args: &str) -> String {
     let map: BTreeMap<String, String> = args
         .split(',')
         .filter(|p| !p.is_empty())
@@ -51,13 +68,7 @@ pub fn cache_key_from_args(args: &str) -> String {
                 .map(|(k, v)| (k.trim().into(), v.trim().into()))
         })
         .collect();
-    if let Some(serial) = map.get("serial").filter(|s| !s.is_empty()) {
-        return format!("serial={serial}");
-    }
-    map.iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(",")
+    canonical_key_from_map(&map)
 }
 
 #[derive(Clone)]
@@ -93,7 +104,7 @@ impl DeviceCache {
     /// (no per-key dedup yet) — fine for our cadence; the loser's
     /// result just overwrites in the map.
     pub async fn ensure(&self, info: &DeviceInfo) -> Result<DeviceCapabilities> {
-        let key = cache_key_from_info(info);
+        let key = stable_device_key(info);
         if let Some(hit) = self.inner.read().await.get(&key).cloned() {
             return Ok(hit);
         }
@@ -112,7 +123,7 @@ impl DeviceCache {
     /// key is derived from the canonicalised args; re-probing the same
     /// device under a different arg ordering hits the same entry.
     pub async fn ensure_args(&self, args: &str) -> Result<DeviceCapabilities> {
-        let key = cache_key_from_args(args);
+        let key = stable_device_key_from_args(args);
         if let Some(hit) = self.inner.read().await.get(&key).cloned() {
             return Ok(hit);
         }
@@ -201,13 +212,6 @@ impl Default for DeviceCache {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Public for callers that need to mirror the cache's keying rule
-/// (e.g. building the `present` set for [`DeviceCache::prune`]).
-#[must_use]
-pub fn key_for(info: &DeviceInfo) -> String {
-    cache_key_from_info(info)
 }
 
 #[cfg(test)]
@@ -306,7 +310,7 @@ mod tests {
         let cache = DeviceCache::with_probe(probe, Duration::from_secs(1));
         let i = info("hackrf", Some("b74865"));
         let _ = cache.ensure(&i).await.unwrap();
-        cache.invalidate(&key_for(&i)).await;
+        cache.invalidate(&stable_device_key(&i)).await;
         let _ = cache.ensure(&i).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -321,7 +325,7 @@ mod tests {
         let _ = cache.ensure(&b).await.unwrap();
         assert_eq!(cache.len().await, 2);
         let mut present = HashSet::new();
-        present.insert(key_for(&a));
+        present.insert(stable_device_key(&a));
         cache.prune(&present).await;
         assert_eq!(cache.len().await, 1);
     }

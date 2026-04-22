@@ -56,10 +56,6 @@ mod device;
 #[allow(dead_code)]
 mod device_cache;
 
-#[path = "../src/soapy_source.rs"]
-#[allow(dead_code)]
-mod soapy_source;
-
 #[path = "../src/block_schema.rs"]
 #[allow(dead_code)]
 mod block_schema;

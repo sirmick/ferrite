@@ -40,7 +40,6 @@ mod frame_bus;
 mod log_stream;
 mod preset_pipeline;
 mod routes;
-mod soapy_source;
 
 /// Ferrite SDR daemon.
 #[derive(Parser, Debug)]
@@ -145,6 +144,42 @@ struct Args {
     #[arg(long = "probe-all", default_value_t = false)]
     probe_all: bool,
 
+    /// Enumerate every `SoapySDR` device, probe it, open a short Rx
+    /// stream, and print sample-count / magnitude stats for each one.
+    /// Intended as a CLI smoke test — confirms the device not only
+    /// opens and advertises capabilities but also produces samples.
+    #[arg(long = "read-all", default_value_t = false)]
+    read_all: bool,
+
+    /// Duration of the per-device sampling window used by `--read-all`.
+    /// Defaults to 1s, which is long enough for every driver we care
+    /// about to stabilise and return several million samples at the
+    /// target 2 Ms/s.
+    #[arg(long = "read-secs", default_value_t = 1.0)]
+    read_secs: f64,
+
+    /// Restrict `--read-all` to a single device (by SoapySDR args
+    /// string). Skips enumeration and targets only the matching device.
+    #[arg(long = "read-device", value_name = "ARGS")]
+    read_device: Option<String>,
+
+    /// Override the sample rate used by `--read-all` (Hz).
+    #[arg(long = "read-rate-hz", value_name = "HZ")]
+    read_rate_hz: Option<f64>,
+
+    /// Apply a `set_bandwidth` call with this value during `--read-all`
+    /// (Hz). Omit to skip `set_bandwidth` entirely (driver default).
+    #[arg(long = "read-bandwidth-hz", value_name = "HZ")]
+    read_bandwidth_hz: Option<f64>,
+
+    /// Override the center frequency used by `--read-all` (Hz).
+    #[arg(long = "read-freq-hz", value_name = "HZ")]
+    read_freq_hz: Option<f64>,
+
+    /// Override the gain used by `--read-all` (dB).
+    #[arg(long = "read-gain-db", value_name = "DB")]
+    read_gain_db: Option<f64>,
+
     /// Hard timeout for `--list-devices` and `--probe-device`. Defaults
     /// to 10s — enough for slow drivers (SDRplay first probe is ~2.3s)
     /// while still bailing long before a wedged SoapySDR daemon would
@@ -216,6 +251,22 @@ async fn main() -> Result<()> {
 
     if args.probe_all {
         return run_probe_all(probe_timeout);
+    }
+
+    if args.read_all {
+        let read_for = Duration::from_secs_f64(args.read_secs.max(0.05));
+        let overrides = device::ReadOverrides {
+            sample_rate_hz: args.read_rate_hz,
+            bandwidth_hz: args.read_bandwidth_hz,
+            center_freq_hz: args.read_freq_hz,
+            gain_db: args.read_gain_db,
+        };
+        return run_read_all(
+            probe_timeout,
+            read_for,
+            args.read_device.as_deref(),
+            overrides,
+        );
     }
 
     let flowgraph_path = args
@@ -406,6 +457,74 @@ fn run_probe_all(timeout: Duration) -> Result<()> {
     }
     if failures > 0 {
         anyhow::bail!("{failures} of {} device(s) failed to probe", devices.len());
+    }
+    Ok(())
+}
+
+/// Enumerate every device, probe it, then open a short Rx stream and
+/// report whether samples actually arrived. Probes use `probe_timeout`;
+/// the sampling window itself is `read_for` per device (plus internal
+/// slack for open/configure/activate).
+fn run_read_all(
+    probe_timeout: Duration,
+    read_for: Duration,
+    restrict_args: Option<&str>,
+    overrides: device::ReadOverrides,
+) -> Result<()> {
+    let devices = if let Some(args) = restrict_args {
+        // Synthetic one-entry list so the rest of the loop is uniform.
+        // Probe fills in label/serial; here we only need args to target it.
+        vec![device::DeviceInfo {
+            driver: String::new(),
+            label: args.to_string(),
+            serial: None,
+            args: args
+                .split(',')
+                .filter_map(|p| p.split_once('='))
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                .collect(),
+        }]
+    } else {
+        device::list_devices_with_timeout(probe_timeout)?
+    };
+    if devices.is_empty() {
+        println!("No SoapySDR devices found.");
+        return Ok(());
+    }
+    println!(
+        "Reading {:.2}s per device from {} SoapySDR device(s):",
+        read_for.as_secs_f64(),
+        devices.len()
+    );
+    let mut failures = 0_usize;
+    for (i, info) in devices.iter().enumerate() {
+        println!();
+        println!("=== [{i}] {} ({}) ===", info.label, info.args_string());
+        let args_s = info.args_string();
+        let caps = match device::probe_with_timeout(&args_s, probe_timeout) {
+            Ok(c) => c,
+            Err(err) => {
+                eprintln!("probe failed: {err:#}");
+                failures += 1;
+                continue;
+            }
+        };
+        match device::read_samples_with_timeout(&args_s, &caps, read_for, overrides.clone()) {
+            Ok(report) => {
+                device::print_sample_report(&report);
+                if report.samples_read == 0 {
+                    failures += 1;
+                    eprintln!("  (no samples read — treated as failure)");
+                }
+            }
+            Err(err) => {
+                eprintln!("read failed: {err:#}");
+                failures += 1;
+            }
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures} of {} device(s) failed to read", devices.len());
     }
     Ok(())
 }

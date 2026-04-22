@@ -122,7 +122,7 @@ pub async fn list_devices(
     let mut present = std::collections::HashSet::with_capacity(devices.len());
     let mut entries = Vec::with_capacity(devices.len());
     for info in devices {
-        present.insert(crate::device_cache::key_for(&info));
+        present.insert(crate::device_cache::stable_device_key(&info));
         match cache.ensure(&info).await {
             Ok(caps) => entries.push(DeviceEntry::Available(Box::new(caps))),
             Err(err) => entries.push(DeviceEntry::Unavailable {

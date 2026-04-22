@@ -35,6 +35,8 @@ pub mod registry;
 pub mod render;
 pub mod sine;
 #[cfg(feature = "soapysdr")]
+pub mod soapy_retry;
+#[cfg(feature = "soapysdr")]
 pub mod soapy_source;
 pub mod spsc_ring;
 pub mod tee_iq_f32;

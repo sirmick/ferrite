@@ -9,12 +9,15 @@
 //! `libSoapySDR` is a hard build-time dependency — see `server/Cargo.toml`.
 
 use std::collections::BTreeMap;
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_void};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
+use soapysdr_sys::{SoapySDRDevice, SoapySDRKwargs, SoapySDRRange};
 
 /// Default probe timeout for the CLI. The "happy" SDRplay probe takes
 /// ~2.3s on the dev box; we leave plenty of headroom for slower drivers
@@ -84,7 +87,7 @@ impl DeviceInfo {
 
 /// Enumerate every device `SoapySDR` plugins can see. Empty vec when
 /// no hardware is attached — that's a clean success, not an error.
-pub fn list_devices() -> Result<Vec<DeviceInfo>> {
+pub(crate) fn list_devices() -> Result<Vec<DeviceInfo>> {
     let entries = soapysdr::enumerate("").context("SoapySDR enumerate failed")?;
     Ok(entries.iter().map(device_info_from_args).collect())
 }
@@ -222,16 +225,70 @@ pub fn probe_with_timeout(args: &str, timeout: Duration) -> Result<DeviceCapabil
 }
 
 /// Open the device at `args`, query everything we can, close. Single
-/// shot — Soapy serialises device access, so the caller can't hold the
-/// returned struct and expect the device to stay open.
-pub fn probe(args: &str) -> Result<DeviceCapabilities> {
-    let device = soapysdr::Device::new(args)
-        .with_context(|| format!("open SoapySDR device with args {args:?}"))?;
+/// shot — one `SoapySDRDevice_makeStrArgs` / one `SoapySDRDevice_unmake`
+/// per call, with every query (including `getSettingInfo`) in between.
+///
+/// Going straight through `soapysdr-sys` — not the safe `soapysdr` 0.5
+/// wrapper — because that wrapper doesn't expose `getSettingInfo` and
+/// has no way to hand out the underlying `*mut SoapySDRDevice`, so
+/// mixing the two costs a second open per device. Drivers like RTL-SDR
+/// and SDRplay do non-trivial work on every open (kernel detach, tuner
+/// probe, API handshake), so we go direct and pay for it once.
+pub(crate) fn probe(args: &str) -> Result<DeviceCapabilities> {
+    let args_c = CString::new(args).with_context(|| format!("args contain NUL byte: {args:?}"))?;
 
-    let driver_key = device.driver_key().context("read driver_key")?.clone();
-    let hardware_key = device.hardware_key().context("read hardware_key")?.clone();
-    let hw_args = device.hardware_info().context("read hardware_info")?;
-    let hardware_info = args_to_map(&hw_args);
+    // Retry the raw `makeStrArgs` against the same "device deletion
+    // in-progress" race that `SoapySource::open_with_retry` guards — a
+    // prior handle (ours, from a recent probe, or the block's) may
+    // still be tearing down inside the driver. Shared classifier in
+    // `ferrite_blocks::soapy_retry` keeps the two paths in lockstep.
+    let mut device_ptr: *mut SoapySDRDevice = std::ptr::null_mut();
+    let mut last_err: Option<String> = None;
+    for attempt in 0..ferrite_blocks::soapy_retry::OPEN_MAX_ATTEMPTS {
+        // SAFETY: args_c outlives the call. A null return means open failed.
+        device_ptr = unsafe { soapysdr_sys::SoapySDRDevice_makeStrArgs(args_c.as_ptr()) };
+        if !device_ptr.is_null() {
+            break;
+        }
+        let err = soapy_last_error();
+        let is_last = attempt + 1 == ferrite_blocks::soapy_retry::OPEN_MAX_ATTEMPTS;
+        if !is_last && ferrite_blocks::soapy_retry::is_transient_make_chain(&err) {
+            tracing::warn!(
+                attempt = attempt + 1,
+                max = ferrite_blocks::soapy_retry::OPEN_MAX_ATTEMPTS,
+                "SoapySDR probe open busy releasing; retrying"
+            );
+            std::thread::sleep(ferrite_blocks::soapy_retry::OPEN_BACKOFF);
+            last_err = Some(err);
+            continue;
+        }
+        bail!("open SoapySDR device with args {args:?}: {err}");
+    }
+    if device_ptr.is_null() {
+        let err = last_err.unwrap_or_else(|| "open returned null with no error".into());
+        bail!("open SoapySDR device with args {args:?}: {err}");
+    }
+
+    let guard = DeviceHandle(device_ptr);
+    probe_with_handle(guard.0, args)
+}
+
+/// Runs all queries against an already-open device handle. Separate so
+/// the RAII `DeviceHandle` still closes the device if any query fails.
+fn probe_with_handle(device: *mut SoapySDRDevice, args: &str) -> Result<DeviceCapabilities> {
+    let driver_key =
+        unsafe { take_soapy_cstring(soapysdr_sys::SoapySDRDevice_getDriverKey(device)) };
+    check_last_status().context("read driver_key")?;
+
+    let hardware_key =
+        unsafe { take_soapy_cstring(soapysdr_sys::SoapySDRDevice_getHardwareKey(device)) };
+    check_last_status().context("read hardware_key")?;
+
+    let mut hw_kwargs = unsafe { soapysdr_sys::SoapySDRDevice_getHardwareInfo(device) };
+    check_last_status().context("read hardware_info")?;
+    let hardware_info = kwargs_to_map(&hw_kwargs);
+    // SAFETY: getHardwareInfo returns a Kwargs whose strings we own.
+    unsafe { soapysdr_sys::SoapySDRKwargs_clear(&raw mut hw_kwargs) };
 
     let info = DeviceInfo {
         driver: driver_key.clone(),
@@ -243,17 +300,14 @@ pub fn probe(args: &str) -> Result<DeviceCapabilities> {
         args: parse_args_string(args),
     };
 
-    let num_rx = device
-        .num_channels(soapysdr::Direction::Rx)
-        .context("read num_channels(Rx)")?;
+    let num_rx = unsafe { soapysdr_sys::SoapySDRDevice_getNumChannels(device, SOAPY_RX) };
+    check_last_status().context("read num_channels(Rx)")?;
+
     let rx_channels = (0..num_rx)
-        .map(|ch| probe_rx_channel(&device, ch))
+        .map(|ch| probe_rx_channel(device, ch))
         .collect::<Result<Vec<_>>>()?;
 
-    // Drop the safe handle before opening a second one for getSettingInfo.
-    // Most drivers (RSPdx, RTL, HackRF) refuse a second concurrent handle.
-    drop(device);
-    let settings = read_setting_info(args).unwrap_or_else(|err| {
+    let settings = read_setting_info(device).unwrap_or_else(|err| {
         tracing::debug!(?err, "getSettingInfo unavailable; settings list empty");
         Vec::new()
     });
@@ -268,32 +322,54 @@ pub fn probe(args: &str) -> Result<DeviceCapabilities> {
     })
 }
 
-/// Open the device via raw FFI just long enough to enumerate
-/// `SoapySDRDevice_getSettingInfo`. The safe `soapysdr` 0.5 wrapper
-/// doesn't expose this call; rather than vendor a fork we reach into
-/// `soapysdr-sys` for one cold-path query.
-fn read_setting_info(args: &str) -> Result<Vec<SettingInfo>> {
-    use std::ffi::CStr;
+/// Direction arg for the channel-keyed FFI entry points. The `soapysdr-sys`
+/// constant is `u32`; the C API takes `c_int`.
+#[allow(clippy::cast_possible_wrap)]
+const SOAPY_RX: c_int = soapysdr_sys::SOAPY_SDR_RX as c_int;
 
-    // Re-use the safe Args parser; kwargs owns its own backing copy.
-    let kwargs: soapysdr::Args = args.into();
-    let kwargs_raw = kwargs.as_raw_const();
+/// RAII wrapper that guarantees `SoapySDRDevice_unmake` runs even if a
+/// subsequent query fails.
+struct DeviceHandle(*mut SoapySDRDevice);
 
-    // SAFETY: kwargs_raw points at kwargs's interior, alive for this call.
-    let device = unsafe { soapysdr_sys::SoapySDRDevice_make(kwargs_raw) };
-    if device.is_null() {
-        let err_ptr = unsafe { soapysdr_sys::SoapySDRDevice_lastError() };
-        let msg = if err_ptr.is_null() {
-            "SoapySDRDevice_make returned null".to_string()
-        } else {
-            unsafe { CStr::from_ptr(err_ptr) }.to_string_lossy().into()
-        };
-        anyhow::bail!("open for getSettingInfo failed: {msg}");
+impl Drop for DeviceHandle {
+    fn drop(&mut self) {
+        // SAFETY: self.0 came from makeStrArgs and is closed exactly once.
+        let rc = unsafe { soapysdr_sys::SoapySDRDevice_unmake(self.0) };
+        if rc != 0 {
+            tracing::debug!(rc, "SoapySDRDevice_unmake non-zero (ignored)");
+        }
     }
+}
 
+/// Call immediately after a raw FFI call that doesn't return a status
+/// code to surface any exception the C bindings caught.
+fn check_last_status() -> Result<()> {
+    // SAFETY: no aliasing; thread-local status + error.
+    let status = unsafe { soapysdr_sys::SoapySDRDevice_lastStatus() };
+    if status == 0 {
+        Ok(())
+    } else {
+        bail!("{}", soapy_last_error())
+    }
+}
+
+fn soapy_last_error() -> String {
+    // SAFETY: Soapy keeps the last-error string in thread-local storage;
+    // the pointer is valid until the next Device API call on this thread.
+    let p = unsafe { soapysdr_sys::SoapySDRDevice_lastError() };
+    if p.is_null() {
+        "unknown SoapySDR error".to_string()
+    } else {
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
+}
+
+/// Enumerate `SoapySDRDevice_getSettingInfo` on an already-open device.
+fn read_setting_info(device: *mut SoapySDRDevice) -> Result<Vec<SettingInfo>> {
     let mut len: usize = 0;
-    // SAFETY: device is non-null, len is a valid out-pointer.
+    // SAFETY: device non-null, len is a valid out-pointer.
     let list_ptr = unsafe { soapysdr_sys::SoapySDRDevice_getSettingInfo(device, &raw mut len) };
+    check_last_status().context("read getSettingInfo")?;
 
     let mut out = Vec::with_capacity(len);
     if !list_ptr.is_null() && len > 0 {
@@ -306,12 +382,6 @@ fn read_setting_info(args: &str) -> Result<Vec<SettingInfo>> {
         // *and* frees the list itself (TypesC.cpp:134) — no follow-up
         // SoapySDR_free needed.
         unsafe { soapysdr_sys::SoapySDRArgInfoList_clear(list_ptr, len) };
-    }
-
-    // SAFETY: device is the make() return value; closes once.
-    let unmake_rc = unsafe { soapysdr_sys::SoapySDRDevice_unmake(device) };
-    if unmake_rc != 0 {
-        tracing::debug!(unmake_rc, "SoapySDRDevice_unmake non-zero (ignored)");
     }
     Ok(out)
 }
@@ -398,14 +468,6 @@ unsafe fn c_optional(p: *mut std::os::raw::c_char) -> Option<String> {
     )
 }
 
-fn args_to_map(args: &soapysdr::Args) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    for (k, v) in args {
-        map.insert(k.to_string(), v.to_string());
-    }
-    map
-}
-
 fn parse_args_string(s: &str) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for part in s.split(',').filter(|p| !p.is_empty()) {
@@ -416,63 +478,88 @@ fn parse_args_string(s: &str) -> BTreeMap<String, String> {
     map
 }
 
-fn probe_rx_channel(device: &soapysdr::Device, channel: usize) -> Result<RxChannelCapabilities> {
-    let dir = soapysdr::Direction::Rx;
+fn probe_rx_channel(device: *mut SoapySDRDevice, channel: usize) -> Result<RxChannelCapabilities> {
+    let antennas = list_strings(device, channel, soapysdr_sys::SoapySDRDevice_listAntennas)
+        .context("read antennas")?;
 
-    let antennas = device.antennas(dir, channel).context("read antennas")?;
+    let sample_rate_ranges_hz = list_ranges(
+        device,
+        channel,
+        soapysdr_sys::SoapySDRDevice_getSampleRateRange,
+    )
+    .context("read sample-rate ranges")?;
 
-    let sample_rate_ranges_hz = device
-        .get_sample_rate_range(dir, channel)
-        .context("read sample-rate ranges")?
-        .into_iter()
-        .map(RangeSpec::from)
-        .collect();
+    let bandwidth_ranges_hz = list_ranges(
+        device,
+        channel,
+        soapysdr_sys::SoapySDRDevice_getBandwidthRange,
+    )
+    .context("read bandwidth ranges")?;
 
-    let bandwidth_ranges_hz = device
-        .bandwidth_range(dir, channel)
-        .context("read bandwidth ranges")?
-        .into_iter()
-        .map(RangeSpec::from)
-        .collect();
+    let frequency_ranges_hz = list_ranges(
+        device,
+        channel,
+        soapysdr_sys::SoapySDRDevice_getFrequencyRange,
+    )
+    .context("read frequency ranges")?;
 
-    let frequency_ranges_hz = device
-        .frequency_range(dir, channel)
-        .context("read frequency ranges")?
-        .into_iter()
-        .map(RangeSpec::from)
-        .collect();
+    let components = list_strings(
+        device,
+        channel,
+        soapysdr_sys::SoapySDRDevice_listFrequencies,
+    )
+    .context("read frequency components")?;
 
-    let mut frequency_components = Vec::new();
-    for comp in device
-        .list_frequencies(dir, channel)
-        .context("read frequency components")?
-    {
-        let ranges = device
-            .component_frequency_range(dir, channel, comp.as_bytes())
-            .with_context(|| format!("read frequency range for component {comp:?}"))?
-            .into_iter()
-            .map(RangeSpec::from)
-            .collect();
+    let mut frequency_components = Vec::with_capacity(components.len());
+    for name in components {
+        let ranges = component_ranges(device, channel, &name, |dev, dir, ch, key, len| unsafe {
+            soapysdr_sys::SoapySDRDevice_getFrequencyRangeComponent(dev, dir, ch, key, len)
+        })
+        .with_context(|| format!("read frequency range for component {name:?}"))?;
         frequency_components.push(FrequencyComponent {
-            name: comp,
+            name,
             ranges_hz: ranges,
         });
     }
 
-    let mut gains = Vec::new();
-    for name in device.list_gains(dir, channel).context("read gain list")? {
-        let range = device
-            .gain_element_range(dir, channel, name.as_bytes())
-            .with_context(|| format!("read gain range for element {name:?}"))?
-            .into();
+    let gain_names = list_strings(device, channel, soapysdr_sys::SoapySDRDevice_listGains)
+        .context("read gain list")?;
+
+    let mut gains = Vec::with_capacity(gain_names.len());
+    for name in gain_names {
+        let key = CString::new(name.as_str())
+            .with_context(|| format!("gain name contains NUL: {name:?}"))?;
+        // SAFETY: device is open, key lives for the call.
+        let range = unsafe {
+            soapysdr_sys::SoapySDRDevice_getGainElementRange(
+                device,
+                SOAPY_RX,
+                channel,
+                key.as_ptr(),
+            )
+        };
+        check_last_status().with_context(|| format!("read gain range for element {name:?}"))?;
         gains.push(GainElement {
             name,
-            range_db: range,
+            range_db: range_from_raw(range),
         });
     }
 
-    let overall_gain_range_db = device.gain_range(dir, channel).ok().map(RangeSpec::from);
-    let has_agc = device.has_gain_mode(dir, channel).unwrap_or(false);
+    // SAFETY: device is open. getGainRange has no error surface separate
+    // from lastStatus; treat a non-zero status as "no overall range".
+    let overall_raw =
+        unsafe { soapysdr_sys::SoapySDRDevice_getGainRange(device, SOAPY_RX, channel) };
+    let overall_gain_range_db = if check_last_status().is_ok() {
+        Some(range_from_raw(overall_raw))
+    } else {
+        None
+    };
+
+    // SAFETY: device is open.
+    let has_agc = unsafe { soapysdr_sys::SoapySDRDevice_hasGainMode(device, SOAPY_RX, channel) };
+    // hasGainMode sets status when the driver doesn't support it — swallow
+    // that, mirroring the previous `unwrap_or(false)`.
+    let has_agc = check_last_status().is_ok() && has_agc;
 
     Ok(RxChannelCapabilities {
         index: channel,
@@ -485,6 +572,124 @@ fn probe_rx_channel(device: &soapysdr::Device, channel: usize) -> Result<RxChann
         overall_gain_range_db,
         has_agc,
     })
+}
+
+type StringListFn =
+    unsafe extern "C" fn(*const SoapySDRDevice, c_int, usize, *mut usize) -> *mut *mut c_char;
+
+type RangeListFn =
+    unsafe extern "C" fn(*const SoapySDRDevice, c_int, usize, *mut usize) -> *mut SoapySDRRange;
+
+fn list_strings(
+    device: *mut SoapySDRDevice,
+    channel: usize,
+    f: StringListFn,
+) -> Result<Vec<String>> {
+    let mut len: usize = 0;
+    // SAFETY: device is open, len is a valid out-pointer.
+    let ptr = unsafe { f(device, SOAPY_RX, channel, &raw mut len) };
+    check_last_status()?;
+    // SAFETY: Soapy returned `len` valid C strings on success.
+    Ok(unsafe { take_soapy_string_list(ptr, len) })
+}
+
+fn list_ranges(
+    device: *mut SoapySDRDevice,
+    channel: usize,
+    f: RangeListFn,
+) -> Result<Vec<RangeSpec>> {
+    let mut len: usize = 0;
+    // SAFETY: device is open, len is a valid out-pointer.
+    let ptr = unsafe { f(device, SOAPY_RX, channel, &raw mut len) };
+    check_last_status()?;
+    // SAFETY: Soapy returned `len` valid ranges on success.
+    Ok(unsafe { take_soapy_range_list(ptr, len) })
+}
+
+fn component_ranges<F>(
+    device: *mut SoapySDRDevice,
+    channel: usize,
+    name: &str,
+    f: F,
+) -> Result<Vec<RangeSpec>>
+where
+    F: FnOnce(*const SoapySDRDevice, c_int, usize, *const c_char, *mut usize) -> *mut SoapySDRRange,
+{
+    let key = CString::new(name).with_context(|| format!("component name NUL: {name:?}"))?;
+    let mut len: usize = 0;
+    let ptr = f(device, SOAPY_RX, channel, key.as_ptr(), &raw mut len);
+    check_last_status()?;
+    // SAFETY: Soapy returned `len` valid ranges on success.
+    Ok(unsafe { take_soapy_range_list(ptr, len) })
+}
+
+fn range_from_raw(r: SoapySDRRange) -> RangeSpec {
+    let step = if r.step > 0.0 { Some(r.step) } else { None };
+    RangeSpec {
+        min: r.minimum,
+        max: r.maximum,
+        step,
+    }
+}
+
+fn kwargs_to_map(k: &SoapySDRKwargs) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    if k.size == 0 || k.keys.is_null() || k.vals.is_null() {
+        return map;
+    }
+    for i in 0..k.size {
+        // SAFETY: keys/vals are `size` non-null C strings per Soapy contract.
+        let key = unsafe { CStr::from_ptr(*k.keys.add(i)) }
+            .to_string_lossy()
+            .into_owned();
+        let val = unsafe { CStr::from_ptr(*k.vals.add(i)) }
+            .to_string_lossy()
+            .into_owned();
+        map.insert(key, val);
+    }
+    map
+}
+
+/// Turn a Soapy-allocated C string into an owned `String` and free the
+/// backing buffer. Null input returns an empty string — matches the
+/// previous safe-wrapper behaviour.
+unsafe fn take_soapy_cstring(ptr: *mut c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let s = unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
+    // SAFETY: ptr came from a Soapy getter that expects SoapySDR_free.
+    unsafe { soapysdr_sys::SoapySDR_free(ptr.cast::<c_void>()) };
+    s
+}
+
+unsafe fn take_soapy_string_list(mut ptr: *mut *mut c_char, len: usize) -> Vec<String> {
+    if ptr.is_null() || len == 0 {
+        return Vec::new();
+    }
+    // SAFETY: caller guarantees `len` valid entries.
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let out: Vec<String> = slice
+        .iter()
+        .map(|&p| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+        .collect();
+    // SAFETY: pairs the getter with its designated free function.
+    unsafe { soapysdr_sys::SoapySDRStrings_clear(&raw mut ptr, len) };
+    out
+}
+
+unsafe fn take_soapy_range_list(ptr: *mut SoapySDRRange, len: usize) -> Vec<RangeSpec> {
+    if ptr.is_null() || len == 0 {
+        return Vec::new();
+    }
+    // SAFETY: caller guarantees `len` valid ranges.
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let out: Vec<RangeSpec> = slice.iter().copied().map(range_from_raw).collect();
+    // SAFETY: range lists are freed with SoapySDR_free.
+    unsafe { soapysdr_sys::SoapySDR_free(ptr.cast::<c_void>()) };
+    out
 }
 
 /// Pretty-print the result of [`probe`]: one section per Rx channel,
@@ -554,6 +759,243 @@ fn format_range(r: RangeSpec) -> String {
         Some(step) => format!("[{:.3}, {:.3}] step {:.3}", r.min, r.max, step),
         None => format!("[{:.3}, {:.3}]", r.min, r.max),
     }
+}
+
+/// Result of a short-duration sample read, used by `--read-all` to
+/// confirm a device can actually produce samples after we've probed it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SampleReadReport {
+    pub sample_rate_hz: f64,
+    pub center_freq_hz: f64,
+    pub bandwidth_hz: Option<f64>,
+    pub gain_db: Option<f64>,
+    pub antenna: Option<String>,
+    pub samples_read: usize,
+    pub elapsed_ms: u128,
+    pub mean_magnitude: f32,
+    pub peak_magnitude: f32,
+    pub timeouts: u32,
+    pub overflows: u32,
+}
+
+/// Optional per-call overrides for [`read_samples`]. `None` fields use
+/// values derived from the device's probed capabilities.
+#[derive(Debug, Clone, Default)]
+pub struct ReadOverrides {
+    pub sample_rate_hz: Option<f64>,
+    pub bandwidth_hz: Option<f64>,
+    pub center_freq_hz: Option<f64>,
+    pub gain_db: Option<f64>,
+}
+
+/// Wrap [`read_samples`] in a worker thread with a wall-clock timeout so
+/// a wedged driver (SDRplay API service, stuck USB handle) doesn't hang
+/// the CLI. `read_for` is the sampling window itself; the thread is
+/// given `read_for + 10s` of headroom for open/configure/activate.
+pub fn read_samples_with_timeout(
+    args: &str,
+    caps: &DeviceCapabilities,
+    read_for: Duration,
+    overrides: ReadOverrides,
+) -> Result<SampleReadReport> {
+    let args_o = args.to_string();
+    let caps_o = caps.clone();
+    let budget = read_for + Duration::from_secs(10);
+    with_probe_timeout(&format!("read_samples({args})"), budget, move || {
+        read_samples(&args_o, &caps_o, read_for, &overrides)
+    })
+}
+
+/// Open `args`, configure a sane sample rate / center frequency / gain
+/// from `caps`, activate a `Complex<f32>` Rx stream on channel 0, and
+/// read for `read_for`. Returns simple stats for the operator.
+///
+/// Crate-private so CLI callers are forced through
+/// [`read_samples_with_timeout`] — a wedged driver otherwise hangs the
+/// process forever.
+pub(crate) fn read_samples(
+    args: &str,
+    caps: &DeviceCapabilities,
+    read_for: Duration,
+    overrides: &ReadOverrides,
+) -> Result<SampleReadReport> {
+    use num_complex::Complex;
+    use soapysdr::{Direction, ErrorCode};
+    use std::time::Instant;
+
+    let rx = caps
+        .rx_channels
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("device has no Rx channels"))?;
+
+    let sample_rate_hz = overrides
+        .sample_rate_hz
+        .or_else(|| pick_in_ranges(&rx.sample_rate_ranges_hz, 2_000_000.0))
+        .ok_or_else(|| anyhow::anyhow!("device reports no sample-rate ranges"))?;
+    let center_freq_hz = overrides
+        .center_freq_hz
+        .or_else(|| pick_in_ranges(&rx.frequency_ranges_hz, 100_000_000.0))
+        .ok_or_else(|| anyhow::anyhow!("device reports no frequency ranges"))?;
+    let gain_db = overrides
+        .gain_db
+        .or_else(|| rx.overall_gain_range_db.map(|r| (r.min + r.max) / 2.0));
+    let antenna = rx.antennas.first().cloned();
+    let channel = rx.index;
+
+    let device = soapysdr::Device::new(args)
+        .with_context(|| format!("open SoapySDR device with args {args:?}"))?;
+    let dir = Direction::Rx;
+
+    device
+        .set_sample_rate(dir, channel, sample_rate_hz)
+        .with_context(|| format!("set sample_rate={sample_rate_hz}"))?;
+    device
+        .set_frequency(dir, channel, center_freq_hz, ())
+        .with_context(|| format!("set center_freq={center_freq_hz}"))?;
+    if let Some(bw) = overrides.bandwidth_hz {
+        device
+            .set_bandwidth(dir, channel, bw)
+            .with_context(|| format!("set bandwidth={bw}"))?;
+    }
+    if let Some(ant) = &antenna {
+        // Single-antenna drivers accept this as a no-op; failure here is
+        // not fatal to the read test.
+        let _ = device.set_antenna(dir, channel, ant.as_bytes());
+    }
+    if let Some(g) = gain_db {
+        // Some drivers reject the aggregate set_gain (HackRF does in some
+        // builds); fall through to whatever default gain the driver uses.
+        let _ = device.set_gain(dir, channel, g);
+    }
+
+    let mut stream = device
+        .rx_stream::<Complex<f32>>(&[channel])
+        .context("create Rx stream")?;
+    stream.activate(None).context("activate Rx stream")?;
+
+    let buf_size = 4096_usize;
+    let mut buf = vec![Complex::new(0.0_f32, 0.0); buf_size];
+    let mut samples_read = 0_usize;
+    let mut mag_sum = 0.0_f64;
+    let mut peak = 0.0_f32;
+    let mut timeouts = 0_u32;
+    let mut overflows = 0_u32;
+    let start = Instant::now();
+    let deadline = start + read_for;
+    let read_timeout_us: i64 = 500_000;
+
+    while Instant::now() < deadline {
+        let result = {
+            let mut slices: [&mut [Complex<f32>]; 1] = [&mut buf[..]];
+            stream.read(&mut slices, read_timeout_us)
+        };
+        match result {
+            Ok(0) => {}
+            Ok(n) => {
+                for s in &buf[..n] {
+                    let m = (s.re * s.re + s.im * s.im).sqrt();
+                    mag_sum += f64::from(m);
+                    if m > peak {
+                        peak = m;
+                    }
+                }
+                samples_read = samples_read.saturating_add(n);
+            }
+            Err(err) if err.code == ErrorCode::Timeout => {
+                timeouts = timeouts.saturating_add(1);
+            }
+            Err(err) if err.code == ErrorCode::Overflow => {
+                overflows = overflows.saturating_add(1);
+            }
+            Err(err) => {
+                let _ = stream.deactivate(None);
+                bail!("stream read: {err}");
+            }
+        }
+    }
+    let elapsed = start.elapsed();
+    let _ = stream.deactivate(None);
+
+    let mean_magnitude = if samples_read > 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        let mean = (mag_sum / samples_read as f64) as f32;
+        mean
+    } else {
+        0.0
+    };
+
+    Ok(SampleReadReport {
+        sample_rate_hz,
+        center_freq_hz,
+        bandwidth_hz: overrides.bandwidth_hz,
+        gain_db,
+        antenna,
+        samples_read,
+        elapsed_ms: elapsed.as_millis(),
+        mean_magnitude,
+        peak_magnitude: peak,
+        timeouts,
+        overflows,
+    })
+}
+
+/// Pick the closest value to `target` that's valid across any of the
+/// given ranges. Prefers `target` itself when a range contains it.
+/// Returns `None` if `ranges` is empty.
+fn pick_in_ranges(ranges: &[RangeSpec], target: f64) -> Option<f64> {
+    if ranges.is_empty() {
+        return None;
+    }
+    for r in ranges {
+        if target >= r.min && target <= r.max {
+            return Some(target);
+        }
+    }
+    let mut best = ranges[0].min;
+    let mut best_dist = (best - target).abs();
+    for r in ranges {
+        for cand in [r.min, r.max] {
+            let d = (cand - target).abs();
+            if d < best_dist {
+                best = cand;
+                best_dist = d;
+            }
+        }
+    }
+    Some(best)
+}
+
+pub fn print_sample_report(report: &SampleReadReport) {
+    let gain = report
+        .gain_db
+        .map(|g| format!("{g:.1} dB"))
+        .unwrap_or_else(|| "—".to_string());
+    let bw = report
+        .bandwidth_hz
+        .map(|b| format!("{b:.0} Hz"))
+        .unwrap_or_else(|| "—".to_string());
+    let antenna = report.antenna.as_deref().unwrap_or("—");
+    println!(
+        "  rate={:.0} Hz  bw={bw}  center={:.0} Hz  gain={}  antenna={}",
+        report.sample_rate_hz, report.center_freq_hz, gain, antenna,
+    );
+    let observed_msps = if report.elapsed_ms > 0 {
+        #[allow(clippy::cast_precision_loss)]
+        let ms = report.elapsed_ms as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let n = report.samples_read as f64;
+        n / ms / 1000.0
+    } else {
+        0.0
+    };
+    println!(
+        "  read {} samples in {} ms ({observed_msps:.2} Ms/s observed)",
+        report.samples_read, report.elapsed_ms,
+    );
+    println!(
+        "  mean|z|={:.4}  peak|z|={:.4}  timeouts={}  overflows={}",
+        report.mean_magnitude, report.peak_magnitude, report.timeouts, report.overflows,
+    );
 }
 
 /// Pretty-print the result of [`list_devices`] to stdout, one block per

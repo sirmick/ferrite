@@ -2,6 +2,8 @@
   "driver_key": "sdrplay",
   "label": "SDRplay (RSP1A / RSPdx / RSPduo)",
   "sample_rate_hz": 2000000,
-  "bandwidth_hz": 5000000,
-  "notes": "2 MS/s with 5 MHz IF filter is the canonical SDRplay 'general listening' setup — wide enough to scan a band, narrow enough to keep a strong adjacent carrier from desensing the front end. The 200 kHz default that ships with SoapySDRPlay would brick-wall the spectrum at ±100 kHz."
+  "sample_rate_choices_hz": [500000, 1000000, 2000000, 4000000, 6000000, 8000000, 10000000],
+  "max_sample_rate_hz": 10000000,
+  "if_filter_ladder_hz": [200000, 300000, 600000, 1536000, 5000000, 6000000, 7000000, 8000000],
+  "notes": "IF filter picked as the largest ladder entry ≤ Fs. SDRplay's own default of 200 kHz brick-walls the spectrum at ±100 kHz, and any filter wider than Fs makes the driver silently upclock Fs — so we pick from the ladder explicitly rather than leaving it to the driver. Advertised max of 10.66 MS/s fails activateStream in practice; clamped to 10 MS/s."
 }

@@ -60,6 +60,7 @@ use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, OutputPort, ParamKind, ParamSpec, Placement,
     PortSpec, PortType, ReconfigureScope, Work,
 };
+use crate::soapy_retry;
 use crate::spsc_ring::IqRing;
 
 /// Ring capacity in samples. 512 k complex samples = 4 MiB.
@@ -174,7 +175,12 @@ impl SoapySource {
         for attempt in 0..MAX_ATTEMPTS {
             match Self::try_construct(params) {
                 Ok(s) => return Ok(s),
-                Err(err) if attempt + 1 < MAX_ATTEMPTS && is_transient_open_error(&err) => {
+                Err(err)
+                    if attempt + 1 < MAX_ATTEMPTS
+                        && soapy_retry::is_transient_open_chain(&soapy_retry::flatten_chain(
+                            &err,
+                        )) =>
+                {
                     tracing::warn!(
                         attempt = attempt + 1,
                         max = MAX_ATTEMPTS,
@@ -188,10 +194,26 @@ impl SoapySource {
             }
         }
         let err = last_err.unwrap_or_else(|| anyhow!("SoapySource::new failed for unknown reason"));
-        Err(decorate_exhausted_error(err, params.args.as_str()))
+        let chain = soapy_retry::flatten_chain(&err);
+        match soapy_retry::hint_for_exhausted(&chain, params.args.as_str()) {
+            Some(hint) => Err(err.context(hint)),
+            None => Err(err),
+        }
     }
 
     fn try_construct(params: &SoapySourceParams) -> Result<Self> {
+        tracing::info!(
+            args = %params.args,
+            sample_rate_hz = params.sample_rate_hz,
+            center_freq_hz = params.center_freq_hz,
+            bandwidth_hz = ?params.bandwidth_hz,
+            antenna = ?params.antenna,
+            gain_db = ?params.gain_db,
+            agc = ?params.agc,
+            channel = params.channel,
+            settings = ?params.settings,
+            "SoapySource::try_construct params"
+        );
         let device = open_with_retry(params.args.as_str())
             .with_context(|| format!("open SoapySDR device with args {:?}", params.args))?;
         let dir = Direction::Rx;
@@ -604,79 +626,26 @@ fn run_reader(
     let _ = stream.deactivate(None);
 }
 
-/// Wrap an exhausted-retry error with a recovery hint when we recognise
-/// a known driver-side wedge. The classifier is conservative — only
-/// triggers on signatures we've actually observed — so unfamiliar
-/// failures still surface verbatim.
-fn decorate_exhausted_error(err: anyhow::Error, args: &str) -> anyhow::Error {
-    let chain: String = err
-        .chain()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join(" :: ");
-    let hint: Option<&'static str> = if args.contains("driver=sdrplay")
-        && (chain.contains("sdrplay_api_Fail")
-            || (chain.contains("activate Rx stream") && chain.contains("NotSupported")))
-    {
-        Some(
-            "SDRplay API service appears wedged (activateStream keeps failing). \
-             Try `sudo systemctl restart sdrplay` and retry.",
-        )
-    } else if chain.contains("RX stream already opened") {
-        Some(
-            "Driver still holds a previous Rx stream open. \
-             Try replugging the SDR or restarting ferrited.",
-        )
-    } else {
-        None
-    };
-    match hint {
-        Some(h) => err.context(h),
-        None => err,
-    }
-}
-
-/// True for the family of "driver isn't ready yet" errors that we want
-/// to retry an entire `SoapySource::try_construct` against. Covers the
-/// `Device::new` race (caught separately by `open_with_retry`) and the
-/// SDRplay-specific `activateStream() - Init() failed: sdrplay_api_Fail`
-/// — surfaced through the safe wrapper as `NotSupported` with empty
-/// message — that hits when the API service hasn't finished tearing
-/// down a prior stream.
-fn is_transient_open_error(err: &anyhow::Error) -> bool {
-    let chain: String = err
-        .chain()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join(" :: ");
-    chain.contains("device deletion in-progress")
-        || chain.contains("RX stream already opened")
-        || (chain.contains("activate Rx stream") && chain.contains("NotSupported"))
-        || chain.contains("sdrplay_api_Fail")
-}
-
 /// Open a SoapySDR device with a short retry loop for the
-/// `device deletion in-progress` race. SoapySDR returns this when a
-/// previous handle (typically from a capabilities probe done seconds
-/// earlier) is still tearing down inside the driver. The window is
-/// usually <1s; bail with the original error after 5 attempts so a
-/// genuinely-broken device still surfaces fast.
+/// "device deletion in-progress" race — a previous handle still
+/// tearing down inside the driver. Shared constants + classifier with
+/// the raw-FFI probe path live in [`crate::soapy_retry`].
 fn open_with_retry(args: &str) -> Result<Device> {
-    const MAX_ATTEMPTS: usize = 5;
-    const BACKOFF: Duration = Duration::from_millis(400);
     let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 0..MAX_ATTEMPTS {
+    for attempt in 0..soapy_retry::OPEN_MAX_ATTEMPTS {
         match Device::new(args) {
             Ok(dev) => return Ok(dev),
             Err(err) => {
                 let msg = format!("{err}");
-                if msg.contains("device deletion in-progress") && attempt + 1 < MAX_ATTEMPTS {
+                if soapy_retry::is_transient_make_chain(&msg)
+                    && attempt + 1 < soapy_retry::OPEN_MAX_ATTEMPTS
+                {
                     tracing::warn!(
                         attempt = attempt + 1,
-                        max = MAX_ATTEMPTS,
+                        max = soapy_retry::OPEN_MAX_ATTEMPTS,
                         "SoapySDR device busy releasing; retrying"
                     );
-                    std::thread::sleep(BACKOFF);
+                    std::thread::sleep(soapy_retry::OPEN_BACKOFF);
                     last_err = Some(anyhow!(err));
                     continue;
                 }
