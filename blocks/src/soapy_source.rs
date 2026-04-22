@@ -642,4 +642,132 @@ mod tests {
         assert!(p.gain_db.is_none());
         assert!(p.agc.is_none());
     }
+
+    /// Real-hardware soak: open → init → pump → stop → drop in a loop,
+    /// varying centre freq + gain each iteration. Reproduces the
+    /// "RX stream already opened" / "device deletion in-progress"
+    /// races that surface when params change rapidly. Gated on
+    /// `FERRITE_TEST_DEVICE_ARGS`; iterations override via
+    /// `FERRITE_TEST_DEVICE_ITERS` (default 20).
+    ///
+    /// ```sh
+    /// FERRITE_TEST_DEVICE_ARGS=driver=hackrf \
+    ///     cargo test -p ferrite-blocks --features soapysdr \
+    ///     device_cycle_soak -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires hardware; set FERRITE_TEST_DEVICE_ARGS to run"]
+    fn device_cycle_soak() {
+        use crate::block::{BlockIo, InitCtx, OutBuf, OutputPort, PortMeta};
+        use num_complex::Complex;
+        use std::time::Duration;
+
+        let args = std::env::var("FERRITE_TEST_DEVICE_ARGS")
+            .expect("set FERRITE_TEST_DEVICE_ARGS=driver=… to run this test");
+        let iters: usize = std::env::var("FERRITE_TEST_DEVICE_ITERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+
+        // Conservative rate every supported SDR can actually produce
+        // (RTL caps at 3.2 MS/s). Freq + gain rotate through a handful
+        // of plausible bands to force the driver to retune each cycle.
+        let rate_hz = 2_000_000.0_f64;
+        let rotations: &[(f64, f64)] = &[
+            (100_100_000.0, 20.0),   // FM broadcast
+            (433_920_000.0, 25.0),   // EU ISM
+            (868_350_000.0, 30.0),   // EU SRD
+            (915_000_000.0, 15.0),   // US ISM
+            (1_090_000_000.0, 35.0), // ADS-B
+        ];
+
+        let mut total_pushed: u64 = 0;
+        let mut iter_failures: Vec<(usize, String)> = Vec::new();
+
+        for i in 0..iters {
+            let (freq, gain) = rotations[i % rotations.len()];
+            eprintln!("[iter {i}/{iters}] rate={rate_hz:.0} freq={freq:.0} gain={gain}");
+            let params = SoapySourceParams {
+                args: args.clone(),
+                sample_rate_hz: rate_hz,
+                center_freq_hz: freq,
+                gain_db: Some(gain),
+                channel: 0,
+                ..Default::default()
+            };
+            let mut src = match SoapySource::new(&params) {
+                Ok(s) => s,
+                Err(err) => {
+                    iter_failures.push((i, format!("new: {err:#}")));
+                    continue;
+                }
+            };
+            let mut ctx = InitCtx {
+                input_meta: &[],
+                output_meta: &[],
+                frames_hint: 4096,
+            };
+            if let Err(err) = src.init(&mut ctx) {
+                iter_failures.push((i, format!("init: {err:#}")));
+                continue;
+            }
+
+            // Pump for ~200 ms total — long enough to confirm samples
+            // flow at this rate (~400 k samples should land in the ring).
+            let mut buf = vec![Complex::new(0.0_f32, 0.0); 4096];
+            for _ in 0..40 {
+                std::thread::sleep(Duration::from_millis(5));
+                let mut outputs = [OutputPort {
+                    name: "out",
+                    meta: PortMeta {
+                        sample_rate_hz: rate_hz,
+                        center_freq_hz: freq,
+                    },
+                    buf: OutBuf::IqF32(&mut buf),
+                }];
+                let mut io = BlockIo {
+                    inputs: &mut [],
+                    outputs: &mut outputs,
+                };
+                if let Err(err) = src.process(&mut io) {
+                    iter_failures.push((i, format!("process: {err:#}")));
+                    break;
+                }
+            }
+
+            let pushed = src.samples_pushed();
+            let underruns = src.underrun_samples();
+            let ring_drops = src.ring_drops();
+            let overflow = src.overflow_drops();
+            let gaps = src.timestamp_gaps();
+            eprintln!(
+                "  pushed={pushed} underruns={underruns} ring_drops={ring_drops} \
+                 overflow={overflow} ts_gaps={gaps}"
+            );
+            if pushed == 0 {
+                iter_failures.push((i, "no samples pushed".to_string()));
+            }
+            total_pushed = total_pushed.saturating_add(pushed);
+
+            if let Err(err) = src.stop() {
+                iter_failures.push((i, format!("stop: {err:#}")));
+            }
+            drop(src);
+        }
+
+        eprintln!(
+            "device_cycle_soak: {} iterations OK, {} failed, {} samples total",
+            iters - iter_failures.len(),
+            iter_failures.len(),
+            total_pushed
+        );
+        for (i, msg) in &iter_failures {
+            eprintln!("  iter {i}: {msg}");
+        }
+        assert!(
+            iter_failures.is_empty(),
+            "{} iteration(s) failed",
+            iter_failures.len()
+        );
+    }
 }
