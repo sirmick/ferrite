@@ -11,14 +11,12 @@ description = "Ferrite SDR daemon — device I/O, wideband FFT, channelizer, WS 
 [lints]
 workspace = true
 
-[features]
-default  = []
-# Links SoapySDR at build time. Requires libSoapySDR and its pkg-config
-# metadata on PKG_CONFIG_PATH — see scripts/build-soapysdr.sh and the
-# `source soapysdr/env.sh` line in docs/06-build.md. Propagates to the
-# blocks crate so the `SoapySource` flowgraph block appears in the
-# registry whenever the server has Soapy linked in.
-soapysdr = ["dep:soapysdr", "ferrite-blocks/soapysdr"]
+# SoapySDR is a hard requirement for ferrited — `libSoapySDR` and its
+# pkg-config metadata must be on `PKG_CONFIG_PATH` at build time (see
+# scripts/build-soapysdr.sh and the `source soapysdr/env.sh` line in
+# docs/06-build.md). Making it required (not a feature) avoids the
+# silent-degradation footgun where a soapy-less build would pretend
+# every device was unavailable at runtime.
 
 [dependencies]
 axum        = { version = "0.7", features = ["macros", "ws"] }
@@ -32,11 +30,15 @@ serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 anyhow      = "1"
 clap        = { version = "4", features = ["derive"] }
-ferrite-blocks = { path = "../blocks" }
+ferrite-blocks = { path = "../blocks", features = ["soapysdr"] }
 ferrite-runtime = { path = "../runtime" }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 postcard    = { version = "1", default-features = false, features = ["alloc"] }
-soapysdr    = { version = "0.5", optional = true }
+soapysdr    = "0.5"
+# Used directly to reach SoapySDRDevice_getSettingInfo / writeSetting,
+# which the safe `soapysdr` 0.5 wrapper doesn't yet expose. Same Soapy
+# C-ABI; no separate `soapysdr-sys = ...` is needed for the safe crate.
+soapysdr-sys = "0.8"
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

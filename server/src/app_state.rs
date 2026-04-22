@@ -263,6 +263,42 @@ impl AppState {
             .clone();
 
         if id == SOURCE_ID {
+            // Try the live path first when the pipeline is running and
+            // the source block opts in (whitelisted keys only — see
+            // SoapySource::apply_live_params). On Ok(false) the runtime
+            // falls back to a full rebuild via the same composed-source
+            // path as patch_source.
+            {
+                let pipeline = self.inner.pipeline.lock().await;
+                if let Some(mount) = pipeline.as_ref() {
+                    let live_plan = mount
+                        .live_reconfigure_block(
+                            SOURCE_ID,
+                            serde_json::Value::Object(delta_obj.clone()),
+                        )
+                        .await?;
+                    drop(pipeline);
+                    if !live_plan.is_noop() {
+                        // Mirror the merged params back into source_config so
+                        // /api/source reads stay coherent.
+                        let mut sc = self.inner.source_config.write().await;
+                        let mut merged =
+                            match std::mem::replace(&mut sc.params, serde_json::Value::Null) {
+                                serde_json::Value::Object(m) => m,
+                                _ => serde_json::Map::new(),
+                            };
+                        for (k, v) in delta_obj.clone() {
+                            merged.insert(k, v);
+                        }
+                        sc.params = serde_json::Value::Object(merged);
+                        return Ok(Some(live_plan));
+                    }
+                    // is_noop here means the runtime saw no diff; treat as success.
+                    return Ok(Some(live_plan));
+                }
+            }
+            // Pipeline is stopped — just merge into the persisted source
+            // config; the next start() will compose with the new params.
             let mut new_source = self.inner.source_config.read().await.clone();
             let mut merged =
                 match std::mem::replace(&mut new_source.params, serde_json::Value::Null) {

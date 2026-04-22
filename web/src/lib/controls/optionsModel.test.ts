@@ -78,10 +78,12 @@ describe('defaultsFor — RTL-SDR', () => {
 describe('defaultsFor — SDRPlay', () => {
   const state = defaultsFor(SDRPLAY_CAPS)!;
 
-  it('falls back to the smallest ≥ 1 MS/s when 2.048 MS/s is not exact', () => {
-    // The SDRPlay range is continuous; its only "choices" are min and max.
-    // Smallest ≥ 1 MS/s of {62500, 10_660_000} is 10_660_000.
-    expect(state.sample_rate_hz).toBe(10_660_000);
+  it('pins the per-driver preferred 2 MS/s sample rate', () => {
+    // SDRplay's advertised rate range is the continuous [62.5k, 10.66M],
+    // so without injection the dropdown only shows the endpoints. The
+    // per-driver preset injects 2 MS/s as a choice and selects it.
+    expect(state.sample_rate_hz).toBe(2_000_000);
+    expect(state.sample_rate_choices).toContain(2_000_000);
   });
 
   it('uses the first antenna as default and keeps the full list', () => {
@@ -93,9 +95,12 @@ describe('defaultsFor — SDRPlay', () => {
     expect(state.gains.map((g) => g.name)).toEqual(['IFGR', 'RFGR']);
   });
 
-  it('picks the smallest discrete bandwidth as the default', () => {
-    expect(state.bandwidth_hz).toBe(200_000);
-    expect(state.bandwidth_choices).toContain(8_000_000);
+  it('pins the per-driver preferred 5 MHz analog filter', () => {
+    // SDRplay's filter ladder includes 5 MHz; the per-driver preset
+    // pins it (a sane wide-but-not-everything-open default for a
+    // 2 MS/s open).
+    expect(state.bandwidth_hz).toBe(5_000_000);
+    expect(state.bandwidth_choices).toContain(5_000_000);
   });
 });
 
@@ -146,9 +151,9 @@ describe('toSourceConfig', () => {
     expect(cfg.params.bandwidth_hz).toBeUndefined();
   });
 
-  it('includes bandwidth_hz when the device offers one', () => {
+  it('includes the per-driver pinned bandwidth on SDRplay', () => {
     const state = defaultsFor(SDRPLAY_CAPS)!;
     const cfg = toSourceConfig(SDRPLAY_CAPS, state);
-    expect(cfg.params.bandwidth_hz).toBe(200_000);
+    expect(cfg.params.bandwidth_hz).toBe(5_000_000);
   });
 });

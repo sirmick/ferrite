@@ -1,0 +1,6 @@
+{
+  "driver_key": "airspyhf",
+  "label": "Airspy HF+ Discovery",
+  "sample_rate_hz": 768000,
+  "notes": "HF+ is HF/VHF only; 768 kS/s is the standard mode."
+}

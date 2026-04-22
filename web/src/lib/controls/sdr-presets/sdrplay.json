@@ -1,0 +1,7 @@
+{
+  "driver_key": "sdrplay",
+  "label": "SDRplay (RSP1A / RSPdx / RSPduo)",
+  "sample_rate_hz": 2000000,
+  "bandwidth_hz": 5000000,
+  "notes": "2 MS/s with 5 MHz IF filter is the canonical SDRplay 'general listening' setup — wide enough to scan a band, narrow enough to keep a strong adjacent carrier from desensing the front end. The 200 kHz default that ships with SoapySDRPlay would brick-wall the spectrum at ±100 kHz."
+}

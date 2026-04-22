@@ -96,11 +96,19 @@ export function defaultsFor(caps: DeviceCapabilities): OptionsState | null {
   const ch = firstChannel(caps);
   if (!ch) return null;
 
-  const rateChoices = rangesToChoices(ch.sample_rate_ranges_hz);
-  const sample_rate_hz = preferredRate(rateChoices);
+  // Inject the per-driver sweet-spot rate as a choice when it falls
+  // inside an advertised continuous range. SDRplay advertises only
+  // `[62.5k, 10.66M]` endpoints; without injection 2 MS/s would never
+  // appear in the dropdown even though the device fully supports it.
+  const rateChoices = withPreferredInjected(
+    rangesToChoices(ch.sample_rate_ranges_hz),
+    ch.sample_rate_ranges_hz,
+    PREFERRED_RATE_BY_DRIVER[caps.driver_key],
+  );
+  const sample_rate_hz = preferredRate(rateChoices, caps.driver_key);
 
   const bandwidthChoices = rangesToChoices(ch.bandwidth_ranges_hz);
-  const bandwidth_hz = bandwidthChoices.length ? bandwidthChoices[0] : null;
+  const bandwidth_hz = preferredBandwidth(bandwidthChoices, sample_rate_hz, caps.driver_key);
 
   const freqRange = ch.frequency_ranges_hz[0] ?? { min: 0, max: 6e9, step: null };
 
@@ -135,16 +143,92 @@ function midOfRange(r: RangeSpec): number {
 }
 
 /**
- * Pick a sane default sample rate when the device exposes a ladder.
- * 2.048 MS/s is the long-standing RTL-SDR sweet spot; otherwise the
- * smallest choice ≥ 1 MS/s, falling back to the highest.
+ * Inject `target` into a sorted choice list when it falls inside one of
+ * the advertised ranges. No-op when the target is undefined or already
+ * present (within 1 sample). Used to make the per-driver preferred rate
+ * land in the dropdown for devices that only advertise endpoints.
  */
-function preferredRate(choices: number[]): number {
-  if (choices.length === 0) return 2_048_000;
-  const target = 2_048_000;
-  if (choices.some((c) => Math.abs(c - target) < 1)) return target;
+function withPreferredInjected(
+  choices: number[],
+  ranges: { min: number; max: number; step: number | null }[],
+  target: number | undefined,
+): number[] {
+  if (target === undefined) return choices;
+  if (choices.some((c) => Math.abs(c - target) < 1)) return choices;
+  const inRange = ranges.some((r) => target >= r.min && target <= r.max);
+  if (!inRange) return choices;
+  return [...choices, target].sort((a, b) => a - b);
+}
+
+/**
+ * Per-driver opening presets, loaded eagerly from `sdr-presets/*.json`.
+ * Each file is one driver's sweet-spot rate plus optional pinned
+ * bandwidth — see `sdr-presets/README.md`.
+ *
+ * Vite's `import.meta.glob({ eager: true })` inlines the JSON at build
+ * time, so this is just a static lookup at runtime.
+ */
+interface SdrPreset {
+  driver_key: string;
+  sample_rate_hz: number;
+  bandwidth_hz?: number;
+}
+const PRESETS: Record<string, SdrPreset> = (() => {
+  const files = import.meta.glob<{ default: SdrPreset }>('./sdr-presets/*.json', {
+    eager: true,
+  });
+  const out: Record<string, SdrPreset> = {};
+  for (const mod of Object.values(files)) {
+    const p = mod.default;
+    if (p && typeof p.driver_key === 'string') out[p.driver_key] = p;
+  }
+  return out;
+})();
+
+const PREFERRED_RATE_BY_DRIVER: Record<string, number> = Object.fromEntries(
+  Object.entries(PRESETS).map(([k, p]) => [k, p.sample_rate_hz]),
+);
+
+/**
+ * Pick a sane default sample rate. Prefer the per-driver sweet spot
+ * (`PREFERRED_RATE_BY_DRIVER`) when the device advertises it; fall
+ * back to the closest choice ≥ that target, then to the smallest
+ * choice ≥ 1 MS/s, then to the highest.
+ */
+function preferredRate(choices: number[], driverKey: string): number {
+  if (choices.length === 0) return PREFERRED_RATE_BY_DRIVER[driverKey] ?? 2_048_000;
+  const target = PREFERRED_RATE_BY_DRIVER[driverKey] ?? 2_048_000;
+  const exact = choices.find((c) => Math.abs(c - target) < 1);
+  if (exact !== undefined) return exact;
+  const above = choices.find((c) => c >= target);
+  if (above !== undefined) return above;
   const above1m = choices.find((c) => c >= 1_000_000);
   return above1m ?? choices[choices.length - 1];
+}
+
+const PREFERRED_BANDWIDTH_BY_DRIVER: Record<string, number> = Object.fromEntries(
+  Object.entries(PRESETS)
+    .filter(([, p]) => typeof p.bandwidth_hz === 'number')
+    .map(([k, p]) => [k, p.bandwidth_hz!]),
+);
+
+/**
+ * Pick a sane default analog bandwidth for the chosen sample rate.
+ * Prefer a per-driver pinned value (`PREFERRED_BANDWIDTH_BY_DRIVER`)
+ * if the device advertises it; otherwise the smallest choice that's
+ * ≥ 0.8 × sample rate (so the filter doesn't brick-wall a wider
+ * capture); fall back to the largest if nothing meets that, and
+ * `null` (driver default) if no choices exist.
+ */
+function preferredBandwidth(choices: number[], rate: number, driverKey: string): number | null {
+  if (choices.length === 0) return null;
+  const pinned = PREFERRED_BANDWIDTH_BY_DRIVER[driverKey];
+  if (pinned !== undefined) {
+    const exact = choices.find((c) => Math.abs(c - pinned) < 1);
+    if (exact !== undefined) return exact;
+  }
+  const target = rate * 0.8;
+  return choices.find((c) => c >= target) ?? choices[choices.length - 1];
 }
 
 /** True when `state` is internally consistent (freq in range, gains in range). */

@@ -6,15 +6,54 @@
 //! - `ferrited --list-devices` (main.rs) — print on startup, exit 0.
 //! - `GET /api/devices` (lands in #57) — JSON response to the browser.
 //!
-//! Gated on the `soapysdr` cargo feature so CI (and any hardware-free
-//! build) compiles without `libSoapySDR` present.
-
-#![cfg(feature = "soapysdr")]
+//! `libSoapySDR` is a hard build-time dependency — see `server/Cargo.toml`.
 
 use std::collections::BTreeMap;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
+
+/// Default probe timeout for the CLI. The "happy" SDRplay probe takes
+/// ~2.3s on the dev box; we leave plenty of headroom for slower drivers
+/// while still bailing long before a wedged `sdrplay_apiService` would
+/// hang forever. Server routes set their own.
+pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run a probe-style closure on a worker thread and bail with a helpful
+/// error if it doesn't return within `timeout`. SoapySDR drivers can
+/// wedge at the C/C++ layer (e.g. the SDRplay API service holding a
+/// stale device handle) and there's no way to cancel the in-flight call
+/// — we leak the thread so the foreground stays responsive. Fine for
+/// CLI use; the process exits right after.
+pub fn with_probe_timeout<F, T>(label: &str, timeout: Duration, op: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = mpsc::sync_channel::<Result<T>>(1);
+    thread::Builder::new()
+        .name(format!("ferrite-probe[{label}]"))
+        .spawn(move || {
+            let _ = tx.send(op());
+        })
+        .context("spawn probe thread")?;
+    match rx.recv_timeout(timeout) {
+        Ok(res) => res,
+        Err(mpsc::RecvTimeoutError::Timeout) => bail!(
+            "{label} timed out after {:.1}s — SoapySDR may be wedged. \
+             For SDRplay try `sudo systemctl restart sdrplay`; \
+             for USB drivers replug the device. (The probe thread is \
+             still running and will be cleaned up on process exit.)",
+            timeout.as_secs_f64()
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("{label} probe thread panicked before returning")
+        }
+    }
+}
 
 /// One `SoapySDR`-visible device and the kv args Soapy reports for it.
 ///
@@ -48,6 +87,12 @@ impl DeviceInfo {
 pub fn list_devices() -> Result<Vec<DeviceInfo>> {
     let entries = soapysdr::enumerate("").context("SoapySDR enumerate failed")?;
     Ok(entries.iter().map(device_info_from_args).collect())
+}
+
+/// Same as [`list_devices`], but returns a clear timeout error rather
+/// than hanging forever when a driver wedges at the C layer.
+pub fn list_devices_with_timeout(timeout: Duration) -> Result<Vec<DeviceInfo>> {
+    with_probe_timeout("list_devices", timeout, list_devices)
 }
 
 fn device_info_from_args(args: &soapysdr::Args) -> DeviceInfo {
@@ -122,16 +167,43 @@ pub struct RxChannelCapabilities {
     pub has_agc: bool,
 }
 
-/// Full probe result: the enumeration info plus one entry per Rx
-/// channel. Tx is out of scope for Ferrite.
+/// One driver-specific setting exposed via `SoapySDRDevice_getSettingInfo`.
 ///
-/// # Driver-specific settings
-///
-/// `SoapySDRDevice_getSettingInfo` is not exposed by `rust-soapysdr`
-/// 0.5, so bias-tee / IF-gain / RSP-antenna-routing type settings are
-/// **not** in this schema yet. A follow-up commit will reach into
-/// `soapysdr-sys` to fill that gap; the web option dialog (#64) will
-/// need the same shape extended.
+/// These are the per-driver knobs that don't fit the standard Soapy
+/// surface — e.g. `rfgain_sel`, `agc_setpoint`, `biasT_ctrl`, `hdr_ctrl`
+/// on SDRplay; `direct_samp` on RTL-SDR; `amp_ctrl`, `bias_tx` on HackRF.
+/// We pass them through verbatim so the frontend can render generic
+/// controls without knowing the driver.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingInfo {
+    pub key: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub units: Option<String>,
+    pub data_type: SettingType,
+    pub default: String,
+    pub range: Option<RangeSpec>,
+    pub options: Vec<SettingOption>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingType {
+    Bool,
+    Int,
+    Float,
+    String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingOption {
+    pub value: String,
+    pub label: Option<String>,
+}
+
+/// Full probe result: the enumeration info, one entry per Rx channel,
+/// and any driver-specific settings reported by `getSettingInfo`. Tx is
+/// out of scope for Ferrite.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceCapabilities {
     pub info: DeviceInfo,
@@ -139,6 +211,14 @@ pub struct DeviceCapabilities {
     pub hardware_key: String,
     pub hardware_info: BTreeMap<String, String>,
     pub rx_channels: Vec<RxChannelCapabilities>,
+    pub settings: Vec<SettingInfo>,
+}
+
+/// Same as [`probe`], with a hard wall-clock timeout. Use this from any
+/// caller that can't tolerate an indefinite hang (CLI, HTTP handler).
+pub fn probe_with_timeout(args: &str, timeout: Duration) -> Result<DeviceCapabilities> {
+    let owned = args.to_string();
+    with_probe_timeout(&format!("probe({args})"), timeout, move || probe(&owned))
 }
 
 /// Open the device at `args`, query everything we can, close. Single
@@ -170,13 +250,152 @@ pub fn probe(args: &str) -> Result<DeviceCapabilities> {
         .map(|ch| probe_rx_channel(&device, ch))
         .collect::<Result<Vec<_>>>()?;
 
+    // Drop the safe handle before opening a second one for getSettingInfo.
+    // Most drivers (RSPdx, RTL, HackRF) refuse a second concurrent handle.
+    drop(device);
+    let settings = read_setting_info(args).unwrap_or_else(|err| {
+        tracing::debug!(?err, "getSettingInfo unavailable; settings list empty");
+        Vec::new()
+    });
+
     Ok(DeviceCapabilities {
         info,
         driver_key,
         hardware_key,
         hardware_info,
         rx_channels,
+        settings,
     })
+}
+
+/// Open the device via raw FFI just long enough to enumerate
+/// `SoapySDRDevice_getSettingInfo`. The safe `soapysdr` 0.5 wrapper
+/// doesn't expose this call; rather than vendor a fork we reach into
+/// `soapysdr-sys` for one cold-path query.
+fn read_setting_info(args: &str) -> Result<Vec<SettingInfo>> {
+    use std::ffi::CStr;
+
+    // Re-use the safe Args parser; kwargs owns its own backing copy.
+    let kwargs: soapysdr::Args = args.into();
+    let kwargs_raw = kwargs.as_raw_const();
+
+    // SAFETY: kwargs_raw points at kwargs's interior, alive for this call.
+    let device = unsafe { soapysdr_sys::SoapySDRDevice_make(kwargs_raw) };
+    if device.is_null() {
+        let err_ptr = unsafe { soapysdr_sys::SoapySDRDevice_lastError() };
+        let msg = if err_ptr.is_null() {
+            "SoapySDRDevice_make returned null".to_string()
+        } else {
+            unsafe { CStr::from_ptr(err_ptr) }.to_string_lossy().into()
+        };
+        anyhow::bail!("open for getSettingInfo failed: {msg}");
+    }
+
+    let mut len: usize = 0;
+    // SAFETY: device is non-null, len is a valid out-pointer.
+    let list_ptr = unsafe { soapysdr_sys::SoapySDRDevice_getSettingInfo(device, &raw mut len) };
+
+    let mut out = Vec::with_capacity(len);
+    if !list_ptr.is_null() && len > 0 {
+        // SAFETY: Soapy guarantees `len` valid `SoapySDRArgInfo` entries.
+        let slice = unsafe { std::slice::from_raw_parts(list_ptr, len) };
+        for raw in slice {
+            out.push(setting_info_from_raw(raw));
+        }
+        // SAFETY: ArgInfoList_clear clears each entry's interior strings
+        // *and* frees the list itself (TypesC.cpp:134) — no follow-up
+        // SoapySDR_free needed.
+        unsafe { soapysdr_sys::SoapySDRArgInfoList_clear(list_ptr, len) };
+    }
+
+    // SAFETY: device is the make() return value; closes once.
+    let unmake_rc = unsafe { soapysdr_sys::SoapySDRDevice_unmake(device) };
+    if unmake_rc != 0 {
+        tracing::debug!(unmake_rc, "SoapySDRDevice_unmake non-zero (ignored)");
+    }
+    Ok(out)
+}
+
+fn setting_info_from_raw(raw: &soapysdr_sys::SoapySDRArgInfo) -> SettingInfo {
+    use soapysdr_sys::{
+        SOAPY_SDR_ARG_INFO_BOOL, SOAPY_SDR_ARG_INFO_FLOAT, SOAPY_SDR_ARG_INFO_INT,
+        SOAPY_SDR_ARG_INFO_STRING,
+    };
+
+    // Driver-allocated C strings; lifetimes end with SoapySDRArgInfoList_clear.
+    let key = unsafe { c_required(raw.key) };
+    let default = unsafe { c_required(raw.value) };
+    let name = unsafe { c_optional(raw.name) };
+    let description = unsafe { c_optional(raw.description) };
+    let units = unsafe { c_optional(raw.units) };
+
+    let data_type = match raw.type_ {
+        SOAPY_SDR_ARG_INFO_BOOL => SettingType::Bool,
+        SOAPY_SDR_ARG_INFO_INT => SettingType::Int,
+        SOAPY_SDR_ARG_INFO_FLOAT => SettingType::Float,
+        SOAPY_SDR_ARG_INFO_STRING => SettingType::String,
+        _ => SettingType::String,
+    };
+
+    let range = if matches!(data_type, SettingType::Int | SettingType::Float)
+        && raw.range.maximum > raw.range.minimum
+    {
+        Some(RangeSpec::from(soapysdr::Range {
+            minimum: raw.range.minimum,
+            maximum: raw.range.maximum,
+            step: raw.range.step,
+        }))
+    } else {
+        None
+    };
+
+    let mut options = Vec::with_capacity(raw.numOptions);
+    if !raw.options.is_null() && raw.numOptions > 0 {
+        // SAFETY: Soapy guarantees `numOptions` valid C-string pointers.
+        let vals = unsafe { std::slice::from_raw_parts(raw.options, raw.numOptions) };
+        let names = if raw.optionNames.is_null() {
+            None
+        } else {
+            // SAFETY: same length as `options` per Soapy contract.
+            Some(unsafe { std::slice::from_raw_parts(raw.optionNames, raw.numOptions) })
+        };
+        for (i, &val_ptr) in vals.iter().enumerate() {
+            let value = unsafe { c_required(val_ptr) };
+            let label = names.and_then(|ns| unsafe { c_optional(ns[i]) });
+            options.push(SettingOption { value, label });
+        }
+    }
+
+    SettingInfo {
+        label: name.clone().unwrap_or_else(|| key.clone()),
+        key,
+        description,
+        units,
+        data_type,
+        default,
+        range,
+        options,
+    }
+}
+
+unsafe fn c_required(p: *mut std::os::raw::c_char) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(p) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+unsafe fn c_optional(p: *mut std::os::raw::c_char) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(p) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn args_to_map(args: &soapysdr::Args) -> BTreeMap<String, String> {
@@ -299,6 +518,27 @@ pub fn print_capabilities(caps: &DeviceCapabilities) {
             println!("    gain.{}_db: {}", g.name, format_range(g.range_db));
         }
     }
+    if !caps.settings.is_empty() {
+        println!();
+        println!("  driver settings:");
+        for s in &caps.settings {
+            let kind = match s.data_type {
+                SettingType::Bool => "bool",
+                SettingType::Int => "int",
+                SettingType::Float => "float",
+                SettingType::String => "string",
+            };
+            let suffix = if let Some(r) = s.range {
+                format!(" {}", format_range(r))
+            } else if !s.options.is_empty() {
+                let opts: Vec<&str> = s.options.iter().map(|o| o.value.as_str()).collect();
+                format!(" {{{}}}", opts.join(","))
+            } else {
+                String::new()
+            };
+            println!("    {} ({kind}, default={}){}", s.key, s.default, suffix);
+        }
+    }
 }
 
 fn print_ranges(label: &str, ranges: &[RangeSpec]) {
@@ -350,6 +590,74 @@ mod tests {
         assert!(probe("driver=ferrite-no-such-driver").is_err());
     }
 
+    /// The wrapper passes a fast-failing operation's error straight
+    /// through — it should *not* dress it up as a timeout.
+    #[test]
+    fn with_probe_timeout_passes_underlying_error_through() {
+        let res: Result<()> = with_probe_timeout("fast-fail", Duration::from_secs(5), || {
+            bail!("inner failure")
+        });
+        let err = res.expect_err("expected failure");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("inner failure"), "got: {msg}");
+        assert!(!msg.contains("timed out"), "should not be a timeout: {msg}");
+    }
+
+    /// And a slow operation hits the timeout with the helpful hint.
+    #[test]
+    fn with_probe_timeout_fires_with_helpful_message() {
+        let res: Result<()> = with_probe_timeout("slow-op", Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(500));
+            Ok(())
+        });
+        let err = res.expect_err("expected timeout");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("timed out"), "got: {msg}");
+        assert!(
+            msg.contains("sdrplay") || msg.contains("SDRplay"),
+            "expected hint: {msg}"
+        );
+    }
+
+    #[test]
+    fn with_probe_timeout_returns_value_from_op() {
+        let res = with_probe_timeout("ok", Duration::from_secs(5), || {
+            Ok::<_, anyhow::Error>(42_u32)
+        })
+        .expect("should succeed");
+        assert_eq!(res, 42);
+    }
+
+    /// Real-hardware probe — gated behind `--ignored` and the env var
+    /// `FERRITE_TEST_DEVICE_ARGS`. Lets you exercise the exact code path
+    /// the server uses, in isolation, with full stderr visible. Run e.g.
+    /// `FERRITE_TEST_DEVICE_ARGS=driver=sdrplay \
+    ///   cargo test -p ferrited --features soapysdr -- --ignored \
+    ///   probe_real_device --nocapture`.
+    #[test]
+    #[ignore = "requires hardware; set FERRITE_TEST_DEVICE_ARGS to run"]
+    fn probe_real_device() {
+        let args = std::env::var("FERRITE_TEST_DEVICE_ARGS")
+            .expect("set FERRITE_TEST_DEVICE_ARGS=driver=… to run this test");
+        let caps = probe_with_timeout(&args, DEFAULT_PROBE_TIMEOUT)
+            .expect("probe should succeed against real hardware");
+        // Smoke checks — anything we'd expect from any sane SDR.
+        assert!(!caps.driver_key.is_empty(), "driver_key empty");
+        assert!(!caps.rx_channels.is_empty(), "no Rx channels reported");
+        let ch0 = &caps.rx_channels[0];
+        assert!(!ch0.antennas.is_empty(), "no antennas reported");
+        assert!(
+            !ch0.sample_rate_ranges_hz.is_empty(),
+            "no sample-rate ranges reported"
+        );
+        assert!(
+            !ch0.frequency_ranges_hz.is_empty(),
+            "no frequency ranges reported"
+        );
+        // Print the probe so `--nocapture` doubles as a debug dump.
+        print_capabilities(&caps);
+    }
+
     #[test]
     fn parse_args_string_splits_on_comma_and_equals() {
         let map = parse_args_string("driver=sdrplay,label=RSP1A,serial=ABC123");
@@ -392,6 +700,16 @@ mod tests {
             driver_key: "rtlsdr".into(),
             hardware_key: "RTL2832U".into(),
             hardware_info: BTreeMap::from([("tuner".to_string(), "R820T2".to_string())]),
+            settings: vec![SettingInfo {
+                key: "biasT_ctrl".into(),
+                label: "BiasT Enable".into(),
+                description: Some("BiasT Control".into()),
+                units: None,
+                data_type: SettingType::Bool,
+                default: "true".into(),
+                range: None,
+                options: vec![],
+            }],
             rx_channels: vec![RxChannelCapabilities {
                 index: 0,
                 antennas: vec!["RX".into()],
@@ -438,9 +756,15 @@ mod tests {
             "hardware_key",
             "hardware_info",
             "rx_channels",
+            "settings",
         ] {
             assert!(json.get(key).is_some(), "missing top-level key: {key}");
         }
+        let setting = &json["settings"][0];
+        for key in ["key", "label", "data_type", "default", "options"] {
+            assert!(setting.get(key).is_some(), "missing setting key: {key}");
+        }
+        assert_eq!(setting["data_type"], "bool");
         let chan = &json["rx_channels"][0];
         for key in [
             "index",

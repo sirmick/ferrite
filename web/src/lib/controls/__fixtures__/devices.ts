@@ -44,6 +44,22 @@ export const RTLSDR_CAPS: DeviceCapabilities = {
       has_agc: true,
     },
   ],
+  settings: [
+    {
+      key: 'direct_samp',
+      label: 'Direct Sampling',
+      description: null,
+      units: null,
+      data_type: 'string',
+      default: '0',
+      range: null,
+      options: [
+        { value: '0', label: 'Off' },
+        { value: '1', label: 'I-ADC' },
+        { value: '2', label: 'Q-ADC' },
+      ],
+    },
+  ],
 };
 
 /** SDRPlay RSPduo — wider frequency, multiple antennas, IF/RF gain split. */
@@ -82,6 +98,28 @@ export const SDRPLAY_CAPS: DeviceCapabilities = {
       ],
       overall_gain_range_db: { min: 0, max: 68, step: 1 },
       has_agc: true,
+    },
+  ],
+  settings: [
+    {
+      key: 'biasT_ctrl',
+      label: 'BiasT Enable',
+      description: 'BiasT Control',
+      units: null,
+      data_type: 'bool',
+      default: 'true',
+      range: null,
+      options: [],
+    },
+    {
+      key: 'agc_setpoint',
+      label: 'AGC Setpoint',
+      description: 'AGC target dBFS',
+      units: 'dB',
+      data_type: 'int',
+      default: '-30',
+      range: { min: -60, max: 0, step: null },
+      options: [],
     },
   ],
 };

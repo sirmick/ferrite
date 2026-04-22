@@ -32,12 +32,10 @@ mod preset_pipeline;
 #[allow(dead_code)]
 mod app_state;
 
-#[cfg(feature = "soapysdr")]
 #[path = "../src/device.rs"]
 #[allow(dead_code)]
 mod device;
 
-#[cfg(feature = "soapysdr")]
 #[path = "../src/soapy_source.rs"]
 #[allow(dead_code)]
 mod soapy_source;

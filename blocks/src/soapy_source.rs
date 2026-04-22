@@ -42,6 +42,7 @@
 #![cfg(feature = "soapysdr")]
 
 use std::{
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -109,6 +110,12 @@ pub struct SoapySourceParams {
     pub agc: Option<bool>,
     /// Rx channel index. Most drivers only have channel 0.
     pub channel: usize,
+    /// Driver-specific settings (`SoapySDRDevice_writeSetting`) — keys
+    /// and values are passed through verbatim from
+    /// `getSettingInfo`-discovered controls. Applied last so a setting
+    /// can override an earlier standard call if it overlaps. Restart-on-
+    /// change is the only update path today.
+    pub settings: BTreeMap<String, String>,
 }
 
 impl Default for SoapySourceParams {
@@ -122,6 +129,7 @@ impl Default for SoapySourceParams {
             gain_db: None,
             agc: None,
             channel: 0,
+            settings: BTreeMap::new(),
         }
     }
 }
@@ -153,7 +161,7 @@ impl SoapySource {
     /// Blocking — call from `tokio::task::spawn_blocking` when invoking
     /// from an async context.
     pub fn new(params: &SoapySourceParams) -> Result<Self> {
-        let device = Device::new(params.args.as_str())
+        let device = open_with_retry(params.args.as_str())
             .with_context(|| format!("open SoapySDR device with args {:?}", params.args))?;
         let dir = Direction::Rx;
         let ch = params.channel;
@@ -183,6 +191,14 @@ impl SoapySource {
             device
                 .set_gain(dir, ch, g)
                 .with_context(|| format!("set gain={g}"))?;
+        }
+        for (key, value) in &params.settings {
+            // Soapy's writeSetting is the catch-all for driver-specific
+            // knobs surfaced via getSettingInfo. Treat failures as soft —
+            // a stale key from a previous device shouldn't kill the open.
+            if let Err(err) = device.write_setting::<&str>(key, value) {
+                tracing::warn!(?err, key, value, "writeSetting failed (ignored)");
+            }
         }
 
         let actual_rate = device.sample_rate(dir, ch).unwrap_or(params.sample_rate_hz);
@@ -330,6 +346,52 @@ impl Block for SoapySource {
                 },
             ],
         }
+    }
+
+    /// Apply the live-tunable params (`center_freq_hz`, `gain_db`,
+    /// `antenna`, `agc`) directly against the open device, no stream
+    /// restart. Anything outside that whitelist defers to a rebuild by
+    /// returning `Ok(false)`.
+    ///
+    /// Most Soapy drivers serialise device-side calls internally, so
+    /// concurrent `setFrequency`/`setGain` against an active `RxStream`
+    /// is safe. The reader thread keeps pulling samples through the
+    /// transition; downstream sees a smooth retune instead of an audio
+    /// gap.
+    fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+        let Some(obj) = delta.as_object() else {
+            return Ok(false);
+        };
+        const LIVE_KEYS: &[&str] = &["center_freq_hz", "gain_db", "antenna", "agc"];
+        if !obj.keys().all(|k| LIVE_KEYS.contains(&k.as_str())) {
+            return Ok(false);
+        }
+        let dir = Direction::Rx;
+        let ch = self.channel;
+        if let Some(v) = obj.get("center_freq_hz").and_then(|v| v.as_f64()) {
+            self.device
+                .set_frequency(dir, ch, v, ())
+                .with_context(|| format!("live set_frequency={v}"))?;
+            self.center_freq_hz = self.device.frequency(dir, ch).unwrap_or(v);
+        }
+        if let Some(v) = obj.get("gain_db").and_then(|v| v.as_f64()) {
+            self.device
+                .set_gain(dir, ch, v)
+                .with_context(|| format!("live set_gain={v}"))?;
+        }
+        if let Some(v) = obj.get("antenna").and_then(|v| v.as_str()) {
+            self.device
+                .set_antenna(dir, ch, v.as_bytes())
+                .with_context(|| format!("live set_antenna={v}"))?;
+        }
+        if let Some(v) = obj.get("agc").and_then(|v| v.as_bool()) {
+            // Drivers without AGC return Err — surface as soft-failure
+            // rather than killing the live path.
+            if let Err(err) = self.device.set_gain_mode(dir, ch, v) {
+                tracing::warn!(?err, agc = v, "live set_gain_mode failed (ignored)");
+            }
+        }
+        Ok(true)
     }
 
     fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
@@ -502,6 +564,38 @@ fn run_reader(
         }
     }
     let _ = stream.deactivate(None);
+}
+
+/// Open a SoapySDR device with a short retry loop for the
+/// `device deletion in-progress` race. SoapySDR returns this when a
+/// previous handle (typically from a capabilities probe done seconds
+/// earlier) is still tearing down inside the driver. The window is
+/// usually <1s; bail with the original error after 5 attempts so a
+/// genuinely-broken device still surfaces fast.
+fn open_with_retry(args: &str) -> Result<Device> {
+    const MAX_ATTEMPTS: usize = 5;
+    const BACKOFF: Duration = Duration::from_millis(400);
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        match Device::new(args) {
+            Ok(dev) => return Ok(dev),
+            Err(err) => {
+                let msg = format!("{err}");
+                if msg.contains("device deletion in-progress") && attempt + 1 < MAX_ATTEMPTS {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max = MAX_ATTEMPTS,
+                        "SoapySDR device busy releasing; retrying"
+                    );
+                    std::thread::sleep(BACKOFF);
+                    last_err = Some(anyhow!(err));
+                    continue;
+                }
+                return Err(anyhow!(err));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("Device::new failed for unknown reason")))
 }
 
 #[cfg(test)]

@@ -93,7 +93,6 @@ async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroa
 /// (e.g. driver loaded but hardware already held by another process), so
 /// each entry is either `Available` with the full capability schema or
 /// `Unavailable` with the enumerate-time info plus the probe error.
-#[cfg(feature = "soapysdr")]
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DeviceEntry {
@@ -105,10 +104,7 @@ pub enum DeviceEntry {
 }
 
 /// `GET /api/devices` — enumerate every `SoapySDR` device and probe each
-/// one for its full capability schema. Returns 501 on builds without the
-/// `soapysdr` feature so the web UI can render a clear "server built
-/// without hardware support" state instead of hitting a 404.
-#[cfg(feature = "soapysdr")]
+/// one for its full capability schema.
 pub async fn list_devices() -> Result<Json<Vec<DeviceEntry>>, (StatusCode, Json<ApiError>)> {
     let entries = tokio::task::spawn_blocking(probe_all_devices)
         .await
@@ -117,13 +113,12 @@ pub async fn list_devices() -> Result<Json<Vec<DeviceEntry>>, (StatusCode, Json<
     Ok(Json(entries))
 }
 
-#[cfg(feature = "soapysdr")]
 fn probe_all_devices() -> anyhow::Result<Vec<DeviceEntry>> {
-    let devices = crate::device::list_devices()?;
+    let devices = crate::device::list_devices_with_timeout(crate::device::DEFAULT_PROBE_TIMEOUT)?;
     let mut entries = Vec::with_capacity(devices.len());
     for info in devices {
         let args = info.args_string();
-        match crate::device::probe(&args) {
+        match crate::device::probe_with_timeout(&args, crate::device::DEFAULT_PROBE_TIMEOUT) {
             Ok(caps) => entries.push(DeviceEntry::Available(Box::new(caps))),
             Err(err) => entries.push(DeviceEntry::Unavailable {
                 info,
@@ -134,7 +129,6 @@ fn probe_all_devices() -> anyhow::Result<Vec<DeviceEntry>> {
     Ok(entries)
 }
 
-#[cfg(feature = "soapysdr")]
 fn internal(message: String) -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -142,21 +136,6 @@ fn internal(message: String) -> (StatusCode, Json<ApiError>) {
             error: ApiErrorBody {
                 code: "DEVICE_PROBE_FAILED",
                 message,
-            },
-        }),
-    )
-}
-
-#[cfg(not(feature = "soapysdr"))]
-pub async fn list_devices() -> (StatusCode, Json<ApiError>) {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiError {
-            error: ApiErrorBody {
-                code: "SOAPYSDR_FEATURE_DISABLED",
-                message: "ferrited was built without the `soapysdr` feature; \
-                          rebuild with `--features soapysdr`"
-                    .to_string(),
             },
         }),
     )
@@ -353,7 +332,6 @@ pub async fn patch_pipeline_block(
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum SourceCapabilitiesResponse {
-    #[cfg(feature = "soapysdr")]
     Hardware {
         type_name: String,
         capabilities: Box<crate::device::DeviceCapabilities>,
@@ -361,14 +339,12 @@ pub enum SourceCapabilitiesResponse {
     Software {
         type_name: String,
     },
-    #[cfg(feature = "soapysdr")]
     Unavailable {
         type_name: String,
         error: String,
     },
 }
 
-#[cfg(feature = "soapysdr")]
 pub async fn get_source_capabilities(
     State(state): State<AppState>,
 ) -> Result<Json<SourceCapabilitiesResponse>, (StatusCode, Json<ApiError>)> {
@@ -383,9 +359,11 @@ pub async fn get_source_capabilities(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let probe = tokio::task::spawn_blocking(move || crate::device::probe(&args))
-        .await
-        .map_err(|e| internal(format!("device probe task panicked: {e}")))?;
+    let probe = tokio::task::spawn_blocking(move || {
+        crate::device::probe_with_timeout(&args, crate::device::DEFAULT_PROBE_TIMEOUT)
+    })
+    .await
+    .map_err(|e| internal(format!("device probe task panicked: {e}")))?;
     let response = match probe {
         Ok(caps) => SourceCapabilitiesResponse::Hardware {
             type_name,
@@ -397,16 +375,6 @@ pub async fn get_source_capabilities(
         },
     };
     Ok(Json(response))
-}
-
-#[cfg(not(feature = "soapysdr"))]
-pub async fn get_source_capabilities(
-    State(state): State<AppState>,
-) -> Json<SourceCapabilitiesResponse> {
-    let source = state.get_source().await;
-    Json(SourceCapabilitiesResponse::Software {
-        type_name: source.type_name,
-    })
 }
 
 /// `GET /api/presets` — enumerate every `*.json` preset the server can

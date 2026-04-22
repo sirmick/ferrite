@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Clone SoapySDR + SoapySDRPlay3 sources into ./soapysdr-src/ and install
-# to ./soapysdr/ (prefix, no sudo). Source env.sh after to use.
+# Clone SoapySDR + driver modules (SDRplay, HackRF, RTL-SDR) into
+# ./soapysdr-src/ and install to ./soapysdr/ (prefix, no sudo). Source
+# env.sh after to use.
+#
+# HackRF and RTL-SDR require their low-level userland libs installed
+# system-wide (libhackrf-dev, librtlsdr-dev on Debian/Ubuntu). The
+# cmake steps below will fail loudly if they're missing.
 
 set -euo pipefail
 
@@ -37,12 +42,20 @@ build_cmake() {
 
 clone_or_update https://github.com/pothosware/SoapySDR.git        "$SRC_DIR/SoapySDR"
 clone_or_update https://github.com/pothosware/SoapySDRPlay3.git   "$SRC_DIR/SoapySDRPlay3"
+clone_or_update https://github.com/pothosware/SoapyHackRF.git     "$SRC_DIR/SoapyHackRF"
+clone_or_update https://github.com/pothosware/SoapyRTLSDR.git     "$SRC_DIR/SoapyRTLSDR"
 
 echo ">>> Building SoapySDR"
 build_cmake "$SRC_DIR/SoapySDR"
 
 echo ">>> Building SoapySDRPlay3 (requires SDRplay API installed system-wide)"
 build_cmake "$SRC_DIR/SoapySDRPlay3"
+
+echo ">>> Building SoapyHackRF (requires libhackrf-dev)"
+build_cmake "$SRC_DIR/SoapyHackRF"
+
+echo ">>> Building SoapyRTLSDR (requires librtlsdr-dev)"
+build_cmake "$SRC_DIR/SoapyRTLSDR"
 
 cat > "$PREFIX/env.sh" <<EOF
 # source this from repo root to use the local SoapySDR build:
@@ -56,4 +69,4 @@ EOF
 
 echo
 echo ">>> Done. Sanity check:"
-echo "    source $PREFIX/env.sh && SoapySDRUtil --info && SoapySDRUtil --probe=driver=sdrplay"
+echo "    source $PREFIX/env.sh && SoapySDRUtil --info && SoapySDRUtil --find"

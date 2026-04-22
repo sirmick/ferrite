@@ -1,0 +1,6 @@
+{
+  "driver_key": "rtlsdr",
+  "label": "RTL-SDR (R820T / R820T2 / R860)",
+  "sample_rate_hz": 2048000,
+  "notes": "2.048 MS/s is the long-standing sweet spot — 2.4 MS/s flirts with USB drops on R820T. No analog filter ladder; AGC + tuner gain only."
+}

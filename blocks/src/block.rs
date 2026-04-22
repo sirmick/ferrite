@@ -523,6 +523,25 @@ pub trait Block: Send + AsAny {
     fn stop(&mut self) -> Result<()> {
         Ok(())
     }
+
+    /// Try to absorb a params delta in-place, without going through the
+    /// runtime's stop-rebuild-start path. Returns `Ok(true)` when the
+    /// delta was fully applied live (no further action needed),
+    /// `Ok(false)` when the block has no live path for any key in
+    /// `delta` (the runtime falls back to a full reconfigure), and
+    /// `Err(_)` for hard failures the caller should surface.
+    ///
+    /// Implementors should treat this as best-effort: if any one key in
+    /// `delta` can't be applied live, return `Ok(false)` and let the
+    /// rebuild handle the whole change atomically. Don't apply some
+    /// keys and reject others — partial application breaks the contract
+    /// that `applied_doc` either matches the live state or doesn't.
+    ///
+    /// Default returns `Ok(false)`, which preserves today's behavior:
+    /// every block change rebuilds the flowgraph.
+    fn apply_live_params(&mut self, _delta: &serde_json::Value) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Construct an instance from a JSON params value. The runtime calls this

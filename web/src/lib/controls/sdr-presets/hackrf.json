@@ -1,0 +1,6 @@
+{
+  "driver_key": "hackrf",
+  "label": "HackRF One",
+  "sample_rate_hz": 8000000,
+  "notes": "8 MS/s is comfortable on USB 2.0 and gives a useful wideband view; HackRF runs cleanly up to 20 MS/s on USB 3.0 if you want to push it. AMP off by default — flip it for weak HF/VHF signals only."
+}

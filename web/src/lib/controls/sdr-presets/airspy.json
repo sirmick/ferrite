@@ -1,0 +1,6 @@
+{
+  "driver_key": "airspy",
+  "label": "Airspy R2 / Mini",
+  "sample_rate_hz": 6000000,
+  "notes": "6 MS/s on R2 (also works on Mini); 10 MS/s available on R2 if you have the CPU. LNA gain is the primary knob."
+}

@@ -4,49 +4,9 @@
 // hide hardware-only controls.
 
 import { ApiError } from '$lib/api/errors';
+import type { DeviceCapabilities } from '$lib/api/devices';
 
-export interface RangeSpec {
-  min: number;
-  max: number;
-  step: number | null;
-}
-
-export interface GainElement {
-  name: string;
-  range_db: RangeSpec;
-}
-
-export interface FrequencyComponent {
-  name: string;
-  ranges_hz: RangeSpec[];
-}
-
-export interface RxChannelCapabilities {
-  index: number;
-  antennas: string[];
-  sample_rate_ranges_hz: RangeSpec[];
-  bandwidth_ranges_hz: RangeSpec[];
-  frequency_ranges_hz: RangeSpec[];
-  frequency_components: FrequencyComponent[];
-  gains: GainElement[];
-  overall_gain_range_db: RangeSpec | null;
-  has_agc: boolean;
-}
-
-export interface DeviceInfo {
-  driver: string;
-  label: string;
-  serial: string | null;
-  args: Record<string, string>;
-}
-
-export interface DeviceCapabilities {
-  info: DeviceInfo;
-  driver_key: string;
-  hardware_key: string;
-  hardware_info: Record<string, string>;
-  rx_channels: RxChannelCapabilities[];
-}
+export type { DeviceCapabilities };
 
 export type SourceCapabilitiesResponse =
   | { kind: 'hardware'; type_name: string; capabilities: DeviceCapabilities }

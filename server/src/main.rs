@@ -39,7 +39,6 @@ mod frame_bus;
 mod log_stream;
 mod preset_pipeline;
 mod routes;
-#[cfg(feature = "soapysdr")]
 mod soapy_source;
 
 /// Ferrite SDR daemon.
@@ -50,11 +49,13 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0:8088")]
     bind: String,
 
-    /// Flowgraph preset JSON. Required. The `src` block must be a
-    /// `Source` placeholder (see `runtime::compose`); the concrete
-    /// source is supplied separately via `--source` or inline flags.
+    /// Flowgraph preset JSON. Required for the server/headless modes;
+    /// not used by `--list-devices` or `--probe-device`. The `src` block
+    /// must be a `Source` placeholder (see `runtime::compose`); the
+    /// concrete source is supplied separately via `--source` or inline
+    /// flags.
     #[arg(long = "flowgraph", value_name = "PATH")]
-    flowgraph: PathBuf,
+    flowgraph: Option<PathBuf>,
 
     /// Optional `SourceConfig` JSON — overrides any inline `--source-*`
     /// flags. The file body is deserialised as `SourceConfig`.
@@ -133,6 +134,13 @@ struct Args {
     /// Probe one device's capabilities and exit.
     #[arg(long = "probe-device", value_name = "ARGS")]
     probe_device: Option<String>,
+
+    /// Hard timeout for `--list-devices` and `--probe-device`. Defaults
+    /// to 10s — enough for slow drivers (SDRplay first probe is ~2.3s)
+    /// while still bailing long before a wedged SoapySDR daemon would
+    /// hang the CLI.
+    #[arg(long = "probe-timeout-secs", default_value_t = 10)]
+    probe_timeout_secs: u64,
 }
 
 fn load_flowgraph(path: &std::path::Path) -> Result<FlowgraphDoc> {
@@ -186,20 +194,26 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    let probe_timeout = Duration::from_secs(args.probe_timeout_secs);
+
     if args.list_devices {
-        return run_list_devices();
+        return run_list_devices(probe_timeout);
     }
 
     if let Some(probe_args) = args.probe_device.as_deref() {
-        return run_probe_device(probe_args);
+        return run_probe_device(probe_args, probe_timeout);
     }
 
-    let preset = load_flowgraph(&args.flowgraph)?;
+    let flowgraph_path = args
+        .flowgraph
+        .as_deref()
+        .context("--flowgraph PATH is required to start the server (see --list-devices / --probe-device for diagnostics)")?;
+    let preset = load_flowgraph(flowgraph_path)?;
     let source = build_source_config(&args)?;
     let tick_period = Duration::from_micros(args.tick_period_us);
 
     tracing::info!(
-        flowgraph = %args.flowgraph.display(),
+        flowgraph = %flowgraph_path.display(),
         source = %source.type_name,
         tick_period_us = args.tick_period_us,
         "ferrited starting"
@@ -209,7 +223,7 @@ async fn main() -> Result<()> {
     if let Some(dir) = args
         .presets_dir
         .clone()
-        .or_else(|| args.flowgraph.parent().map(std::path::Path::to_path_buf))
+        .or_else(|| flowgraph_path.parent().map(std::path::Path::to_path_buf))
     {
         tracing::info!(path = %dir.display(), "presets browser enabled");
         state = state.with_presets_dir(dir);
@@ -330,36 +344,16 @@ async fn run_headless_for(
     Ok(())
 }
 
-#[cfg(feature = "soapysdr")]
-fn run_list_devices() -> Result<()> {
-    let devices = device::list_devices()?;
+fn run_list_devices(timeout: Duration) -> Result<()> {
+    let devices = device::list_devices_with_timeout(timeout)?;
     device::print_devices(&devices);
     Ok(())
 }
 
-#[cfg(not(feature = "soapysdr"))]
-fn run_list_devices() -> Result<()> {
-    anyhow::bail!(
-        "ferrited was built without the `soapysdr` feature; rebuild with \
-         `cargo run -p ferrited --features soapysdr -- --list-devices` \
-         (see CONTRIBUTING.md for the SoapySDR dev setup)"
-    )
-}
-
-#[cfg(feature = "soapysdr")]
-fn run_probe_device(args: &str) -> Result<()> {
-    let caps = device::probe(args)?;
+fn run_probe_device(args: &str, timeout: Duration) -> Result<()> {
+    let caps = device::probe_with_timeout(args, timeout)?;
     device::print_capabilities(&caps);
     Ok(())
-}
-
-#[cfg(not(feature = "soapysdr"))]
-fn run_probe_device(_args: &str) -> Result<()> {
-    anyhow::bail!(
-        "ferrited was built without the `soapysdr` feature; rebuild with \
-         `cargo run -p ferrited --features soapysdr -- --probe-device …` \
-         (see CONTRIBUTING.md for the SoapySDR dev setup)"
-    )
 }
 
 fn header_layer(name: &'static str, value: &'static str) -> SetResponseHeaderLayer<HeaderValue> {

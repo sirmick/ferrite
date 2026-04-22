@@ -18,7 +18,6 @@
   type LoadState =
     | { kind: 'idle' }
     | { kind: 'loading' }
-    | { kind: 'unsupported' }
     | { kind: 'error'; message: string }
     | { kind: 'ok'; entries: DeviceEntry[] };
 
@@ -28,10 +27,6 @@
     state = { kind: 'loading' };
     try {
       const raw = await fetchDevices();
-      if (raw === null) {
-        state = { kind: 'unsupported' };
-        return;
-      }
       // The wire form for `available` entries flattens DeviceCapabilities
       // into the same map as the discriminator; normalise so consumers
       // don't have to know about that.
@@ -62,11 +57,6 @@
 
   {#if state.kind === 'idle' || state.kind === 'loading'}
     <p class="text-xs text-[color:var(--color-muted)]">Probing SoapySDR devices…</p>
-  {:else if state.kind === 'unsupported'}
-    <p class="text-xs text-[color:var(--color-muted)]">
-      ferrited was built without the <code>soapysdr</code> feature; rebuild with
-      <code>cargo run -p ferrited --features soapysdr</code> to enable hardware.
-    </p>
   {:else if state.kind === 'error'}
     <p class="text-xs text-rose-400">Failed to load devices: {state.message}</p>
   {:else if state.entries.length === 0}
@@ -76,46 +66,53 @@
   {:else}
     <ul class="flex flex-col gap-2">
       {#each state.entries as entry, i (i)}
-        <li class="rounded border border-slate-800 bg-slate-900/40 p-3">
-          <div class="flex items-baseline justify-between gap-3">
-            <div class="flex flex-col">
-              <span class="font-medium">{deviceLabel(entry)}</span>
+        {#if entry.status === 'available'}
+          <li>
+            <button
+              type="button"
+              class="group flex w-full flex-col gap-2 rounded border border-slate-800 bg-slate-900/40 p-3 text-left transition-colors hover:border-[color:var(--color-accent)] hover:bg-slate-900/70 focus:outline-none focus-visible:border-[color:var(--color-accent)]"
+              onclick={() => onSelect(entry.capabilities)}
+            >
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="font-medium">{deviceLabel(entry)}</span>
+                <span
+                  class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)] group-hover:text-[color:var(--color-accent)]"
+                >
+                  Open →
+                </span>
+              </div>
               <span class="font-mono text-[10px] text-[color:var(--color-muted)]">
-                {entry.status === 'available'
-                  ? deviceArgsString(entry.capabilities.info)
-                  : deviceArgsString(entry.info)}
+                {deviceArgsString(entry.capabilities.info)}
               </span>
-            </div>
-            {#if entry.status === 'available'}
-              <button
-                type="button"
-                class="rounded bg-[color:var(--color-accent)] px-3 py-1 text-xs font-semibold text-slate-900"
-                onclick={() => onSelect(entry.capabilities)}
-              >
-                Open
-              </button>
-            {:else}
+              <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+                <dt class="text-[color:var(--color-muted)]">Driver</dt>
+                <dd class="font-mono">{entry.capabilities.driver_key}</dd>
+                <dt class="text-[color:var(--color-muted)]">Hardware</dt>
+                <dd class="font-mono">{entry.capabilities.hardware_key}</dd>
+                <dt class="text-[color:var(--color-muted)]">Rx channels</dt>
+                <dd class="font-mono">{entry.capabilities.rx_channels.length}</dd>
+              </dl>
+            </button>
+          </li>
+        {:else}
+          <li class="rounded border border-slate-800 bg-slate-900/40 p-3 opacity-70">
+            <div class="flex items-baseline justify-between gap-3">
+              <div class="flex flex-col">
+                <span class="font-medium">{deviceLabel(entry)}</span>
+                <span class="font-mono text-[10px] text-[color:var(--color-muted)]">
+                  {deviceArgsString(entry.info)}
+                </span>
+              </div>
               <span
                 class="rounded border border-amber-700 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-400"
                 title={entry.error}
               >
                 Unavailable
               </span>
-            {/if}
-          </div>
-          {#if entry.status === 'available'}
-            <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
-              <dt class="text-[color:var(--color-muted)]">Driver</dt>
-              <dd class="font-mono">{entry.capabilities.driver_key}</dd>
-              <dt class="text-[color:var(--color-muted)]">Hardware</dt>
-              <dd class="font-mono">{entry.capabilities.hardware_key}</dd>
-              <dt class="text-[color:var(--color-muted)]">Rx channels</dt>
-              <dd class="font-mono">{entry.capabilities.rx_channels.length}</dd>
-            </dl>
-          {:else}
+            </div>
             <p class="mt-2 text-[11px] text-amber-300/80">{entry.error}</p>
-          {/if}
-        </li>
+          </li>
+        {/if}
       {/each}
     </ul>
   {/if}

@@ -1,0 +1,5 @@
+{
+  "driver_key": "uhd",
+  "label": "Ettus / USRP (UHD)",
+  "sample_rate_hz": 2000000
+}

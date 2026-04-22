@@ -1,0 +1,5 @@
+{
+  "driver_key": "lime",
+  "label": "LimeSDR",
+  "sample_rate_hz": 2000000
+}

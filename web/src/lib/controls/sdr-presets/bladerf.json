@@ -1,0 +1,5 @@
+{
+  "driver_key": "bladerf",
+  "label": "bladeRF",
+  "sample_rate_hz": 2000000
+}

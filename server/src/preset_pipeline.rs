@@ -84,6 +84,28 @@ impl PresetMount {
         attach_bridge_sinks(&mut rt, &node_half, &self.bridge_sink)?;
         Ok(plan)
     }
+
+    /// Try to apply `delta` to block `id` via the live path
+    /// (`Block::apply_live_params`). On `Ok(false)` from the block, the
+    /// runtime falls back to a full rebuild — which here means we have
+    /// to attach bridge sinks again, same as [`Self::reconfigure`].
+    pub async fn live_reconfigure_block(
+        &self,
+        id: &str,
+        delta: serde_json::Value,
+    ) -> Result<ReconfigurePlan> {
+        let mut rt = self.runtime.lock().await;
+        let plan = rt
+            .live_reconfigure_block(id, delta)
+            .context("runtime live_reconfigure_block")?;
+        // The fallback path (full rebuild) leaves bridges detached; the
+        // live path doesn't touch them. Re-attach unconditionally — it's
+        // idempotent and keeps the call simple.
+        if let Some(doc) = rt.applied_doc().cloned() {
+            attach_bridge_sinks(&mut rt, &doc, &self.bridge_sink)?;
+        }
+        Ok(plan)
+    }
 }
 
 impl PresetHandle {

@@ -3,12 +3,11 @@
   import LogPanel from '$lib/layout/LogPanel.svelte';
   import Split from '$lib/layout/Split.svelte';
   import BandsPanel from '$lib/presets/BandsPanel.svelte';
-  import ReceiversPanel from '$lib/presets/ReceiversPanel.svelte';
+  import SettingsPanel from '$lib/presets/SettingsPanel.svelte';
   import SignalCatalog from '$lib/presets/SignalCatalog.svelte';
   import SourceDialog from '$lib/controls/SourceDialog.svelte';
-  import DeviceOptions from '$lib/controls/DeviceOptions.svelte';
   import FlowgraphDialog from '$lib/controls/FlowgraphDialog.svelte';
-  import type { DeviceCapabilities } from '$lib/api/devices';
+  import { defaultsFor, toSourceConfig } from '$lib/controls/optionsModel';
   import type { SourceConfig } from '$lib/api/source';
   import { demoAddInWorker } from '$lib/workers/demo-client';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
@@ -20,10 +19,8 @@
   let frameRate = $state(0);
   let lastFrameSize = $state(0);
   let showSource = $state(false);
-  let showOptions = $state(false);
-  let optionsCaps = $state<DeviceCapabilities | null>(null);
   let showFlowgraph = $state(false);
-  let leftTab = $state<'bands' | 'catalog' | 'receivers'>('bands');
+  let leftTab = $state<'bands' | 'catalog' | 'settings'>('bands');
 
   async function runDemo() {
     try {
@@ -178,8 +175,8 @@
                   <button
                     type="button"
                     class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
-                    class:tab-active={leftTab === 'receivers'}
-                    onclick={() => (leftTab = 'receivers')}>Receivers</button
+                    class:tab-active={leftTab === 'settings'}
+                    onclick={() => (leftTab = 'settings')}>Settings</button
                   >
                 </div>
                 <div class="min-h-0 flex-1">
@@ -188,7 +185,7 @@
                   {:else if leftTab === 'catalog'}
                     <SignalCatalog />
                   {:else}
-                    <ReceiversPanel />
+                    <SettingsPanel />
                   {/if}
                 </div>
               </div>
@@ -223,17 +220,12 @@
   source={pipeline.source}
   onClose={() => (showSource = false)}
   onPickDevice={(caps) => {
-    optionsCaps = caps;
-    showOptions = true;
+    // No second dialog — defaults from optionsModel are live-editable
+    // afterwards via the Settings → Input panel and spectrum header.
+    const state = defaultsFor(caps);
+    if (state) void pipeline.patchSource(toSourceConfig(caps, state));
   }}
   onApply={(cfg: SourceConfig) => void pipeline.patchSource(cfg)}
-/>
-
-<DeviceOptions
-  bind:open={showOptions}
-  capabilities={optionsCaps}
-  onApply={(cfg: SourceConfig) => void pipeline.patchSource(cfg)}
-  onClose={() => (showOptions = false)}
 />
 
 <FlowgraphDialog bind:open={showFlowgraph} onClose={() => (showFlowgraph = false)} />

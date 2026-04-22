@@ -24,8 +24,6 @@
 //! `RxStream` (which deactivates and closes itself). `Device` is held
 //! by the stream so the handle stays valid for the read loop.
 
-#![cfg(feature = "soapysdr")]
-
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},

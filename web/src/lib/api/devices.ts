@@ -40,12 +40,38 @@ export interface DeviceInfo {
   args: Record<string, string>;
 }
 
+/** One entry from `SoapySDRDevice_getSettingInfo` — driver-specific
+ *  knobs that don't fit the standard Soapy surface (e.g. SDRplay's
+ *  `rfgain_sel`, `agc_setpoint`, `biasT_ctrl`; HackRF's `amp_ctrl`).
+ *  The frontend renders these generically by `data_type` + range/options,
+ *  so adding a new driver requires no UI code. */
+export interface SettingInfo {
+  key: string;
+  label: string;
+  description: string | null;
+  units: string | null;
+  data_type: SettingType;
+  /** Soapy reports default + current as the same string; we keep the
+   *  raw form rather than parsing per-type so writes round-trip. */
+  default: string;
+  range: RangeSpec | null;
+  options: SettingOption[];
+}
+
+export type SettingType = 'bool' | 'int' | 'float' | 'string';
+
+export interface SettingOption {
+  value: string;
+  label: string | null;
+}
+
 export interface DeviceCapabilities {
   info: DeviceInfo;
   driver_key: string;
   hardware_key: string;
   hardware_info: Record<string, string>;
   rx_channels: RxChannelCapabilities[];
+  settings: SettingInfo[];
 }
 
 /** Tagged-union mirror of `routes.rs::DeviceEntry`. */
@@ -65,14 +91,9 @@ export function deviceLabel(entry: DeviceEntry): string {
   return entry.status === 'available' ? entry.capabilities.info.label : entry.info.label;
 }
 
-/**
- * Fetch the device list. Returns `null` when the server was built without
- * the `soapysdr` feature (the route returns 501 in that case) so callers
- * can render a "no hardware support" hint instead of an error toast.
- */
-export async function fetchDevices(): Promise<DeviceEntry[] | null> {
+/** Fetch the device list. SoapySDR is a hard dep on the server side. */
+export async function fetchDevices(): Promise<DeviceEntry[]> {
   const r = await fetch('/api/devices');
-  if (r.status === 501) return null;
   if (!r.ok) {
     throw new Error(`fetchDevices failed: ${r.status} ${r.statusText}`);
   }

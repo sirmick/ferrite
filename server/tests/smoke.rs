@@ -34,12 +34,10 @@ mod preset_pipeline;
 #[allow(dead_code)]
 mod app_state;
 
-#[cfg(feature = "soapysdr")]
 #[path = "../src/device.rs"]
 #[allow(dead_code)]
 mod device;
 
-#[cfg(feature = "soapysdr")]
 #[path = "../src/soapy_source.rs"]
 #[allow(dead_code)]
 mod soapy_source;
@@ -443,12 +441,6 @@ async fn ui_sinks_returns_fft_stream_id_for_server_side_tap() {
 async fn devices_endpoint_shape_matches_build() {
     let addr = spawn_app(false).await;
     let body = http_get(&format!("http://{addr}/api/devices")).await;
-    #[cfg(not(feature = "soapysdr"))]
-    assert!(
-        body.contains("SOAPYSDR_FEATURE_DISABLED"),
-        "expected the feature-disabled error body, got: {body}"
-    );
-    #[cfg(feature = "soapysdr")]
     assert!(
         body.trim() == "[]" || body.contains("\"status\":"),
         "expected empty array or tagged DeviceEntry list, got: {body}"

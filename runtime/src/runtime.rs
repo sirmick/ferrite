@@ -41,7 +41,7 @@ use ferrite_blocks::{
 use crate::block_registry::{instantiate_blocks, BlockMap, InventorySpecRegistry};
 use crate::doc::{Environment, FlowgraphDoc};
 use crate::instantiate::{instantiate_flowgraph, SpecMap};
-use crate::reconfigure::{diff_presets, ReconfigurePlan};
+use crate::reconfigure::{diff_presets, ParamChange, ReconfigurePlan};
 use crate::schedule::Schedule;
 use crate::typed_ring::TypedRing;
 use crate::validate::validate_doc;
@@ -162,6 +162,21 @@ impl TypedBuf {
 
 fn state_error(op: &'static str, state: RuntimeState) -> anyhow::Error {
     anyhow!("runtime: {op} not allowed from state {state:?}")
+}
+
+/// Heuristic: does this construction error look like a transient
+/// exclusive-hardware conflict against the *previous* graph (i.e.
+/// will it likely succeed if we drop the old graph and retry)?
+///
+/// Signatures we recognise:
+///   - "RX stream already opened" — SoapyHackRF when the prior
+///     Device handle still has an active RxStream on the cached pointer.
+///   - "device deletion in-progress" — SoapyRTLSDR / SoapySDRplay
+///     when a handle is mid-tear-down at the C/C++ layer.
+fn is_exclusive_resource_conflict(err: &anyhow::Error) -> bool {
+    let chain = err.chain().map(|e| e.to_string()).collect::<Vec<_>>();
+    let blob = chain.join(" :: ");
+    blob.contains("RX stream already opened") || blob.contains("device deletion in-progress")
 }
 
 /// Pull a readable message out of a `catch_unwind` payload. `panic!` with
@@ -753,12 +768,45 @@ impl Runtime {
             return Ok(plan);
         }
 
-        let mut replacement = Self::load_doc(new_doc, env, self.frames_hint)?;
+        // Capture the pre-reconfigure run state once, up-front: the
+        // recovery path below may stop the runtime, and we still want
+        // to resume Running after a successful swap.
+        let prev_state = self.state;
+
+        // Build the replacement first — preserves rollback for the
+        // common case where a bad doc fails validation and we want to
+        // leave the running graph untouched.
+        //
+        // Some blocks own exclusive hardware (notably SoapySource on
+        // HackRF: SoapySDR returns a cached Device handle from
+        // `Device::new`, and the device refuses a second `rx_stream()`
+        // with "RX stream already opened" until our previous stream is
+        // dropped). When we hit one of those known resource-conflict
+        // errors, fall back to stop-old-then-build. This loses the
+        // rollback property for that one path: if the second attempt
+        // also fails, the runtime ends stopped and the caller sees an
+        // error toast — acceptable surface for an actual misconfig.
+        let mut replacement = match Self::load_doc(new_doc, env, self.frames_hint) {
+            Ok(rt) => rt,
+            Err(err) if is_exclusive_resource_conflict(&err) => {
+                eprintln!(
+                    "reconfigure: replacement build hit exclusive-resource conflict ({err}); \
+                     stopping old graph and retrying"
+                );
+                if matches!(
+                    prev_state,
+                    RuntimeState::Initialized | RuntimeState::Running
+                ) {
+                    let _ = self.stop();
+                }
+                Self::load_doc(new_doc, env, self.frames_hint)?
+            }
+            Err(err) => return Err(err),
+        };
         replacement.init()?;
 
-        let prev_state = self.state;
         if matches!(
-            prev_state,
+            self.state,
             RuntimeState::Initialized | RuntimeState::Running
         ) {
             let _ = self.stop();
@@ -822,6 +870,73 @@ impl Runtime {
         }
         block.params = Some(serde_json::Value::Object(merged));
         self.reconfigure(&new_doc)
+    }
+
+    /// Try the block's live-update path first; fall back to the full
+    /// rebuild on `Ok(false)`. Returns the plan that was applied either
+    /// way — the live branch fabricates a `SelfBlock`-scoped plan from
+    /// the diff so callers see a uniform shape.
+    ///
+    /// On success the live branch also merges `delta` into the applied
+    /// doc so subsequent diffs stay consistent with the live device
+    /// state. A live-path error propagates as-is (doesn't fall back),
+    /// because partial application would leave the doc and device out
+    /// of sync.
+    pub fn live_reconfigure_block(
+        &mut self,
+        id: &str,
+        delta: serde_json::Value,
+    ) -> Result<ReconfigurePlan> {
+        let delta_obj = delta
+            .as_object()
+            .ok_or_else(|| anyhow!("params delta must be a JSON object"))?
+            .clone();
+        let block = self
+            .block_mut(id)
+            .ok_or_else(|| anyhow!("no block {id:?} in runtime"))?;
+        if !block.apply_live_params(&delta)? {
+            return self.reconfigure_block(id, delta);
+        }
+
+        // Live succeeded — patch applied_doc + synthesize a SelfBlock plan.
+        let doc = self.applied_doc.as_mut().ok_or_else(|| {
+            anyhow!("runtime: live_reconfigure_block requires a load_doc-built runtime")
+        })?;
+        let decl = doc
+            .blocks
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("no block {id:?} in applied doc"))?;
+        let spec = ferrite_blocks::registry::find(decl.type_name.as_str())
+            .map(ferrite_blocks::registry::BlockEntry::spec)
+            .ok_or_else(|| anyhow!("registry: no spec for block type {:?}", decl.type_name))?;
+        let mut merged = match decl.params.take() {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        let mut changes = Vec::with_capacity(delta_obj.len());
+        for (k, v) in delta_obj {
+            let old_value = merged.get(&k).cloned().unwrap_or(serde_json::Value::Null);
+            let scope = spec
+                .params
+                .iter()
+                .find(|p| p.key == k)
+                .map(|p| p.reconfig_scope)
+                .unwrap_or(ferrite_blocks::ReconfigureScope::SelfBlock);
+            changes.push(ParamChange {
+                block_id: id.to_string(),
+                param_key: k.clone(),
+                old_value,
+                new_value: v.clone(),
+                scope,
+            });
+            merged.insert(k, v);
+        }
+        decl.params = Some(serde_json::Value::Object(merged));
+        Ok(ReconfigurePlan {
+            changes,
+            structural: Vec::new(),
+            overall: ferrite_blocks::ReconfigureScope::SelfBlock,
+        })
     }
 }
 

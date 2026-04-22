@@ -10,7 +10,7 @@
     open: boolean;
     /** Current source config — seeds the Tone tab when its type is sine. */
     source: SourceConfig | null;
-    /** Selected a Soapy device: parent opens the DeviceOptions flow. */
+    /** Selected a Soapy device: parent applies a default SourceConfig. */
     onPickDevice: (caps: DeviceCapabilities) => void;
     /** Applied a source-config from any tab — parent PATCHes it. */
     onApply: (cfg: SourceConfig) => void;

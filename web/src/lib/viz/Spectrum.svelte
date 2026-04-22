@@ -6,6 +6,7 @@
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { rangesToChoices } from '$lib/controls/optionsModel';
   import Nixie from '$lib/controls/Nixie.svelte';
+  import LiveControls from '$lib/controls/LiveControls.svelte';
   import FftControls from './FftControls.svelte';
 
   interface Props {
@@ -261,6 +262,8 @@
           <span class="font-mono text-slate-300">{fmtRate(axes.sample_rate_hz)}</span>
         {/if}
       </label>
+
+      <LiveControls />
 
       <div class="mx-1 h-4 border-l border-slate-800"></div>
 
