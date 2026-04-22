@@ -187,7 +187,8 @@ impl SoapySource {
                 Err(err) => return Err(err),
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("SoapySource::new failed for unknown reason")))
+        let err = last_err.unwrap_or_else(|| anyhow!("SoapySource::new failed for unknown reason"));
+        Err(decorate_exhausted_error(err, params.args.as_str()))
     }
 
     fn try_construct(params: &SoapySourceParams) -> Result<Self> {
@@ -601,6 +602,38 @@ fn run_reader(
         }
     }
     let _ = stream.deactivate(None);
+}
+
+/// Wrap an exhausted-retry error with a recovery hint when we recognise
+/// a known driver-side wedge. The classifier is conservative — only
+/// triggers on signatures we've actually observed — so unfamiliar
+/// failures still surface verbatim.
+fn decorate_exhausted_error(err: anyhow::Error, args: &str) -> anyhow::Error {
+    let chain: String = err
+        .chain()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join(" :: ");
+    let hint: Option<&'static str> = if args.contains("driver=sdrplay")
+        && (chain.contains("sdrplay_api_Fail")
+            || (chain.contains("activate Rx stream") && chain.contains("NotSupported")))
+    {
+        Some(
+            "SDRplay API service appears wedged (activateStream keeps failing). \
+             Try `sudo systemctl restart sdrplay` and retry.",
+        )
+    } else if chain.contains("RX stream already opened") {
+        Some(
+            "Driver still holds a previous Rx stream open. \
+             Try replugging the SDR or restarting ferrited.",
+        )
+    } else {
+        None
+    };
+    match hint {
+        Some(h) => err.context(h),
+        None => err,
+    }
 }
 
 /// True for the family of "driver isn't ready yet" errors that we want
