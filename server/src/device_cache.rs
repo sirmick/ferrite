@@ -139,11 +139,62 @@ impl DeviceCache {
         guard.retain(|k, _| present.contains(k));
     }
 
+    /// Enumerate every visible device and probe each one into the
+    /// cache. Intended to be called once at daemon boot so the first
+    /// `/api/devices` request and the first `SoapySource::new` don't
+    /// race against an unrelated probe. A failed probe is logged but
+    /// doesn't abort warm-up — a wedged SDRplay shouldn't keep the
+    /// rest of the rack offline.
+    pub async fn warm_all(&self) -> WarmReport {
+        let devices = match tokio::task::spawn_blocking(|| {
+            crate::device::list_devices_with_timeout(crate::device::DEFAULT_PROBE_TIMEOUT)
+        })
+        .await
+        {
+            Ok(Ok(d)) => d,
+            Ok(Err(err)) => {
+                tracing::warn!(error = %format!("{err:#}"), "device enumerate failed during warm-up");
+                return WarmReport::default();
+            }
+            Err(err) => {
+                tracing::warn!(?err, "device enumerate task panicked during warm-up");
+                return WarmReport::default();
+            }
+        };
+        let mut report = WarmReport {
+            attempted: devices.len(),
+            ..WarmReport::default()
+        };
+        for info in devices {
+            let label = info.label.clone();
+            match self.ensure(&info).await {
+                Ok(_) => {
+                    tracing::info!(label = %label, "device cache warmed");
+                    report.succeeded += 1;
+                }
+                Err(err) => {
+                    tracing::warn!(label = %label, error = %format!("{err:#}"), "device probe failed during warm-up");
+                    report.failed += 1;
+                }
+            }
+        }
+        report
+    }
+
     /// Number of cached entries. Diagnostic only.
     #[cfg(test)]
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
     }
+}
+
+/// Outcome of a [`DeviceCache::warm_all`] pass — printed at boot so
+/// the operator can tell at a glance how many devices are usable.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WarmReport {
+    pub attempted: usize,
+    pub succeeded: usize,
+    pub failed: usize,
 }
 
 impl Default for DeviceCache {

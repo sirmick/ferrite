@@ -243,6 +243,17 @@ async fn main() -> Result<()> {
         state = state.with_presets_dir(dir);
     }
 
+    // Warm the device-capability cache before the listener binds. The
+    // first `/api/devices` request hits the cache; SoapySource::new
+    // doesn't race against an unrelated probe of the same driver.
+    let warm = state.device_cache().warm_all().await;
+    tracing::info!(
+        attempted = warm.attempted,
+        succeeded = warm.succeeded,
+        failed = warm.failed,
+        "device cache warm-up complete"
+    );
+
     if args.auto_start {
         state.start().await.context("auto-start pipeline")?;
         tracing::info!("pipeline auto-started");
