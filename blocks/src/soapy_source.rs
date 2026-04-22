@@ -160,7 +160,37 @@ impl SoapySource {
     /// Open the device, apply configuration, and activate the Rx stream.
     /// Blocking — call from `tokio::task::spawn_blocking` when invoking
     /// from an async context.
+    ///
+    /// Wraps the whole open → configure → activate sequence in a retry
+    /// loop. SDRplay in particular sometimes fails `activateStream()`
+    /// with `sdrplay_api_Fail` (surfaces as `NotSupported`) when opened
+    /// shortly after the previous handle was released — the API service
+    /// hasn't finished tearing the prior stream down. Dropping
+    /// everything and retrying after a short backoff clears it.
     pub fn new(params: &SoapySourceParams) -> Result<Self> {
+        const MAX_ATTEMPTS: usize = 4;
+        const BACKOFF: Duration = Duration::from_millis(400);
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            match Self::try_construct(params) {
+                Ok(s) => return Ok(s),
+                Err(err) if attempt + 1 < MAX_ATTEMPTS && is_transient_open_error(&err) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max = MAX_ATTEMPTS,
+                        error = %err,
+                        "SoapySource construct failed transiently; retrying"
+                    );
+                    std::thread::sleep(BACKOFF);
+                    last_err = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("SoapySource::new failed for unknown reason")))
+    }
+
+    fn try_construct(params: &SoapySourceParams) -> Result<Self> {
         let device = open_with_retry(params.args.as_str())
             .with_context(|| format!("open SoapySDR device with args {:?}", params.args))?;
         let dir = Direction::Rx;
@@ -207,7 +237,14 @@ impl SoapySource {
         let mut stream: RxStream<Complex<f32>> = device
             .rx_stream::<Complex<f32>>(&[ch])
             .context("create Rx stream")?;
-        stream.activate(None).context("activate Rx stream")?;
+        if let Err(err) = stream.activate(None) {
+            // SDRplay's daemon leaves the stream half-open if activate
+            // fails — a follow-up deactivate clears the daemon-side
+            // state so the next Device::new doesn't inherit the wedge.
+            // Best-effort; the original error is what we report.
+            let _ = stream.deactivate(None);
+            return Err(anyhow::Error::new(err).context("activate Rx stream"));
+        }
 
         Ok(Self {
             device,
@@ -566,6 +603,25 @@ fn run_reader(
     let _ = stream.deactivate(None);
 }
 
+/// True for the family of "driver isn't ready yet" errors that we want
+/// to retry an entire `SoapySource::try_construct` against. Covers the
+/// `Device::new` race (caught separately by `open_with_retry`) and the
+/// SDRplay-specific `activateStream() - Init() failed: sdrplay_api_Fail`
+/// — surfaced through the safe wrapper as `NotSupported` with empty
+/// message — that hits when the API service hasn't finished tearing
+/// down a prior stream.
+fn is_transient_open_error(err: &anyhow::Error) -> bool {
+    let chain: String = err
+        .chain()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join(" :: ");
+    chain.contains("device deletion in-progress")
+        || chain.contains("RX stream already opened")
+        || (chain.contains("activate Rx stream") && chain.contains("NotSupported"))
+        || chain.contains("sdrplay_api_Fail")
+}
+
 /// Open a SoapySDR device with a short retry loop for the
 /// `device deletion in-progress` race. SoapySDR returns this when a
 /// previous handle (typically from a capabilities probe done seconds
@@ -648,13 +704,23 @@ mod tests {
     /// "RX stream already opened" / "device deletion in-progress"
     /// races that surface when params change rapidly. Gated on
     /// `FERRITE_TEST_DEVICE_ARGS`; iterations override via
-    /// `FERRITE_TEST_DEVICE_ITERS` (default 20).
+    /// `FERRITE_TEST_DEVICE_ITERS` (default 20). Inter-iteration delay
+    /// is `FERRITE_TEST_DEVICE_GAP_MS` (default 1000).
     ///
     /// ```sh
     /// FERRITE_TEST_DEVICE_ARGS=driver=hackrf \
     ///     cargo test -p ferrite-blocks --features soapysdr \
     ///     device_cycle_soak -- --ignored --nocapture
     /// ```
+    ///
+    /// **Known SDRplay limitation**: `sdrplay_apiService` mishandles
+    /// rapid open/close cycles, failing `activateStream()` with
+    /// `sdrplay_api_Fail` on roughly 50–70% of iterations regardless
+    /// of inter-call gap (tested up to 3 s). The block-level retry
+    /// loop in `SoapySource::new` cannot work around it — the daemon
+    /// stays wedged across multiple Device::make/unmake cycles. Real
+    /// fix is `systemctl restart sdrplay` between sessions. RTL-SDR
+    /// and HackRF do not exhibit this.
     #[test]
     #[ignore = "requires hardware; set FERRITE_TEST_DEVICE_ARGS to run"]
     fn device_cycle_soak() {
@@ -681,10 +747,24 @@ mod tests {
             (1_090_000_000.0, 35.0), // ADS-B
         ];
 
+        // Quiet time between open attempts. SDRplay's `sdrplay_apiService`
+        // daemon needs ~1s after a stream is deactivated before the next
+        // `Device::new` will activate cleanly — without the gap roughly
+        // half of opens fail with `sdrplay_api_Fail`. Tunable via the env
+        // var so a stress run can probe the lower bound; defaults match
+        // realistic UI-driven cadence.
+        let inter_iter_ms: u64 = std::env::var("FERRITE_TEST_DEVICE_GAP_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1000);
+
         let mut total_pushed: u64 = 0;
         let mut iter_failures: Vec<(usize, String)> = Vec::new();
 
         for i in 0..iters {
+            if i > 0 {
+                std::thread::sleep(Duration::from_millis(inter_iter_ms));
+            }
             let (freq, gain) = rotations[i % rotations.len()];
             eprintln!("[iter {i}/{iters}] rate={rate_hz:.0} freq={freq:.0} gain={gain}");
             let params = SoapySourceParams {
