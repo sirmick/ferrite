@@ -1,259 +1,65 @@
 # 08 — Roadmap
 
-## Shape of the plan
+## Where we are
 
-v0.1 is the first shippable thing: **one SDR, one browser, clean WBFM
-listening and one real decoder (likely ADS-B)**. Everything is organized
-in phases that each end on a **demo-able** state, because a project that
-can demo every few weeks stays honest about what works.
+Working today, end-to-end:
 
-Each phase lists a crisp definition of "done" — the moment at which it is
-legitimate to start planning the next phase.
+- `ferrited` boots, enumerates SoapySDR devices, caches per-device probes
+  ([`server/src/device_cache.rs`](../server/src/device_cache.rs)).
+- Preset-first server: one `FlowgraphDoc` + one `SourceConfig` on
+  `AppState`, no per-session state. `--flowgraph PATH` is required.
+- Rust runtime ([`runtime/`](../runtime/)) drives both ends. Native scheduler
+  in `ferrited`; `RuntimeHandle` WASM facade in the browser
+  ([`runtime/src/wasm.rs`](../runtime/src/wasm.rs)).
+- Per-wire `TypedRing` accumulating buffers
+  ([`runtime/src/typed_ring.rs`](../runtime/src/typed_ring.rs)) with a
+  demand-driven scheduler that honours `Work.consumed`.
+- Cross-env split: `split_for_environment` auto-inserts
+  `WsBridgeTx*`/`WsBridgeRx` pairs and stamps `stream_id`s deterministically
+  from `CROSS_ENV_STREAM_BASE = 1000`. `ui:<name>` sentinel sinks become
+  Tx-only blocks; the browser learns the id via `GET /api/ui-sinks`.
+- Source placeholder + `compose_source`
+  ([`runtime/src/compose.rs`](../runtime/src/compose.rs)) — preset names
+  `"type": "Source"`; `SourceConfig` overlays at load time.
+- Postcard `Frame` transport on `/ws/preset`; encoder and decoder both come
+  from `ferrite_blocks`, so wire-format drift is a build break.
+- Browser runtime in a Worker
+  ([`web/src/lib/runner/`](../web/src/lib/runner/)); SAB ring + AudioWorklet.
+- Generic block-params pipe (D24): `GET /api/pipeline/blocks` +
+  `POST /api/pipeline/blocks/:id/params`, mirrored on the WASM side by
+  `RuntimeHandle::reconfigure_block`. One `<BlockParams>` Svelte component
+  renders every block's params from its `BlockSpec`.
+- Preset registry: `GET /api/presets` + `POST /api/preset` with hot reconfig.
+- Six shipped presets in [`flowgraphs/`](../flowgraphs/): `wbfm`, `wbam`,
+  `dtmf-e2e`, `fm-audio-record`, `am-audio-record`, `capture_fm`.
 
-| phase | name                             | status                                 | demo gate                                                        |
-|-------|----------------------------------|----------------------------------------|------------------------------------------------------------------|
-| 0     | Docs-first                       | done                                   | this docs tree exists, plan frozen                               |
-| A     | Scaffolding                      | done                                   | "hello WS" ping-pong over the real stack; CI green               |
-| B     | Synthetic data path E2E          | done                                   | synthetic waterfall visible in browser, no hardware              |
-| C     | First real device                | done                                   | RTL-SDR + SDRPlay enumerate, open, stream; options dialog works  |
-| D     | First listening experience       | done via M1–M5 pivot + post-M5 refactors | tune to a local FM station, hear audio, drag VFO on waterfall    |
-| E     | First decoder                    | planned                                | ADS-B messages decoded live from a real receiver                 |
-| F     | LLM signal identify              | post-v0.1                              | drag waterfall box → "that's APRS" with sigidwiki deep-link      |
-| G     | Spectrum allocation explorer     | post-v0.1                              | full-spectrum zoomable chart, click-to-retune                    |
+The full historical record of how we got here lives in
+[`09-decisions.md`](09-decisions.md) (D01–D26) and the milestone tally in
+[`10-commits.md`](10-commits.md).
 
-Phases A–E are **v0.1**. Phases F and G are the shape of v0.2, sketched
-here so decisions in v0.1 don't paint them into a corner.
+## Forward work
 
-> **Where we actually are (2026-04-20):** Phase D shipped via the M1–M5
-> runtime pivot (see `docs/10-commits.md` "Runtime pivot — M1–M5") plus
-> the post-M5 preset-first server refactors. Forward work now splits
-> two ways: (a) the analog-listening + decoder sequence in
-> `docs/decoder-roadmap/` (capability-first, starting with the Phase 1
-> helper blocks), and (b) the first C-vendor port (multimon-ng —
-> decoder-roadmap Phase 2) as the `blocks/native/` substrate. ADS-B
-> (originally planned as Phase E's first decoder) is now decoder-roadmap
-> Phase 3 — see D20 in `09-decisions.md` for why.
+Two parallel tracks, both rooted in concrete decisions already in the log:
 
-## Phase 0 — Documentation
+- **Decoders** — sequencing in [`docs/decoder-roadmap/`](decoder-roadmap/).
+  Phase 1 (analog listening: `AmDemod`, `SsbDemod`, `Deemphasis`, `Squelch`,
+  `Agc`, `Resample` — see D20) is the next post-M5 push and feeds every
+  later decoder chain.
+- **UX** — the UX-1 cluster in [`10-commits.md`](10-commits.md):
+  click-to-tune (D25), preset switching with retention (D26), sample-rate
+  dropdown from `/api/source/capabilities`, generic receiver pane built on
+  `<BlockParams>` (D24).
 
-No code. Capture the architecture in this `docs/` tree and a top-level
-README before implementation starts. The goal is that a contributor
-(or future-you) can orient without reading chat history.
+The decoder-roadmap directory is the authoritative source for decoder-side
+planning; this doc deliberately doesn't duplicate it.
 
-**Done when:** every numbered doc in `docs/` exists and is internally
-consistent with the others, and the README points into them.
+## What's deferred
 
-Deliverables:
-- `README.md`
-- `docs/00-context.md` through `docs/10-commits.md`
+Captured in [`09-decisions.md`](09-decisions.md):
 
-## Phase A — Scaffolding
-
-Get the real build topology in place with the smallest possible payload
-flowing through it. Hello-world, but through the shape we actually ship.
-
-**Done when:**
-- Cargo workspace with `server/` and `blocks/` members compiles.
-- `ferrited` serves `GET /api/hello` over HTTP and echoes on `/ws`.
-- pnpm workspace with `web/` (SvelteKit + Bits UI + Tailwind + Dockview)
-  builds and runs in dev against the Rust backend (Vite proxy for
-  `/api` and `/ws`).
-- COOP/COEP headers set in both dev (Vite plugin) and prod
-  (`ferrited` static serve).
-- A trivial Rust→WASM block built with `wasm-pack` is imported via
-  `vite-plugin-wasm` and called from a Web Worker to prove the path.
-- CI (GitHub Actions) runs `cargo check/test/clippy/fmt` and
-  `pnpm test/lint/check` on every PR and merge.
-- Pre-commit hooks enforce format + lint.
-
-**Demo:** load the page, see a "connected" indicator, see the WASM
-block's output logged. No signals yet. This is the hardest phase to
-feel impressive; it's also the one that unlocks every future phase.
-
-## Phase B — Synthetic data path E2E
-
-Prove the full data path — block → WS → WebGL — with zero hardware.
-Replay mode lands here so it stays first-class from day one.
-
-**Done when:**
-- `blocks/` crate has `SignalSource`, `FFT`, `Decimator` with unit tests
-  passing native and in WASM. Fixtures identical in both.
-- `ferrited` runs a hardcoded `SignalSource → FFT → WS` pipeline.
-- Binary WS frame codec implemented per `docs/02-protocol.md`.
-- Frontend WebGL waterfall + spectrum renders the FFT stream.
-- `ferrited --source file://path.iq --loop` replays a recorded IQ file
-  through the same pipeline.
-- Wire-protocol conformance test harness running in CI.
-- AudioWorklet `process()` unit-tested in Vitest.
-- SAB ring-buffer stress test running in headless Chromium in CI.
-
-**Demo:** load the page, see a moving waterfall of a synthetic chirp,
-then rerun with `--source file://wbfm_fragment.iq` and see the FM
-waterfall without an SDR connected.
-
-## Phase C — First real device
-
-Plug in hardware. SoapySDR integration, capability introspection,
-REST endpoints, auto-generated options dialog.
-
-**Done when:**
-- `soapysdr` Rust bindings linked into `ferrited`.
-- `GET /api/devices` enumerates with full capability schema (rates,
-  freq ranges, named gain elements, antennas, all `getSettingInfo` keys).
-- `POST /api/device/open`, `GET …/state`, `PATCH …/settings`,
-  `POST …/close` implemented with session semantics (last-connect wins).
-- Frontend options dialog auto-generated from the capability schema
-  using Bits UI primitives.
-- `mutableWhileStreaming: false` settings show "Apply & restart stream"
-  in the UI; backend does clean close+reopen preserving `session_id`.
-- WS streams real FFT from the real device.
-- RTL-SDR and SDRPlay RSPduo both work. RSPduo's two tuners each appear
-  as distinct devices in enumeration.
-
-**Demo:** plug in an RTL-SDR, open the page, pick the device, configure
-bias-tee and gain, see real radio noise on the waterfall. Swap in the
-SDRPlay, repeat.
-
-## Phase D — First listening experience
-
-The first time a user says "I heard it." Channelizer, minimal flowgraph
-runtime, FM demod, audio out.
-
-**Done when:**
-- `Channelizer` block runs server-side and produces per-VFO narrowband
-  IQ on dedicated stream IDs.
-- REST endpoints `POST/PATCH/DELETE /api/device/{id}/vfo` land.
-- Flowgraph runtime in the Rust `runtime/` crate (rlib + cdylib, `wasm`
-  feature): JSON parse → validate → instantiate blocks from registry →
-  wire → run. `ferrited` links it natively; the browser imports it as a
-  WASM module and runs it in a Worker. See D19 — the TS
-  `packages/flowgraph-runtime/` package shipped through Phase D and is
-  superseded; M1–M5 track its replacement (commits addendum in
-  `10-commits.md`).
-- `FmDemod` block (Rust, dual-built).
-- AudioWorklet consumes from a SAB ring filled by the Worker's
-  `AudioSink`.
-- `flowgraphs/wbfm.json` loads, runs, and produces clean audio.
-- Per-digit frequency dial widget.
-- Waterfall tuning interactions: click-drag = SDR centre (expensive,
-  `PATCH /api/source` → SourceRestart), right-click = VFO/channelizer
-  offset (cheap, `PATCH /api/flowgraph` → Self-scope). See D21.
-- Golden-fixture CI test: replay-mode `ferrited` + the WBFM flowgraph
-  → audio RMS and a known pilot tone match within tolerance.
-- `ferrited --flowgraph <path>` loads the same preset and runs its
-  node half through the Rust runtime, with no browser attached.
-
-**Demo:** open the page, tune to a local FM broadcast, hear music. Drag
-the VFO down the band, listen to other stations.
-
-## Phase E — First decoder
-
-Port a C decoder, wrap it as a block, wire it through a flowgraph, show
-decoded output in the UI. The likely candidate is **dump1090** for ADS-B
-(smallest C surface to port cleanly).
-
-**Done when:**
-- Pure-DSP core of the chosen decoder vendored under `decoders/`,
-  stripped of I/O glue.
-- Native build via `cc` crate; WASM build via
-  `clang --target=wasm32-unknown-unknown` + wasi-libc.
-- Thin Rust `Block` wrapper implements the block trait on both targets.
-- `flowgraphs/adsb.json` loads and runs: `SoapySource` (node) →
-  `Channelizer` (node) → auto-inserted `WsBridgeTx`/`Rx` → `AdsbDecoder`
-  (browser) → `EventBusSink` (browser) → UI.
-- A message list panel renders decoded frames (Bits UI, virtualized).
-- Golden-fixture CI test: known ADS-B burst decodes to known hex.
-- Map panel (MapLibre or similar) plots aircraft from decoded position
-  reports. (Map is optional for v0.1 but on the critical path for
-  "looks real.")
-
-**Demo:** tune to 1090 MHz with the RTL-SDR, see aircraft positions
-updating live.
-
-### Why ADS-B first
-
-- dump1090 core is a small, well-understood C codebase.
-- No patent / licensing drama (compare AMBE for DMR).
-- Decoded output is visually compelling (moving aircraft on a map) —
-  motivates the team and earns trust with users.
-- Verifies the full C→WASM port pipeline on something that matters.
-
-FT8 and M17+codec2 follow the same port shape; they land post-v0.1.
-
-## Phase F — LLM signal identify (post-v0.1)
-
-User drag-selects a region on the waterfall; the app asks an LLM what
-it might be, grounded by a RAG index over scraped sigidwiki content.
-
-Scope:
-- `tools/scrape-sigidwiki/` — MediaWiki API client producing
-  `data/sigidwiki.json` (checked into repo, CC-BY-SA attributed).
-- `GET/POST /api/identify` — frontend posts `{ png, center_freq, span,
-  resolution_bw, timestamp, iq_clip? }`; backend retrieves top-N
-  sigidwiki candidates by frequency+bandwidth match, composes a vision
-  prompt, calls the configured LLM.
-- Result card in the UI with `{ best_guess, candidates: [{name, url,
-  summary}] }` and deep-links into sigidwiki.
-- Signal catalog panel: searchable view over `sigidwiki.json`.
-
-Backend proxies the LLM call (API key lives in `ferrited.toml`, not in
-browser storage). Identical requests can be cached server-side.
-
-### v0.1 carryover
-
-- The `POST /api/identify` route and its request/response shape are
-  sketched in Phase D so the frontend can stub against them early.
-- No actual LLM call in v0.1; the endpoint returns a clear "not yet
-  implemented" response.
-
-## Phase G — Spectrum allocation explorer (post-v0.1)
-
-Full-spectrum-at-a-glance Dockview panel inspired by spectrumwiki.com.
-Log-scale axis from ~0 Hz to 300 GHz. Smooth wheel zoom. Click-to-retune
-(with "out of range of current device" state for unreachable bands).
-
-Scope:
-- `data/spectrum-allocations.json` — static data assembled from ITU /
-  FCC / ARRL public sources, checked in.
-- "Band allocation" tooltip on the tuned frequency (lands in v0.1).
-- Full zoomable explorer as its own Svelte component (SVG with
-  virtualization; WebGL if band density demands it) — post-v0.1.
-
-### v0.1 carryover
-
-- The static allocation data format is chosen in v0.1 (one tooltip
-  consumer exists) to avoid a later migration.
-
-## Consciously deferred
-
-These are not "maybe never." They are "not in v0.1" — the reasons are
-logged in `docs/09-decisions.md`.
-
-- **Multi-listener / multi-device.** Channelizer is pool-architected so
-  this is an extension, not a rewrite. Still out for v0.1.
-- **Server-side long-form recording.** OPFS (browser) covers short;
-  replay mode covers "test against what I captured."
-- **Dedicated headless binary.** Not needed — `ferrited --flowgraph
-  <path>` launched as a second instance covers the "headless decoder
-  feeding MQTT/syslog/SQLite" use cases. See D19.
-- **Additional decoders** (APRS, FT8, M17+codec2) — land alongside
-  their respective blocks post-v0.1. Candidate list is frozen; DMR is
-  ruled out (AMBE licensing).
-- **Remote access / auth.** v0.1 is LAN-trust. Tailscale or a
-  user-operated tunnel covers remote access today; server-side auth is
-  a separate design project.
-- **Mobile / tablet UI.** Desktop-first. The layout engine (Dockview)
-  does not claim mobile; a separate mobile view is post-v0.1 if at all.
-
-## Release criteria for v0.1
-
-All of the Phase A–E "done when" checklists pass, plus:
-
-- `cargo test --workspace` and `wasm-pack test` green.
-- `pnpm -r test` and `pnpm --filter web test:e2e` green.
-- Wire-protocol conformance test green.
-- SAB ring-buffer stress test green in CI.
-- Golden-fixture tests for WBFM and ADS-B green.
-- Manual smoke on a Pi 5 with both RTL-SDR and SDRPlay RSPduo:
-  enumerate, open, tune FM, hear audio, tune ADS-B, see aircraft.
-- Documentation reflects shipped behavior (not just the plan).
+- **Multi-listener / multi-device** — D06.
+- **Server-side recordings** — D08 (browser owns user state).
+- **Authentication / remote access** — D07 (LAN-trust; user's tunnel
+  problem).
+- **Mobile UI** — desktop-first.
+- **DMR / DSD** — D15 (AMBE patent encumbrance).
