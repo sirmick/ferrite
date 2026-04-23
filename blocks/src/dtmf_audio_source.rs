@@ -266,6 +266,10 @@ impl Block for DtmfAudioSource {
         Ok(())
     }
 
+    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+        Some(f64::from(self.params.rate_hz))
+    }
+
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
         let Some(dst) = io
             .outputs

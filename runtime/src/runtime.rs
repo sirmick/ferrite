@@ -29,6 +29,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use num_complex::Complex;
@@ -49,6 +50,20 @@ use crate::validate::validate_doc;
 /// Default per-call frame budget. 1024 matches the browser `AudioWorklet`
 /// batch (`128 · 8`) and is a reasonable default for native too.
 pub const DEFAULT_FRAMES_HINT: usize = 1024;
+
+/// Default scheduler tick period assumed by callers that can't supply one
+/// (unit tests, short-lived harnesses). 400µs matches the server's
+/// `--tick-period-us` default. Runtime sizes source-output rings from
+/// `rate × tick_period × SOURCE_RING_TICKS`, so the default keeps
+/// rate-aware sizing active even when the caller is indifferent to the
+/// real cadence.
+pub const DEFAULT_TICK_PERIOD: Duration = Duration::from_micros(400);
+
+/// Source output rings hold this many ticks' worth of samples before
+/// back-pressure kicks in. 4× absorbs tick-cadence jitter and brief
+/// downstream stalls without stalling the source reader, which for
+/// hardware backends (SoapySource) would mean USB overflow.
+const SOURCE_RING_TICKS: f64 = 4.0;
 
 /// Safety cap on work-loop passes inside a single `tick()` call. Every
 /// pass must make at least one block produce or consume; if none does,
@@ -71,6 +86,7 @@ pub struct Runtime {
     /// `process` call.
     wires: Vec<RefCell<TypedRing>>,
     frames_hint: usize,
+    tick_period: Duration,
     state: RuntimeState,
     /// The doc the currently-instantiated graph was built from. Set by
     /// [`Runtime::load_doc`]; `None` for runtimes built through
@@ -212,12 +228,17 @@ impl Runtime {
     /// Full load path: parse, validate, instantiate, assemble. Uses the
     /// real inventory registry — the ordinary entry point for the
     /// server and the browser WASM host.
-    pub fn load_doc(doc: &FlowgraphDoc, env: Environment, frames_hint: usize) -> Result<Self> {
+    pub fn load_doc(
+        doc: &FlowgraphDoc,
+        env: Environment,
+        frames_hint: usize,
+        tick_period: Duration,
+    ) -> Result<Self> {
         let v = validate_doc(doc).map_err(|e| anyhow!("validate: {e}"))?;
         let (specs, schedule) = instantiate_flowgraph(&v, &InventorySpecRegistry, env)
             .map_err(|e| anyhow!("instantiate: {e}"))?;
         let blocks = instantiate_blocks(doc)?;
-        let mut rt = Self::from_parts(blocks, &specs, &schedule, frames_hint)?;
+        let mut rt = Self::from_parts(blocks, &specs, &schedule, frames_hint, tick_period)?;
         rt.applied_doc = Some(doc.clone());
         rt.environment = Some(env);
         Ok(rt)
@@ -232,6 +253,7 @@ impl Runtime {
         specs: &SpecMap,
         schedule: &Schedule,
         frames_hint: usize,
+        tick_period: Duration,
     ) -> Result<Self> {
         // 1. Map block id → its index in the topo order.
         let id_to_index: BTreeMap<String, usize> = schedule
@@ -319,10 +341,29 @@ impl Runtime {
                 } else {
                     // Wire capacity: respect the producer's declared
                     // output_capacity_hints (e.g. FFT=4096), floor at
-                    // frames_hint. Migrates to relative_rate-based
-                    // sizing in a follow-up commit (B4).
+                    // frames_hint. Pure sources also floor at
+                    // `rate × tick_period × SOURCE_RING_TICKS` so a
+                    // single tick can absorb the full burst — without
+                    // this, `frames_hint=1024` caps pipeline throughput
+                    // at ~2.56 MSPS regardless of the source's actual
+                    // rate. Migrates to relative_rate-based sizing in
+                    // a follow-up commit (B4).
                     let hints = instances[producer_idx].output_capacity_hints();
-                    let capacity = frames_hint.max(hints[producer_port_idx]);
+                    let mut capacity = frames_hint.max(hints[producer_port_idx]);
+                    let producer_is_source = skeletons[producer_idx].spec.inputs.is_empty();
+                    if producer_is_source && !tick_period.is_zero() {
+                        if let Some(rate) =
+                            instances[producer_idx].output_rate_hz(producer_port_idx)
+                        {
+                            if rate.is_finite() && rate > 0.0 {
+                                let per_burst =
+                                    (rate * tick_period.as_secs_f64() * SOURCE_RING_TICKS).ceil();
+                                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                                let per_burst = per_burst as usize;
+                                capacity = capacity.max(per_burst);
+                            }
+                        }
+                    }
                     let idx = wire_specs.len();
                     wire_specs.push(WireSpec {
                         port_type: producer_port.port_type,
@@ -375,6 +416,7 @@ impl Runtime {
             entries,
             wires,
             frames_hint,
+            tick_period,
             state: RuntimeState::Created,
             applied_doc: None,
             environment: None,
@@ -384,6 +426,11 @@ impl Runtime {
     #[must_use]
     pub fn frames_hint(&self) -> usize {
         self.frames_hint
+    }
+
+    #[must_use]
+    pub fn tick_period(&self) -> Duration {
+        self.tick_period
     }
 
     #[must_use]
@@ -483,11 +530,23 @@ impl Runtime {
         //    so a block like FFT that needs a full `size=4096` dst to
         //    emit isn't starved by a default `frames_hint=1024`. The
         //    actual write_peek still clamps to ring free space.
+        //
+        //    Pure sources skip the `frames_hint` cap: their own reader
+        //    thread paces them, and `frames_hint=1024` per tick would
+        //    throttle any source above ~2.56 MSPS (at 400µs ticks). The
+        //    downstream ring capacity, sized in `from_parts` from the
+        //    source's declared rate × tick_period, is what actually
+        //    bounds the burst.
         let hints = self.entries[i].block.output_capacity_hints();
+        let is_source = spec.inputs.is_empty();
         let mut output_budget = usize::MAX;
         let saw_output = !spec.outputs.is_empty();
         for j in 0..spec.outputs.len() {
-            let per_port_cap = self.frames_hint.max(hints[j]);
+            let per_port_cap = if is_source {
+                usize::MAX
+            } else {
+                self.frames_hint.max(hints[j])
+            };
             match &self.entries[i].outputs[j] {
                 OutputSlot::Wire(widx) => {
                     let avail = self.wires[*widx].borrow().available_write();
@@ -786,7 +845,8 @@ impl Runtime {
         // rollback property for that one path: if the second attempt
         // also fails, the runtime ends stopped and the caller sees an
         // error toast — acceptable surface for an actual misconfig.
-        let mut replacement = match Self::load_doc(new_doc, env, self.frames_hint) {
+        let mut replacement = match Self::load_doc(new_doc, env, self.frames_hint, self.tick_period)
+        {
             Ok(rt) => rt,
             Err(err) if is_exclusive_resource_conflict(&err) => {
                 eprintln!(
@@ -799,7 +859,7 @@ impl Runtime {
                 ) {
                     let _ = self.stop();
                 }
-                Self::load_doc(new_doc, env, self.frames_hint)?
+                Self::load_doc(new_doc, env, self.frames_hint, self.tick_period)?
             }
             Err(err) => return Err(err),
         };
@@ -816,6 +876,7 @@ impl Runtime {
             entries,
             wires,
             frames_hint,
+            tick_period,
             state,
             applied_doc,
             environment,
@@ -823,6 +884,7 @@ impl Runtime {
         self.entries = entries;
         self.wires = wires;
         self.frames_hint = frames_hint;
+        self.tick_period = tick_period;
         self.state = state;
         self.applied_doc = applied_doc;
         self.environment = environment;
@@ -1006,7 +1068,7 @@ mod tests {
 
     fn load(json: &str, frames: usize) -> Runtime {
         let doc: FlowgraphDoc = serde_json::from_str(json).unwrap();
-        Runtime::load_doc(&doc, Environment::Browser, frames).unwrap()
+        Runtime::load_doc(&doc, Environment::Browser, frames, DEFAULT_TICK_PERIOD).unwrap()
     }
 
     /// Copy the first `n` IqF32 elements of the named block's output
@@ -1044,14 +1106,16 @@ mod tests {
     #[test]
     fn chain_propagates_samples_src_to_decim() {
         // SineSource → Decimator(factor=2). After one tick the source
-        // has run once, filling 64 samples into the ring; the decimator
-        // drains that and emits ~half as many before stalling on empty
-        // input (source only runs once per tick).
+        // has run once, filling the ring; the decimator drains that
+        // and emits ~half as many before stalling on empty input
+        // (sources run at most once per tick). The low `rate_hz`
+        // keeps rate-aware ring sizing below `frames_hint` so the
+        // assertion doesn't drift with tick-period defaults.
         let mut rt = load(
             r#"{
                 "name":"t","environments":["browser"],
                 "blocks":{
-                    "src":{"type":"SineSource","params":{"rate_hz":1000000,"tone_freq_abs_hz":10,"center_freq_hz":0}},
+                    "src":{"type":"SineSource","params":{"rate_hz":1000,"tone_freq_abs_hz":10,"center_freq_hz":0}},
                     "decim":{"type":"Decimator","params":{"factor":2,"num_taps":17,"cutoff_normalized":0.2}}
                 },
                 "wires":[["src.out","decim.in"]]
@@ -1243,7 +1307,8 @@ mod tests {
             },
         );
         let blocks = instantiate_blocks(&doc).unwrap();
-        let Err(err) = Runtime::from_parts(blocks, &specs, &schedule, 16) else {
+        let Err(err) = Runtime::from_parts(blocks, &specs, &schedule, 16, DEFAULT_TICK_PERIOD)
+        else {
             panic!("expected unknown-producer error");
         };
         assert!(format!("{err}").contains("ghost"));
@@ -1275,7 +1340,7 @@ mod tests {
         let (specs, schedule) =
             instantiate_flowgraph(&v, &InventorySpecRegistry, Environment::Browser).unwrap();
         let blocks = instantiate_blocks(&doc).unwrap();
-        let rt = Runtime::from_parts(blocks, &specs, &schedule, 16).unwrap();
+        let rt = Runtime::from_parts(blocks, &specs, &schedule, 16, DEFAULT_TICK_PERIOD).unwrap();
         assert!(rt.applied_doc().is_none());
     }
 
@@ -1384,7 +1449,8 @@ mod tests {
         let (specs, schedule) =
             instantiate_flowgraph(&v, &InventorySpecRegistry, Environment::Browser).unwrap();
         let blocks = instantiate_blocks(&doc).unwrap();
-        let mut rt = Runtime::from_parts(blocks, &specs, &schedule, 16).unwrap();
+        let mut rt =
+            Runtime::from_parts(blocks, &specs, &schedule, 16, DEFAULT_TICK_PERIOD).unwrap();
         let err = rt.reconfigure(&doc).unwrap_err();
         assert!(format!("{err}").contains("reconfigure"));
     }
@@ -1589,9 +1655,13 @@ mod tests {
     #[test]
     fn fft_emits_one_bin_block_per_size_samples() {
         // Accumulating FFT: given N input samples, the block emits
-        // floor(N / size) output frames total. This pins that the
-        // accum stays intact across ticks — a regression here would
-        // mean samples were dropped between ticks.
+        // floor(N / size) output frames total with nothing dropped.
+        // The FFT leaves surplus in the ring each call rather than
+        // silently discarding it, so the accum stays intact across
+        // re-invocations within a tick and across tick boundaries.
+        // A low `rate_hz` keeps the source ring sized by
+        // `frames_hint`, not by rate-aware sizing, so this test isn't
+        // sensitive to tick-period defaults.
         let size = 128_usize;
         let mut rt = load(
             &format!(
@@ -1599,7 +1669,7 @@ mod tests {
                     "name":"fft-accum","environments":["browser"],
                     "blocks":{{
                         "src": {{"type":"SineSource","placement":"browser",
-                                 "params":{{"rate_hz":100000.0,"tone_freq_abs_hz":1000.0,
+                                 "params":{{"rate_hz":1000.0,"tone_freq_abs_hz":10.0,
                                             "center_freq_hz":0.0,"amplitude":0.5}}}},
                         "fft": {{"type":"FFT","placement":"browser",
                                  "params":{{"size":{size},"window":"hann"}}}}

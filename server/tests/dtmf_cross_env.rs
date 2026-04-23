@@ -25,7 +25,7 @@ use std::time::Duration;
 use ferrite_blocks::{frame::Frame, EventsSink, WsBridgeRx};
 use ferrite_runtime::{
     split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry, Runtime,
-    CROSS_ENV_STREAM_BASE, DEFAULT_FRAMES_HINT,
+    CROSS_ENV_STREAM_BASE, DEFAULT_FRAMES_HINT, DEFAULT_TICK_PERIOD,
 };
 
 #[path = "../src/log_stream.rs"]
@@ -79,9 +79,13 @@ async fn dtmf_e2e_preset_round_trips_digits_across_cross_env_bridge() {
     // The scheduler is sync; we own the tick cadence in this test loop.
     let browser_half = split_for_environment(&doc, Environment::Browser, &InventorySpecRegistry)
         .expect("browser split");
-    let mut browser_rt =
-        Runtime::load_doc(&browser_half, Environment::Browser, DEFAULT_FRAMES_HINT)
-            .expect("browser runtime loads");
+    let mut browser_rt = Runtime::load_doc(
+        &browser_half,
+        Environment::Browser,
+        DEFAULT_FRAMES_HINT,
+        DEFAULT_TICK_PERIOD,
+    )
+    .expect("browser runtime loads");
     browser_rt.init().expect("browser init");
     browser_rt.start().expect("browser start");
 

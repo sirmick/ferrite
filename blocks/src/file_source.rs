@@ -219,6 +219,10 @@ impl Block for FileIqSource {
         Ok(())
     }
 
+    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+        Some(self.rate_hz)
+    }
+
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
         // Peek the output length without holding a borrow that conflicts
         // with `self.reader` and `self.scratch` below.

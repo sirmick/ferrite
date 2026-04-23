@@ -33,7 +33,7 @@ pub use instantiate::{instantiate_flowgraph, SpecMap, SpecRegistry};
 pub use reconfigure::{
     diff_presets, ParamChange, ReconfigureError, ReconfigurePlan, StructuralChange,
 };
-pub use runtime::{Runtime, RuntimeState, DEFAULT_FRAMES_HINT};
+pub use runtime::{Runtime, RuntimeState, DEFAULT_FRAMES_HINT, DEFAULT_TICK_PERIOD};
 pub use schedule::{build_wire_plan, topological_order, InputSource, Schedule, WirePlan};
 pub use typed_ring::TypedRing;
 pub use validate::{validate_doc, FlowgraphValidationError, Phase, ValidatedDoc, ValidationError};

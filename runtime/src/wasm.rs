@@ -93,17 +93,28 @@ impl RuntimeHandle {
     /// Build a runtime from a flowgraph JSON doc targeting the given
     /// environment (typically `"browser"`). `frames_hint` overrides the
     /// per-call frame budget; pass `None` (or `undefined` from JS) to
-    /// use [`DEFAULT_FRAMES_HINT`].
+    /// use [`DEFAULT_FRAMES_HINT`]. `tick_period_us` overrides the
+    /// assumed scheduler cadence used for source-ring sizing; `None`
+    /// uses [`DEFAULT_TICK_PERIOD`] (400µs).
     #[wasm_bindgen(constructor)]
     pub fn new(
         doc_json: &str,
         env: &str,
         frames_hint: Option<usize>,
+        tick_period_us: Option<u32>,
     ) -> Result<RuntimeHandle, JsError> {
         let target = parse_environment(env)?;
         let doc = parse_doc(doc_json)?;
-        let rt = Runtime::load_doc(&doc, target, frames_hint.unwrap_or(DEFAULT_FRAMES_HINT))
-            .map_err(|e| JsError::new(&format!("{e:#}")))?;
+        let tick_period = tick_period_us
+            .map(|us| std::time::Duration::from_micros(u64::from(us)))
+            .unwrap_or(crate::runtime::DEFAULT_TICK_PERIOD);
+        let rt = Runtime::load_doc(
+            &doc,
+            target,
+            frames_hint.unwrap_or(DEFAULT_FRAMES_HINT),
+            tick_period,
+        )
+        .map_err(|e| JsError::new(&format!("{e:#}")))?;
         Ok(Self { rt })
     }
 

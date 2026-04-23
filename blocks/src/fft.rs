@@ -10,6 +10,8 @@
 //! tear through this hot-path code.
 
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use num_complex::Complex;
@@ -48,6 +50,20 @@ impl FftWindow {
 pub struct FftBlockParams {
     pub size: usize,
     pub window: FftWindow,
+    /// Accepted for backwards-compat with presets and `compose_source`;
+    /// no longer consulted. The throttle is now wall-clock based, so
+    /// the sample-count → seconds translation it used to drive is
+    /// redundant. Kept to avoid breaking authored flowgraphs.
+    #[allow(dead_code)]
+    pub input_rate_hz: f64,
+    /// Upper bound on output frame rate in Hz. `None` disables
+    /// throttling (the FFT emits every `size` samples, as before).
+    /// When set, the block drops samples between emits so that at
+    /// most `max_frames_per_second` windows per second reach the
+    /// output — measured against wall-clock, not nominal input rate,
+    /// so a pipeline that delivers irregularly still tracks the
+    /// target cadence rather than over-skipping and starving the UI.
+    pub max_frames_per_second: Option<f64>,
 }
 
 impl Default for FftBlockParams {
@@ -55,6 +71,8 @@ impl Default for FftBlockParams {
         Self {
             size: 4096,
             window: FftWindow::Hann,
+            input_rate_hz: 0.0,
+            max_frames_per_second: None,
         }
     }
 }
@@ -69,6 +87,13 @@ pub struct FftBlock {
     // input is not re-presented next tick, so an FFT that needs more
     // samples than one upstream tick produces must buffer internally.
     accum: Vec<Complex<f32>>,
+    /// Wall-clock timestamp of the last successful emit. `None` means
+    /// the next full window emits immediately. Used by the throttle:
+    /// when `max_frames_per_second` is set, arriving samples are
+    /// dropped until `now - last_emit >= 1/fps`. Absent on wasm32
+    /// targets where `Instant::now()` panics.
+    #[cfg(not(target_arch = "wasm32"))]
+    last_emit: Option<Instant>,
 }
 
 impl FftBlock {
@@ -90,12 +115,27 @@ impl FftBlock {
             window,
             scratch,
             accum,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_emit: None,
         })
     }
 
     #[must_use]
     pub const fn size(&self) -> usize {
         self.params.size
+    }
+
+    /// Minimum wall-clock gap between successive emits under the
+    /// `max_frames_per_second` cap. `None` when throttling is disabled
+    /// (either because `max_frames_per_second` is `None` or ≤ 0), in
+    /// which case the FFT emits on every full window.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn min_emit_interval(&self) -> Option<Duration> {
+        let fps = self.params.max_frames_per_second?;
+        if fps <= 0.0 || !fps.is_finite() {
+            return None;
+        }
+        Some(Duration::from_secs_f64(1.0 / fps))
     }
 }
 
@@ -156,6 +196,18 @@ impl Block for FftBlock {
                     // on the next `process` call.
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
+                ParamSpec {
+                    key: "max_frames_per_second",
+                    label: "Max FPS",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 240.0,
+                        step: 1.0,
+                        default: 0.0,
+                        unit: "Hz",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                },
             ],
         }
     }
@@ -190,15 +242,44 @@ impl Block for FftBlock {
             return Ok(Work::new());
         };
 
-        // Pull every available input sample into the internal accumulator.
-        // Cap at `n` — anything beyond a full frame is discarded rather
-        // than queued, since the runtime already gave us a fresh view
-        // next tick and overlapping frames aren't useful for the
-        // waterfall.
+        let mut work = Work::new();
+
+        // Wall-clock throttle: if `max_frames_per_second` is set and
+        // the last emit was < 1/fps ago, drop all arriving samples
+        // without accumulating. Going by wall-clock (rather than
+        // sample-count × nominal rate) means the UI rate tracks the
+        // target whether the pipeline is delivering at nominal or
+        // running slow under load. On wasm32 the throttle is a no-op
+        // because `Instant::now()` panics there; no current preset
+        // places FFT in the browser, so this only bites if someone
+        // later does.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(min_gap) = self.min_emit_interval() {
+            if let Some(last) = self.last_emit {
+                if last.elapsed() < min_gap {
+                    // Still in the skip window — reset accumulator so
+                    // we build the next frame from fresh samples when
+                    // the gap elapses, rather than stitching stale
+                    // input across the boundary. Drain the whole
+                    // visible input so the upstream ring doesn't back
+                    // up while we wait.
+                    self.accum.clear();
+                    work.consumed[0] = src.len();
+                    return Ok(work);
+                }
+            }
+        }
+
+        // Accumulate path: only consume what we actually use. Surplus
+        // stays in the ring for the scheduler's next pass so it can
+        // feed another full window in the same tick — critical once
+        // the source ring is sized for `rate × tick_period × 4`, which
+        // routinely delivers more than `size` samples per `process`
+        // call. The old "consume src.len(), discard surplus" behaviour
+        // silently dropped ~1/3 of the input at 16 MSPS.
         let take = (n - self.accum.len()).min(src.len());
         self.accum.extend_from_slice(&src[..take]);
-        let mut work = Work::new();
-        work.consumed[0] = src.len();
+        work.consumed[0] = take;
 
         if self.accum.len() < n {
             return Ok(work);
@@ -230,6 +311,10 @@ impl Block for FftBlock {
         }
 
         self.accum.clear();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.last_emit = Some(Instant::now());
+        }
         work.produced[0] = n;
         Ok(work)
     }
@@ -273,6 +358,8 @@ mod tests {
     #[test]
     fn zero_input_zero_output() {
         let mut block = FftBlock::new(FftBlockParams {
+            input_rate_hz: 0.0,
+            max_frames_per_second: None,
             size: 64,
             window: FftWindow::None,
         })
@@ -290,6 +377,8 @@ mod tests {
         // at DC. After fft-shift DC is at index n/2 and magnitude = n.
         let n = 64;
         let mut block = FftBlock::new(FftBlockParams {
+            input_rate_hz: 0.0,
+            max_frames_per_second: None,
             size: n,
             window: FftWindow::None,
         })
@@ -315,6 +404,8 @@ mod tests {
         let n = 64usize;
         let k = 5usize;
         let mut block = FftBlock::new(FftBlockParams {
+            input_rate_hz: 0.0,
+            max_frames_per_second: None,
             size: n,
             window: FftWindow::None,
         })
@@ -341,8 +432,73 @@ mod tests {
     fn rejects_non_power_of_two() {
         assert!(FftBlock::new(FftBlockParams {
             size: 96,
-            window: FftWindow::Hann
+            window: FftWindow::Hann,
+            input_rate_hz: 0.0,
+            max_frames_per_second: None,
         })
         .is_err());
+    }
+
+    /// Run `process` once with the given input; return `(consumed,
+    /// produced)` without asserting a specific emit outcome. Used by
+    /// throttle tests that need to observe "no emit this call".
+    fn run_fft_raw(block: &mut FftBlock, input: &[Complex<f32>]) -> (usize, usize) {
+        let mut out = vec![Complex::new(0.0, 0.0); block.size()];
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::IqF32(input),
+        }];
+        let mut outputs = [OutputPort {
+            name: "out",
+            meta: PortMeta::default(),
+            buf: OutBuf::IqF32(&mut out),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut outputs,
+        };
+        let w = block.process(&mut io).unwrap();
+        (w.consumed[0], w.produced[0])
+    }
+
+    /// With a 30-Hz cap, a second full window arriving microseconds
+    /// after the first must be dropped — wall-clock gap between emits
+    /// is ~1/30 s. The throttle no longer leans on any declared input
+    /// rate, so it holds whether delivery tracks nominal or drifts.
+    #[test]
+    fn max_fps_throttles_back_to_back_emits() {
+        let size = 64usize;
+        let mut block = FftBlock::new(FftBlockParams {
+            size,
+            window: FftWindow::None,
+            input_rate_hz: 0.0,
+            max_frames_per_second: Some(30.0),
+        })
+        .unwrap();
+        // First window emits.
+        let (c1, p1) = run_fft_raw(&mut block, &vec![Complex::new(0.0_f32, 0.0); size]);
+        assert_eq!((c1, p1), (size, size));
+        assert!(block.last_emit.is_some(), "emit must stamp last_emit");
+        // Second window arrives immediately — throttled, no output.
+        let (c2, p2) = run_fft_raw(&mut block, &vec![Complex::new(0.0_f32, 0.0); size]);
+        assert_eq!(c2, size, "consumed samples are counted even when throttled");
+        assert_eq!(p2, 0, "second window within 1/fps must not emit");
+    }
+
+    /// No throttle: every full window emits, no wall-clock gate in play.
+    #[test]
+    fn default_params_mean_no_throttle() {
+        let mut block = FftBlock::new(FftBlockParams {
+            size: 64,
+            window: FftWindow::None,
+            input_rate_hz: 0.0,
+            max_frames_per_second: None,
+        })
+        .unwrap();
+        let (_, p1) = run_fft_raw(&mut block, &vec![Complex::new(0.0_f32, 0.0); 64]);
+        assert_eq!(p1, 64);
+        let (_, p2) = run_fft_raw(&mut block, &vec![Complex::new(0.0_f32, 0.0); 64]);
+        assert_eq!(p2, 64, "no-throttle mode emits on every full window");
     }
 }

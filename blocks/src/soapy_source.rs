@@ -169,7 +169,14 @@ impl SoapySource {
     /// hasn't finished tearing the prior stream down. Dropping
     /// everything and retrying after a short backoff clears it.
     pub fn new(params: &SoapySourceParams) -> Result<Self> {
-        const MAX_ATTEMPTS: usize = 4;
+        // 2 attempts is enough: `open_with_retry` already catches the
+        // makeStrArgs race internally (5× with 400 ms backoff), so the
+        // only thing this outer loop guards against is a short-lived
+        // "RX stream already opened" that self-clears in ~200 ms.
+        // Configuration errors (SDRplay cliff, impossible bandwidth) are
+        // no longer classified as transient (see `soapy_retry`) so they
+        // fail fast on the first attempt instead of wasting ~1.5 s.
+        const MAX_ATTEMPTS: usize = 2;
         const BACKOFF: Duration = Duration::from_millis(400);
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 0..MAX_ATTEMPTS {
@@ -452,6 +459,10 @@ impl Block for SoapySource {
             }
         }
         Ok(true)
+    }
+
+    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+        Some(self.sample_rate_hz)
     }
 
     fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {

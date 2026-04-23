@@ -519,6 +519,21 @@ pub trait Block: Send + AsAny {
         None
     }
 
+    /// Absolute output sample rate (Hz) on the given output port, when
+    /// known. Used by the runtime to size wire rings so a pure source
+    /// can absorb one scheduler tick's worth of samples without
+    /// stalling — `frames_hint` alone caps throughput at
+    /// `frames_hint / tick_period` MSPS, which for the default 1024 /
+    /// 400µs ceiling is ~2.56 MSPS.
+    ///
+    /// Only pure sources (no input ports) need to implement this —
+    /// downstream blocks' rates are derivable from
+    /// [`relative_rate`](Self::relative_rate). Returning `None` (the
+    /// default) keeps the legacy `frames_hint`-only sizing.
+    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+        None
+    }
+
     /// Flush and release. Must be idempotent.
     fn stop(&mut self) -> Result<()> {
         Ok(())

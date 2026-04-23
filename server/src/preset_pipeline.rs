@@ -140,8 +140,13 @@ pub fn spawn_preset(
     let node_half = split_for_environment(doc, Environment::Node, &InventorySpecRegistry)
         .map_err(|e| anyhow!("env_split: {e}"))?;
 
-    let mut runtime = Runtime::load_doc(&node_half, Environment::Node, DEFAULT_FRAMES_HINT)
-        .context("runtime load_doc")?;
+    let mut runtime = Runtime::load_doc(
+        &node_half,
+        Environment::Node,
+        DEFAULT_FRAMES_HINT,
+        tick_period,
+    )
+    .context("runtime load_doc")?;
 
     let bridge_sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(frames));
     attach_bridge_sinks(&mut runtime, &node_half, &bridge_sink)?;

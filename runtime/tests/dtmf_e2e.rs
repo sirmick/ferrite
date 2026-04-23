@@ -33,7 +33,7 @@
 use ferrite_blocks::EventsSink;
 use ferrite_runtime::{
     split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry, Runtime,
-    CROSS_ENV_STREAM_BASE, DEFAULT_FRAMES_HINT,
+    CROSS_ENV_STREAM_BASE, DEFAULT_FRAMES_HINT, DEFAULT_TICK_PERIOD,
 };
 use serde_json::{json, Value};
 
@@ -83,8 +83,13 @@ fn dtmf_chain_runs_end_to_end_and_decodes_digits() {
     }))
     .expect("doc parses");
 
-    let mut rt =
-        Runtime::load_doc(&doc, Environment::Node, DEFAULT_FRAMES_HINT).expect("runtime loads");
+    let mut rt = Runtime::load_doc(
+        &doc,
+        Environment::Node,
+        DEFAULT_FRAMES_HINT,
+        DEFAULT_TICK_PERIOD,
+    )
+    .expect("runtime loads");
     rt.init().expect("init");
     rt.start().expect("start");
 
