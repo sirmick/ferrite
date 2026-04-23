@@ -39,7 +39,7 @@ use ferrite_blocks::{
     MAX_PORTS,
 };
 
-use crate::block_registry::{instantiate_blocks, BlockMap, InventorySpecRegistry};
+use crate::block_registry::{BlockMap, InventorySpecRegistry};
 use crate::doc::{Environment, FlowgraphDoc};
 use crate::instantiate::{instantiate_flowgraph, SpecMap};
 use crate::reconfigure::{diff_presets, ParamChange, ReconfigurePlan};
@@ -131,6 +131,14 @@ struct BlockEntry {
     /// `produced[j]` = last-reported count for output port `j`, for
     /// introspection (tests, dashboards). Does not feed scheduling.
     produced: Vec<usize>,
+    /// `true` when this block instance was moved over from a previous
+    /// runtime during reconfigure (its `init()` has already been called
+    /// and, for stateful blocks like `SoapySource`, its reader thread
+    /// is already running). [`Runtime::init`] skips `block.init()` on
+    /// these so the reused block isn't asked to double-initialise. No
+    /// effect on [`Runtime::stop`] — a carried-over block still needs
+    /// a graceful shutdown when its new runtime winds down.
+    carried_over: bool,
 }
 
 /// What backs one output port's buffer for a `process` call.
@@ -237,11 +245,77 @@ impl Runtime {
         let v = validate_doc(doc).map_err(|e| anyhow!("validate: {e}"))?;
         let (specs, schedule) = instantiate_flowgraph(&v, &InventorySpecRegistry, env)
             .map_err(|e| anyhow!("instantiate: {e}"))?;
-        let blocks = instantiate_blocks(doc)?;
+        let blocks = crate::block_registry::instantiate_blocks(doc)?;
         let mut rt = Self::from_parts(blocks, &specs, &schedule, frames_hint, tick_period)?;
         rt.applied_doc = Some(doc.clone());
         rt.environment = Some(env);
         Ok(rt)
+    }
+
+    /// Compute the set of block ids whose `type_name` + `params` +
+    /// `placement` are byte-identical between two docs. Pure — does
+    /// not touch any runtime state.
+    fn reusable_ids(
+        old_doc: &FlowgraphDoc,
+        new_doc: &FlowgraphDoc,
+    ) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for (id, old_decl) in &old_doc.blocks {
+            if let Some(new_decl) = new_doc.blocks.get(id) {
+                if old_decl.type_name == new_decl.type_name
+                    && old_decl.params == new_decl.params
+                    && old_decl.placement == new_decl.placement
+                {
+                    out.insert(id.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Factory-construct every block in `doc` whose id is *not* in
+    /// `skip` — used by [`Self::reconfigure`] to build replacement
+    /// blocks speculatively before touching the live runtime. A factory
+    /// failure here is safely rollback-able because nothing in `self`
+    /// has been touched yet.
+    fn construct_blocks_excluding(
+        doc: &FlowgraphDoc,
+        skip: &std::collections::BTreeSet<String>,
+    ) -> Result<BlockMap> {
+        let mut out = BlockMap::new();
+        for (id, decl) in &doc.blocks {
+            if skip.contains(id) {
+                continue;
+            }
+            let entry = ferrite_blocks::registry::find(&decl.type_name).ok_or_else(|| {
+                anyhow!("block {id:?}: type {:?} is not registered", decl.type_name)
+            })?;
+            let params = decl.params.clone().unwrap_or(serde_json::Value::Null);
+            let block = entry
+                .construct(&params)
+                .with_context(|| format!("constructing block {id:?} ({})", decl.type_name))?;
+            out.insert(id.clone(), block);
+        }
+        Ok(out)
+    }
+
+    /// Remove block instances by id from `self.entries`. Called by
+    /// [`Self::reconfigure`] *only after* the rest of the new runtime
+    /// has been speculatively constructed — at that point `self` is
+    /// about to be replaced anyway, so the swap_remove side-effect
+    /// (entries reordering) is fine.
+    fn drain_blocks_by_id(&mut self, ids: &std::collections::BTreeSet<String>) -> BlockMap {
+        let mut out = BlockMap::new();
+        let mut i = 0;
+        while i < self.entries.len() {
+            if ids.contains(&self.entries[i].id) {
+                let entry = self.entries.swap_remove(i);
+                out.insert(entry.id, entry.block);
+            } else {
+                i += 1;
+            }
+        }
+        out
     }
 
     /// Assemble a runtime from already-produced pieces. `blocks` is
@@ -409,6 +483,7 @@ impl Runtime {
                 outputs,
                 input_wires,
                 produced: vec![0; spec.outputs.len()],
+                carried_over: false,
             });
         }
 
@@ -450,6 +525,12 @@ impl Runtime {
             ring.borrow_mut().reset();
         }
         for entry in &mut self.entries {
+            if entry.carried_over {
+                // Reused from a previous runtime — its init() has already
+                // run (and, for stateful blocks, set up external state
+                // like reader threads that must not be duplicated).
+                continue;
+            }
             let mut ctx = InitCtx {
                 input_meta: &[],
                 output_meta: &[],
@@ -832,22 +913,37 @@ impl Runtime {
         // to resume Running after a successful swap.
         let prev_state = self.state;
 
-        // Build the replacement first — preserves rollback for the
-        // common case where a bad doc fails validation and we want to
-        // leave the running graph untouched.
+        // Reconfigure in three commit-safe phases:
         //
-        // Some blocks own exclusive hardware (notably SoapySource on
-        // HackRF: SoapySDR returns a cached Device handle from
-        // `Device::new`, and the device refuses a second `rx_stream()`
-        // with "RX stream already opened" until our previous stream is
-        // dropped). When we hit one of those known resource-conflict
-        // errors, fall back to stop-old-then-build. This loses the
-        // rollback property for that one path: if the second attempt
-        // also fails, the runtime ends stopped and the caller sees an
-        // error toast — acceptable surface for an actual misconfig.
-        let mut replacement = match Self::load_doc(new_doc, env, self.frames_hint, self.tick_period)
-        {
-            Ok(rt) => rt,
+        //   1. Validate + speculatively construct every NEW block
+        //      (anything whose type/params/placement differ from the
+        //      old doc). All failures here roll back trivially — `self`
+        //      is untouched.
+        //   2. Drain reusable block instances out of `self.entries`.
+        //      After this point we're committed: the old graph's
+        //      structure is broken, but each surviving block is either
+        //      in the new `blocks` map or queued for stop().
+        //   3. Assemble the replacement runtime via `from_parts` — a
+        //      deterministic wiring/indexing pass that only fails on
+        //      programmer error.
+        //
+        // This is what makes "swapping preset wbfm → wbam keeps the
+        // SoapySource running" cheap instead of doing a 5+ second SDR
+        // close+reopen cycle.
+        let v = validate_doc(new_doc).map_err(|e| anyhow!("validate: {e}"))?;
+        let (specs, schedule) = instantiate_flowgraph(&v, &InventorySpecRegistry, env)
+            .map_err(|e| anyhow!("instantiate: {e}"))?;
+
+        let reusable = Self::reusable_ids(old_doc, new_doc);
+
+        // Phase 1: build the brand-new blocks first. Some blocks own
+        // exclusive hardware (notably SoapySource on HackRF, which
+        // refuses a second `rx_stream()` until our previous one drops).
+        // When that conflict surfaces we fall back to stop-old-then-
+        // build; the retry rebuilds from scratch, deliberately giving
+        // up the reuse optimisation for that one transition.
+        let mut blocks = match Self::construct_blocks_excluding(new_doc, &reusable) {
+            Ok(blocks) => blocks,
             Err(err) if is_exclusive_resource_conflict(&err) => {
                 eprintln!(
                     "reconfigure: replacement build hit exclusive-resource conflict ({err}); \
@@ -859,10 +955,37 @@ impl Runtime {
                 ) {
                     let _ = self.stop();
                 }
-                Self::load_doc(new_doc, env, self.frames_hint, self.tick_period)?
+                // Force-rebuild: skip the reuse path entirely so the old
+                // hardware handles release before the retry asks the
+                // driver for fresh ones.
+                let empty = std::collections::BTreeSet::new();
+                Self::construct_blocks_excluding(new_doc, &empty)?
             }
             Err(err) => return Err(err),
         };
+
+        // Phase 2: drain reusable blocks from the old runtime and merge.
+        for (id, block) in self.drain_blocks_by_id(&reusable) {
+            blocks.insert(id, block);
+        }
+
+        // Phase 3: assemble. Any failure here is a programmer bug
+        // because `validate_doc` + `instantiate_flowgraph` already
+        // succeeded; surface it as-is.
+        let mut replacement = Self::from_parts(
+            blocks,
+            &specs,
+            &schedule,
+            self.frames_hint,
+            self.tick_period,
+        )?;
+        for entry in &mut replacement.entries {
+            if reusable.contains(&entry.id) {
+                entry.carried_over = true;
+            }
+        }
+        replacement.applied_doc = Some(new_doc.clone());
+        replacement.environment = Some(env);
         replacement.init()?;
 
         if matches!(
@@ -1398,6 +1521,96 @@ mod tests {
                 .as_f64(),
             Some(0.25)
         );
+    }
+
+    #[test]
+    fn reconfigure_preserves_byte_identical_block_instance() {
+        // When a block's type_name + params + placement are unchanged
+        // between the old and new docs, the reconfigure path must keep
+        // the original Block instance instead of constructing a fresh
+        // one. We verify that by checking the concrete `SineSource`
+        // instance identity — its internal sample counter advances
+        // after a tick, and a reused instance keeps that state; a
+        // freshly-constructed one would start from zero again.
+        use ferrite_blocks::SineSource;
+        let doc_json = r#"{
+            "name":"wbfm_like","environments":["browser"],
+            "blocks":{
+                "src":{"type":"SineSource","params":{"rate_hz":4,"tone_freq_abs_hz":1,"amplitude":0.5}},
+                "demod":{"type":"FmDemod","params":{"sample_rate_hz":4,"max_deviation_hz":1}}
+            },
+            "wires":[["src.out","demod.in"]]
+        }"#;
+        let mut rt = load(doc_json, 8);
+        rt.init().unwrap();
+        rt.start().unwrap();
+        rt.tick().unwrap();
+        rt.tick().unwrap();
+        let phase_before = rt.block_typed::<SineSource>("src").unwrap().phase();
+
+        // New doc swaps the demod only. The source block is byte-
+        // identical → must carry over.
+        let new_doc: FlowgraphDoc = serde_json::from_str(
+            r#"{
+                "name":"wbam_like","environments":["browser"],
+                "blocks":{
+                    "src":{"type":"SineSource","params":{"rate_hz":4,"tone_freq_abs_hz":1,"amplitude":0.5}},
+                    "demod":{"type":"AmDemod","params":{"sample_rate_hz":4,"bias_tau_ms":100}}
+                },
+                "wires":[["src.out","demod.in"]]
+            }"#,
+        )
+        .unwrap();
+        rt.reconfigure(&new_doc).unwrap();
+
+        // If the instance was preserved, the phase hasn't been reset
+        // to zero. A fresh SineSource starts at phase 0.0.
+        let phase_after = rt.block_typed::<SineSource>("src").unwrap().phase();
+        assert_eq!(
+            phase_before, phase_after,
+            "SineSource phase should carry over unchanged across reconfigure; \
+             before={phase_before} after={phase_after}"
+        );
+    }
+
+    #[test]
+    fn reconfigure_rebuilds_block_when_params_change() {
+        // Mirror of the test above: when params differ the block must
+        // be reconstructed, and a fresh SineSource starts back at
+        // phase 0. Rate=5, tone=1 → phase_inc = 858_993_459, which
+        // doesn't wrap evenly over the tick's sample count, so phase
+        // settles at a non-zero value before reconfigure.
+        use ferrite_blocks::SineSource;
+        let doc_json = r#"{
+            "name":"t","environments":["browser"],
+            "blocks":{
+                "src":{"type":"SineSource","params":{"rate_hz":5,"tone_freq_abs_hz":1,"amplitude":0.5}},
+                "demod":{"type":"FmDemod","params":{"sample_rate_hz":5,"max_deviation_hz":1}}
+            },
+            "wires":[["src.out","demod.in"]]
+        }"#;
+        let mut rt = load(doc_json, 8);
+        rt.init().unwrap();
+        rt.start().unwrap();
+        rt.tick().unwrap();
+        rt.tick().unwrap();
+        let phase_before = rt.block_typed::<SineSource>("src").unwrap().phase();
+        assert!(phase_before > 0);
+
+        let new_doc: FlowgraphDoc = serde_json::from_str(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{
+                    "src":{"type":"SineSource","params":{"rate_hz":5,"tone_freq_abs_hz":1,"amplitude":0.75}},
+                    "demod":{"type":"FmDemod","params":{"sample_rate_hz":5,"max_deviation_hz":1}}
+                },
+                "wires":[["src.out","demod.in"]]
+            }"#,
+        )
+        .unwrap();
+        rt.reconfigure(&new_doc).unwrap();
+        let phase_after = rt.block_typed::<SineSource>("src").unwrap().phase();
+        assert_eq!(phase_after, 0, "fresh SineSource must start at phase 0");
     }
 
     #[test]

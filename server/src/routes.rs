@@ -424,10 +424,30 @@ pub async fn load_preset(
     State(state): State<AppState>,
     Json(req): Json<LoadPresetRequest>,
 ) -> Result<Json<LoadPresetResponse>, (StatusCode, Json<ApiError>)> {
+    let started = std::time::Instant::now();
+    tracing::info!(name = %req.name, "POST /api/preset");
     let (doc, plan) = state
         .load_preset_by_name(&req.name)
         .await
         .map_err(|e| bad_request("LOAD_PRESET_FAILED", format!("{e:#}")))?;
+    let dt_ms = started.elapsed().as_millis();
+    let scope = plan.as_ref().map_or("no-pipeline", |p| match p.overall {
+        ferrite_blocks::ReconfigureScope::SelfBlock => "self-block",
+        ferrite_blocks::ReconfigureScope::Downstream => "downstream",
+        ferrite_blocks::ReconfigureScope::SourceRestart => "source-restart",
+    });
+    let structural = plan.as_ref().map_or(0, |p| p.structural.len());
+    if dt_ms > 500 {
+        tracing::warn!(
+            name = %req.name, elapsed_ms = dt_ms as u64, scope, structural,
+            "[slow] POST /api/preset"
+        );
+    } else {
+        tracing::info!(
+            name = %req.name, elapsed_ms = dt_ms as u64, scope, structural,
+            "POST /api/preset ok"
+        );
+    }
     Ok(Json(LoadPresetResponse {
         name: doc.name,
         reconfigure: reconfigure_response(plan),

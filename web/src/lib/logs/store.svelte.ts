@@ -74,11 +74,21 @@ let consolePatched = false;
 export function patchConsole(): void {
   if (consolePatched || typeof window === 'undefined') return;
   consolePatched = true;
-  for (const level of ['error', 'warn'] as const) {
-    const original = console[level].bind(console);
-    console[level] = (...args: unknown[]) => {
+  // Patch the full common set. `log` and `info` both map to LogLevel
+  // 'info'; `debug` maps to 'debug'. Upstream `RUST_LOG=browser=warn`
+  // can mute the chatty levels server-side if needed.
+  const map: Record<'log' | 'info' | 'debug' | 'warn' | 'error', LogLevel> = {
+    log: 'info',
+    info: 'info',
+    debug: 'debug',
+    warn: 'warn',
+    error: 'error',
+  };
+  for (const key of Object.keys(map) as Array<keyof typeof map>) {
+    const original = console[key].bind(console);
+    console[key] = (...args: unknown[]) => {
       original(...args);
-      logs.push('client', level, args.map(formatArg).join(' '));
+      logs.push('client', map[key], args.map(formatArg).join(' '));
     };
   }
   window.addEventListener('error', (e) => {

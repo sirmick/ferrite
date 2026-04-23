@@ -18,16 +18,28 @@
     return `${hz} Hz`;
   }
 
+  let tuning = $state(false);
   async function tune(e: BandEntry) {
     if (!pipeline.source) return;
-    // Swap presets first when the entry pins one and it differs from
-    // the currently-loaded doc. Tuning happens after so the new
-    // preset's source block gets the target center_freq.
-    if (e.preset && pipeline.flowgraph?.name !== e.preset) {
-      const resp = await pipeline.loadPreset(e.preset);
-      if (resp === null) return;
+    // In-flight guard — preset swaps on SDR hardware can take multiple
+    // seconds (device teardown + reopen), and a second click during
+    // that window would stack another concurrent tune. Drop the new
+    // click on the floor; the button also goes `disabled` so the user
+    // gets visual feedback that the first click is still running.
+    if (tuning) return;
+    tuning = true;
+    try {
+      // Swap presets first when the entry pins one and it differs from
+      // the currently-loaded doc. Tuning happens after so the new
+      // preset's source block gets the target center_freq.
+      if (e.preset && pipeline.flowgraph?.name !== e.preset) {
+        const resp = await pipeline.loadPreset(e.preset);
+        if (resp === null) return;
+      }
+      await applyControl('flow.src.center_freq_hz', e.hz);
+    } finally {
+      tuning = false;
     }
-    await applyControl('flow.src.center_freq_hz', e.hz);
   }
 
   let axes = $derived(currentAxes(pipeline));
@@ -59,9 +71,9 @@
               <li>
                 <button
                   type="button"
-                  class="flex w-full items-center justify-between gap-2 px-3 py-0.5 text-left text-[11px] hover:bg-slate-800/70"
+                  class="flex w-full items-center justify-between gap-2 px-3 py-0.5 text-left text-[11px] hover:bg-slate-800/70 disabled:cursor-wait disabled:opacity-60"
                   class:active={active === entry.hz}
-                  disabled={!pipeline.source}
+                  disabled={!pipeline.source || tuning}
                   onclick={() => void tune(entry)}
                 >
                   <span class="truncate">{entry.label}</span>
