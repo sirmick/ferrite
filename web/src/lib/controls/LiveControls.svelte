@@ -7,6 +7,7 @@
   // panel, just a curated subset of controls.
 
   import { pipeline } from '$lib/pipeline.svelte';
+  import { applyControl } from '$lib/control/dispatch';
 
   let caps = $derived(
     pipeline.sourceCaps?.kind === 'hardware' ? pipeline.sourceCaps.capabilities : null,
@@ -53,17 +54,17 @@
       const next = pendingGain;
       pendingGain = undefined;
       if (next !== undefined && next !== gainDb) {
-        void pipeline.patchSourceParams({ gain_db: next });
+        void applyControl('flow.src.gain_db', next);
       }
     }, GAIN_DEBOUNCE_MS);
   }
   function commitAntenna(v: string) {
     if (v === antenna) return;
-    void pipeline.patchSourceParams({ antenna: v });
+    void applyControl('flow.src.antenna', v);
   }
   function commitAgc(v: boolean) {
     if (v === agc) return;
-    void pipeline.patchSourceParams({ agc: v });
+    void applyControl('flow.src.agc', v);
   }
 </script>
 

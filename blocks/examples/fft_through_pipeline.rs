@@ -29,8 +29,6 @@ use num_complex::Complex;
 
 const DEFAULT_FFT_SIZE: usize = 16_384;
 const OUTPUT_PIXEL_WIDTH: usize = 1200;
-const FLOOR_DBFS: f32 = -100.0;
-const CEIL_DBFS: f32 = 0.0;
 const ALPHA: f32 = 0.3;
 
 fn main() -> ExitCode {
@@ -64,12 +62,11 @@ fn run() -> Result<()> {
     let mut fft = FftBlock::new(FftBlockParams {
         size: fft_size,
         window: FftWindow::Hann,
+        ..Default::default()
     })?;
 
     let mut logmag = LogMagU8::new(LogMagU8Params {
         size: fft_size,
-        floor_dbfs: FLOOR_DBFS,
-        ceil_dbfs: CEIL_DBFS,
         alpha: ALPHA,
     });
 

@@ -411,13 +411,18 @@ mod tests {
             .await
             .expect("pre-reconfigure frame within 1s")
             .expect("recv ok");
+        // Unknown type on the *node* side so `env_split` doesn't have
+        // a chance to strip it before instantiate — the node half mount
+        // is what we're testing rollback on, and env_split now tolerates
+        // unknown types with explicit non-env placements (browser-side
+        // NativeOnly blocks get pruned without the inventory lookup).
         let bad_doc: FlowgraphDoc = serde_json::from_str(
             r#"{
                 "name": "test_cross_env",
                 "environments": ["node", "browser"],
                 "blocks": {
-                    "src":  { "type": "SineSource", "placement": "node" },
-                    "sink": { "type": "NotAThing",   "placement": "browser" }
+                    "src":  { "type": "NotAThing",   "placement": "node" },
+                    "sink": { "type": "Decimator",   "placement": "browser" }
                 },
                 "wires": [["src.out", "sink.in"]]
             }"#,

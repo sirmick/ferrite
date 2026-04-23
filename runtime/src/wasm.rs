@@ -263,11 +263,17 @@ impl RuntimeHandle {
     }
 
     /// Apply a params delta to one browser-side block and reconfigure
-    /// in place. `delta_json` is a JSON-encoded object (`{"key":value…}`);
-    /// keys present replace, keys absent stay. Returns a JSON string
-    /// with the same wire shape as the REST `POST /api/pipeline/blocks/:id/params`
-    /// response so the web dispatcher can handle node-side and browser-side
-    /// reconfigures uniformly.
+    /// in place. Tries the block's `apply_live_params` hot path first
+    /// (phase-continuous for blocks that opt in), falls back to a
+    /// block-scoped rebuild on Ok(false). Same decision the server's
+    /// `apply_block_params` makes for node-side blocks — keeps the two
+    /// halves consistent.
+    ///
+    /// `delta_json` is a JSON-encoded object (`{"key":value…}`); keys
+    /// present replace, keys absent stay. Returns a JSON string with
+    /// the same wire shape as the REST `POST /api/pipeline/blocks/:id/params`
+    /// response so the web dispatcher can treat REST and WASM replies
+    /// with a single type.
     ///
     /// The runtime's rollback contract carries through — if the merged
     /// doc fails to build, the browser runtime is left untouched.
@@ -277,7 +283,7 @@ impl RuntimeHandle {
             .map_err(|e| JsError::new(&format!("delta JSON parse error: {e}")))?;
         let plan = self
             .rt
-            .reconfigure_block(id, delta)
+            .live_reconfigure_block(id, delta)
             .map_err(|e| JsError::new(&format!("{e:#}")))?;
         let body = reconfigure_response_json(&plan);
         serde_json::to_string(&body)

@@ -14,7 +14,7 @@
 
   import type { PipelineBlock } from '$lib/api/pipelineBlocks';
   import type { ParamSchema } from '$lib/api/flowgraph';
-  import { pipeline } from '$lib/pipeline.svelte';
+  import { applyControl } from '$lib/control/dispatch';
 
   interface Props {
     block: PipelineBlock;
@@ -47,10 +47,17 @@
     return Number.isFinite(n) ? n : fallback;
   }
 
+  // Placement tells us which runtime owns the block: `browser` goes
+  // to the WASM worker in-process (no HTTP, hot-apply via
+  // apply_live_params); anything else is on the node side and routes
+  // through the server's existing dispatch. Hot-vs-rebuild is always
+  // the server/block's call — we just pick the destination.
+  let namespace = $derived(block.placement === 'browser' ? 'browser' : 'flow');
+
   async function commit(key: string, value: unknown) {
     pending = key;
     try {
-      await pipeline.setBlockParam(block.id, key, value);
+      await applyControl(`${namespace}.${block.id}.${key}`, value);
     } finally {
       pending = null;
     }

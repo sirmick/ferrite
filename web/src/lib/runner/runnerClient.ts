@@ -58,6 +58,21 @@ export class FlowgraphRunner {
     return resp.data.state;
   }
 
+  /** Apply a params delta to a browser-side block. Wraps the worker's
+   *  Rust `liveReconfigureBlock` via postMessage — hot-path apply for
+   *  blocks that implement `apply_live_params`, block-rebuild fallback
+   *  otherwise. No network hop (the browser runtime is already
+   *  in-process in the worker). */
+  async reconfigureBlock(blockId: string, delta: Record<string, unknown>): Promise<void> {
+    const resp = await this.send({
+      id: this.nextId++,
+      kind: 'reconfigureBlock',
+      blockId,
+      delta,
+    });
+    assertKind(resp, 'reconfigureBlock');
+  }
+
   terminate(): void {
     this.worker.terminate?.();
     const leftover = new Error('FlowgraphRunner: terminated with pending requests');

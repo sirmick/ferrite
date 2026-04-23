@@ -13,6 +13,7 @@
   import { pipeline } from '$lib/pipeline.svelte';
   import type { RangeSpec, SettingInfo, SettingType } from '$lib/api/devices';
   import { fullBandwidthChoices, fullRateChoices, hiddenSettingsFor } from './optionsModel';
+  import { applyControl } from '$lib/control/dispatch';
 
   let caps = $derived(
     pipeline.sourceCaps?.kind === 'hardware' ? pipeline.sourceCaps.capabilities : null,
@@ -50,10 +51,10 @@
     return Number.isFinite(n) ? n : fallback;
   }
 
-  async function commit(label: string, patch: Record<string, unknown>) {
-    pending = label;
+  async function commit(key: string, value: unknown) {
+    pending = key;
     try {
-      await pipeline.patchSourceParams(patch);
+      await applyControl(`flow.src.${key}`, value);
     } finally {
       pending = null;
     }
@@ -61,7 +62,10 @@
 
   async function commitSetting(s: SettingInfo, value: string) {
     const next = { ...settingsMap, [s.key]: value };
-    await commit(s.key, { settings: next });
+    // The `settings` sub-object is the driver's `writeSetting` bag —
+    // merged server-side like any other source param, but not part of
+    // the `apply_live_params` whitelist so it forces a rebuild.
+    await commit('settings', next);
   }
 
   function settingValue(s: SettingInfo): string {
@@ -133,7 +137,7 @@
             onchange={(e) => {
               const mhz = Number((e.currentTarget as HTMLInputElement).value);
               if (!Number.isFinite(mhz)) return;
-              commit('center_freq_hz', { center_freq_hz: Math.round(mhz * 1e6) });
+              commit('center_freq_hz', Math.round(mhz * 1e6));
             }}
           />
         </label>
@@ -150,9 +154,7 @@
             value={String(currentRate)}
             disabled={busy || pending !== null}
             onchange={(e) =>
-              commit('sample_rate_hz', {
-                sample_rate_hz: Number((e.currentTarget as HTMLSelectElement).value),
-              })}
+              commit('sample_rate_hz', Number((e.currentTarget as HTMLSelectElement).value))}
           >
             {#each rateChoices as r (r)}
               <option value={String(r)}>{fmtRate(r)}</option>
@@ -171,7 +173,7 @@
             disabled={busy || pending !== null}
             onchange={(e) => {
               const raw = (e.currentTarget as HTMLSelectElement).value;
-              commit('bandwidth_hz', { bandwidth_hz: raw === '' ? null : Number(raw) });
+              commit('bandwidth_hz', raw === '' ? null : Number(raw));
             }}
           >
             <option value="">— auto —</option>
@@ -193,9 +195,7 @@
               value={currentGain}
               disabled={busy || pending !== null || currentAgc}
               oninput={(e) =>
-                commit('gain_db', {
-                  gain_db: Number((e.currentTarget as HTMLInputElement).value),
-                })}
+                commit('gain_db', Number((e.currentTarget as HTMLInputElement).value))}
             />
             <input
               type="number"
@@ -205,9 +205,7 @@
               value={currentGain}
               disabled={busy || pending !== null || currentAgc}
               onchange={(e) =>
-                commit('gain_db', {
-                  gain_db: Number((e.currentTarget as HTMLInputElement).value),
-                })}
+                commit('gain_db', Number((e.currentTarget as HTMLInputElement).value))}
             />
           </div>
         </label>
@@ -219,7 +217,7 @@
             type="checkbox"
             checked={currentAgc}
             disabled={busy || pending !== null}
-            onchange={(e) => commit('agc', { agc: (e.currentTarget as HTMLInputElement).checked })}
+            onchange={(e) => commit('agc', (e.currentTarget as HTMLInputElement).checked)}
           />
         </label>
       {/if}
@@ -229,8 +227,7 @@
           <select
             value={currentAntenna}
             disabled={busy || pending !== null}
-            onchange={(e) =>
-              commit('antenna', { antenna: (e.currentTarget as HTMLSelectElement).value })}
+            onchange={(e) => commit('antenna', (e.currentTarget as HTMLSelectElement).value)}
           >
             {#each antennas as a (a)}
               <option value={a}>{a}</option>

@@ -18,7 +18,7 @@ import type { FlowgraphDoc } from '../flowgraph.js';
 
 import { AudioRingWriter } from '../audio/ringBuffer.js';
 import type { FrameClient } from '../ws/client.js';
-import { initFrameDecoder, PayloadType } from '../ws/frame.js';
+import { PayloadType } from '../ws/frame.js';
 import { viewIqF32 } from '../ws/source.js';
 import type { LoadResult, RunnerRequest, RunnerResponse, RuntimeState } from './protocol.js';
 import type { RuntimeHandle } from './rustRuntime.js';
@@ -97,10 +97,29 @@ export class RunnerCore {
             kind: 'state',
             data: { state: this.currentState() },
           };
+        case 'reconfigureBlock':
+          this.doReconfigureBlock(req.blockId, req.delta);
+          return { id: req.id, ok: true, kind: 'reconfigureBlock' };
       }
     } catch (err) {
       return { id: req.id, ok: false, error: errorMessage(err) };
     }
+  }
+
+  /** Hand a params delta to `RuntimeHandle.reconfigureBlock`, which
+   *  (as of the wasm.rs wrapper) tries the block's `apply_live_params`
+   *  hot path first and falls back to a block-scoped rebuild on
+   *  Ok(false). Same decision the server's non-src `apply_block_params`
+   *  makes — keeps the two halves consistent and lets browser-placed
+   *  blocks update in place without a full load/start cycle.
+   *
+   *  The JSON response body (reconfigure plan) is parsed but discarded
+   *  — the main thread doesn't need the reconfigure plan for a
+   *  client-triggered write, and the Rust side throws on error
+   *  anyway. */
+  private doReconfigureBlock(blockId: string, delta: Record<string, unknown>): void {
+    const state = this.loaded ?? throwNoRuntime();
+    state.rt.reconfigureBlock(blockId, JSON.stringify(delta));
   }
 
   private currentState(): RuntimeState {
@@ -112,11 +131,6 @@ export class RunnerCore {
     if (this.loaded) {
       throw new Error('RunnerCore.load: already loaded — stop() first');
     }
-    // The frame decoder's wasm instance is per-realm: the main thread
-    // initialises its own on page load, the worker needs its own here.
-    // Without this, inbound IQ frames on the cross-env bridge decode-
-    // fail silently and the whole audio chain starves.
-    await initFrameDecoder();
     const splitDoc = await this.env.splitDoc(doc, 'browser');
     const client = this.env.createFrameClient(wsUrl);
     let rt: RuntimeHandle | null = null;

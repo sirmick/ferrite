@@ -3,10 +3,16 @@
   // knobs that belong next to the spectrum, not in the receiver pane.
   // Shown only when the composed preset exposes the canonical block
   // ids (`fft`, `logmag`). The strip reads live values from
-  // `pipeline.blocks[id].values` and commits via `setBlockParam`, so
-  // the knobs always reflect what the runtime is actually using.
+  // `pipeline.blocks[id].values` and commits via `applyControl`.
+  //
+  // Floor/ceil used to live here as manual logmag params; they moved
+  // client-side (`client.spectrum.displayFloorDbfs`/`displayCeilDbfs`)
+  // once the server quantisation window became fixed — no UI inputs
+  // here today, the auto-scale toggle in the spectrum strip is the
+  // primary way users adjust the visible range.
 
   import { pipeline } from '$lib/pipeline.svelte';
+  import { applyControl } from '$lib/control/dispatch';
 
   const FFT_ID = 'fft';
   const LOGMAG_ID = 'logmag';
@@ -39,16 +45,16 @@
 
   let size = $derived(numValue(fftBlock, 'size', 4096));
   let windowKind = $derived(strValue(fftBlock, 'window', 'hann'));
-  let floorDb = $derived(numValue(logmagBlock, 'floor_dbfs', -100));
-  let ceilDb = $derived(numValue(logmagBlock, 'ceil_dbfs', 0));
   let alpha = $derived(numValue(logmagBlock, 'alpha', 0.3));
 
   // Both `fft.size` and `logmag.size` must change together — logmag
   // expects the fft's output bin count, so mid-flight they can't
-  // disagree even for one tick. Two sequential `setBlockParam` calls
-  // rebuild the blocks out of phase and the display ends up empty or
-  // malformed; patchFlowgraph swaps the whole doc atomically so both
-  // blocks see the new size at the same moment.
+  // disagree even for one tick. Two sequential writes rebuild the
+  // blocks out of phase and the display ends up empty or malformed;
+  // `patchFlowgraph` swaps the whole doc atomically so both blocks
+  // see the new size in the same reconfigure pass. This is the one
+  // structural write from the FFT strip, hence the direct call — it
+  // doesn't fit the single-key `applyControl` shape.
   async function commitSize(v: number) {
     const doc = pipeline.flowgraph;
     if (!doc) return;
@@ -88,7 +94,7 @@
           class="rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
           value={windowKind}
           onchange={(e) =>
-            void pipeline.setBlockParam(FFT_ID, 'window', (e.target as HTMLSelectElement).value)}
+            void applyControl(`flow.${FFT_ID}.window`, (e.target as HTMLSelectElement).value)}
         >
           {#each windowChoices as w (w)}
             <option value={w}>{w}</option>
@@ -100,42 +106,6 @@
     {#if logmagBlock}
       <div class="mx-1 h-4 border-l border-slate-800"></div>
 
-      <label class="flex items-center gap-1" title="bottom of the visible dBFS range">
-        <span>floor</span>
-        <input
-          type="number"
-          class="w-16 rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
-          min={-160}
-          max={0}
-          step={1}
-          value={floorDb}
-          onchange={(e) =>
-            void pipeline.setBlockParam(
-              LOGMAG_ID,
-              'floor_dbfs',
-              Number((e.target as HTMLInputElement).value),
-            )}
-        />
-        <span>dBFS</span>
-      </label>
-      <label class="flex items-center gap-1" title="top of the visible dBFS range">
-        <span>ceil</span>
-        <input
-          type="number"
-          class="w-16 rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
-          min={-60}
-          max={60}
-          step={1}
-          value={ceilDb}
-          onchange={(e) =>
-            void pipeline.setBlockParam(
-              LOGMAG_ID,
-              'ceil_dbfs',
-              Number((e.target as HTMLInputElement).value),
-            )}
-        />
-        <span>dBFS</span>
-      </label>
       <label class="flex items-center gap-1" title="EMA smoothing across rows (1 = no smoothing)">
         <span>smooth</span>
         <input
@@ -146,9 +116,8 @@
           step={0.01}
           value={alpha}
           onchange={(e) =>
-            void pipeline.setBlockParam(
-              LOGMAG_ID,
-              'alpha',
+            void applyControl(
+              `flow.${LOGMAG_ID}.alpha`,
               Number((e.target as HTMLInputElement).value),
             )}
         />

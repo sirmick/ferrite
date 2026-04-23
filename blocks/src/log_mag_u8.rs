@@ -1,12 +1,16 @@
 //! `LogMagU8` — complex FFT bins → dBFS quantised to u8.
 //!
 //! Each input bin's power is normalised by the FFT size to compute dBFS,
-//! exponentially smoothed across frames, and linearly mapped from
-//! `[floor_dbfs, ceil_dbfs]` to `[0, 255]` for direct consumption by a
-//! waterfall colormap texture.
+//! exponentially smoothed across frames, and linearly mapped from a
+//! **fixed** `[SERVER_FLOOR_DBFS, SERVER_CEIL_DBFS]` window to `[0, 255]`.
+//! That's a deliberate architectural choice: the server's quantisation
+//! window is wide and constant (−160..0 dBFS, 0.625 dB/byte), and every
+//! display-range decision is made client-side on top of the byte stream.
+//! No more "weak signal invisible because the preset shipped floor=−100"
+//! foot-gun; no more server round-trip to zoom the spectrum.
 //!
-//! The contrast knobs (`floor_dbfs`, `ceil_dbfs`, `alpha`) all live here
-//! so the [`crate::fft::FftBlock`] upstream stays pure cf32 → cf32.
+//! Only `alpha` (per-bin EMA smoothing) remains a live-tunable block
+//! param — it's a real signal-processing choice, not a display one.
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -16,12 +20,15 @@ use crate::block::{
     Placement, PortSpec, PortType, ReconfigureScope, Work, MAX_PORTS,
 };
 
+/// Low end of the server quantisation window. Byte 0 maps to this.
+pub const SERVER_FLOOR_DBFS: f32 = -160.0;
+/// High end of the server quantisation window. Byte 255 maps to this.
+pub const SERVER_CEIL_DBFS: f32 = 0.0;
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct LogMagU8Params {
     pub size: usize,
-    pub floor_dbfs: f32,
-    pub ceil_dbfs: f32,
     /// Exponential smoothing factor in `(0, 1]`. 1.0 means "no smoothing"
     /// (each frame overwrites the previous); lower values hold noise
     /// floors steadier.
@@ -32,8 +39,6 @@ impl Default for LogMagU8Params {
     fn default() -> Self {
         Self {
             size: 4096,
-            floor_dbfs: -100.0,
-            ceil_dbfs: 0.0,
             alpha: 0.3,
         }
     }
@@ -41,24 +46,17 @@ impl Default for LogMagU8Params {
 
 pub struct LogMagU8 {
     params: LogMagU8Params,
-    /// Per-bin smoothed dBFS value. Initialised to `floor_dbfs` so the
-    /// first frame emits the colormap's black level instead of a spike.
+    /// Per-bin smoothed dBFS value. Initialised to the server floor so
+    /// the first frame emits the colormap's black level instead of a
+    /// spike.
     smoothed: Vec<f32>,
 }
 
 impl LogMagU8 {
     #[must_use]
     pub fn new(params: LogMagU8Params) -> Self {
-        let smoothed = vec![params.floor_dbfs; params.size];
+        let smoothed = vec![SERVER_FLOOR_DBFS; params.size];
         Self { params, smoothed }
-    }
-
-    pub fn set_floor_dbfs(&mut self, v: f32) {
-        self.params.floor_dbfs = v;
-    }
-
-    pub fn set_ceil_dbfs(&mut self, v: f32) {
-        self.params.ceil_dbfs = v;
     }
 
     pub fn set_alpha(&mut self, v: f32) {
@@ -98,30 +96,6 @@ impl Block for LogMagU8 {
                     reconfig_scope: ReconfigureScope::Downstream,
                 },
                 ParamSpec {
-                    key: "floor_dbfs",
-                    label: "Noise floor",
-                    kind: ParamKind::Range {
-                        min: -160.0,
-                        max: 0.0,
-                        step: 1.0,
-                        default: -100.0,
-                        unit: "dBFS",
-                    },
-                    reconfig_scope: ReconfigureScope::SelfBlock,
-                },
-                ParamSpec {
-                    key: "ceil_dbfs",
-                    label: "Ceiling",
-                    kind: ParamKind::Range {
-                        min: -60.0,
-                        max: 60.0,
-                        step: 1.0,
-                        default: 0.0,
-                        unit: "dBFS",
-                    },
-                    reconfig_scope: ReconfigureScope::SelfBlock,
-                },
-                ParamSpec {
                     key: "alpha",
                     label: "Smoothing",
                     kind: ParamKind::Range {
@@ -141,24 +115,17 @@ impl Block for LogMagU8 {
         Ok(())
     }
 
-    /// Live apply `floor_dbfs`, `ceil_dbfs`, and `alpha` — all three
-    /// are post-FFT display knobs that don't need a rebuild. `size`
-    /// reallocates the smoothing buffer so it still falls back to
-    /// block-rebuild. This is the hot path the spectrum auto-scale
-    /// hammers on every ~500ms when enabled.
+    /// Live apply `alpha` (EMA smoothing factor). `size` reallocates
+    /// the smoothing buffer so it still falls back to block-rebuild.
+    /// Display-range decisions (formerly floor/ceil) moved client-side,
+    /// so nothing else belongs here.
     fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
         let Some(obj) = delta.as_object() else {
             return Ok(false);
         };
-        const LIVE_KEYS: &[&str] = &["floor_dbfs", "ceil_dbfs", "alpha"];
+        const LIVE_KEYS: &[&str] = &["alpha"];
         if !obj.keys().all(|k| LIVE_KEYS.contains(&k.as_str())) {
             return Ok(false);
-        }
-        if let Some(v) = obj.get("floor_dbfs").and_then(|v| v.as_f64()) {
-            self.set_floor_dbfs(v as f32);
-        }
-        if let Some(v) = obj.get("ceil_dbfs").and_then(|v| v.as_f64()) {
-            self.set_ceil_dbfs(v as f32);
         }
         if let Some(v) = obj.get("alpha").and_then(|v| v.as_f64()) {
             self.set_alpha(v as f32);
@@ -208,8 +175,10 @@ impl Block for LogMagU8 {
             return Ok(Work::new());
         }
 
-        let floor = self.params.floor_dbfs;
-        let ceil = self.params.ceil_dbfs;
+        // Fixed wide quantisation window — client handles any visual
+        // zoom via a display-range remap on the byte stream.
+        let floor = SERVER_FLOOR_DBFS;
+        let ceil = SERVER_CEIL_DBFS;
         let alpha = self.params.alpha;
         let scale = 255.0 / (ceil - floor).max(1e-6);
         #[allow(clippy::cast_precision_loss)]
@@ -291,13 +260,11 @@ mod tests {
     #[test]
     fn peak_bin_hits_ceiling() {
         // Magnitude n in one bin → power = n² / n² = 1.0 → dBFS = 0 →
-        // with ceil=0, floor=-100, maps to 255.
+        // SERVER_CEIL_DBFS = 0, maps to 255.
         let n = 64;
         let params = LogMagU8Params {
             size: n,
             alpha: 1.0,
-            floor_dbfs: -100.0,
-            ceil_dbfs: 0.0,
         };
         let mut block = LogMagU8::new(params);
         let mut input = vec![Complex::new(0.0_f32, 0.0); n];
@@ -311,20 +278,18 @@ mod tests {
     }
 
     #[test]
-    fn midpoint_maps_to_half() {
-        // Power = 1e-5 → dBFS = -50. floor=-100 ceil=0 span=100. -50 is
-        // halfway → maps to ~128.
+    fn midpoint_of_server_window_maps_to_half() {
+        // Power = 1e-8 → dBFS = -80. SERVER window is [-160, 0] so -80
+        // is the exact halfway point → maps to ~128.
         let n = 64;
         let params = LogMagU8Params {
             size: n,
             alpha: 1.0,
-            floor_dbfs: -100.0,
-            ceil_dbfs: 0.0,
         };
         let mut block = LogMagU8::new(params);
-        // power = |s|² / n² = 1e-5 → |s|² = n² · 1e-5 → |s| = n · sqrt(1e-5).
+        // power = |s|² / n² = 1e-8 → |s|² = n² · 1e-8 → |s| = n · sqrt(1e-8).
         #[allow(clippy::cast_precision_loss)]
-        let mag = (n as f32) * (1e-5_f32).sqrt();
+        let mag = (n as f32) * (1e-8_f32).sqrt();
         let input = vec![Complex::new(mag, 0.0); n];
         let out = run(&mut block, &input);
         for b in out {
@@ -340,15 +305,13 @@ mod tests {
         let params = LogMagU8Params {
             size: n,
             alpha: 0.5,
-            floor_dbfs: -100.0,
-            ceil_dbfs: 0.0,
         };
         let mut block = LogMagU8::new(params);
         #[allow(clippy::cast_precision_loss)]
         let peak = Complex::new(n as f32, 0.0);
         let input = vec![peak; n];
         let mut last = 0_u8;
-        for _ in 0..20 {
+        for _ in 0..100 {
             let out = run(&mut block, &input);
             last = out[0];
         }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { bands, type BandEntry } from './bands';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
+  import { applyControl } from '$lib/control/dispatch';
 
   let openGroups = $state<Record<string, boolean>>({});
   function toggle(name: string) {
@@ -26,7 +27,7 @@
       const resp = await pipeline.loadPreset(e.preset);
       if (resp === null) return;
     }
-    await pipeline.patchSourceParams({ center_freq_hz: e.hz });
+    await applyControl('flow.src.center_freq_hz', e.hz);
   }
 
   let axes = $derived(currentAxes(pipeline));

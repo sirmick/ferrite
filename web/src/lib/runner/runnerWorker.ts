@@ -6,9 +6,18 @@
 // worth covering).
 
 import { FrameClient } from '../ws/client.js';
+import { initFrameDecoder } from '../ws/frame.js';
 import type { RunnerRequest } from './protocol.js';
 import { RunnerCore } from './runnerCore.js';
 import { createRuntime, splitFlowgraphForEnv } from './rustRuntime.js';
+
+// The frame decoder wasm is realm-local — the main thread initialises
+// its own on page load; the worker needs its own before the first
+// frame arrives on the subscribed WebSocket. Fire this once at worker
+// startup; `FrameClient.onMessage` will block decode attempts until
+// it resolves. (The core's unit tests construct `RunnerCore` directly
+// without going through this glue, so they stay WASM-free.)
+void initFrameDecoder();
 
 const core = new RunnerCore({
   createFrameClient: (wsUrl) =>

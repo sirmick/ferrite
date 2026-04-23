@@ -1,14 +1,13 @@
-// Main-thread store for the audio panel: volume, mute, and live
-// peak/RMS levels. Mirrors state into every attached `AudioWorkletNode`
-// (the worklet owns the gain multiplier and sends back batch stats),
-// and decays a peak-hold line so the meter's top indicator lingers
-// briefly at the loudest recent sample.
+// Main-thread store for the audio panel: tracks live peak/RMS and
+// relays volume/mute changes into every attached `AudioWorkletNode`.
 //
-// Lives on the main thread; the worklet's message port is the only
-// audio-thread contact. Survives preset reloads: when the browser
-// runtime tears down and recreates AudioWorkletNodes, the store keeps
-// the user's volume/mute settings and re-pushes them on attach.
+// Persisted state (volume, muted) lives in the client control store —
+// `applyControl('client.audio.volume', v)` persists AND calls
+// `setVolume` here to push the worklet side. On attach we seed the
+// new node from the store so a fresh AudioWorkletNode doesn't snap
+// back to unity gain after a preset reload.
 
+import { clientControls } from '$lib/control/clientStore.svelte';
 import type { AudioControlMessage, AudioLevelMessage } from './audioRingProcessor';
 
 /** Peak-hold decay rate, dB per second. Typical pro-audio meters are
@@ -21,10 +20,6 @@ const PEAK_HOLD_DECAY_DB_PER_SEC = 20;
 const SILENCE_FLOOR_LINEAR = 1e-4;
 
 export class AudioPanelStore {
-  /** User volume knob. 1.0 = unity gain, 2.0 = +6 dB, 0 = silent. */
-  volume = $state(1.0);
-  /** Separate mute toggle so users can unmute back to their chosen volume. */
-  muted = $state(false);
   /** Most recent peak reported by the worklet, linear. */
   peak = $state(0);
   /** Most recent RMS, linear. */
@@ -39,15 +34,18 @@ export class AudioPanelStore {
   private decayTimer: ReturnType<typeof setInterval> | undefined;
   private lastDecayAt = 0;
 
-  /** Attach a worklet node. The store immediately pushes current
-   *  volume/muted and subscribes to level updates. Idempotent per node. */
+  /** Attach a worklet node. The store seeds it from the client control
+   *  store's current volume/muted (so preset reloads don't snap gain
+   *  back to unity) and starts the level-message listener. Idempotent
+   *  per node. */
   attach(node: AudioWorkletNode): void {
     if (this.nodes.has(node)) return;
     this.nodes.add(node);
     this.attached = this.nodes.size > 0;
-    // Push the current state so a freshly-created node doesn't start
-    // at unity when the user had it at 50%.
-    this.sendTo(node, { volume: this.volume, muted: this.muted });
+    this.sendTo(node, {
+      volume: clientControls.get('client.audio.volume'),
+      muted: clientControls.get('client.audio.muted'),
+    });
     node.port.onmessage = (ev: MessageEvent) => {
       const msg = ev.data as AudioLevelMessage | undefined;
       if (!msg || msg.type !== 'level') return;
@@ -73,17 +71,17 @@ export class AudioPanelStore {
     }
   }
 
-  /** Slider writes land here. Pushes to every attached node. */
+  /** Push a volume change to every attached worklet. Called by the
+   *  dispatcher for `client.audio.volume` — the store no longer owns
+   *  the persisted value (that lives in `clientControls`). */
   setVolume(v: number): void {
     const clamped = Math.max(0, Math.min(2, v));
-    if (clamped === this.volume) return;
-    this.volume = clamped;
     this.broadcast({ volume: clamped });
   }
 
+  /** Push a mute toggle to every attached worklet. Called by the
+   *  dispatcher for `client.audio.muted`. */
   setMuted(m: boolean): void {
-    if (m === this.muted) return;
-    this.muted = m;
     this.broadcast({ muted: m });
   }
 

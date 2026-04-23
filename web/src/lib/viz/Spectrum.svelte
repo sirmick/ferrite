@@ -8,6 +8,8 @@
   import Nixie from '$lib/controls/Nixie.svelte';
   import LiveControls from '$lib/controls/LiveControls.svelte';
   import FftControls from './FftControls.svelte';
+  import { applyControl } from '$lib/control/dispatch';
+  import { clientControls } from '$lib/control/clientStore.svelte';
 
   interface Props {
     client: FrameClient;
@@ -63,9 +65,12 @@
   // rate for exploring the band.
   const WHEEL_STEP_HZ = 10_000;
 
-  let fade = $state(true);
-  let maxHold = $state(false);
-  let autoScale = $state(false);
+  // Display toggles live in the client control store so they persist
+  // across reloads and stay read/write through the same `applyControl`
+  // dispatch path every other knob uses.
+  let fade = $derived(clientControls.get('client.spectrum.fade'));
+  let maxHold = $derived(clientControls.get('client.spectrum.maxHold'));
+  let autoScale = $derived(clientControls.get('client.spectrum.autoScale'));
 
   // Sample-rate dropdown by the nixies: preset-curated short list.
   // Software sources (sine, file) have no advertised rate ladder, so
@@ -95,10 +100,10 @@
   function onRateChange(ev: Event) {
     const v = Number((ev.target as HTMLSelectElement).value);
     if (!Number.isFinite(v) || v === axes?.sample_rate_hz) return;
-    // Couple BW to Fs via the preset's IF-filter ladder when the driver
-    // has one. Drivers with no ladder (RTL-SDR, HackRF) leave BW alone —
-    // `bandwidthForRate` returns null and we omit the key from the
-    // patch so the driver keeps its current behaviour.
+    // Atomic two-key write: Fs + BW must land in one patch so the
+    // server sees both in the same reconfigure pass (driver-specific
+    // IF filter ladder on SDRplay etc.). `patchSourceParams` is the
+    // escape hatch from `applyControl` for multi-key flow writes.
     const caps = pipeline.sourceCaps;
     const patch: Record<string, unknown> = { sample_rate_hz: v };
     if (caps?.kind === 'hardware') {
@@ -110,7 +115,7 @@
 
   function commitCenter(hz: number) {
     if (axes && hz !== axes.center_freq_hz) {
-      void pipeline.patchSourceParams({ center_freq_hz: hz });
+      void applyControl('flow.src.center_freq_hz', hz);
     }
   }
 
@@ -124,7 +129,7 @@
     const half = axes.sample_rate_hz / 2;
     const clamped = Math.max(-half, Math.min(half, shift));
     if (clamped !== vfoShiftHz) {
-      void pipeline.setBlockParam(vfoBlock.id, 'freq_shift_hz', clamped);
+      void applyControl(`flow.${vfoBlock.id}.freq_shift_hz`, clamped);
     }
   }
 
@@ -132,9 +137,7 @@
     if (!axes) return;
     ev.preventDefault();
     const sign = ev.deltaY > 0 ? -1 : 1;
-    void pipeline.patchSourceParams({
-      center_freq_hz: axes.center_freq_hz + sign * WHEEL_STEP_HZ,
-    });
+    void applyControl('flow.src.center_freq_hz', axes.center_freq_hz + sign * WHEEL_STEP_HZ);
   }
 
   // Click = VFO; double-click = SDR centre. Native `click` fires twice
@@ -157,7 +160,7 @@
     // block there's nothing for the single-click to do that dblclick
     // wouldn't also do — short-circuit and centre immediately.
     if (!vfoBlock || !axes) {
-      void pipeline.patchSourceParams({ center_freq_hz: Math.round(f) });
+      void applyControl('flow.src.center_freq_hz', Math.round(f));
       return;
     }
     if (pendingSingle !== undefined) clearTimeout(pendingSingle);
@@ -175,7 +178,7 @@
     const f = freqAtPointer(ev);
     if (f === undefined) return;
     // Centre freq is on the live-apply whitelist — hot retune, no rebuild.
-    void pipeline.patchSourceParams({ center_freq_hz: Math.round(f) });
+    void applyControl('flow.src.center_freq_hz', Math.round(f));
   }
 
   onMount(() => {
@@ -200,20 +203,14 @@
     return unsub;
   });
 
-  // Display-axis and flags propagate to the renderer on every change.
-  // Floor/ceil track the live logmag block's params so adjusting them
-  // via the FFT controls strip updates the y-axis labels in lockstep.
-  const DEFAULT_FLOOR_DBFS = -100;
-  const DEFAULT_CEIL_DBFS = 0;
-  let logmagValues = $derived(
-    (pipeline.blocks.logmag?.values as Record<string, unknown> | null | undefined) ?? null,
-  );
-  let floorDbfs = $derived(
-    typeof logmagValues?.floor_dbfs === 'number' ? logmagValues.floor_dbfs : DEFAULT_FLOOR_DBFS,
-  );
-  let ceilDbfs = $derived(
-    typeof logmagValues?.ceil_dbfs === 'number' ? logmagValues.ceil_dbfs : DEFAULT_CEIL_DBFS,
-  );
+  // Server now quantises to a fixed [−160, 0] dBFS window (see
+  // LogMagU8::SERVER_FLOOR_DBFS / _CEIL_DBFS); byte 0 = −160 dBFS,
+  // byte 255 = 0 dBFS. That's the renderer's absolute reference for
+  // unmapping bytes to dB. Any "display zoom" sits on top via the
+  // display-range override (`client.spectrum.displayFloorDbfs`/
+  // `displayCeilDbfs`) — see the auto-scale effect below.
+  const SERVER_FLOOR_DBFS = -160;
+  const SERVER_CEIL_DBFS = 0;
   $effect(() => {
     if (!renderer) return;
     if (!axes) {
@@ -223,9 +220,20 @@
     renderer.setAxes({
       centerHz: axes.center_freq_hz,
       rateHz: axes.sample_rate_hz,
-      floorDbfs,
-      ceilDbfs,
+      floorDbfs: SERVER_FLOOR_DBFS,
+      ceilDbfs: SERVER_CEIL_DBFS,
     });
+  });
+
+  // The display range that actually drives the y-axis labels and the
+  // byte→pixel LUT. Auto-scale writes here; manual overrides (not yet
+  // UI-exposed as inputs) can be added later. Kept independent from
+  // the fixed server window.
+  let displayFloorDbfs = $derived(clientControls.get('client.spectrum.displayFloorDbfs'));
+  let displayCeilDbfs = $derived(clientControls.get('client.spectrum.displayCeilDbfs'));
+  $effect(() => {
+    if (!renderer) return;
+    renderer.setDisplayRange({ floorDbfs: displayFloorDbfs, ceilDbfs: displayCeilDbfs });
   });
 
   $effect(() => {
@@ -233,15 +241,14 @@
   });
 
   // Auto-scale: pure client-side display stretch. Chases the signal's
-  // running p10/p99 and hands the renderer a tighter display range —
-  // server-side logmag quantisation is untouched, so no round-trip,
-  // no rebuild, no judder. The tradeoff is coarser byte resolution
-  // across the narrower window (256 steps spread over less dB), but
-  // for browsing that's invisible.
+  // running p10/p99 and writes back into the client store's
+  // `displayFloorDbfs`/`displayCeilDbfs` so the renderer sees it via
+  // the $derived reads above. Persists across reloads for free.
   const AUTO_SCALE_ALPHA = 0.08; // ~0.5s response at 30 Hz FFT
   const AUTO_FLOOR_MARGIN_DB = 5;
   const AUTO_CEIL_HEADROOM_DB = 10;
   const AUTO_MIN_WINDOW_DB = 20;
+  const AUTO_COMMIT_HYSTERESIS_DB = 0.5; // store writes only on meaningful moves
 
   let autoFloorEma: number | undefined;
   let autoCeilEma: number | undefined;
@@ -250,17 +257,13 @@
     if (!renderer) return;
     if (!autoScale) {
       renderer.onStats(() => {});
-      renderer.setDisplayRange(undefined);
       autoFloorEma = undefined;
       autoCeilEma = undefined;
       return;
     }
-    const getFloor = () => floorDbfs;
-    const getCeil = () => ceilDbfs;
     renderer.onStats((stats) => {
-      const f = getFloor();
-      const c = getCeil();
-      if (c <= f) return;
+      const f = SERVER_FLOOR_DBFS;
+      const c = SERVER_CEIL_DBFS;
       const toDbfs = (byte: number) => f + (byte / 255) * (c - f);
       const p10Dbfs = toDbfs(stats.p10);
       const p99Dbfs = toDbfs(stats.p99);
@@ -274,30 +277,28 @@
         autoCeilEma === undefined
           ? ceilTarget
           : autoCeilEma * (1 - AUTO_SCALE_ALPHA) + ceilTarget * AUTO_SCALE_ALPHA;
-      let displayFloor = autoFloorEma;
-      let displayCeil = autoCeilEma;
-      // Guard against a pathologically narrow window (all p10≈p99 on a
-      // silent frame) — force at least 20 dB between the bars so the
-      // scale reads usefully instead of snapping to a knife-edge.
-      if (displayCeil - displayFloor < AUTO_MIN_WINDOW_DB) {
-        const mid = (displayFloor + displayCeil) / 2;
-        displayFloor = mid - AUTO_MIN_WINDOW_DB / 2;
-        displayCeil = mid + AUTO_MIN_WINDOW_DB / 2;
+      let nextFloor = autoFloorEma;
+      let nextCeil = autoCeilEma;
+      if (nextCeil - nextFloor < AUTO_MIN_WINDOW_DB) {
+        const mid = (nextFloor + nextCeil) / 2;
+        nextFloor = mid - AUTO_MIN_WINDOW_DB / 2;
+        nextCeil = mid + AUTO_MIN_WINDOW_DB / 2;
       }
-      // Don't clamp the display floor back into the server's
-      // quantisation window: typical signals have p10 near the server
-      // floor, so `p10 - margin` lands just below, and a clamp would
-      // pin the display floor to the server floor permanently — the
-      // floor would appear stuck. Letting it drift a few dB below is
-      // harmless (bytes saturate at 0 either way); the ceil still
-      // clamps because pushing it past the server ceil is genuinely
-      // wasted pixels.
-      displayCeil = Math.min(displayCeil, c);
-      renderer?.setDisplayRange({ floorDbfs: displayFloor, ceilDbfs: displayCeil });
+      nextCeil = Math.min(nextCeil, c);
+      // Skip writes that would change the stored value by less than
+      // the meter's noise floor — `applyControl` persists to localStorage
+      // on every set, and driving it per-frame is wasteful.
+      const curF = clientControls.get('client.spectrum.displayFloorDbfs');
+      const curC = clientControls.get('client.spectrum.displayCeilDbfs');
+      if (Math.abs(nextFloor - curF) >= AUTO_COMMIT_HYSTERESIS_DB) {
+        void applyControl('client.spectrum.displayFloorDbfs', Math.round(nextFloor * 10) / 10);
+      }
+      if (Math.abs(nextCeil - curC) >= AUTO_COMMIT_HYSTERESIS_DB) {
+        void applyControl('client.spectrum.displayCeilDbfs', Math.round(nextCeil * 10) / 10);
+      }
     });
     return () => {
       renderer?.onStats(() => {});
-      renderer?.setDisplayRange(undefined);
     };
   });
 
@@ -354,11 +355,27 @@
       <div class="mx-1 h-4 border-l border-slate-800"></div>
 
       <label class="flex items-center gap-1" title="fade trail of recent traces">
-        <input type="checkbox" bind:checked={fade} />
+        <input
+          type="checkbox"
+          checked={fade}
+          onchange={(e) =>
+            void applyControl(
+              'client.spectrum.fade',
+              (e.currentTarget as HTMLInputElement).checked,
+            )}
+        />
         <span>fade</span>
       </label>
       <label class="flex items-center gap-1" title="running max-hold trace">
-        <input type="checkbox" bind:checked={maxHold} />
+        <input
+          type="checkbox"
+          checked={maxHold}
+          onchange={(e) =>
+            void applyControl(
+              'client.spectrum.maxHold',
+              (e.currentTarget as HTMLInputElement).checked,
+            )}
+        />
         <span>max hold</span>
       </label>
       {#if maxHold}
@@ -374,7 +391,15 @@
         class="flex items-center gap-1"
         title="auto-track floor/ceil to the signal (writes logmag.floor_dbfs/ceil_dbfs)"
       >
-        <input type="checkbox" bind:checked={autoScale} />
+        <input
+          type="checkbox"
+          checked={autoScale}
+          onchange={(e) =>
+            void applyControl(
+              'client.spectrum.autoScale',
+              (e.currentTarget as HTMLInputElement).checked,
+            )}
+        />
         <span>auto</span>
       </label>
     </div>

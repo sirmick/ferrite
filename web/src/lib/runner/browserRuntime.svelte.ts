@@ -166,6 +166,22 @@ class BrowserRuntime {
     this.enqueue(() => this.reload(doc, wsUrl));
   }
 
+  /** Apply a params delta to a browser-placed block. Routes through
+   *  the worker's Rust runtime via `FlowgraphRunner.reconfigureBlock`.
+   *  Surface-level wrapper so `applyControl(\`browser.${id}.${key}\`, v)`
+   *  has a single destination regardless of which block. Errors surface
+   *  into the logs store; caller gets a fulfilled void. */
+  async reconfigureBlock(blockId: string, delta: Record<string, unknown>): Promise<void> {
+    const runner = this.runner;
+    if (!runner) return;
+    try {
+      await runner.reconfigureBlock(blockId, delta);
+    } catch (err) {
+      const msg = errorMessage(err);
+      logs.push('client', 'error', `browser-block reconfigure ${blockId}: ${msg}`);
+    }
+  }
+
   /** Called by the page when `pipeline.status` changes. Idempotent.
    *
    *  Stores the desired state so a later reload can auto-start if the

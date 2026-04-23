@@ -10,6 +10,14 @@
 
   import { audioPanel, linearToDbfs } from '$lib/audio/audioPanel.svelte';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
+  import { clientControls } from '$lib/control/clientStore.svelte';
+  import { applyControl } from '$lib/control/dispatch';
+
+  // Persisted playback knobs live in the client store so they survive
+  // preset reloads and page refreshes. Peak/RMS/peakHold still come
+  // from `audioPanel` because they're worklet-driven, not user state.
+  let volume = $derived(clientControls.get('client.audio.volume'));
+  let muted = $derived(clientControls.get('client.audio.muted'));
 
   // Scale the linear [0, 1] peak/rms to a 0..1 meter fraction over a
   // -60..0 dBFS range. Clipped peaks saturate the right side of the
@@ -35,12 +43,12 @@
   //   > -6: red (approaching clip)
   let peakColour = $derived(peakDb > -6 ? '#f87171' : peakDb > -18 ? '#facc15' : '#34d399');
 
-  let volumePct = $derived(Math.round(audioPanel.volume * 100));
+  let volumePct = $derived(Math.round(volume * 100));
 
   function onVolume(ev: Event) {
     const v = Number((ev.target as HTMLInputElement).value);
     if (!Number.isFinite(v)) return;
-    audioPanel.setVolume(v / 100);
+    void applyControl('client.audio.volume', v / 100);
   }
 </script>
 
@@ -57,7 +65,7 @@
     <label class="flex flex-col gap-1">
       <div class="flex items-baseline justify-between">
         <span class="text-[color:var(--color-muted)]">volume</span>
-        <span class="font-mono text-slate-300">{audioPanel.muted ? 'muted' : `${volumePct}%`}</span>
+        <span class="font-mono text-slate-300">{muted ? 'muted' : `${volumePct}%`}</span>
       </div>
       <input
         type="range"
@@ -66,14 +74,15 @@
         step="1"
         value={volumePct}
         oninput={onVolume}
-        disabled={audioPanel.muted}
+        disabled={muted}
         class="w-full"
       />
       <label class="flex items-center gap-1">
         <input
           type="checkbox"
-          checked={audioPanel.muted}
-          onchange={(e) => audioPanel.setMuted((e.currentTarget as HTMLInputElement).checked)}
+          checked={muted}
+          onchange={(e) =>
+            void applyControl('client.audio.muted', (e.currentTarget as HTMLInputElement).checked)}
         />
         <span>mute</span>
       </label>

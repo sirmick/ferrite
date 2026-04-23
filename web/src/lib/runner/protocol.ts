@@ -24,7 +24,20 @@ export type RunnerRequest =
     }
   | { readonly id: number; readonly kind: 'start' }
   | { readonly id: number; readonly kind: 'stop' }
-  | { readonly id: number; readonly kind: 'state' };
+  | { readonly id: number; readonly kind: 'state' }
+  | {
+      /** Apply a partial params delta to a single block inside the
+       *  browser-side runtime. Routes through Rust
+       *  `RuntimeHandle.live_reconfigure_block`, so block-scoped hot
+       *  params (e.g. `FmDemod.max_deviation_hz`) take effect with no
+       *  full-graph reload. Falls back to a block-scoped rebuild when
+       *  the block's `apply_live_params` returns false — exactly the
+       *  same semantics the server has for its half. */
+      readonly id: number;
+      readonly kind: 'reconfigureBlock';
+      readonly blockId: string;
+      readonly delta: Record<string, unknown>;
+    };
 
 /**
  * Result of a successful `load`: every instantiated block id the graph
@@ -45,4 +58,5 @@ export type RunnerResponse =
       readonly kind: 'state';
       readonly data: { readonly state: RuntimeState };
     }
+  | { readonly id: number; readonly ok: true; readonly kind: 'reconfigureBlock' }
   | { readonly id: number; readonly ok: false; readonly error: string };

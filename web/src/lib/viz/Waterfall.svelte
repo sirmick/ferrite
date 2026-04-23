@@ -4,6 +4,7 @@
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
+  import { applyControl } from '$lib/control/dispatch';
 
   interface Props {
     client: FrameClient;
@@ -63,7 +64,7 @@
     dragging = false;
     const f = pointerFreq(ev.clientX);
     dragX = null;
-    if (f !== null) void pipeline.patchSourceParams({ center_freq_hz: Math.round(f) });
+    if (f !== null) void applyControl('flow.src.center_freq_hz', Math.round(f));
   }
 
   function onPointerCancel(ev: PointerEvent) {
