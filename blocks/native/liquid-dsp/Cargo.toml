@@ -1,0 +1,27 @@
+[package]
+name        = "ferrite-liquid-dsp"
+version     = "0.0.1"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+description = "Vendored liquid-dsp + safe Rust wrappers, dual-compile (native + WASM)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# wasm-bindgen is gated on the `wasm` feature so the native build
+# stays free of wasm-only deps. Mirrors `ferrite-hello-vendor` and
+# `ferrite-blocks`.
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen"]
+
+[build-dependencies]
+cc      = "1.0"
+bindgen = "0.70"

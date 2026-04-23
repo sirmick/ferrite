@@ -46,6 +46,7 @@ int    fprintf(FILE *stream, const char *fmt, ...);
 int    snprintf(char *buf, size_t cap, const char *fmt, ...);
 int    sprintf(char *buf, const char *fmt, ...);
 int    vfprintf(FILE *stream, const char *fmt, va_list ap);
+int    vprintf(const char *fmt, va_list ap);
 int    vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap);
 int    fputs(const char *s, FILE *stream);
 int    fputc(int c, FILE *stream);

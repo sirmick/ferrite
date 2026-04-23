@@ -30,6 +30,7 @@ FILE *stdin  = (FILE *)&__ferrite_stub_stdin_obj;
 int printf(const char *fmt, ...) { (void)fmt; return 0; }
 int fprintf(FILE *s, const char *fmt, ...) { (void)s; (void)fmt; return 0; }
 int vfprintf(FILE *s, const char *fmt, va_list ap) { (void)s; (void)fmt; (void)ap; return 0; }
+int vprintf(const char *fmt, va_list ap) { (void)fmt; (void)ap; return 0; }
 int fputs(const char *s, FILE *st) { (void)s; (void)st; return 0; }
 int fputc(int c, FILE *st) { (void)st; return c; }
 int putchar(int c) { return c; }

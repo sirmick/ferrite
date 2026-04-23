@@ -5,6 +5,7 @@ members = [
     "blocks",
     "blocks-macros",
     "blocks/native/hello",
+    "blocks/native/liquid-dsp",
     "runtime",
 ]
 
