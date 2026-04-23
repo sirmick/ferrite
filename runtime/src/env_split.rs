@@ -297,20 +297,28 @@ fn resolve_placements(
     // Pass 1: seed from explicit `placement` + hard-pinned BlockSpec.
     // Unresolved `Placement::Either` (no explicit) stays as `None` and
     // gets filled in by neighbour propagation below.
+    //
+    // Spec lookup is allowed to fail *only* when the block carries an
+    // explicit `placement` — the doc is self-describing in that case
+    // and the block will either be stripped (wrong env) or fail at
+    // instantiate time with a clearer error. This is load-bearing for
+    // the browser-side WASM split, which runs against a registry that
+    // deliberately omits NativeOnly blocks like `SoapySource`; without
+    // this escape hatch every `placement: "node"` block would fail
+    // validation before the split had a chance to drop it.
     let mut out: BTreeMap<String, Option<Environment>> = BTreeMap::new();
     for (id, decl) in &doc.blocks {
-        let spec = registry
-            .get(&decl.type_name)
-            .ok_or_else(|| SplitError::UnknownType {
-                id: id.clone(),
-                type_name: decl.type_name.clone(),
-            })?;
-        let resolved = match (decl.placement, spec.placement) {
-            (Some(e), Placement::Either) => Some(e),
-            (Some(Environment::Node) | None, Placement::NativeOnly) => Some(Environment::Node),
-            (Some(Environment::Browser) | None, Placement::WasmOnly) => Some(Environment::Browser),
-            (None, Placement::Either) => None,
-            (Some(explicit), block_ph) => {
+        let spec = registry.get(&decl.type_name);
+        let resolved = match (decl.placement, spec.map(|s| s.placement)) {
+            (Some(e), Some(Placement::Either)) => Some(e),
+            (Some(Environment::Node) | None, Some(Placement::NativeOnly)) => {
+                Some(Environment::Node)
+            }
+            (Some(Environment::Browser) | None, Some(Placement::WasmOnly)) => {
+                Some(Environment::Browser)
+            }
+            (None, Some(Placement::Either)) => None,
+            (Some(explicit), Some(block_ph)) => {
                 let required = match block_ph {
                     Placement::NativeOnly => Environment::Node,
                     Placement::WasmOnly => Environment::Browser,
@@ -322,6 +330,14 @@ fn resolve_placements(
                     explicit,
                     required,
                 });
+            }
+            // Unknown type — trust explicit placement, or fail cleanly.
+            (Some(e), None) => Some(e),
+            (None, None) => {
+                return Err(SplitError::UnknownType {
+                    id: id.clone(),
+                    type_name: decl.type_name.clone(),
+                })
             }
         };
         out.insert(id.clone(), resolved);

@@ -43,12 +43,25 @@
   let ceilDb = $derived(numValue(logmagBlock, 'ceil_dbfs', 0));
   let alpha = $derived(numValue(logmagBlock, 'alpha', 0.3));
 
-  // Keeping `fft.size` and `logmag.size` in sync is a UI concern —
-  // the blocks don't enforce it themselves. The size knob is a
-  // single control here and fans out to both blocks.
+  // Both `fft.size` and `logmag.size` must change together — logmag
+  // expects the fft's output bin count, so mid-flight they can't
+  // disagree even for one tick. Two sequential `setBlockParam` calls
+  // rebuild the blocks out of phase and the display ends up empty or
+  // malformed; patchFlowgraph swaps the whole doc atomically so both
+  // blocks see the new size at the same moment.
   async function commitSize(v: number) {
-    if (fftBlock) await pipeline.setBlockParam(FFT_ID, 'size', v);
-    if (logmagBlock) await pipeline.setBlockParam(LOGMAG_ID, 'size', v);
+    const doc = pipeline.flowgraph;
+    if (!doc) return;
+    const nextBlocks: Record<string, unknown> = {};
+    for (const [id, block] of Object.entries(doc.blocks ?? {})) {
+      if (id === FFT_ID || id === LOGMAG_ID) {
+        const p = (block.params ?? {}) as Record<string, unknown>;
+        nextBlocks[id] = { ...block, params: { ...p, size: v } };
+      } else {
+        nextBlocks[id] = block;
+      }
+    }
+    await pipeline.patchFlowgraph({ ...doc, blocks: nextBlocks as typeof doc.blocks });
   }
 </script>
 

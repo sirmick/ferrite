@@ -24,3 +24,50 @@ export interface FlowgraphDoc {
   readonly blocks?: Readonly<Record<string, BlockInstanceDecl>>;
   readonly wires?: ReadonlyArray<Wire>;
 }
+
+/** Canonical `Source` placeholder id + sentinel type. Must match the
+ *  Rust constants in `compose.rs`. */
+export const SOURCE_ID = 'src';
+export const SOURCE_SENTINEL_TYPE = 'Source';
+
+/** Mirror of Rust `compose_source` for client-side callers. Replaces
+ *  the `src` placeholder's `"Source"` type with the active source's
+ *  real type, merges params (source wins on collisions), and
+ *  propagates `sample_rate_hz` into any block that declares
+ *  `input_rate_hz`. Used by the browser runtime, which needs a
+ *  self-contained doc the wasm runtime can actually instantiate —
+ *  `GET /api/flowgraph` returns the preset only. */
+export function composeSource(
+  preset: FlowgraphDoc,
+  source: { type: string; params: Record<string, unknown> },
+): FlowgraphDoc {
+  const srcBlocks: Record<string, BlockInstanceDecl> = {};
+  for (const [k, v] of Object.entries(preset.blocks ?? {})) srcBlocks[k] = v;
+  const placeholder = srcBlocks[SOURCE_ID];
+  if (!placeholder || placeholder.type !== SOURCE_SENTINEL_TYPE) {
+    // Preset has no placeholder — caller handed us something already
+    // composed, or a bareband preset. Either way, nothing to do.
+    return preset;
+  }
+  const hints = (placeholder.params ?? {}) as Record<string, unknown>;
+  const merged: Record<string, unknown> = { ...hints, ...source.params };
+  srcBlocks[SOURCE_ID] = {
+    type: source.type,
+    placement: placeholder.placement,
+    params: merged,
+  };
+  const rate = merged.sample_rate_hz;
+  if (typeof rate === 'number' && rate > 0) {
+    for (const [id, block] of Object.entries(srcBlocks)) {
+      if (id === SOURCE_ID) continue;
+      const p = block.params;
+      if (p && typeof p === 'object' && 'input_rate_hz' in p) {
+        srcBlocks[id] = {
+          ...block,
+          params: { ...p, input_rate_hz: rate },
+        };
+      }
+    }
+  }
+  return { ...preset, blocks: srcBlocks };
+}

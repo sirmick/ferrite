@@ -269,12 +269,21 @@ impl AppState {
     /// - `id == "src"` — merge delta into `SourceConfig.params` and
     ///   delegate to [`patch_source`], which picks hot-apply vs rebuild.
     /// - any other id — merge delta into `preset_doc.blocks[id].params`
-    ///   and route through [`patch_flowgraph`].
+    ///   and, if the pipeline is running, try the block's
+    ///   `apply_live_params` hot path via
+    ///   [`PresetMount::live_reconfigure_block`]. Only fall back to a
+    ///   full [`patch_flowgraph`] when the hot path can't apply.
     ///
     /// The delta is a JSON object; keys present replace, keys absent
     /// stay. Returns the same reconfigure plan shape as the other patch
     /// paths so `POST /api/pipeline/blocks/{id}/params` can share its
     /// response type.
+    ///
+    /// The hot-path branch for non-source blocks is what keeps
+    /// interactive controls from rebuilding the world on every tick —
+    /// e.g. channelizer `freq_shift_hz` is declared `SelfBlock`, so
+    /// dragging the VFO retunes the baseband-shift without restarting
+    /// the source.
     pub async fn apply_block_params(
         &self,
         id: &str,
@@ -293,6 +302,63 @@ impl AppState {
             return self.patch_source(merged).await;
         }
 
+        // Is this block on the browser half? Cross-env presets place
+        // demod/decim/audio-sink on `placement: "browser"` — `env_split`
+        // strips them from the node runtime, so `live_reconfigure_block`
+        // against the node half would always error with "no block X in
+        // runtime". For browser-placed blocks we just mirror the delta
+        // into preset_doc and return a no-op plan; the browser runtime
+        // picks up the change the next time it's loaded with a fresh
+        // composed doc. (Live-update of browser blocks without a reload
+        // is a follow-up — it needs a new reconfigureBlock message on
+        // the runner protocol.)
+        let is_browser_block = self
+            .inner
+            .preset_doc
+            .read()
+            .await
+            .blocks
+            .get(id)
+            .and_then(|b| b.placement)
+            .map(|p| matches!(p, ferrite_runtime::Environment::Browser))
+            .unwrap_or(false);
+
+        // Fast path: when the pipeline is running and the block lives
+        // on the node side, try the block's live update. The runtime's
+        // live_reconfigure_block internally falls back to a block-scoped
+        // reconfigure_block on Ok(false) from apply_live_params, so a
+        // non-live key still lands correctly — we only need
+        // patch_flowgraph when there's no running pipeline at all.
+        if !is_browser_block {
+            let pipeline = self.inner.pipeline.lock().await;
+            if let Some(mount) = pipeline.as_ref() {
+                let plan = mount
+                    .live_reconfigure_block(id, serde_json::Value::Object(delta_obj.clone()))
+                    .await?;
+                drop(pipeline);
+                // Mirror the delta back into preset_doc so subsequent
+                // reads of /api/flowgraph and list_blocks see the new
+                // values — live_reconfigure_block updates the runtime's
+                // applied_doc, but the canonical preset_doc is AppState's.
+                let mut new_doc = self.inner.preset_doc.write().await;
+                let block = new_doc
+                    .blocks
+                    .get_mut(id)
+                    .ok_or_else(|| anyhow!("no block {id:?} in preset"))?;
+                let mut merged = match block.params.take() {
+                    Some(serde_json::Value::Object(m)) => m,
+                    _ => serde_json::Map::new(),
+                };
+                for (k, v) in delta_obj {
+                    merged.insert(k, v);
+                }
+                block.params = Some(serde_json::Value::Object(merged));
+                return Ok(Some(plan));
+            }
+        }
+
+        // Pipeline stopped — just stage the edit in the preset doc; the
+        // next start() will compose with the new value.
         let mut new_doc = self.inner.preset_doc.read().await.clone();
         let block = new_doc
             .blocks

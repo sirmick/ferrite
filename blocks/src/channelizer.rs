@@ -38,6 +38,16 @@ use crate::block::{
 };
 
 /// Construction-time params.
+///
+/// Two ways to specify rate. Pick one:
+/// - **Legacy**: set `factor` directly. Output rate = input / factor.
+/// - **Rate-target**: set `output_rate_hz` and let the block derive
+///   `factor = round(input_rate_hz / output_rate_hz)`. Used by presets
+///   that want a stable output rate (e.g. 240 kHz into an FM demod)
+///   regardless of the source's current sample rate — which `compose`
+///   pushes into `input_rate_hz` at runtime. When `output_rate_hz` is
+///   set, `num_taps` and `cutoff_normalized` are auto-derived from
+///   the computed factor; preset authors should leave them out.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct ChannelizerParams {
@@ -47,7 +57,13 @@ pub struct ChannelizerParams {
     /// centre frequency. Positive values tune to RF above centre.
     pub freq_shift_hz: f64,
     /// Integer decimation factor M ≥ 1. Output rate = input / M.
+    /// Ignored when `output_rate_hz` is set.
     pub factor: usize,
+    /// Target output sample rate, Hz. When set and positive, the block
+    /// computes `factor = round(input_rate_hz / output_rate_hz)` and
+    /// overrides the raw `factor`, `num_taps`, and `cutoff_normalized`
+    /// fields. `None` leaves legacy behaviour intact.
+    pub output_rate_hz: Option<f64>,
     /// FIR length. Default `8·M+1`, matching `DecimatorParams`.
     pub num_taps: usize,
     /// LPF cutoff as a fraction of the **input** rate, 0 < fc < 0.5.
@@ -69,8 +85,37 @@ impl ChannelizerParams {
             input_rate_hz,
             freq_shift_hz,
             factor,
+            output_rate_hz: None,
             num_taps: 8 * factor + 1,
             cutoff_normalized,
+        }
+    }
+
+    /// Resolve the rate-target mode into concrete values. Returns the
+    /// params as-is when `output_rate_hz` is unset or invalid. When
+    /// set, derives `factor` from `input_rate_hz / output_rate_hz`
+    /// (clamped to ≥ 1) and rewrites `num_taps` + `cutoff_normalized`
+    /// to match the new factor, so the FIR stays well-matched across
+    /// source-rate changes.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    pub fn resolve(self) -> Self {
+        let Some(out) = self.output_rate_hz else {
+            return self;
+        };
+        if !(out > 0.0 && self.input_rate_hz > 0.0) {
+            return self;
+        }
+        let factor = ((self.input_rate_hz / out).round() as usize).max(1);
+        Self {
+            factor,
+            num_taps: 8 * factor + 1,
+            cutoff_normalized: 0.4 / factor as f32,
+            ..self
         }
     }
 }
@@ -106,6 +151,9 @@ impl Channelizer {
     /// `factor == 0`, `num_taps < 3`, non-positive input rate, or an
     /// out-of-range cutoff.
     pub fn new(params: ChannelizerParams) -> Result<Self> {
+        // Collapse rate-target mode down to concrete factor + FIR sizing.
+        // No-op for legacy presets that set `factor` directly.
+        let params = params.resolve();
         if params.factor == 0 {
             bail!("channelizer factor must be >= 1");
         }
@@ -221,6 +269,21 @@ impl Block for Channelizer {
                     reconfig_scope: ReconfigureScope::Downstream,
                 },
                 ParamSpec {
+                    key: "output_rate_hz",
+                    label: "Output rate",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 10.0e6,
+                        step: 1.0,
+                        default: 0.0,
+                        unit: "Hz",
+                    },
+                    // When set, auto-derives `factor` (and FIR) from the
+                    // ratio to `input_rate_hz`. Same downstream scope as
+                    // `factor` — output rate change triggers a tear-down.
+                    reconfig_scope: ReconfigureScope::Downstream,
+                },
+                ParamSpec {
                     key: "num_taps",
                     label: "FIR length",
                     kind: ParamKind::Range {
@@ -265,6 +328,24 @@ impl Block for Channelizer {
             }
         }
         Ok(())
+    }
+
+    /// Live VFO retune — the reason this block exists. Only `freq_shift_hz`
+    /// is accepted; rebuilding for anything else (factor/taps/cutoff)
+    /// requires a fresh filter design, so we return `Ok(false)` and let
+    /// the runtime fall back to a block-scoped rebuild.
+    fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+        let Some(obj) = delta.as_object() else {
+            return Ok(false);
+        };
+        const LIVE_KEYS: &[&str] = &["freq_shift_hz"];
+        if !obj.keys().all(|k| LIVE_KEYS.contains(&k.as_str())) {
+            return Ok(false);
+        }
+        if let Some(v) = obj.get("freq_shift_hz").and_then(|v| v.as_f64()) {
+            self.set_freq_shift(v);
+        }
+        Ok(true)
     }
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
@@ -375,12 +456,37 @@ mod tests {
     }
 
     #[test]
+    fn output_rate_hz_derives_factor_from_input_rate() {
+        // 8 MS/s source, target 240 kHz channel → factor = round(8M/240k) = 33.
+        let params = ChannelizerParams {
+            input_rate_hz: 8_000_000.0,
+            freq_shift_hz: 0.0,
+            factor: 1, // garbage, ignored
+            output_rate_hz: Some(240_000.0),
+            num_taps: 7,             // garbage, auto-overridden
+            cutoff_normalized: 0.01, // garbage, auto-overridden
+        };
+        let ch = Channelizer::new(params).unwrap();
+        assert_eq!(ch.factor(), 33);
+        // FIR sizing tracks the derived factor (8*33 + 1).
+        assert_eq!(ch.taps().len(), 8 * 33 + 1);
+    }
+
+    #[test]
+    fn output_rate_hz_unset_leaves_factor_alone() {
+        // Legacy mode: explicit factor wins, output_rate_hz: None.
+        let ch = Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 4)).unwrap();
+        assert_eq!(ch.factor(), 4);
+    }
+
+    #[test]
     fn constructor_rejects_bad_params() {
         assert!(Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 0)).is_err());
         assert!(Channelizer::new(ChannelizerParams {
             input_rate_hz: 2.0e6,
             freq_shift_hz: 0.0,
             factor: 4,
+            output_rate_hz: None,
             num_taps: 2,
             cutoff_normalized: 0.1,
         })
@@ -389,6 +495,7 @@ mod tests {
             input_rate_hz: 0.0,
             freq_shift_hz: 0.0,
             factor: 4,
+            output_rate_hz: None,
             num_taps: 33,
             cutoff_normalized: 0.1,
         })
@@ -397,6 +504,7 @@ mod tests {
             input_rate_hz: 2.0e6,
             freq_shift_hz: 0.0,
             factor: 4,
+            output_rate_hz: None,
             num_taps: 33,
             cutoff_normalized: 0.5,
         })
@@ -443,6 +551,7 @@ mod tests {
             input_rate_hz: fs,
             freq_shift_hz: tone_hz,
             factor,
+            output_rate_hz: None,
             num_taps: 129,
             cutoff_normalized: 0.4 / factor as f32,
         };
@@ -483,6 +592,7 @@ mod tests {
             input_rate_hz: fs,
             freq_shift_hz: 0.0,
             factor,
+            output_rate_hz: None,
             num_taps: 129,
             cutoff_normalized: 0.4 / factor as f32,
         };
@@ -521,6 +631,7 @@ mod tests {
             input_rate_hz: fs,
             freq_shift_hz: 100_000.0,
             factor,
+            output_rate_hz: None,
             num_taps: 129,
             cutoff_normalized: 0.4 / factor as f32,
         };

@@ -2,6 +2,7 @@
   import { pipeline } from '$lib/pipeline.svelte';
   import BlockParams from '$lib/controls/BlockParams.svelte';
   import InputControls from '$lib/controls/InputControls.svelte';
+  import AudioPanel from './AudioPanel.svelte';
   import { RECEIVERS, applyRecipe, detectReceiver, findRecipe, type ReceiverId } from './receivers';
 
   // Container for everything the user reaches for after the source is
@@ -91,6 +92,17 @@
             {/if}
           </section>
         {/if}
+      </div>
+    </details>
+
+    <details open class="settings-section">
+      <summary
+        class="cursor-pointer select-none text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-fg)]"
+      >
+        Audio
+      </summary>
+      <div class="mt-2 pl-1">
+        <AudioPanel />
       </div>
     </details>
 

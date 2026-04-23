@@ -11,8 +11,11 @@
   import type { SourceConfig } from '$lib/api/source';
   import { demoAddInWorker } from '$lib/workers/demo-client';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
-  import { patchConsole } from '$lib/logs/store.svelte';
+  import { logs, patchConsole } from '$lib/logs/store.svelte';
   import { connectServerLogs } from '$lib/logs/client';
+  import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
+  import { wsUrlFor } from '$lib/api/errors';
+  import { composeSource } from '$lib/flowgraph';
   import { onMount } from 'svelte';
 
   let wasmStatus = $state<'pending' | 'ok' | string>('pending');
@@ -20,7 +23,18 @@
   let lastFrameSize = $state(0);
   let showSource = $state(false);
   let showFlowgraph = $state(false);
-  let leftTab = $state<'bands' | 'catalog' | 'settings'>('bands');
+  type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs';
+  let leftTab = $state<LeftTab>('bands');
+
+  // Opening the Logs tab acks the error badge. Errors that arrive
+  // while the tab is already open also clear (see effect below), since
+  // the user is looking at them in real time.
+  $effect(() => {
+    if (leftTab === 'logs') logs.ackErrors();
+  });
+  $effect(() => {
+    if (leftTab === 'logs' && logs.unreadErrors > 0) logs.ackErrors();
+  });
 
   async function runDemo() {
     try {
@@ -35,10 +49,44 @@
     patchConsole();
     const disconnectLogs = connectServerLogs();
     void pipeline.init();
+    browserRuntime.init();
+    // Gesture-unlock: `AudioContext.resume()` is a no-op until the
+    // user has interacted with the page. Keep these listeners
+    // *permanent*, not `once:true` — HMR and preset reloads create
+    // fresh AudioContexts that each need their own gesture to resume,
+    // so every click/keydown gets a shot at unlocking the current one.
+    // `unlockAudio` is idempotent on already-running contexts.
+    const unlock = () => void browserRuntime.unlockAudio();
+    document.addEventListener('click', unlock);
+    document.addEventListener('keydown', unlock);
     return () => {
+      document.removeEventListener('click', unlock);
+      document.removeEventListener('keydown', unlock);
+      void browserRuntime.teardown();
       disconnectLogs();
       pipeline.teardown();
     };
+  });
+
+  // Browser runtime lifecycle: keep it in sync with the server-side
+  // pipeline. We compose preset + source into a runnable doc here
+  // (mirror of Rust's `compose_source`) — the wasm runtime needs the
+  // `src` placeholder replaced with the real source type, otherwise
+  // the `Source` sentinel looks like an unknown block. Structural
+  // flowgraph changes trigger a reload; start/stop follow the server's
+  // pipeline.status. Both calls are idempotent.
+  $effect(() => {
+    const preset = pipeline.flowgraph;
+    const source = pipeline.source;
+    if (!preset || !source) return;
+    const composed = composeSource(preset, {
+      type: source.type,
+      params: source.params as Record<string, unknown>,
+    });
+    browserRuntime.syncFlowgraph(composed, wsUrlFor('/ws/preset'));
+  });
+  $effect(() => {
+    browserRuntime.syncStatus(pipeline.status === 'running');
   });
 
   // Count frames per second against whichever client is current.
@@ -155,47 +203,53 @@
       storageKey="ferrite.split.aside-main"
     >
       {#snippet a()}
-        <aside class="flex h-full w-full flex-col">
-          <Split direction="column" defaultFraction={0.5} storageKey="ferrite.split.aside-internal">
-            {#snippet a()}
-              <div class="flex h-full min-h-0 flex-col">
-                <div class="flex border-b border-slate-800 text-[11px]">
-                  <button
-                    type="button"
-                    class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
-                    class:tab-active={leftTab === 'bands'}
-                    onclick={() => (leftTab = 'bands')}>Bands</button
-                  >
-                  <button
-                    type="button"
-                    class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
-                    class:tab-active={leftTab === 'catalog'}
-                    onclick={() => (leftTab = 'catalog')}>Catalog</button
-                  >
-                  <button
-                    type="button"
-                    class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
-                    class:tab-active={leftTab === 'settings'}
-                    onclick={() => (leftTab = 'settings')}>Settings</button
-                  >
-                </div>
-                <div class="min-h-0 flex-1">
-                  {#if leftTab === 'bands'}
-                    <BandsPanel />
-                  {:else if leftTab === 'catalog'}
-                    <SignalCatalog />
-                  {:else}
-                    <SettingsPanel />
-                  {/if}
-                </div>
-              </div>
-            {/snippet}
-            {#snippet b()}
-              <div class="h-full min-h-0">
-                <LogPanel />
-              </div>
-            {/snippet}
-          </Split>
+        <aside class="flex h-full min-h-0 w-full flex-col">
+          <div class="flex border-b border-slate-800 text-[11px]">
+            <button
+              type="button"
+              class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+              class:tab-active={leftTab === 'bands'}
+              onclick={() => (leftTab = 'bands')}>Bands</button
+            >
+            <button
+              type="button"
+              class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+              class:tab-active={leftTab === 'catalog'}
+              onclick={() => (leftTab = 'catalog')}>Catalog</button
+            >
+            <button
+              type="button"
+              class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+              class:tab-active={leftTab === 'settings'}
+              onclick={() => (leftTab = 'settings')}>Settings</button
+            >
+            <button
+              type="button"
+              class="relative flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+              class:tab-active={leftTab === 'logs'}
+              onclick={() => (leftTab = 'logs')}
+            >
+              Logs
+              {#if logs.unreadErrors > 0 && leftTab !== 'logs'}
+                <span
+                  class="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-rose-500"
+                  title="{logs.unreadErrors} unread error{logs.unreadErrors === 1 ? '' : 's'}"
+                  aria-label="{logs.unreadErrors} unread errors"
+                ></span>
+              {/if}
+            </button>
+          </div>
+          <div class="min-h-0 flex-1">
+            {#if leftTab === 'bands'}
+              <BandsPanel />
+            {:else if leftTab === 'catalog'}
+              <SignalCatalog />
+            {:else if leftTab === 'settings'}
+              <SettingsPanel />
+            {:else}
+              <LogPanel />
+            {/if}
+          </div>
         </aside>
       {/snippet}
       {#snippet b()}

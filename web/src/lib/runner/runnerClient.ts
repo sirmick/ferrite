@@ -29,7 +29,10 @@ export class FlowgraphRunner {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
 
-  constructor(private readonly worker: WorkerLike) {
+  constructor(
+    private readonly worker: WorkerLike,
+    private readonly onDiag?: (text: string) => void,
+  ) {
     this.worker.onmessage = (ev) => this.onResponse(ev.data);
   }
 
@@ -69,16 +72,29 @@ export class FlowgraphRunner {
     });
   }
 
-  private onResponse(resp: RunnerResponse): void {
-    const slot = this.pending.get(resp.id);
+  private onResponse(resp: RunnerResponse | DiagMessage): void {
+    // Unsolicited diagnostic log from the worker — threaded out
+    // through an optional callback rather than a new protocol kind,
+    // so test doubles that don't care about diags stay unaffected.
+    if ((resp as DiagMessage).kind === 'diag') {
+      this.onDiag?.((resp as DiagMessage).text);
+      return;
+    }
+    const r = resp as RunnerResponse;
+    const slot = this.pending.get(r.id);
     if (!slot) return;
-    this.pending.delete(resp.id);
-    if (resp.ok) {
-      slot.resolve(resp);
+    this.pending.delete(r.id);
+    if (r.ok) {
+      slot.resolve(r);
     } else {
-      slot.reject(new Error(resp.error));
+      slot.reject(new Error(r.error));
     }
   }
+}
+
+interface DiagMessage {
+  readonly kind: 'diag';
+  readonly text: string;
 }
 
 type SuccessResp = Extract<RunnerResponse, { ok: true }>;

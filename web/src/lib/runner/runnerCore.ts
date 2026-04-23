@@ -18,7 +18,7 @@ import type { FlowgraphDoc } from '../flowgraph.js';
 
 import { AudioRingWriter } from '../audio/ringBuffer.js';
 import type { FrameClient } from '../ws/client.js';
-import { PayloadType } from '../ws/frame.js';
+import { initFrameDecoder, PayloadType } from '../ws/frame.js';
 import { viewIqF32 } from '../ws/source.js';
 import type { LoadResult, RunnerRequest, RunnerResponse, RuntimeState } from './protocol.js';
 import type { RuntimeHandle } from './rustRuntime.js';
@@ -44,6 +44,16 @@ interface AudioBinding {
   readonly blockId: string;
   readonly writer: AudioRingWriter;
   readonly scratch: Float32Array;
+  /** Samples drained from this block since the last diag report. */
+  drained: number;
+}
+
+/** Per-bridge inbound counter. Incremented from the WS subscription
+ *  callback each time a frame lands. */
+interface BridgeCounter {
+  readonly blockId: string;
+  readonly streamId: number;
+  samples: number;
 }
 
 interface LoadedState {
@@ -53,6 +63,9 @@ interface LoadedState {
   audio: AudioBinding[];
   tickTimer: ReturnType<typeof setTimeout> | null;
   running: boolean;
+  bridges: BridgeCounter[];
+  ticks: number;
+  diagTimer: ReturnType<typeof setInterval> | null;
 }
 
 export class RunnerCore {
@@ -99,13 +112,18 @@ export class RunnerCore {
     if (this.loaded) {
       throw new Error('RunnerCore.load: already loaded — stop() first');
     }
+    // The frame decoder's wasm instance is per-realm: the main thread
+    // initialises its own on page load, the worker needs its own here.
+    // Without this, inbound IQ frames on the cross-env bridge decode-
+    // fail silently and the whole audio chain starves.
+    await initFrameDecoder();
     const splitDoc = await this.env.splitDoc(doc, 'browser');
     const client = this.env.createFrameClient(wsUrl);
     let rt: RuntimeHandle | null = null;
     try {
       rt = await this.env.createRuntime(splitDoc, 'browser');
       rt.init();
-      const { subscribers, audio, audioSabs } = wireBlocks(splitDoc, client, rt);
+      const { subscribers, audio, audioSabs, bridges } = wireBlocks(splitDoc, client, rt);
       const blocks = Object.keys(splitDoc.blocks ?? {});
       this.loaded = {
         rt,
@@ -114,6 +132,9 @@ export class RunnerCore {
         audio,
         tickTimer: null,
         running: false,
+        bridges,
+        ticks: 0,
+        diagTimer: null,
       };
       this.lastState = 'initialized';
       return { blocks, audioSabs };
@@ -129,6 +150,7 @@ export class RunnerCore {
     state.rt.start();
     state.running = true;
     this.scheduleTick(state);
+    this.startDiagTimer(state);
   }
 
   private scheduleTick(state: LoadedState): void {
@@ -139,9 +161,11 @@ export class RunnerCore {
       if (this.loaded !== state || !state.running) return;
       try {
         state.rt.tick();
+        state.ticks += 1;
         for (const a of state.audio) {
           const n = state.rt.drainAudio(a.blockId, a.scratch);
           if (n > 0) a.writer.write(a.scratch.subarray(0, n));
+          a.drained += n;
         }
       } catch {
         // Tick errors are isolated to this iteration — an explicit stop
@@ -152,6 +176,25 @@ export class RunnerCore {
     }, interval);
   }
 
+  /** Emit a one-line diag to the main thread every second. Summarises
+   *  what the tick loop is actually doing so the page can tell where
+   *  the audio chain is stalled without opening devtools on the worker. */
+  private startDiagTimer(state: LoadedState): void {
+    if (state.diagTimer !== null) return;
+    state.diagTimer = setInterval(() => {
+      if (this.loaded !== state || !state.running) return;
+      const bridgeSummary = state.bridges
+        .map((b) => `${b.blockId}(#${b.streamId})=${b.samples}`)
+        .join(' ');
+      const audioSummary = state.audio.map((a) => `${a.blockId}=${a.drained}`).join(' ');
+      const text = `runner 1s: ticks=${state.ticks} rx[${bridgeSummary}] audio[${audioSummary}]`;
+      postDiag(text);
+      state.ticks = 0;
+      for (const b of state.bridges) b.samples = 0;
+      for (const a of state.audio) a.drained = 0;
+    }, 1000);
+  }
+
   private doStop(): void {
     const state = this.loaded;
     if (!state) return;
@@ -159,6 +202,10 @@ export class RunnerCore {
     if (state.tickTimer !== null) {
       clearTimeout(state.tickTimer);
       state.tickTimer = null;
+    }
+    if (state.diagTimer !== null) {
+      clearInterval(state.diagTimer);
+      state.diagTimer = null;
     }
     for (const unsub of state.subscribers) unsub();
     try {
@@ -172,6 +219,18 @@ export class RunnerCore {
   }
 }
 
+/** Unsolicited "log from the worker" — the main thread's
+ *  `FlowgraphRunner` recognises `kind: 'diag'` and forwards the text
+ *  to its `onDiag` callback. A no-op outside a Worker context (tests). */
+function postDiag(text: string): void {
+  const g = globalThis as {
+    postMessage?: (msg: unknown) => void;
+  };
+  if (typeof g.postMessage === 'function') {
+    g.postMessage({ kind: 'diag', text });
+  }
+}
+
 function wireBlocks(
   doc: FlowgraphDoc,
   client: FrameClient,
@@ -180,17 +239,23 @@ function wireBlocks(
   subscribers: Array<() => void>;
   audio: AudioBinding[];
   audioSabs: Record<string, SharedArrayBuffer>;
+  bridges: BridgeCounter[];
 } {
   const subscribers: Array<() => void> = [];
   const audio: AudioBinding[] = [];
   const audioSabs: Record<string, SharedArrayBuffer> = {};
+  const bridges: BridgeCounter[] = [];
   for (const [blockId, raw] of Object.entries(doc.blocks ?? {})) {
     const block = raw as { type?: string; params?: Record<string, unknown> };
     if (block.type === 'WsBridgeRx') {
       const streamId = Number(block.params?.stream_id ?? 0);
+      const counter: BridgeCounter = { blockId, streamId, samples: 0 };
+      bridges.push(counter);
       const unsub = client.subscribe(streamId, (frame) => {
         if (frame.header.payloadType !== PayloadType.IqF32) return;
-        rt.pushIq(blockId, viewIqF32(frame.payload));
+        const samples = viewIqF32(frame.payload);
+        counter.samples += samples.length / 2; // complex pairs → IQ samples
+        rt.pushIq(blockId, samples);
       });
       subscribers.push(unsub);
     } else if (block.type === 'AudioSink') {
@@ -198,11 +263,11 @@ function wireBlocks(
         Number(block.params?.buffer_samples ?? DEFAULT_AUDIO_SINK_CAPACITY),
       );
       const writer = AudioRingWriter.create(capacity);
-      audio.push({ blockId, writer, scratch: new Float32Array(capacity) });
+      audio.push({ blockId, writer, scratch: new Float32Array(capacity), drained: 0 });
       audioSabs[blockId] = writer.sab;
     }
   }
-  return { subscribers, audio, audioSabs };
+  return { subscribers, audio, audioSabs, bridges };
 }
 
 function toProtocolState(s: string): RuntimeState {

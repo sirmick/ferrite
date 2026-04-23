@@ -38,27 +38,34 @@
       b.spec.params.some((p) => p.key === 'freq_shift_hz'),
     ),
   );
-  let vfoShiftHz = $derived.by(() => {
-    if (!vfoBlock) return 0;
-    const v = (vfoBlock.values as Record<string, unknown> | null)?.freq_shift_hz;
-    return typeof v === 'number' ? v : 0;
-  });
+  let vfoValues = $derived(
+    (vfoBlock?.values as Record<string, unknown> | null | undefined) ?? null,
+  );
+  let vfoShiftHz = $derived(
+    typeof vfoValues?.freq_shift_hz === 'number' ? vfoValues.freq_shift_hz : 0,
+  );
   let vfoAbsHz = $derived((axes?.center_freq_hz ?? 0) + vfoShiftHz);
+  // Channel bandwidth shown as a translucent band around the VFO on the
+  // FFT — the slice of spectrum being demodulated. Prefer the explicit
+  // `output_rate_hz` from the preset; fall back to Fs_in / factor when a
+  // preset drives the channelizer by decimation instead.
+  let vfoWidthHz = $derived.by(() => {
+    if (!vfoValues || !axes) return undefined;
+    const outRate = vfoValues.output_rate_hz;
+    if (typeof outRate === 'number' && outRate > 0) return outRate;
+    const factor = vfoValues.factor;
+    if (typeof factor === 'number' && factor > 0) return axes.sample_rate_hz / factor;
+    return undefined;
+  });
 
-  const STEPS = [
-    { label: '1 Hz', hz: 1 },
-    { label: '10 Hz', hz: 10 },
-    { label: '100 Hz', hz: 100 },
-    { label: '1 kHz', hz: 1_000 },
-    { label: '10 kHz', hz: 10_000 },
-    { label: '100 kHz', hz: 100_000 },
-    { label: '1 MHz', hz: 1_000_000 },
-  ] as const;
-  let stepIdx = $state(4);
-  let stepHz = $derived(STEPS[stepIdx].hz);
+  // Fixed wheel-nudge step. The nixie handles fine tuning (each digit
+  // is click-to-increment), so this just needs to be a sensible scroll
+  // rate for exploring the band.
+  const WHEEL_STEP_HZ = 10_000;
 
-  let fade = $state(false);
+  let fade = $state(true);
   let maxHold = $state(false);
+  let autoScale = $state(false);
 
   // Sample-rate dropdown by the nixies: preset-curated short list.
   // Software sources (sine, file) have no advertised rate ladder, so
@@ -121,31 +128,54 @@
     }
   }
 
-  function nudge(sign: 1 | -1) {
-    if (!axes) return;
-    const hz = axes.center_freq_hz + sign * stepHz;
-    void pipeline.patchSourceParams({ center_freq_hz: hz });
-  }
-
   function onWheel(ev: WheelEvent) {
     if (!axes) return;
     ev.preventDefault();
-    nudge(ev.deltaY > 0 ? -1 : 1);
+    const sign = ev.deltaY > 0 ? -1 : 1;
+    void pipeline.patchSourceParams({
+      center_freq_hz: axes.center_freq_hz + sign * WHEEL_STEP_HZ,
+    });
+  }
+
+  // Click = VFO; double-click = SDR centre. Native `click` fires twice
+  // before `dblclick`, so we hold the single-click action in a timer
+  // and cancel it if the second click lands within the OS double-click
+  // window.
+  const DBLCLICK_MS = 250;
+  let pendingSingle: ReturnType<typeof setTimeout> | undefined;
+
+  function freqAtPointer(ev: MouseEvent): number | undefined {
+    if (!renderer || !canvas) return undefined;
+    const rect = canvas.getBoundingClientRect();
+    return renderer.pixelToFreq(ev.clientX - rect.left);
   }
 
   function onClick(ev: MouseEvent) {
-    if (!renderer || !canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const f = renderer.pixelToFreq(ev.clientX - rect.left);
+    const f = freqAtPointer(ev);
     if (f === undefined) return;
-    // Click moves the VFO inside the wide RF view — source stays
-    // tuned. Without a channelizer block (bareband presets), click
-    // re-tunes the source itself.
-    if (vfoBlock && axes) {
-      commitVfo(Math.round(f));
-    } else {
+    // Defer so a following dblclick can cancel. If there's no VFO
+    // block there's nothing for the single-click to do that dblclick
+    // wouldn't also do — short-circuit and centre immediately.
+    if (!vfoBlock || !axes) {
       void pipeline.patchSourceParams({ center_freq_hz: Math.round(f) });
+      return;
     }
+    if (pendingSingle !== undefined) clearTimeout(pendingSingle);
+    pendingSingle = setTimeout(() => {
+      pendingSingle = undefined;
+      commitVfo(Math.round(f));
+    }, DBLCLICK_MS);
+  }
+
+  function onDblClick(ev: MouseEvent) {
+    if (pendingSingle !== undefined) {
+      clearTimeout(pendingSingle);
+      pendingSingle = undefined;
+    }
+    const f = freqAtPointer(ev);
+    if (f === undefined) return;
+    // Centre freq is on the live-apply whitelist — hot retune, no rebuild.
+    void pipeline.patchSourceParams({ center_freq_hz: Math.round(f) });
   }
 
   onMount(() => {
@@ -202,6 +232,75 @@
     renderer?.setFeatures({ fade, maxHold });
   });
 
+  // Auto-scale: pure client-side display stretch. Chases the signal's
+  // running p10/p99 and hands the renderer a tighter display range —
+  // server-side logmag quantisation is untouched, so no round-trip,
+  // no rebuild, no judder. The tradeoff is coarser byte resolution
+  // across the narrower window (256 steps spread over less dB), but
+  // for browsing that's invisible.
+  const AUTO_SCALE_ALPHA = 0.08; // ~0.5s response at 30 Hz FFT
+  const AUTO_FLOOR_MARGIN_DB = 5;
+  const AUTO_CEIL_HEADROOM_DB = 10;
+  const AUTO_MIN_WINDOW_DB = 20;
+
+  let autoFloorEma: number | undefined;
+  let autoCeilEma: number | undefined;
+
+  $effect(() => {
+    if (!renderer) return;
+    if (!autoScale) {
+      renderer.onStats(() => {});
+      renderer.setDisplayRange(undefined);
+      autoFloorEma = undefined;
+      autoCeilEma = undefined;
+      return;
+    }
+    const getFloor = () => floorDbfs;
+    const getCeil = () => ceilDbfs;
+    renderer.onStats((stats) => {
+      const f = getFloor();
+      const c = getCeil();
+      if (c <= f) return;
+      const toDbfs = (byte: number) => f + (byte / 255) * (c - f);
+      const p10Dbfs = toDbfs(stats.p10);
+      const p99Dbfs = toDbfs(stats.p99);
+      const floorTarget = p10Dbfs - AUTO_FLOOR_MARGIN_DB;
+      const ceilTarget = p99Dbfs + AUTO_CEIL_HEADROOM_DB;
+      autoFloorEma =
+        autoFloorEma === undefined
+          ? floorTarget
+          : autoFloorEma * (1 - AUTO_SCALE_ALPHA) + floorTarget * AUTO_SCALE_ALPHA;
+      autoCeilEma =
+        autoCeilEma === undefined
+          ? ceilTarget
+          : autoCeilEma * (1 - AUTO_SCALE_ALPHA) + ceilTarget * AUTO_SCALE_ALPHA;
+      let displayFloor = autoFloorEma;
+      let displayCeil = autoCeilEma;
+      // Guard against a pathologically narrow window (all p10≈p99 on a
+      // silent frame) — force at least 20 dB between the bars so the
+      // scale reads usefully instead of snapping to a knife-edge.
+      if (displayCeil - displayFloor < AUTO_MIN_WINDOW_DB) {
+        const mid = (displayFloor + displayCeil) / 2;
+        displayFloor = mid - AUTO_MIN_WINDOW_DB / 2;
+        displayCeil = mid + AUTO_MIN_WINDOW_DB / 2;
+      }
+      // Don't clamp the display floor back into the server's
+      // quantisation window: typical signals have p10 near the server
+      // floor, so `p10 - margin` lands just below, and a clamp would
+      // pin the display floor to the server floor permanently — the
+      // floor would appear stuck. Letting it drift a few dB below is
+      // harmless (bytes saturate at 0 either way); the ceil still
+      // clamps because pushing it past the server ceil is genuinely
+      // wasted pixels.
+      displayCeil = Math.min(displayCeil, c);
+      renderer?.setDisplayRange({ floorDbfs: displayFloor, ceilDbfs: displayCeil });
+    });
+    return () => {
+      renderer?.onStats(() => {});
+      renderer?.setDisplayRange(undefined);
+    };
+  });
+
   // Vertical markers over the plot: green = SDR tuner LO, orange = VFO
   // (only when the preset exposes a `freq_shift_hz` knob). They drop
   // into the renderer so they redraw with every frame, not just on
@@ -211,6 +310,7 @@
     renderer.setMarkers({
       sdrCenterHz: axes?.center_freq_hz,
       vfoHz: vfoBlock ? vfoAbsHz : undefined,
+      vfoWidthHz: vfoBlock ? vfoWidthHz : undefined,
     });
   });
 </script>
@@ -229,32 +329,8 @@
 
       <div class="flex items-center gap-1" title="SDR centre — the RF tuner LO">
         <span class="mr-0.5 text-[9px] uppercase tracking-wider text-emerald-400/70">sdr</span>
-        <button
-          type="button"
-          class="rounded border border-slate-700 px-1 leading-none hover:border-slate-500"
-          onclick={() => nudge(-1)}
-          aria-label="decrease centre frequency">−</button
-        >
         <Nixie hz={axes.center_freq_hz} onCommit={commitCenter} tone="green" />
-        <button
-          type="button"
-          class="rounded border border-slate-700 px-1 leading-none hover:border-slate-500"
-          onclick={() => nudge(1)}
-          aria-label="increase centre frequency">+</button
-        >
       </div>
-
-      <label class="flex items-center gap-1">
-        <span>step</span>
-        <select
-          class="rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
-          bind:value={stepIdx}
-        >
-          {#each STEPS as s, i (i)}
-            <option value={i}>{s.label}</option>
-          {/each}
-        </select>
-      </label>
 
       <label class="flex items-center gap-1" title="sample rate / span">
         <span>rate</span>
@@ -294,14 +370,22 @@
           reset
         </button>
       {/if}
+      <label
+        class="flex items-center gap-1"
+        title="auto-track floor/ceil to the signal (writes logmag.floor_dbfs/ceil_dbfs)"
+      >
+        <input type="checkbox" bind:checked={autoScale} />
+        <span>auto</span>
+      </label>
     </div>
     <FftControls />
   {/if}
   <canvas
     bind:this={canvas}
     onclick={onClick}
+    ondblclick={onDblClick}
     onwheel={onWheel}
     class="block min-h-0 w-full flex-1 cursor-crosshair"
-    title="click to tune · wheel to nudge by step"
+    title="click to tune VFO · double-click to re-centre SDR · wheel to nudge"
   ></canvas>
 </div>

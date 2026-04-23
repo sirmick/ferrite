@@ -41,10 +41,30 @@ export interface SpectrumOptions {
  *  (shown in green, on the right of the pair when VFO < centre);
  *  `vfoHz` is where demodulation is actually pulling a channel out
  *  (shown in orange, on the left when VFO < centre). Either may be
- *  undefined — the renderer skips that line. */
+ *  undefined — the renderer skips that line.
+ *
+ *  `vfoWidthHz` is the post-channelizer bandwidth of the demodulated
+ *  channel (i.e. `output_rate_hz` of the Channelizer). When set the
+ *  renderer draws a translucent orange band centred on `vfoHz` of
+ *  that width, giving the same filter-shape cue as a conventional
+ *  SA — you can see what slice of spectrum is being pulled out. */
 export interface SpectrumMarkers {
   sdrCenterHz?: number;
   vfoHz?: number;
+  vfoWidthHz?: number;
+}
+
+/** Client-side display-range override for auto-scale. The server emits
+ *  bytes pre-quantized to `[axes.floorDbfs, axes.ceilDbfs]`; when a
+ *  display override is set, the renderer remaps those bytes onto a
+ *  tighter range for the y-axis and trace height without touching the
+ *  server's scaling. No round-trip, no restart — at the cost of keeping
+ *  the full 0..255 byte resolution across the narrower display window
+ *  (quantization detail may get coarser when the display range is a
+ *  small slice of the server range). */
+export interface SpectrumDisplayRange {
+  floorDbfs: number;
+  ceilDbfs: number;
 }
 
 export interface SpectrumFeatures {
@@ -89,6 +109,7 @@ export class SpectrumRenderer {
   private statsListener: ((s: SpectrumStats) => void) | undefined;
   private markers: SpectrumMarkers = {};
   private collapseBuf: Uint8Array | undefined;
+  private displayRange: SpectrumDisplayRange | undefined;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -139,6 +160,14 @@ export class SpectrumRenderer {
   setMarkers(next: SpectrumMarkers): void {
     if (this.disposed) return;
     this.markers = { ...next };
+    this.scheduleDraw();
+  }
+
+  /** Set a client-side display range. `undefined` clears the override
+   *  and the plot reverts to the server's `axes.floor/ceil`. */
+  setDisplayRange(next: SpectrumDisplayRange | undefined): void {
+    if (this.disposed) return;
+    this.displayRange = next ? { ...next } : undefined;
     this.scheduleDraw();
   }
 
@@ -226,8 +255,11 @@ export class SpectrumRenderer {
     ctx.font = `${10 * dpr}px ui-monospace, SFMono-Regular, Menlo, monospace`;
     ctx.textBaseline = 'middle';
 
-    const floor = this.axes?.floorDbfs ?? 0;
-    const ceil = this.axes?.ceilDbfs ?? 255;
+    // Labels follow the *display* range when auto-scale is active, so
+    // the dBFS ticks you see match the stretched plot rather than the
+    // server's static quantisation window.
+    const floor = this.displayRange?.floorDbfs ?? this.axes?.floorDbfs ?? 0;
+    const ceil = this.displayRange?.ceilDbfs ?? this.axes?.ceilDbfs ?? 255;
     const yTicks = niceTicks(floor, ceil, 6);
     ctx.textAlign = 'right';
     for (const v of yTicks) {
@@ -344,9 +376,37 @@ export class SpectrumRenderer {
 
     const vfo = this.markers.vfoHz;
     if (vfo !== undefined && clamp(vfo)) {
+      // Draw the channel-width band first so the VFO line sits on top.
+      // Band is clipped to the plot — half-channels outside the view
+      // still render the visible slice rather than disappearing.
+      const width = this.markers.vfoWidthHz;
+      if (width !== undefined && width > 0) {
+        const bandLo = Math.max(fMin, vfo - width / 2);
+        const bandHi = Math.min(fMax, vfo + width / 2);
+        if (bandHi > bandLo) {
+          const xLo = toX(bandLo);
+          const xHi = toX(bandHi);
+          ctx.fillStyle = 'rgba(255, 157, 58, 0.12)';
+          ctx.fillRect(xLo, plot.y, xHi - xLo, plot.h);
+          // Subtle edge lines at the band boundaries — easier to read
+          // the exact channel edges than relying on a washed-out fill.
+          ctx.strokeStyle = 'rgba(255, 157, 58, 0.4)';
+          ctx.lineWidth = Math.max(1, Math.floor(dpr));
+          ctx.beginPath();
+          const xLoLine = Math.floor(xLo) + 0.5;
+          const xHiLine = Math.floor(xHi) + 0.5;
+          ctx.moveTo(xLoLine, plot.y);
+          ctx.lineTo(xLoLine, plot.y + plot.h);
+          ctx.moveTo(xHiLine, plot.y);
+          ctx.lineTo(xHiLine, plot.y + plot.h);
+          ctx.stroke();
+        }
+      }
+
       ctx.strokeStyle = 'rgba(255, 157, 58, 0.85)';
       ctx.shadowColor = 'rgba(255, 157, 58, 0.55)';
       ctx.shadowBlur = 6 * dpr;
+      ctx.lineWidth = Math.max(1, Math.floor(dpr));
       const x = Math.floor(toX(vfo)) + 0.5;
       ctx.beginPath();
       ctx.moveTo(x, plot.y);
@@ -356,11 +416,40 @@ export class SpectrumRenderer {
     }
   }
 
+  /** Lookup table mapping byte `b` → pixel y, factoring in the display
+   *  override. Cached across draws with the same plot height + axes +
+   *  override. Avoids per-sample `log`/`mul` in the hot loop — the
+   *  16384-bin FFT at 30 Hz is otherwise where this function spends a
+   *  measurable chunk of frame time. */
+  private byteToYCache: { key: string; lut: Float32Array } | undefined;
+  private byteToYLut(plot: { y: number; h: number }): Float32Array {
+    const serverFloor = this.axes?.floorDbfs ?? 0;
+    const serverCeil = this.axes?.ceilDbfs ?? 255;
+    const displayFloor = this.displayRange?.floorDbfs ?? serverFloor;
+    const displayCeil = this.displayRange?.ceilDbfs ?? serverCeil;
+    const key = `${plot.y}_${plot.h}_${serverFloor}_${serverCeil}_${displayFloor}_${displayCeil}`;
+    if (this.byteToYCache && this.byteToYCache.key === key) return this.byteToYCache.lut;
+    const lut = new Float32Array(256);
+    const serverRange = serverCeil - serverFloor;
+    const displayRange = displayCeil - displayFloor;
+    for (let b = 0; b < 256; b++) {
+      if (this.displayRange && displayRange > 0 && serverRange > 0) {
+        const db = serverFloor + (b / 255) * serverRange;
+        const frac = Math.max(0, Math.min(1, (db - displayFloor) / displayRange));
+        lut[b] = plot.y + plot.h - frac * plot.h;
+      } else {
+        lut[b] = plot.y + plot.h - (b / 255) * plot.h;
+      }
+    }
+    this.byteToYCache = { key, lut };
+    return lut;
+  }
+
   private strokeRow(row: Uint8Array, plot: { x: number; y: number; w: number; h: number }): void {
     if (row.length === 0) return;
     const { ctx } = this;
     const n = row.length;
-    const yScale = plot.h / 255;
+    const lut = this.byteToYLut(plot);
     ctx.beginPath();
 
     // When the FFT has more bins than pixels (e.g. 16384 bins across a
@@ -378,7 +467,7 @@ export class SpectrumRenderer {
       const cols = this.collapseBuf;
       for (let i = 0; i < px; i++) {
         const x = plot.x + i;
-        const y = plot.y + plot.h - cols[i] * yScale;
+        const y = lut[cols[i]!]!;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
@@ -386,7 +475,7 @@ export class SpectrumRenderer {
       const xScale = plot.w / (n - 1);
       for (let i = 0; i < n; i++) {
         const x = plot.x + i * xScale;
-        const y = plot.y + plot.h - row[i] * yScale;
+        const y = lut[row[i]!]!;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }

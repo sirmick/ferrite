@@ -141,6 +141,31 @@ impl Block for LogMagU8 {
         Ok(())
     }
 
+    /// Live apply `floor_dbfs`, `ceil_dbfs`, and `alpha` — all three
+    /// are post-FFT display knobs that don't need a rebuild. `size`
+    /// reallocates the smoothing buffer so it still falls back to
+    /// block-rebuild. This is the hot path the spectrum auto-scale
+    /// hammers on every ~500ms when enabled.
+    fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+        let Some(obj) = delta.as_object() else {
+            return Ok(false);
+        };
+        const LIVE_KEYS: &[&str] = &["floor_dbfs", "ceil_dbfs", "alpha"];
+        if !obj.keys().all(|k| LIVE_KEYS.contains(&k.as_str())) {
+            return Ok(false);
+        }
+        if let Some(v) = obj.get("floor_dbfs").and_then(|v| v.as_f64()) {
+            self.set_floor_dbfs(v as f32);
+        }
+        if let Some(v) = obj.get("ceil_dbfs").and_then(|v| v.as_f64()) {
+            self.set_ceil_dbfs(v as f32);
+        }
+        if let Some(v) = obj.get("alpha").and_then(|v| v.as_f64()) {
+            self.set_alpha(v as f32);
+        }
+        Ok(true)
+    }
+
     fn output_capacity_hints(&self) -> [usize; MAX_PORTS] {
         let mut h = [0; MAX_PORTS];
         h[0] = self.params.size;
