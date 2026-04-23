@@ -35,6 +35,30 @@ type RunnerState = 'idle' | 'loading' | 'loaded' | 'running' | 'error';
 interface MountedAudioNode {
   blockId: string;
   node: AudioWorkletNode;
+  /** Non-null when the node is a member of a stereo pair routed through
+   *  a ChannelMerger — disconnected alongside the node on teardown. */
+  merger?: ChannelMergerNode;
+}
+
+/** Inspect an audio-sink block id and return the channel role a preset
+ *  is asking for, or null when the id doesn't carry a stereo hint. We
+ *  accept `_l` / `_left` / `_r` / `_right` suffixes (case-insensitive)
+ *  — the rest of the id is author-chosen. */
+function blockIdRole(blockId: string): 'left' | 'right' | null {
+  const id = blockId.toLowerCase();
+  if (id.endsWith('_l') || id.endsWith('_left')) return 'left';
+  if (id.endsWith('_r') || id.endsWith('_right')) return 'right';
+  return null;
+}
+
+function findRoleEntry(
+  sabs: Readonly<Record<string, SharedArrayBuffer>>,
+  want: 'left' | 'right',
+): { blockId: string; sab: SharedArrayBuffer } | undefined {
+  for (const [blockId, sab] of Object.entries(sabs)) {
+    if (blockIdRole(blockId) === want) return { blockId, sab };
+  }
+  return undefined;
 }
 
 class BrowserRuntime {
@@ -272,6 +296,25 @@ class BrowserRuntime {
     const ctx = this.audioCtx;
     if (!ctx || !this.workletReady) return;
     await this.workletReady;
+
+    // Partition by block-id suffix so a preset can declare stereo by
+    // naming its two AudioSinks `…_l`/`…_left` and `…_r`/`…_right`. If
+    // exactly one of each role is present we wire them through a
+    // ChannelMergerNode; everything else routes mono straight to
+    // destination (and fans out to all output channels, as today).
+    const leftEntry = findRoleEntry(audioSabs, 'left');
+    const rightEntry = findRoleEntry(audioSabs, 'right');
+    const stereoPair =
+      leftEntry && rightEntry && leftEntry.blockId !== rightEntry.blockId
+        ? { left: leftEntry, right: rightEntry }
+        : null;
+
+    let merger: ChannelMergerNode | undefined;
+    if (stereoPair) {
+      merger = ctx.createChannelMerger(2);
+      merger.connect(ctx.destination);
+    }
+
     for (const [blockId, sab] of Object.entries(audioSabs)) {
       try {
         const node = new AudioWorkletNode(ctx, AUDIO_RING_PROCESSOR_NAME, {
@@ -280,17 +323,31 @@ class BrowserRuntime {
           processorOptions: { sab },
           outputChannelCount: [1],
         });
-        node.connect(ctx.destination);
+
+        let role: 'mono' | 'left' | 'right' = 'mono';
+        if (stereoPair && blockId === stereoPair.left.blockId) {
+          node.connect(merger!, 0, 0);
+          role = 'left';
+        } else if (stereoPair && blockId === stereoPair.right.blockId) {
+          node.connect(merger!, 0, 1);
+          role = 'right';
+        } else {
+          // Mono fan-out to destination works as before — the worklet
+          // emits one channel and Web Audio copies it to each speaker
+          // channel via the default upmix rules.
+          node.connect(ctx.destination);
+        }
+
         // Hook into the audio panel store — volume/mute flow down to
         // the worklet, peak/RMS flow back up for the meter. Survives
         // preset reloads: the store keeps the user's volume and
         // re-pushes it to whatever new node comes out of the next load.
-        audioPanel.attach(node);
-        this.audioNodes.push({ blockId, node });
+        audioPanel.attach(node, role);
+        this.audioNodes.push({ blockId, node, merger });
         logs.push(
           'client',
           'info',
-          `audio node attached: block=${blockId} sabBytes=${sab.byteLength} ctxState=${ctx.state}`,
+          `audio node attached: block=${blockId} role=${role} sabBytes=${sab.byteLength} ctxState=${ctx.state}`,
         );
       } catch (err) {
         logs.push('client', 'error', `audio node ${blockId}: ${errorMessage(err)}`);
@@ -299,10 +356,19 @@ class BrowserRuntime {
   }
 
   private async tearDownAudioNodes(): Promise<void> {
-    for (const { node } of this.audioNodes) {
+    const mergers = new Set<ChannelMergerNode>();
+    for (const { node, merger } of this.audioNodes) {
       audioPanel.detach(node);
       try {
         node.disconnect();
+      } catch {
+        /* best effort */
+      }
+      if (merger) mergers.add(merger);
+    }
+    for (const m of mergers) {
+      try {
+        m.disconnect();
       } catch {
         /* best effort */
       }

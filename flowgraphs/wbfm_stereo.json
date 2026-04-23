@@ -1,0 +1,111 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "wbfm_stereo",
+  "label": "FM broadcast (stereo)",
+  "description": "Wideband FM receiver with stereo decoding. Source 2.4 MS/s IQ, channelizer factor 10 → 240 kS/s, FmDemod at 240 kS/s outputs the MPX composite, StereoDecoder splits into L/R at 240 kS/s, each channel decimated 5× to 48 kHz and fed to its own AudioSink (audio_l, audio_r). The browser runtime detects the _l/_r suffix convention and routes the two sinks through a ChannelMerger to the destination's left and right channels. Pilot-lock events land at ui:stereo for a UI indicator. Server-side FFT/LogMag spectrum chain identical to mono wbfm.",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 100100000.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "freq_shift_hz": 0.0,
+        "factor": 10,
+        "num_taps": 81,
+        "cutoff_normalized": 0.05
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann"
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "FmDemod",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 240000,
+        "max_deviation_hz": 75000
+      }
+    },
+    "stereo": {
+      "type": "StereoDecoder",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 240000,
+        "lock_threshold": 0.02,
+        "lock_tau_ms": 100,
+        "emit_interval_ms": 100
+      }
+    },
+    "decim_l": {
+      "type": "RealF32Decimator",
+      "placement": "browser",
+      "params": {
+        "factor": 5,
+        "num_taps": 41,
+        "cutoff_normalized": 0.08
+      }
+    },
+    "decim_r": {
+      "type": "RealF32Decimator",
+      "placement": "browser",
+      "params": {
+        "factor": 5,
+        "num_taps": 41,
+        "cutoff_normalized": 0.08
+      }
+    },
+    "audio_l": {
+      "type": "AudioSink",
+      "params": {
+        "buffer_samples": 8192
+      }
+    },
+    "audio_r": {
+      "type": "AudioSink",
+      "params": {
+        "buffer_samples": 8192
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "stereo.in"],
+    ["stereo.left", "decim_l.in"],
+    ["stereo.right", "decim_r.in"],
+    ["stereo.events", "ui:stereo"],
+    ["decim_l.out", "audio_l.in"],
+    ["decim_r.out", "audio_r.in"]
+  ]
+}

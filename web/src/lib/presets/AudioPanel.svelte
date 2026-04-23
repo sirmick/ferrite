@@ -37,11 +37,33 @@
   let peakFrac = $derived(dbfsToFraction(peakDb));
   let peakHoldFrac = $derived(dbfsToFraction(peakHoldDb));
 
+  // Per-channel fractions for the stereo layout.
+  let peakDbL = $derived(linearToDbfs(audioPanel.peakLeft));
+  let rmsDbL = $derived(linearToDbfs(audioPanel.rmsLeft));
+  let peakHoldDbL = $derived(linearToDbfs(audioPanel.peakHoldLeft));
+  let peakDbR = $derived(linearToDbfs(audioPanel.peakRight));
+  let rmsDbR = $derived(linearToDbfs(audioPanel.rmsRight));
+  let peakHoldDbR = $derived(linearToDbfs(audioPanel.peakHoldRight));
+
+  let rmsFracL = $derived(dbfsToFraction(rmsDbL));
+  let peakFracL = $derived(dbfsToFraction(peakDbL));
+  let peakHoldFracL = $derived(dbfsToFraction(peakHoldDbL));
+  let rmsFracR = $derived(dbfsToFraction(rmsDbR));
+  let peakFracR = $derived(dbfsToFraction(peakDbR));
+  let peakHoldFracR = $derived(dbfsToFraction(peakHoldDbR));
+
   // Simple colour thresholds so the bar reads at a glance.
   //   < -18 dBFS: green (comfortable)
   //   -18 to -6: yellow (getting loud)
   //   > -6: red (approaching clip)
-  let peakColour = $derived(peakDb > -6 ? '#f87171' : peakDb > -18 ? '#facc15' : '#34d399');
+  function thresholdColour(db: number): string {
+    if (db > -6) return '#f87171';
+    if (db > -18) return '#facc15';
+    return '#34d399';
+  }
+  let peakColour = $derived(thresholdColour(peakDb));
+  let peakColourL = $derived(thresholdColour(peakDbL));
+  let peakColourR = $derived(thresholdColour(peakDbR));
 
   let volumePct = $derived(Math.round(volume * 100));
 
@@ -88,35 +110,98 @@
       </label>
     </label>
 
-    <div class="flex flex-col gap-1">
-      <div class="flex items-baseline justify-between">
-        <span class="text-[color:var(--color-muted)]">level</span>
-        <span class="font-mono text-slate-300">
-          {#if Number.isFinite(peakDb) && peakDb > METER_MIN_DB}
-            {peakDb.toFixed(1)} dBFS
-          {:else}
-            —
+    {#if audioPanel.hasStereo}
+      <div class="flex flex-col gap-2">
+        <div class="flex items-baseline justify-between">
+          <span class="text-[color:var(--color-muted)]">level</span>
+          <span class="font-mono text-[10px] text-slate-500">stereo</span>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <span class="w-2 text-[9px] text-[color:var(--color-muted)]">L</span>
+          <div class="flex-1">
+            <div class="meter">
+              <div
+                class="meter-rms"
+                style:width="{rmsFracL * 100}%"
+                style:background-color={peakColourL}
+              ></div>
+              <div class="meter-peak" style:left="{peakFracL * 100}%"></div>
+              {#if peakHoldFracL > 0}
+                <div class="meter-hold" style:left="{peakHoldFracL * 100}%"></div>
+              {/if}
+            </div>
+          </div>
+          <span class="w-14 text-right font-mono text-[10px] text-slate-300">
+            {#if Number.isFinite(peakDbL) && peakDbL > METER_MIN_DB}
+              {peakDbL.toFixed(1)}
+            {:else}
+              —
+            {/if}
+          </span>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <span class="w-2 text-[9px] text-[color:var(--color-muted)]">R</span>
+          <div class="flex-1">
+            <div class="meter">
+              <div
+                class="meter-rms"
+                style:width="{rmsFracR * 100}%"
+                style:background-color={peakColourR}
+              ></div>
+              <div class="meter-peak" style:left="{peakFracR * 100}%"></div>
+              {#if peakHoldFracR > 0}
+                <div class="meter-hold" style:left="{peakHoldFracR * 100}%"></div>
+              {/if}
+            </div>
+          </div>
+          <span class="w-14 text-right font-mono text-[10px] text-slate-300">
+            {#if Number.isFinite(peakDbR) && peakDbR > METER_MIN_DB}
+              {peakDbR.toFixed(1)}
+            {:else}
+              —
+            {/if}
+          </span>
+        </div>
+
+        <div class="flex justify-between text-[9px] text-[color:var(--color-muted)]">
+          <span>{METER_MIN_DB}</span>
+          <span>-30</span>
+          <span>0 dBFS</span>
+        </div>
+      </div>
+    {:else}
+      <div class="flex flex-col gap-1">
+        <div class="flex items-baseline justify-between">
+          <span class="text-[color:var(--color-muted)]">level</span>
+          <span class="font-mono text-slate-300">
+            {#if Number.isFinite(peakDb) && peakDb > METER_MIN_DB}
+              {peakDb.toFixed(1)} dBFS
+            {:else}
+              —
+            {/if}
+          </span>
+        </div>
+        <!-- Layered bars: RMS (solid), live peak (thin line), peak-hold (thin line) -->
+        <div class="meter">
+          <div
+            class="meter-rms"
+            style:width="{rmsFrac * 100}%"
+            style:background-color={peakColour}
+          ></div>
+          <div class="meter-peak" style:left="{peakFrac * 100}%"></div>
+          {#if peakHoldFrac > 0}
+            <div class="meter-hold" style:left="{peakHoldFrac * 100}%"></div>
           {/if}
-        </span>
+        </div>
+        <div class="flex justify-between text-[9px] text-[color:var(--color-muted)]">
+          <span>{METER_MIN_DB}</span>
+          <span>-30</span>
+          <span>0 dBFS</span>
+        </div>
       </div>
-      <!-- Layered bars: RMS (solid), live peak (thin line), peak-hold (thin line) -->
-      <div class="meter">
-        <div
-          class="meter-rms"
-          style:width="{rmsFrac * 100}%"
-          style:background-color={peakColour}
-        ></div>
-        <div class="meter-peak" style:left="{peakFrac * 100}%"></div>
-        {#if peakHoldFrac > 0}
-          <div class="meter-hold" style:left="{peakHoldFrac * 100}%"></div>
-        {/if}
-      </div>
-      <div class="flex justify-between text-[9px] text-[color:var(--color-muted)]">
-        <span>{METER_MIN_DB}</span>
-        <span>-30</span>
-        <span>0 dBFS</span>
-      </div>
-    </div>
+    {/if}
   {/if}
 </div>
 
