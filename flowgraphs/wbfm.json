@@ -47,6 +47,15 @@
         "alpha": 0.3
       }
     },
+    "rssi": {
+      "type": "RssiProbe",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 240000,
+        "smooth_tau_ms": 50,
+        "emit_interval_ms": 50
+      }
+    },
     "demod": {
       "type": "FmDemod",
       "placement": "browser",
@@ -75,7 +84,9 @@
     ["src.out", "tee.in"],
     ["tee.out0", "chan.in"],
     ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
+    ["chan.out", "rssi.in"],
+    ["rssi.out", "demod.in"],
+    ["rssi.events", "ui:rssi"],
     ["fft.out", "logmag.in"],
     ["logmag.out", "ui:fft"],
     ["demod.out", "decim.in"],

@@ -33,6 +33,41 @@ describe('receivers', () => {
     expect(detectReceiver(null)).toBeNull();
   });
 
+  test('FmDemod with narrow deviation is detected as NBFM', () => {
+    const doc = baseDoc('FmDemod');
+    const narrow: FlowgraphDoc = {
+      ...doc,
+      blocks: {
+        ...doc.blocks,
+        demod: {
+          ...doc.blocks!.demod!,
+          params: { sample_rate_hz: 48000, max_deviation_hz: 5000 },
+        },
+      },
+    };
+    expect(detectReceiver(narrow)).toBe('nbfm');
+  });
+
+  test('SsbDemod sideband param splits USB / LSB', () => {
+    const base = baseDoc('SsbDemod');
+    const usb: FlowgraphDoc = {
+      ...base,
+      blocks: {
+        ...base.blocks,
+        demod: { ...base.blocks!.demod!, params: { sample_rate_hz: 48000, sideband: 'usb' } },
+      },
+    };
+    const lsb: FlowgraphDoc = {
+      ...base,
+      blocks: {
+        ...base.blocks,
+        demod: { ...base.blocks!.demod!, params: { sample_rate_hz: 48000, sideband: 'lsb' } },
+      },
+    };
+    expect(detectReceiver(usb)).toBe('usb');
+    expect(detectReceiver(lsb)).toBe('lsb');
+  });
+
   test('applyRecipe swaps only the demod block and keeps source byte-identical', () => {
     const doc = baseDoc('FmDemod');
     const am = applyRecipe(doc, findRecipe('am'));

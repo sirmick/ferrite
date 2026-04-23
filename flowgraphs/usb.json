@@ -1,0 +1,73 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "usb",
+  "label": "Upper sideband (voice)",
+  "description": "Upper-sideband SSB receiver for amateur voice/digital — 20 m / 17 m / 15 m DX, 10 m FM-mode simplex, 6 m calling. Source 2.4 MS/s IQ. Channelizer decimates by 50 to a 48 kS/s baseband (cutoff ~3 kHz after windowing, matching a classic 2.8–3 kHz communications passband). SsbDemod runs at 48 kS/s with Hilbert-phasing to recover USB and reject the lower sideband by ≳ 24 dB. Output goes straight to the AudioSink; no post-demod decimator needed because the channelizer already lands us on 48 kS/s. Server-side FFT/LogMagU8 spectrum chain matches the other receivers so the visualisation is identical.",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 14200000.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "freq_shift_hz": 0.0,
+        "factor": 50,
+        "num_taps": 121,
+        "cutoff_normalized": 0.00625
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann"
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 48000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "params": {
+        "buffer_samples": 8192
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "audio.in"]
+  ]
+}

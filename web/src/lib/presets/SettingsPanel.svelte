@@ -3,6 +3,7 @@
   import BlockParams from '$lib/controls/BlockParams.svelte';
   import InputControls from '$lib/controls/InputControls.svelte';
   import AudioPanel from './AudioPanel.svelte';
+  import RssiMeter from '$lib/rssi/RssiMeter.svelte';
   import { RECEIVERS, applyRecipe, detectReceiver, findRecipe, type ReceiverId } from './receivers';
 
   // Container for everything the user reaches for after the source is
@@ -43,8 +44,9 @@
       >
         Input
       </summary>
-      <div class="mt-2 pl-1">
+      <div class="mt-2 flex flex-col gap-3 pl-1">
         <InputControls />
+        <RssiMeter />
       </div>
     </details>
 

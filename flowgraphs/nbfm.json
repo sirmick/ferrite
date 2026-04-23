@@ -1,0 +1,72 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "nbfm",
+  "label": "Narrowband FM (voice)",
+  "description": "Narrowband FM receiver for VHF voice — NOAA weather, marine, aircraft (FM mode), 2 m / 70 cm amateur, public safety. Source 2.4 MS/s IQ. Channelizer decimates by 50 to a 48 kS/s baseband (~12 kHz one-sided post-LPF, comfortably passes ±5 kHz deviation + audio sidebands and rejects aliases). FmDemod runs at 48 kS/s with `max_deviation_hz: 5000` — same block as WBFM, narrower scaling. Output goes straight to the AudioSink at the AudioContext rate; no post-demod decimator needed because the channelizer already lands us on 48 kS/s. Server-side FFT/LogMagU8 spectrum chain matches WBFM so the visualisation is identical.",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 162400000.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "freq_shift_hz": 0.0,
+        "factor": 50,
+        "num_taps": 121,
+        "cutoff_normalized": 0.01
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann"
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "FmDemod",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 48000,
+        "max_deviation_hz": 5000
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "params": {
+        "buffer_samples": 8192
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "audio.in"]
+  ]
+}

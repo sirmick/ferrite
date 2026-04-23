@@ -1,0 +1,73 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "lsb",
+  "label": "Lower sideband (voice)",
+  "description": "Lower-sideband SSB receiver — 80 m and 40 m amateur phone, 160 m. Same signal chain as the USB preset; only `sideband: lsb` differs. Source 2.4 MS/s IQ → channelizer factor 50 → SsbDemod at 48 kS/s → AudioSink. Server-side FFT/LogMagU8 spectrum chain is identical to the other receivers.",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 7200000.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "freq_shift_hz": 0.0,
+        "factor": 50,
+        "num_taps": 121,
+        "cutoff_normalized": 0.00625
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann"
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 48000,
+        "sideband": "lsb",
+        "audio_gain": 30.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "params": {
+        "buffer_samples": 8192
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "audio.in"]
+  ]
+}

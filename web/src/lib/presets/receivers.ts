@@ -8,7 +8,7 @@
 
 import type { FlowgraphDoc } from '$lib/flowgraph';
 
-export type ReceiverId = 'fm' | 'am';
+export type ReceiverId = 'fm' | 'nbfm' | 'am' | 'usb' | 'lsb';
 
 export interface ReceiverRecipe {
   id: ReceiverId;
@@ -25,10 +25,28 @@ export const RECEIVERS: readonly ReceiverRecipe[] = [
     params: { sample_rate_hz: 48000, max_deviation_hz: 75000 },
   },
   {
+    id: 'nbfm',
+    label: 'NBFM voice',
+    blockType: 'FmDemod',
+    params: { sample_rate_hz: 48000, max_deviation_hz: 5000 },
+  },
+  {
     id: 'am',
     label: 'AM broadcast',
     blockType: 'AmDemod',
     params: { sample_rate_hz: 48000, bias_tau_ms: 100 },
+  },
+  {
+    id: 'usb',
+    label: 'USB (upper sideband)',
+    blockType: 'SsbDemod',
+    params: { sample_rate_hz: 48000, sideband: 'usb', audio_gain: 30.0 },
+  },
+  {
+    id: 'lsb',
+    label: 'LSB (lower sideband)',
+    blockType: 'SsbDemod',
+    params: { sample_rate_hz: 48000, sideband: 'lsb', audio_gain: 30.0 },
   },
 ];
 
@@ -58,8 +76,20 @@ export function applyRecipe(doc: FlowgraphDoc, recipe: ReceiverRecipe): Flowgrap
   return { ...doc, blocks: next } as FlowgraphDoc;
 }
 
-/** Guess which receiver id matches the live preset's demod block. */
+/** Guess which receiver id matches the live preset's demod block.
+ * For FmDemod we also check `max_deviation_hz` so wide-FM and NBFM —
+ * which share a block type — can be told apart. For SsbDemod we check
+ * `sideband` to split USB vs LSB. */
 export function detectReceiver(doc: FlowgraphDoc | null): ReceiverId | null {
-  const t = doc?.blocks?.demod?.type;
-  return RECEIVERS.find((r) => r.blockType === t)?.id ?? null;
+  const demod = doc?.blocks?.demod;
+  if (!demod) return null;
+  if (demod.type === 'FmDemod') {
+    const dev = (demod.params as { max_deviation_hz?: number } | undefined)?.max_deviation_hz;
+    return dev != null && dev <= 25000 ? 'nbfm' : 'fm';
+  }
+  if (demod.type === 'SsbDemod') {
+    const sb = (demod.params as { sideband?: string } | undefined)?.sideband;
+    return sb === 'lsb' ? 'lsb' : 'usb';
+  }
+  return RECEIVERS.find((r) => r.blockType === demod.type)?.id ?? null;
 }

@@ -173,7 +173,7 @@ mod tests {
         // land before consumers; sibling ties break alphabetically.
         assert_eq!(
             s.order,
-            vec!["src", "tee", "chan", "demod", "decim", "audio", "fft", "logmag"]
+            vec!["src", "tee", "chan", "fft", "logmag", "rssi", "demod", "decim", "audio"]
         );
     }
 
@@ -186,10 +186,14 @@ mod tests {
         let decim = &s.wire_plan["decim"];
         assert_eq!(decim["in"].source_block, "demod");
         assert_eq!(decim["in"].source_port, "out");
-        // demod reads directly from the channelizer's 240 kS/s IQ.
+        // demod reads from the rssi probe (pass-through), which in turn
+        // reads from the channelizer's 240 kS/s IQ.
         let demod = &s.wire_plan["demod"];
-        assert_eq!(demod["in"].source_block, "chan");
+        assert_eq!(demod["in"].source_block, "rssi");
         assert_eq!(demod["in"].source_port, "out");
+        let rssi = &s.wire_plan["rssi"];
+        assert_eq!(rssi["in"].source_block, "chan");
+        assert_eq!(rssi["in"].source_port, "out");
         // src has no inputs — still present with an empty map.
         assert!(s.wire_plan["src"].is_empty());
     }

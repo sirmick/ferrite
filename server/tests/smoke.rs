@@ -315,9 +315,11 @@ async fn patch_flowgraph_invalid_returns_error_and_preserves_state() {
 async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
     // End-to-end smoke: load the shipped wbfm preset, feed it a
     // SineSource (no hardware required), connect to /ws/preset, and
-    // confirm both crossings light up:
-    //   - stream 1000: IQ crossing on `chan.out → decim.in`
-    //   - stream 1001: FFT tap on `logmag.out → ui:fft`
+    // confirm the crossings light up. env_split allocates stream_ids
+    // from 1000+ in doc-traversal order; for wbfm that is:
+    //   - stream 1000: IQ crossing on `rssi.out → demod.in`
+    //   - stream 1001: JsonEvent tap on `rssi.events → ui:rssi`
+    //   - stream 1002: FFT tap on `logmag.out → ui:fft`
     // This exercises the full pipeline compose → env_split → runtime
     // → frame bus → WS path against the same preset the web UI ships.
     let preset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -383,7 +385,7 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
                 stream_id, payload, ..
             } => {
                 *counts.entry((stream_id, "FftU8")).or_default() += 1;
-                if stream_id == 1001 {
+                if stream_id == 1002 {
                     assert_eq!(payload.len(), 16384, "expected 16384 FFT bins");
                     saw_fft = true;
                 }
@@ -392,7 +394,7 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
         }
     }
     assert!(saw_iq, "no IqF32 on stream 1000 within 2s; saw {counts:?}");
-    assert!(saw_fft, "no FftU8 on stream 1001 within 2s; saw {counts:?}");
+    assert!(saw_fft, "no FftU8 on stream 1002 within 2s; saw {counts:?}");
 }
 
 #[tokio::test]

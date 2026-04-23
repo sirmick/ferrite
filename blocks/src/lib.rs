@@ -33,12 +33,15 @@ pub mod log_mag_u8;
 pub mod real_decimator;
 pub mod registry;
 pub mod render;
+pub mod rssi_probe;
 pub mod sine;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_retry;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_source;
 pub mod spsc_ring;
+pub mod squelch;
+pub mod ssb_demod;
 pub mod tee_iq_f32;
 pub mod ws_bridge;
 
@@ -64,10 +67,13 @@ pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 pub use real_decimator::{RealF32Decimator, RealF32DecimatorParams};
 pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hold, SpectrumStats};
+pub use rssi_probe::{RssiProbe, RssiProbeParams};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
 pub use soapy_source::{SoapyReadback, SoapySource, SoapySourceParams};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
+pub use squelch::{Squelch, SquelchParams};
+pub use ssb_demod::{Sideband, SsbDemod, SsbDemodParams};
 pub use tee_iq_f32::TeeIqF32;
 pub use ws_bridge::{
     BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx,
@@ -128,6 +134,9 @@ mod tests {
             "RealF32Decimator",
             "Channelizer",
             "FmDemod",
+            "SsbDemod",
+            "Squelch",
+            "RssiProbe",
             "AmDemod",
             "AmModulator",
             "DtmfAudioSource",
