@@ -112,8 +112,11 @@ fn main() {
         .clang_arg(format!("-I{}", vendor.join("include").display()))
         // M2 surface — keep this list tight. New wrappers append.
         .allowlist_function("firfilt_rrrf_.*")
+        .allowlist_function("ampmodem_.*")
         .allowlist_function("liquid_(?:libversion|error_str)")
         .allowlist_type("firfilt_rrrf")
+        .allowlist_type("ampmodem")
+        .allowlist_type("liquid_ampmodem_type")
         .allowlist_type("liquid_float_complex")
         .allowlist_var("LIQUID_.*")
         // Emit cargo:rerun-if-changed for every header bindgen sees.
@@ -199,6 +202,13 @@ fn liquid_sources(vendor: &std::path::Path) -> Vec<PathBuf> {
                 "windows.c",
             ],
         ),
+        // We pull in just the AM/SSB demod entry from the modem
+        // module (`ampmodem.c`); skipping `modemcf.c`, `fskdem.c`,
+        // and the digital-modem zoo keeps the link small. The two
+        // `_const.c` files are pre-generated symbol tables liquid
+        // expects to find linked even when the digital paths aren't
+        // exercised.
+        ("modem", &["ampmodem.c", "modem.shim.c"]),
         ("nco", &["nco_crcf.c", "nco.utilities.c"]),
         (
             "utility",

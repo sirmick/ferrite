@@ -36,6 +36,32 @@ pub struct Firfilt<T> {
 }
 
 impl Firfilt<f32> {
+    /// Build a real-tap FIR filter from explicit coefficients. The
+    /// caller is responsible for whatever window / design step
+    /// produced them; we just convolve. Useful when liquid's higher-
+    /// level designers (Kaiser, Parks-McClellan, Hilbert) live one
+    /// abstraction away — see [`design_hilbert_taps`] for example.
+    pub fn from_taps(taps: &[f32]) -> Result<Self, &'static str> {
+        if taps.len() < 3 {
+            return Err("firfilt: need at least 3 taps");
+        }
+        // SAFETY: liquid copies the tap buffer internally — `taps`
+        // can drop after the call. NULL on failure (treated as Err).
+        let inner = unsafe {
+            sys::firfilt_rrrf_create(
+                taps.as_ptr() as *mut f32,
+                u32::try_from(taps.len()).expect("firfilt: too many taps for c_uint"),
+            )
+        };
+        if inner.is_null() {
+            return Err("firfilt_rrrf_create returned NULL");
+        }
+        Ok(Self {
+            inner,
+            _marker: PhantomData,
+        })
+    }
+
     /// Design a Kaiser-windowed lowpass FIR filter with `n` taps.
     /// `fc` is the normalised cutoff (0 < fc < 0.5; 0.25 ≈ Fs/4).
     /// `as_db` is the stop-band attenuation in dB; 60 dB is a typical
@@ -116,6 +142,124 @@ impl Firfilt<f32> {
     }
 }
 
+/// AM/SSB modulation type passed to [`Ampmodem::new`]. Mirrors
+/// liquid's `liquid_ampmodem_type` enum 1:1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmType {
+    /// Double sideband (envelope detection).
+    Dsb,
+    /// Upper sideband.
+    Usb,
+    /// Lower sideband.
+    Lsb,
+}
+
+/// AM/SSB demodulator — wraps liquid's `ampmodem`. Consumes one
+/// complex baseband IQ sample per call, returns one real audio
+/// sample at the **same rate**. liquid handles the full chain
+/// internally: a Remez-designed Hilbert filter (`firhilbf`), a
+/// DC blocker (`firfilt_rrrf_create_dc_blocker`), a complex LPF
+/// for the optional carrier-recovery PLL, and the sideband
+/// selection arithmetic — all for ~470 LOC of C we don't have to
+/// write or maintain.
+///
+/// Why wrap a "large block" instead of just `firhilbf`: liquid's
+/// `firhilbf` is a half-band filter that does only 2× rate change
+/// (interp / decim). Same-rate complex-IQ → real-audio for SSB
+/// requires the full Hartley-method assembly that `ampmodem` already
+/// embodies. The image rejection comes from `firhilbf`'s internal
+/// Remez design, which is meaningfully better than the windowed-
+/// sinc Hamming filter SsbDemod previously hand-rolled (~24 dB).
+pub struct Ampmodem {
+    inner: sys::ampmodem,
+}
+
+impl Ampmodem {
+    /// Build a new ampmodem.
+    ///
+    /// - `mod_index`: AM modulation index (the depth of the original
+    ///   transmit modulation). For SSB demod the value mostly affects
+    ///   the carrier-recovery PLL bandwidth; 0.5–1.0 is fine for
+    ///   amateur voice. liquid's example uses 0.8.
+    /// - `kind`: USB / LSB / DSB.
+    /// - `suppressed_carrier`: `true` for typical SSB amateur signals
+    ///   (no carrier transmitted); `false` for AM broadcast where the
+    ///   carrier is present.
+    pub fn new(
+        mod_index: f32,
+        kind: AmType,
+        suppressed_carrier: bool,
+    ) -> Result<Self, &'static str> {
+        if !(mod_index.is_finite() && mod_index > 0.0) {
+            return Err("ampmodem: mod_index must be > 0");
+        }
+        let liquid_type = match kind {
+            AmType::Dsb => sys::liquid_ampmodem_type_LIQUID_AMPMODEM_DSB,
+            AmType::Usb => sys::liquid_ampmodem_type_LIQUID_AMPMODEM_USB,
+            AmType::Lsb => sys::liquid_ampmodem_type_LIQUID_AMPMODEM_LSB,
+        };
+        // SAFETY: parameters validated above; liquid returns NULL on
+        // bad config which we map to Err so callers never see a bad
+        // handle.
+        let inner =
+            unsafe { sys::ampmodem_create(mod_index, liquid_type, i32::from(suppressed_carrier)) };
+        if inner.is_null() {
+            return Err("ampmodem_create returned NULL");
+        }
+        Ok(Self { inner })
+    }
+
+    /// Demodulate one complex IQ sample → one real audio sample.
+    pub fn demodulate(&mut self, re: f32, im: f32) -> f32 {
+        let x = sys::__BindgenComplex { re, im };
+        let mut y: f32 = 0.0;
+        // SAFETY: `inner` is a valid handle; `y` is a writable f32
+        // stack slot.
+        unsafe {
+            sys::ampmodem_demodulate(self.inner, x, &mut y);
+        }
+        y
+    }
+
+    /// Group delay introduced by the internal filter chain
+    /// (Hilbert + DC blocker + LPF). Useful when aligning the
+    /// demodulator output against another path that wasn't
+    /// delayed.
+    #[must_use]
+    pub fn delay(&self) -> u32 {
+        // SAFETY: `inner` is a valid handle.
+        unsafe { sys::ampmodem_get_delay_demod(self.inner) }
+    }
+
+    /// Reset internal state (Hilbert delay line, DC blocker, PLL).
+    pub fn reset(&mut self) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::ampmodem_reset(self.inner);
+        }
+    }
+}
+
+impl Drop for Ampmodem {
+    fn drop(&mut self) {
+        // SAFETY: `inner` was returned by `ampmodem_create` and
+        // hasn't been destroyed; `Drop` runs at most once.
+        unsafe {
+            if !self.inner.is_null() {
+                sys::ampmodem_destroy(self.inner);
+            }
+        }
+    }
+}
+
+// SAFETY: liquid's objects are single-threaded by design but have
+// no thread affinity — moving the handle between threads is fine
+// as long as we don't share access concurrently. `Send` (move) is
+// safe; `Sync` (shared reference) is intentionally not implemented.
+// Required for ferrite-blocks's `Block: Send` bound to be satisfied
+// by blocks that hold an Ampmodem.
+unsafe impl Send for Ampmodem {}
+
 /// WASM smoke entry point — a no-cost facade behind the `wasm`
 /// feature that lets the wasm-pack output be exercised from JS:
 /// builds a Kaiser-windowed lowpass with the given params, pushes
@@ -148,6 +292,10 @@ impl<T> Drop for Firfilt<T> {
         }
     }
 }
+
+// SAFETY: same reasoning as Ampmodem — liquid handles are
+// single-threaded but movable. Send only, not Sync.
+unsafe impl<T: Send> Send for Firfilt<T> {}
 
 #[cfg(test)]
 mod tests {
@@ -194,6 +342,68 @@ mod tests {
         assert!(
             peak < 0.05,
             "lowpass should reject Nyquist signal, got peak={peak}"
+        );
+    }
+
+    #[test]
+    fn ampmodem_constructs_for_each_mode() {
+        // Smoke: every variant of the AmType enum survives a
+        // create + a couple of demodulate calls + drop. If this
+        // works the wrapper API is wired correctly.
+        for kind in [AmType::Dsb, AmType::Usb, AmType::Lsb] {
+            let mut m = Ampmodem::new(0.8, kind, true).expect("create");
+            for _ in 0..32 {
+                let _ = m.demodulate(0.5, 0.1);
+            }
+        }
+    }
+
+    #[test]
+    fn ampmodem_recovers_usb_tone_rejects_image() {
+        // Feed a pure positive-frequency baseband IQ tone (USB) into
+        // a USB demod — expect strong output. Feed the same
+        // frequency negative-rotated (LSB) — expect near-zero output
+        // from the USB demod. Image-rejection ratio in dB is the win
+        // we're after vs. our hand-rolled SsbDemod which managed
+        // ~24 dB. liquid's internal Remez-designed firhilbf should
+        // do meaningfully better.
+        use core::f32::consts::TAU;
+        let fs = 48_000.0_f32;
+        let f = 1_500.0_f32;
+        let n = 8192usize;
+        let mut usb = Ampmodem::new(0.8, AmType::Usb, true).expect("create");
+
+        // USB-only tone — exp(+jωt).
+        let mut out_match = vec![0.0_f32; n];
+        for i in 0..n {
+            let t = i as f32 / fs;
+            out_match[i] = usb.demodulate((TAU * f * t).cos(), (TAU * f * t).sin());
+        }
+        usb.reset();
+        // Same frequency, negative rotation — LSB tone, USB demod
+        // should reject it.
+        let mut out_image = vec![0.0_f32; n];
+        for i in 0..n {
+            let t = i as f32 / fs;
+            out_image[i] = usb.demodulate((TAU * f * t).cos(), -(TAU * f * t).sin());
+        }
+        // Skip filter transient (group delay + a generous margin).
+        let skip = (usb.delay() as usize) + 256;
+        let rms = |x: &[f32]| -> f32 {
+            let s: f32 = x.iter().map(|v| v * v).sum();
+            (s / x.len() as f32).sqrt()
+        };
+        let r_match = rms(&out_match[skip..]);
+        let r_image = rms(&out_image[skip..]);
+        let ratio_db = 20.0 * (r_match / r_image.max(1e-9)).log10();
+        // Bar set above hand-rolled SsbDemod's ~24 dB so we'd notice
+        // a regression. liquid typically does 40–60 dB on this kind
+        // of signal; 30 dB threshold gives ample margin without
+        // becoming a flaky precision tripwire.
+        assert!(
+            ratio_db > 30.0,
+            "USB image rejection should beat 30 dB, got {ratio_db:.1} dB \
+             (match={r_match:.4}, image={r_image:.4})"
         );
     }
 

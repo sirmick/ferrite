@@ -28,6 +28,19 @@ export default defineConfig({
     format: 'es',
     plugins: () => [wasm(), topLevelAwait()],
   },
+  resolve: {
+    alias: {
+      // The wasm-bindgen JS shim for `ferrite-blocks` (now linking
+      // liquid-dsp + wasi-libc on wasm32-unknown-unknown) does a
+      // bare `import * as _ from "wasi_snapshot_preview1"` to
+      // satisfy WASI imports referenced by wasi-libc's stdio path.
+      // We don't run a WASI runtime in the browser, so map the bare
+      // module to our no-op stubs — see src/lib/wasm/wasi-stubs.ts
+      // for why no-ops are correct (the syscalls in question are
+      // never reached by the DSP code paths).
+      wasi_snapshot_preview1: '/src/lib/wasm/wasi-stubs.ts',
+    },
+  },
   server: {
     port: 10000,
     strictPort: true,
