@@ -177,7 +177,14 @@ impl Block for FftBlock {
                     key: "size",
                     label: "FFT size",
                     kind: ParamKind::EnumNumeric {
-                        values: &[1024.0, 2048.0, 4096.0, 8192.0, 16384.0],
+                        // 65536 at 2.4 MS/s gives ~36 Hz/bin and emits
+                        // ~36 frames/sec — comfortable for a waterfall.
+                        // 131072 (~18 Hz/bin) is the practical ceiling
+                        // before the FFT plan starts costing more than
+                        // a frame's tick budget on slower CPUs.
+                        values: &[
+                            1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0, 131072.0,
+                        ],
                         default: 4096.0,
                         unit: "bins",
                     },

@@ -88,7 +88,11 @@ impl Block for LogMagU8 {
                     key: "size",
                     label: "FFT size",
                     kind: ParamKind::EnumNumeric {
-                        values: &[1024.0, 2048.0, 4096.0, 8192.0, 16384.0],
+                        // Mirrors the FFT block's ladder so the two stay
+                        // in lockstep when the UI flips one of them.
+                        values: &[
+                            1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0, 131072.0,
+                        ],
                         default: 4096.0,
                         unit: "bins",
                     },
