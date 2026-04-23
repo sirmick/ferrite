@@ -4,6 +4,7 @@ members = [
     "server",
     "blocks",
     "blocks-macros",
+    "blocks/native/hello",
     "runtime",
 ]
 

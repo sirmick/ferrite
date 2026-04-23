@@ -1,0 +1,24 @@
+[package]
+name        = "ferrite-hello-vendor"
+version     = "0.0.1"
+edition.workspace = true
+license.workspace = true
+publish     = false
+description = "M1 substrate proof — smallest C-as-WASM vendor block."
+
+[lib]
+# `cdylib` for wasm-pack; `rlib` so other workspace crates can `use` us.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# wasm-bindgen is gated on the `wasm` feature so the native build (which
+# the workspace `cargo test` exercises) doesn't drag in a bunch of
+# wasm-only deps. Mirrors the `ferrite-blocks` crate's split.
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen"]
+
+[build-dependencies]
+cc = "1.0"
