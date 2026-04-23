@@ -42,6 +42,7 @@ pub mod soapy_source;
 pub mod spsc_ring;
 pub mod squelch;
 pub mod ssb_demod;
+pub mod stereo_decoder;
 pub mod tee_iq_f32;
 pub mod ws_bridge;
 
@@ -74,6 +75,7 @@ pub use soapy_source::{SoapyReadback, SoapySource, SoapySourceParams};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use squelch::{Squelch, SquelchParams};
 pub use ssb_demod::{Sideband, SsbDemod, SsbDemodParams};
+pub use stereo_decoder::{StereoDecoder, StereoDecoderParams};
 pub use tee_iq_f32::TeeIqF32;
 pub use ws_bridge::{
     BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx,
@@ -137,6 +139,7 @@ mod tests {
             "SsbDemod",
             "Squelch",
             "RssiProbe",
+            "StereoDecoder",
             "AmDemod",
             "AmModulator",
             "DtmfAudioSource",
