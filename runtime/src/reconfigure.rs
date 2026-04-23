@@ -70,6 +70,14 @@ pub enum StructuralChange {
     },
     WiresChanged,
     EnvironmentsChanged,
+    /// Preset name was swapped out wholesale — e.g. `POST /api/preset`
+    /// loading `wbfm` over the currently-applied `nbfm`. Always escalates
+    /// to a full rebuild; keeps the diff as a data record even though the
+    /// per-block deltas below are mostly noise for a cross-preset swap.
+    NameChanged {
+        old: String,
+        new: String,
+    },
 }
 
 /// Plan produced by diffing two presets. Iterate `changes` to see
@@ -96,8 +104,6 @@ impl ReconfigurePlan {
 pub enum ReconfigureError {
     #[error("block {block_id:?}: type {type_name:?} is not registered")]
     UnknownBlockType { block_id: String, type_name: String },
-    #[error("doc names disagree: old={old:?}, new={new:?}")]
-    NameMismatch { old: String, new: String },
 }
 
 /// Diff two presets, consulting `registry` for each block's param scopes.
@@ -112,14 +118,17 @@ pub fn diff_presets(
     new: &FlowgraphDoc,
     registry: &dyn SpecRegistry,
 ) -> Result<ReconfigurePlan, ReconfigureError> {
+    let mut structural = Vec::new();
+
     if old.name != new.name {
-        return Err(ReconfigureError::NameMismatch {
+        // Preset swap — record it, but keep going so the block-delta
+        // and wire-delta arms still populate the plan for diagnostics.
+        // Everything escalates to SourceRestart below regardless.
+        structural.push(StructuralChange::NameChanged {
             old: old.name.clone(),
             new: new.name.clone(),
         });
     }
-
-    let mut structural = Vec::new();
 
     if old.environments != new.environments {
         structural.push(StructuralChange::EnvironmentsChanged);
@@ -515,12 +524,21 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_names_are_an_error() {
+    fn mismatched_names_trigger_full_rebuild() {
+        // Two different presets always force SourceRestart — the plan
+        // records the name swap and surfaces it alongside any other
+        // structural delta the two docs happen to share. The server
+        // uses this on `POST /api/preset` to load a wholesale new
+        // preset over the running one.
         let a = base_doc();
         let mut b = base_doc();
         b.name = "other".into();
-        let err = diff_presets(&a, &b, &TestRegistry).unwrap_err();
-        assert!(matches!(err, ReconfigureError::NameMismatch { .. }));
+        let plan = diff_presets(&a, &b, &TestRegistry).unwrap();
+        assert!(plan.structural.contains(&StructuralChange::NameChanged {
+            old: "t".into(),
+            new: "other".into(),
+        }));
+        assert_eq!(plan.overall, ReconfigureScope::SourceRestart);
     }
 
     #[test]

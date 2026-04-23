@@ -344,6 +344,7 @@ async fn main() -> Result<()> {
         .route("/api/blocks", get(routes::list_block_schemas))
         .route("/api/presets", get(routes::list_presets))
         .route("/api/preset", post(routes::load_preset))
+        .route("/api/debug/log", post(routes::browser_log))
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
         .with_state(state);

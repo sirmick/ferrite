@@ -277,16 +277,17 @@ async fn patch_source_invalid_type_returns_error_and_preserves_state() {
 #[tokio::test]
 async fn patch_flowgraph_invalid_returns_error_and_preserves_state() {
     // Same rollback contract for PATCH /api/flowgraph: a bad preset
-    // (here: a block of an unregistered type) must 4xx and leave the
-    // stored doc intact.
+    // (here: a block of an unregistered type on the node side — stays
+    // in the node-half so the runtime can actually see it) must 4xx and
+    // leave the stored doc intact.
     let addr = spawn_app(true).await;
     let bad_doc = json!({
         "name": "bad",
-        "environments": ["node", "browser"],
+        "environments": ["node"],
         "blocks": {
             "src":  { "type": "Source", "placement": "node",
                       "params": { "center_freq_hz": 0.0, "sample_rate_hz": 1000.0 } },
-            "sink": { "type": "NoSuchBlockType", "placement": "browser" }
+            "sink": { "type": "NoSuchBlockType", "placement": "node" }
         },
         "wires": [["src.out", "sink.in"]]
     });
