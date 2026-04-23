@@ -13,7 +13,12 @@
 
 import type { FlowgraphDoc } from '$lib/flowgraph';
 import { ApiError, wsUrlFor } from '$lib/api/errors';
-import { fetchFlowgraph, patchFlowgraph, type ReconfigureResponse } from '$lib/api/flowgraph';
+import {
+  fetchFlowgraph,
+  patchFlowgraph,
+  type ReconfigureResponse,
+  type SoapyReadback,
+} from '$lib/api/flowgraph';
 import { fetchSource, patchSource, type SourceConfig } from '$lib/api/source';
 import {
   fetchPipelineStatus,
@@ -25,6 +30,7 @@ import { fetchUiSinks, type UiSink } from '$lib/api/uiSinks';
 import { fetchPipelineBlocks, patchBlockParams, type PipelineBlock } from '$lib/api/pipelineBlocks';
 import { fetchPresets, loadPreset, type PresetEntry } from '$lib/api/presets';
 import { fetchSourceCapabilities, type SourceCapabilitiesResponse } from '$lib/api/sourceCaps';
+import { defaultsFor, toSourceConfig } from '$lib/controls/optionsModel';
 import { FrameClient, type ClientStatus } from '$lib/ws/client';
 import { initFrameDecoder } from '$lib/ws/frame';
 import { logs } from '$lib/logs/store.svelte';
@@ -109,9 +115,68 @@ class PipelineStore {
   }
 
   async start(): Promise<void> {
+    // Reset-on-Start: the user's job is to pick the centre frequency,
+    // the system's job is to pick a working rate/BW/gain/antenna. Any
+    // live edits they've made via InputControls (e.g. accidentally
+    // parking sample_rate at the SDRplay cliff) are deliberately
+    // forgotten; the only thing carried across a start is the current
+    // centre frequency, clamped to the device's advertised range.
+    //
+    // No-op when the source is not a SoapySDR device (e.g. SineSource)
+    // or when the capability probe hasn't populated yet — in those
+    // cases the stored params go through verbatim.
+    await this.applySensibleSourceDefaults();
     await this.withBusy(async () => {
       this.status = await startPipeline();
     }, 'start');
+  }
+
+  /** Reset the source config to `defaultsFor(caps)`, carrying over the
+   *  current centre frequency clamped into the advertised range. Called
+   *  from `start()`; exposed as a method so a future "reset now"
+   *  button can reuse it. */
+  private async applySensibleSourceDefaults(): Promise<void> {
+    const caps = this.sourceCaps?.kind === 'hardware' ? this.sourceCaps.capabilities : null;
+    // Extra noisy so you can see it in devtools Console without the
+    // in-page log filter.
+    console.warn(
+      '[reset-on-start]',
+      'caps-kind=' + (this.sourceCaps?.kind ?? 'undefined'),
+      'source-type=' + (this.source?.type ?? 'undefined'),
+    );
+    logs.push(
+      'client',
+      'info',
+      `applySensibleSourceDefaults: caps=${caps ? 'hardware' : 'none'} type=${this.source?.type ?? 'none'}`,
+    );
+    if (!caps || this.source?.type !== 'SoapySource') {
+      console.warn('[reset-on-start] bailing — guard not satisfied');
+      return;
+    }
+
+    const baseline = defaultsFor(caps);
+    if (!baseline) return;
+
+    // Carry the user's current centre frequency, clamped to the advertised
+    // range. If they swapped devices and the old freq is out of band,
+    // fall back to the baseline midpoint rather than picking an
+    // unreachable value.
+    const current = this.source.params as Record<string, unknown>;
+    const currentFreq = typeof current.center_freq_hz === 'number' ? current.center_freq_hz : null;
+    const { min, max } = baseline.freq_range;
+    const keptFreq =
+      currentFreq !== null && Number.isFinite(currentFreq)
+        ? Math.min(max, Math.max(min, currentFreq))
+        : baseline.center_freq_hz;
+
+    const reset = toSourceConfig(caps, { ...baseline, center_freq_hz: keptFreq });
+    console.warn('[reset-on-start] sending PATCH', reset.params);
+    logs.push(
+      'client',
+      'info',
+      `applySensibleSourceDefaults: resetting to rate=${reset.params.sample_rate_hz} bw=${reset.params.bandwidth_hz ?? 'auto'} freq=${reset.params.center_freq_hz}`,
+    );
+    await this.patchSource(reset);
   }
 
   async stop(): Promise<void> {
@@ -121,11 +186,18 @@ class PipelineStore {
   }
 
   /** Patch the source config. If the pipeline is running, the server
-   *  reconfigures it in place. Updates the local mirror on success. */
+   *  reconfigures it in place. Updates the local mirror on success.
+   *
+   *  When the server returns a `source_readback` (SoapySource on a
+   *  running pipeline), the readback values overwrite the optimistic
+   *  ones in `source.params`. Drivers silently clamp BW to the ladder,
+   *  AGC varies IFGR under the user's gain knob, and tune-step rounding
+   *  shifts the centre freq by a few kHz — without reconciliation the
+   *  UI would keep showing whatever the user last wrote. */
   async patchSource(next: SourceConfig): Promise<ReconfigureResponse | null> {
     return this.withBusy(async () => {
       const resp = await patchSource(next);
-      this.source = next;
+      this.source = applyReadback(next, resp.source_readback);
       await this.refreshComposed();
       this.sourceCaps = await fetchSourceCapabilities();
       return resp;
@@ -228,6 +300,21 @@ class PipelineStore {
       return null;
     }
   }
+}
+
+/**
+ * Merge the server's post-apply readback into the optimistic source
+ * config. Only keys the server actually returned are overwritten —
+ * undefined fields mean "driver didn't report this, keep the optimistic
+ * value." Leaves `type` alone; readback is always about params.
+ */
+function applyReadback(next: SourceConfig, readback: SoapyReadback | undefined): SourceConfig {
+  if (!readback) return next;
+  const merged: Record<string, unknown> = { ...next.params };
+  for (const [k, v] of Object.entries(readback)) {
+    if (v !== undefined) merged[k] = v;
+  }
+  return { type: next.type, params: merged };
 }
 
 function indexByName(sinks: UiSink[]): Record<string, UiSink> {

@@ -14,7 +14,9 @@ export const RTLSDR_CAPS: DeviceCapabilities = {
     serial: '00000001',
     args: { driver: 'rtlsdr', serial: '00000001' },
   },
-  driver_key: 'rtlsdr',
+  // SoapySDR returns `RTLSDR` capitalised; fixtures mirror the real
+  // casing so the preset-lookup code paths exercise the normaliser.
+  driver_key: 'RTLSDR',
   hardware_key: 'RTL2832U',
   hardware_info: { tuner: 'R820T2' },
   rx_channels: [
@@ -70,7 +72,9 @@ export const SDRPLAY_CAPS: DeviceCapabilities = {
     serial: '1809071H07',
     args: { driver: 'sdrplay', serial: '1809071H07' },
   },
-  driver_key: 'sdrplay',
+  // SoapySDR returns `SDRplay` capitalised; same reasoning as RTLSDR
+  // above — test the real-world casing, not the preset-file casing.
+  driver_key: 'SDRplay',
   hardware_key: 'RSPduo',
   hardware_info: { hwVer: '3' },
   rx_channels: [

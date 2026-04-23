@@ -1,19 +1,19 @@
 <script lang="ts">
-  // Input panel for the active SDR — driver-specific knobs surfaced via
-  // `getSettingInfo` plus the restart-on-change analog basics (sample
-  // rate, bandwidth). The hot/live controls (gain, antenna, AGC, freq)
-  // live in the spectrum header by the nixies (#70), not here.
+  // Advanced input panel — every capability the probe surfaces, one
+  // control per key, no smart logic. Each change writes its own key via
+  // `patchSourceParams`; the server routes hot-apply vs rebuild by key.
+  // The curated "quick" controls next to the nixies are the smart twin
+  // (e.g. sample-rate change also applies the ladder BW atomically); this
+  // panel stays deliberately dumb so what you pick is what the driver sees.
   //
-  // Reads `pipeline.sourceCaps` for the schema and `pipeline.source.params`
-  // for current values; every change calls `pipeline.patchSourceParams`,
-  // which the server applies by tearing down + rebuilding the source.
+  // Tooltips surface the probe metadata verbatim (`SettingInfo.description`,
+  // `RangeSpec` bounds, gain element name) so the user can inspect what
+  // each knob actually is without leaving the UI.
 
   import { pipeline } from '$lib/pipeline.svelte';
-  import type { SettingInfo, SettingType } from '$lib/api/devices';
-  import { rangesToChoices } from './optionsModel';
+  import type { RangeSpec, SettingInfo, SettingType } from '$lib/api/devices';
+  import { fullBandwidthChoices, fullRateChoices, hiddenSettingsFor } from './optionsModel';
 
-  // Reads capabilities + current params straight off the pipeline store
-  // — same pattern as `BlockParams`. Keeps the parent panel a one-liner.
   let caps = $derived(
     pipeline.sourceCaps?.kind === 'hardware' ? pipeline.sourceCaps.capabilities : null,
   );
@@ -24,11 +24,26 @@
   let settingsMap = $derived((params.settings ?? {}) as Record<string, string>);
   let channel = $derived(caps?.rx_channels[0] ?? null);
 
-  let rateChoices = $derived(channel ? rangesToChoices(channel.sample_rate_ranges_hz) : []);
-  let bwChoices = $derived(channel ? rangesToChoices(channel.bandwidth_ranges_hz) : []);
+  let rateChoices = $derived(caps ? fullRateChoices(caps) : []);
+  let bwChoices = $derived(caps ? fullBandwidthChoices(caps) : []);
+  let hiddenSettings = $derived(new Set(caps ? hiddenSettingsFor(caps) : []));
+  // Drop preset-hidden keys. Used today for SDRplay's `rfgain_sel`, which
+  // duplicates the `RFGR` gain element — rendering both would fight.
+  let visibleSettings = $derived((caps?.settings ?? []).filter((s) => !hiddenSettings.has(s.key)));
+
+  let freqRange = $derived(channel?.frequency_ranges_hz[0] ?? null);
+  let overallGainRange = $derived(channel?.overall_gain_range_db ?? null);
+  let antennas = $derived(channel?.antennas ?? []);
+  let hasAgc = $derived(channel?.has_agc ?? false);
 
   let currentRate = $derived(numberOr(params.sample_rate_hz, rateChoices[0] ?? NaN));
   let currentBw = $derived(numberOr(params.bandwidth_hz, NaN));
+  let currentFreqMHz = $derived(numberOr(params.center_freq_hz, NaN) / 1e6);
+  let currentGain = $derived(numberOr(params.gain_db, overallGainRange?.min ?? 0));
+  let currentAntenna = $derived(
+    typeof params.antenna === 'string' ? (params.antenna as string) : (antennas[0] ?? ''),
+  );
+  let currentAgc = $derived(params.agc === true);
 
   function numberOr(v: unknown, fallback: number): number {
     const n = typeof v === 'number' ? v : Number(v);
@@ -59,8 +74,6 @@
     return `${hz} Hz`;
   }
 
-  // Sample rate is samples-per-second, not Hz. Same magnitudes, different
-  // unit symbol — keep them visually distinct in the dropdowns.
   function fmtRate(sps: number): string {
     if (sps >= 1e6) return `${(sps / 1e6).toFixed(3)} MS/s`;
     if (sps >= 1e3) return `${(sps / 1e3).toFixed(1)} kS/s`;
@@ -68,10 +81,25 @@
   }
 
   function parseByType(t: SettingType, raw: string): string {
-    // Soapy is permissive on the wire — everything is a string. We
-    // validate-but-don't-coerce so the round trip stays loss-free.
     if (t === 'bool') return raw === 'true' ? 'true' : 'false';
     return raw;
+  }
+
+  function rangeTooltip(r: RangeSpec | null | undefined, units: string): string {
+    if (!r) return '';
+    const step = r.step && r.step > 0 ? `, step ${r.step}` : ' (continuous)';
+    return `range ${r.min}–${r.max} ${units}${step}`;
+  }
+
+  function settingTooltip(s: SettingInfo): string {
+    const parts: string[] = [];
+    if (s.description) parts.push(s.description);
+    parts.push(`key: ${s.key}`);
+    parts.push(`type: ${s.data_type}`);
+    if (s.range) parts.push(rangeTooltip(s.range, s.units ?? ''));
+    if (s.options.length > 0) parts.push(`${s.options.length} options`);
+    if (s.default) parts.push(`default: ${s.default}`);
+    return parts.join(' · ');
   }
 </script>
 
@@ -92,8 +120,31 @@
       <header class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">
         analog
       </header>
+      {#if freqRange}
+        <label class="row" title={rangeTooltip(freqRange, 'Hz')}>
+          <span class="label">centre freq</span>
+          <input
+            type="number"
+            step="0.001"
+            min={freqRange.min / 1e6}
+            max={freqRange.max / 1e6}
+            value={Number.isFinite(currentFreqMHz) ? currentFreqMHz : ''}
+            disabled={busy || pending !== null}
+            onchange={(e) => {
+              const mhz = Number((e.currentTarget as HTMLInputElement).value);
+              if (!Number.isFinite(mhz)) return;
+              commit('center_freq_hz', { center_freq_hz: Math.round(mhz * 1e6) });
+            }}
+          />
+        </label>
+      {/if}
       {#if rateChoices.length > 0}
-        <label class="row">
+        <label
+          class="row"
+          title={`curated list from preset; ${rateChoices.length} choices${
+            caps ? ` · driver ${caps.driver_key}` : ''
+          }`}
+        >
           <span class="label">sample rate</span>
           <select
             value={String(currentRate)}
@@ -110,7 +161,10 @@
         </label>
       {/if}
       {#if bwChoices.length > 0}
-        <label class="row">
+        <label
+          class="row"
+          title={`IF filter width; — auto — lets the driver pick. Preset ladder has ${bwChoices.length} entries.`}
+        >
           <span class="label">bandwidth</span>
           <select
             value={Number.isFinite(currentBw) ? String(currentBw) : ''}
@@ -127,17 +181,74 @@
           </select>
         </label>
       {/if}
+      {#if overallGainRange}
+        <label class="row" title={rangeTooltip(overallGainRange, 'dB')}>
+          <span class="label">gain (dB)</span>
+          <div class="range">
+            <input
+              type="range"
+              min={overallGainRange.min}
+              max={overallGainRange.max}
+              step={overallGainRange.step ?? 1}
+              value={currentGain}
+              disabled={busy || pending !== null || currentAgc}
+              oninput={(e) =>
+                commit('gain_db', {
+                  gain_db: Number((e.currentTarget as HTMLInputElement).value),
+                })}
+            />
+            <input
+              type="number"
+              min={overallGainRange.min}
+              max={overallGainRange.max}
+              step={overallGainRange.step ?? 1}
+              value={currentGain}
+              disabled={busy || pending !== null || currentAgc}
+              onchange={(e) =>
+                commit('gain_db', {
+                  gain_db: Number((e.currentTarget as HTMLInputElement).value),
+                })}
+            />
+          </div>
+        </label>
+      {/if}
+      {#if hasAgc}
+        <label class="row" title="set_gain_mode(true) — driver's internal AGC loop">
+          <span class="label">AGC</span>
+          <input
+            type="checkbox"
+            checked={currentAgc}
+            disabled={busy || pending !== null}
+            onchange={(e) => commit('agc', { agc: (e.currentTarget as HTMLInputElement).checked })}
+          />
+        </label>
+      {/if}
+      {#if antennas.length > 1}
+        <label class="row" title={`RF port · ${antennas.length} options`}>
+          <span class="label">antenna</span>
+          <select
+            value={currentAntenna}
+            disabled={busy || pending !== null}
+            onchange={(e) =>
+              commit('antenna', { antenna: (e.currentTarget as HTMLSelectElement).value })}
+          >
+            {#each antennas as a (a)}
+              <option value={a}>{a}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
     </section>
   {/if}
 
-  {#if caps && caps.settings.length > 0}
+  {#if visibleSettings.length > 0}
     <section class="flex flex-col gap-2 border-t border-slate-800 pt-3">
       <header class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">
         driver settings
       </header>
-      {#each caps.settings as s (s.key)}
+      {#each visibleSettings as s (s.key)}
         {@const value = settingValue(s)}
-        <label class="row" title={s.description ?? s.key}>
+        <label class="row" title={settingTooltip(s)}>
           <span class="label">{s.label}{s.units ? ` (${s.units})` : ''}</span>
 
           {#if s.data_type === 'bool'}

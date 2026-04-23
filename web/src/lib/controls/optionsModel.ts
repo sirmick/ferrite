@@ -120,27 +120,120 @@ function spanCenter(ranges: RangeSpec[], fallback: number): number {
   return (r.min + r.max) / 2;
 }
 
+/**
+ * Full sample-rate choices for the advanced panel: the device probe's
+ * advertised values, plus the per-driver preferred rate injected when
+ * it's inside a continuous range, clamped by the preset's
+ * `max_sample_rate_hz` where set (SDRplay advertises 10.66 MS/s but
+ * activateStream fails above 10 MS/s, so we clamp).
+ *
+ * Exported so the live-reconfig dropdown in `InputControls.svelte`
+ * uses the same rule as the dialog's `defaultsFor`; without this the
+ * live panel rendered the raw two-endpoint probe list for a continuous
+ * range — e.g. `[62_500, 10_660_000]` on SDRplay — and any user click
+ * on that dropdown landed at the unreachable ceiling.
+ */
+export function fullRateChoices(caps: DeviceCapabilities): number[] {
+  const ch = firstChannel(caps);
+  if (!ch) return [];
+  const preset = lookupPreset(caps.driver_key);
+  // Start from the probe — the authoritative capability list. For
+  // continuous ranges (SDRplay: 62.5k–10.66M) this is just two endpoints;
+  // for stepped ranges (HackRF: 1M–20M step 1M) it's the full grid.
+  const set = new Set<number>(rangesToChoices(ch.sample_rate_ranges_hz));
+  // Inject the curated list so the advanced panel is a superset of the
+  // header's "quick" list. Without this step SDRplay's advanced dropdown
+  // had just [62.5k, 2M] (continuous-range endpoints + the preset's
+  // preferred default) — picking 6/8/10 MS/s in the header left the
+  // advanced <select> with no matching <option>, and the browser fell
+  // back to showing the first entry. Every curated rate also has to be
+  // reachable from the probe (continuous ranges count anything in
+  // [min, max]; stepped ranges need an exact match) so a stale preset
+  // can't offer an unreachable rate.
+  for (const c of preset?.sample_rate_choices_hz ?? []) {
+    if (rateContains(ch.sample_rate_ranges_hz, c)) set.add(c);
+  }
+  // Inject the per-driver preferred rate when it falls inside a range —
+  // harmless if it's already in the curated list, important on drivers
+  // that curate no list at all.
+  const preferred = preferredRateFor(caps.driver_key);
+  if (preferred !== undefined && rateContains(ch.sample_rate_ranges_hz, preferred)) {
+    set.add(preferred);
+  }
+  const maxRate = preset?.max_sample_rate_hz ?? Number.POSITIVE_INFINITY;
+  return [...set].filter((c) => c <= maxRate).sort((a, b) => a - b);
+}
+
+/**
+ * Curated short list for the **headline** sample-rate dropdown (the
+ * one next to the nixies). When the preset defines
+ * `sample_rate_choices_hz` we keep only entries that are both:
+ * - reachable from the device's advertised ranges, and
+ * - at or below the preset's `max_sample_rate_hz` clamp.
+ *
+ * When the preset has no curated list we fall back to the full probe
+ * list so the UI still offers *something* — but that path should be
+ * rare since every shipped preset has a curated list.
+ */
+export function quickRateChoices(caps: DeviceCapabilities): number[] {
+  const ch = firstChannel(caps);
+  if (!ch) return [];
+  const preset = lookupPreset(caps.driver_key);
+  const full = fullRateChoices(caps);
+  if (!preset?.sample_rate_choices_hz || preset.sample_rate_choices_hz.length === 0) {
+    return full;
+  }
+  const maxRate = preset.max_sample_rate_hz ?? Number.POSITIVE_INFINITY;
+  return preset.sample_rate_choices_hz.filter(
+    (c) => c <= maxRate && rateContains(ch.sample_rate_ranges_hz, c),
+  );
+}
+
+/**
+ * Settings keys the advanced panel should suppress for this driver.
+ * Returns an empty list when the preset has nothing hidden (or no
+ * preset exists). See `SdrPreset.hidden_settings`.
+ */
+export function hiddenSettingsFor(caps: DeviceCapabilities): string[] {
+  return lookupPreset(caps.driver_key)?.hidden_settings ?? [];
+}
+
+/**
+ * Ladder-derived bandwidth for this driver given a sample rate. Returns
+ * `null` when the preset has no ladder (RTL-SDR, HackRF, …) — caller
+ * should omit `bandwidth_hz` from the patch and let the driver keep its
+ * own behaviour. Used by the header's quick sample-rate dropdown to
+ * apply `{sample_rate_hz, bandwidth_hz}` atomically, matching the rule
+ * `defaultsFor` uses on device-open.
+ */
+export function bandwidthForRate(caps: DeviceCapabilities, rateHz: number): number | null {
+  const ladder = lookupPreset(caps.driver_key)?.if_filter_ladder_hz;
+  return pickFromLadder(ladder, rateHz);
+}
+
+/**
+ * Bandwidth choices for the advanced panel. When the preset carries an
+ * `if_filter_ladder_hz`, use it (that's the authoritative list of
+ * filters the hardware actually has). Otherwise fall back to the
+ * device probe. Result is sorted ascending, no duplicates.
+ */
+export function fullBandwidthChoices(caps: DeviceCapabilities): number[] {
+  const ch = firstChannel(caps);
+  if (!ch) return [];
+  const preset = lookupPreset(caps.driver_key);
+  if (preset?.if_filter_ladder_hz && preset.if_filter_ladder_hz.length > 0) {
+    return [...preset.if_filter_ladder_hz].sort((a, b) => a - b);
+  }
+  return rangesToChoices(ch.bandwidth_ranges_hz);
+}
+
 /** Reasonable starting form state for `caps` — used on dialog open. */
 export function defaultsFor(caps: DeviceCapabilities): OptionsState | null {
   const ch = firstChannel(caps);
   if (!ch) return null;
 
-  const preset = PRESETS[caps.driver_key];
-  // Inject the per-driver sweet-spot rate as a choice when it falls
-  // inside an advertised continuous range. SDRplay advertises only
-  // `[62.5k, 10.66M]` endpoints; without injection 2 MS/s would never
-  // appear in the dropdown even though the device fully supports it.
-  const rateChoicesRaw = withPreferredInjected(
-    rangesToChoices(ch.sample_rate_ranges_hz),
-    ch.sample_rate_ranges_hz,
-    PREFERRED_RATE_BY_DRIVER[caps.driver_key],
-  );
-  // Clamp to the preset's practical upper bound when set — SDRplay
-  // advertises 10.66 MS/s but activateStream() fails for anything above
-  // 10 MS/s.
-  const rateChoices = preset?.max_sample_rate_hz
-    ? rateChoicesRaw.filter((c) => c <= preset.max_sample_rate_hz!)
-    : rateChoicesRaw;
+  const preset = lookupPreset(caps.driver_key);
+  const rateChoices = fullRateChoices(caps);
   const sample_rate_hz = preferredRate(rateChoices, caps.driver_key);
   // Curated quick list — nixie dropdown binds here. Falls back to the
   // full probe list when the preset doesn't curate. Entries must be
@@ -154,7 +247,7 @@ export function defaultsFor(caps: DeviceCapabilities): OptionsState | null {
       (c) => c <= maxRate && rateContains(ch.sample_rate_ranges_hz, c),
     ) ?? rateChoices;
 
-  const bandwidthChoices = rangesToChoices(ch.bandwidth_ranges_hz);
+  const bandwidthChoices = fullBandwidthChoices(caps);
   // Driver-specific: some drivers (SDRplay) need an explicit IF filter
   // picked for them because the driver default is either too narrow
   // (brick-walls the waterfall) or too wide (silent upclock of Fs).
@@ -198,24 +291,6 @@ function midOfRange(r: RangeSpec): number {
 }
 
 /**
- * Inject `target` into a sorted choice list when it falls inside one of
- * the advertised ranges. No-op when the target is undefined or already
- * present (within 1 sample). Used to make the per-driver preferred rate
- * land in the dropdown for devices that only advertise endpoints.
- */
-function withPreferredInjected(
-  choices: number[],
-  ranges: { min: number; max: number; step: number | null }[],
-  target: number | undefined,
-): number[] {
-  if (target === undefined) return choices;
-  if (choices.some((c) => Math.abs(c - target) < 1)) return choices;
-  const inRange = ranges.some((r) => target >= r.min && target <= r.max);
-  if (!inRange) return choices;
-  return [...choices, target].sort((a, b) => a - b);
-}
-
-/**
  * Per-driver opening presets, loaded eagerly from `sdr-presets/*.json`.
  * One file per driver pins a sweet-spot sample rate and, when the
  * driver's IF filter behaviour warrants it, an ordered ladder of filter
@@ -243,6 +318,14 @@ interface SdrPreset {
   max_sample_rate_hz?: number;
   /** IF filter ladder for drivers where BW must track Fs — see `pickFromLadder`. */
   if_filter_ladder_hz?: number[];
+  /**
+   * `getSettingInfo` keys to suppress in the advanced panel. Used when a
+   * driver surfaces the same underlying knob twice — e.g. SDRplay's
+   * `rfgain_sel` setting duplicates the `RFGR` gain element. Keeps the
+   * "one control per capability" rule without adding device-specific code
+   * to the frontend: the JSON names the redundant keys and TS filters.
+   */
+  hidden_settings?: string[];
 }
 
 /**
@@ -261,6 +344,13 @@ function pickFromLadder(ladder: number[] | undefined, fs: number): number | null
   return best;
 }
 
+/**
+ * Preset map keyed by **lowercased** `driver_key` — SoapySDR drivers
+ * are inconsistent about casing (`SDRplay`, `HackRF`, `RTLSDR` come
+ * out capitalised while `airspy`, `bladerf`, `lime`, `plutosdr` are
+ * lowercase) but our preset filenames are uniformly lowercase for
+ * sanity. All lookups go through [`lookupPreset`] which normalises.
+ */
 const PRESETS: Record<string, SdrPreset> = (() => {
   const files = import.meta.glob<{ default: SdrPreset }>('./sdr-presets/*.json', {
     eager: true,
@@ -268,14 +358,22 @@ const PRESETS: Record<string, SdrPreset> = (() => {
   const out: Record<string, SdrPreset> = {};
   for (const mod of Object.values(files)) {
     const p = mod.default;
-    if (p && typeof p.driver_key === 'string') out[p.driver_key] = p;
+    if (p && typeof p.driver_key === 'string') out[p.driver_key.toLowerCase()] = p;
   }
   return out;
 })();
 
+function lookupPreset(driverKey: string): SdrPreset | undefined {
+  return PRESETS[driverKey.toLowerCase()];
+}
+
 const PREFERRED_RATE_BY_DRIVER: Record<string, number> = Object.fromEntries(
   Object.entries(PRESETS).map(([k, p]) => [k, p.sample_rate_hz]),
 );
+
+function preferredRateFor(driverKey: string): number | undefined {
+  return PREFERRED_RATE_BY_DRIVER[driverKey.toLowerCase()];
+}
 
 /**
  * Pick a sane default sample rate. Prefer the per-driver sweet spot
@@ -284,8 +382,8 @@ const PREFERRED_RATE_BY_DRIVER: Record<string, number> = Object.fromEntries(
  * choice ≥ 1 MS/s, then to the highest.
  */
 function preferredRate(choices: number[], driverKey: string): number {
-  if (choices.length === 0) return PREFERRED_RATE_BY_DRIVER[driverKey] ?? 2_048_000;
-  const target = PREFERRED_RATE_BY_DRIVER[driverKey] ?? 2_048_000;
+  const target = preferredRateFor(driverKey) ?? 2_048_000;
+  if (choices.length === 0) return target;
   const exact = choices.find((c) => Math.abs(c - target) < 1);
   if (exact !== undefined) return exact;
   const above = choices.find((c) => c >= target);

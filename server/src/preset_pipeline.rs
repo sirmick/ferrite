@@ -21,6 +21,8 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use ferrite_blocks::ws_bridge::{BridgeSink, WsBridgeTx, WsBridgeTxEvents, WsBridgeTxFftU8};
+use ferrite_blocks::{SoapyReadback, SoapySource};
+use ferrite_runtime::SOURCE_ID;
 use ferrite_runtime::{
     split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry, ReconfigurePlan,
     Runtime, DEFAULT_FRAMES_HINT,
@@ -105,6 +107,18 @@ impl PresetMount {
             attach_bridge_sinks(&mut rt, &doc, &self.bridge_sink)?;
         }
         Ok(plan)
+    }
+
+    /// Query the live driver state for the `src` block. Returns `None`
+    /// when the source is not a `SoapySource` (software sources like
+    /// `SineSource` have no hardware state to read back) or when the
+    /// block is absent. Used by the `/api/source` route to return the
+    /// post-apply device state so the UI's `params` reflect reality
+    /// rather than the user's last optimistic write.
+    pub async fn source_readback(&self) -> Option<SoapyReadback> {
+        let mut rt = self.runtime.lock().await;
+        rt.block_typed::<SoapySource>(SOURCE_ID)
+            .map(|b| b.readback())
     }
 }
 

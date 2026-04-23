@@ -15,7 +15,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
-use ferrite_blocks::registry;
+use ferrite_blocks::{registry, SoapyReadback};
 use ferrite_runtime::{
     compose_source, split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry,
     ReconfigurePlan, SourceConfig, SOURCE_ID,
@@ -212,6 +212,19 @@ impl AppState {
         Ok(out)
     }
 
+    /// Query the live driver state for the `src` block. Returns `None`
+    /// when the pipeline is stopped or the source is not a SoapySource.
+    /// Used by `PATCH /api/source` to include the post-apply snapshot in
+    /// the response so the UI can reconcile its optimistic params.
+    pub async fn source_readback(&self) -> Option<SoapyReadback> {
+        let pipeline = self.inner.pipeline.lock().await;
+        if let Some(mount) = pipeline.as_ref() {
+            mount.source_readback().await
+        } else {
+            None
+        }
+    }
+
     /// Walk the current composed preset (preset + source merged) and
     /// surface every block with its full spec and current param values.
     /// The list is pre-split, so both node and browser blocks appear —
@@ -253,16 +266,15 @@ impl AppState {
 
     /// Apply a params delta to one block by id. Dispatches by id:
     ///
-    /// - `id == "src"` — the `Source` placeholder. Delta merges into
-    ///   `SourceConfig.params` and routes through [`patch_source`] so
-    ///   the hardware restart path is preserved.
-    /// - any other id — delta merges into `preset_doc.blocks[id].params`
-    ///   and routes through [`patch_flowgraph`].
+    /// - `id == "src"` — merge delta into `SourceConfig.params` and
+    ///   delegate to [`patch_source`], which picks hot-apply vs rebuild.
+    /// - any other id — merge delta into `preset_doc.blocks[id].params`
+    ///   and route through [`patch_flowgraph`].
     ///
     /// The delta is a JSON object; keys present replace, keys absent
-    /// stay. Returns the same reconfigure plan shape as the other
-    /// patch paths so `POST /api/pipeline/blocks/{id}/params` can share
-    /// its response type.
+    /// stay. Returns the same reconfigure plan shape as the other patch
+    /// paths so `POST /api/pipeline/blocks/{id}/params` can share its
+    /// response type.
     pub async fn apply_block_params(
         &self,
         id: &str,
@@ -274,53 +286,11 @@ impl AppState {
             .clone();
 
         if id == SOURCE_ID {
-            // Try the live path first when the pipeline is running and
-            // the source block opts in (whitelisted keys only — see
-            // SoapySource::apply_live_params). On Ok(false) the runtime
-            // falls back to a full rebuild via the same composed-source
-            // path as patch_source.
-            {
-                let pipeline = self.inner.pipeline.lock().await;
-                if let Some(mount) = pipeline.as_ref() {
-                    let live_plan = mount
-                        .live_reconfigure_block(
-                            SOURCE_ID,
-                            serde_json::Value::Object(delta_obj.clone()),
-                        )
-                        .await?;
-                    drop(pipeline);
-                    if !live_plan.is_noop() {
-                        // Mirror the merged params back into source_config so
-                        // /api/source reads stay coherent.
-                        let mut sc = self.inner.source_config.write().await;
-                        let mut merged =
-                            match std::mem::replace(&mut sc.params, serde_json::Value::Null) {
-                                serde_json::Value::Object(m) => m,
-                                _ => serde_json::Map::new(),
-                            };
-                        for (k, v) in delta_obj.clone() {
-                            merged.insert(k, v);
-                        }
-                        sc.params = serde_json::Value::Object(merged);
-                        return Ok(Some(live_plan));
-                    }
-                    // is_noop here means the runtime saw no diff; treat as success.
-                    return Ok(Some(live_plan));
-                }
-            }
-            // Pipeline is stopped — just merge into the persisted source
-            // config; the next start() will compose with the new params.
-            let mut new_source = self.inner.source_config.read().await.clone();
-            let mut merged =
-                match std::mem::replace(&mut new_source.params, serde_json::Value::Null) {
-                    serde_json::Value::Object(m) => m,
-                    _ => serde_json::Map::new(),
-                };
-            for (k, v) in delta_obj {
-                merged.insert(k, v);
-            }
-            new_source.params = serde_json::Value::Object(merged);
-            return self.patch_source(new_source).await;
+            let merged = {
+                let current = self.inner.source_config.read().await.clone();
+                merge_into_params(current, delta_obj)
+            };
+            return self.patch_source(merged).await;
         }
 
         let mut new_doc = self.inner.preset_doc.read().await.clone();
@@ -400,7 +370,36 @@ impl AppState {
     }
 
     /// Apply a new source config. Same rules as [`patch_flowgraph`].
+    ///
+    /// Fast path: when the new config has the same `type` as the current
+    /// one and the params delta is a shallow top-level change, try
+    /// [`PresetMount::live_reconfigure_block`] on the `src` block first.
+    /// The block's `apply_live_params` decides whether it can honour the
+    /// delta without a stream restart; if not, the runtime falls back to
+    /// a full rebuild. This keeps the `PATCH /api/source` entry point
+    /// behaviourally identical to `apply_block_params("src", delta)` —
+    /// the frontend can send partial source-param edits through either.
     pub async fn patch_source(&self, new_source: SourceConfig) -> Result<Option<ReconfigurePlan>> {
+        // Compute the delta in its own scope so the read guard drops
+        // before we try to take the pipeline mutex or the source_config
+        // write — Rust extends temporary lifetimes across an `if let`
+        // body, which would otherwise deadlock with the write below.
+        let maybe_delta = {
+            let current = self.inner.source_config.read().await;
+            shallow_source_delta(&current, &new_source)
+        };
+        if let Some(delta) = maybe_delta {
+            let pipeline = self.inner.pipeline.lock().await;
+            if let Some(mount) = pipeline.as_ref() {
+                let plan = mount
+                    .live_reconfigure_block(SOURCE_ID, serde_json::Value::Object(delta))
+                    .await?;
+                drop(pipeline);
+                *self.inner.source_config.write().await = new_source;
+                return Ok(Some(plan));
+            }
+        }
+
         let preset = self.inner.preset_doc.read().await.clone();
         let composed = compose_source(&preset, &new_source)
             .map_err(|e| anyhow!("compose preset+source: {e}"))?;
@@ -447,6 +446,68 @@ impl AppState {
         }
         true
     }
+}
+
+/// Merge a partial params delta into `cfg`, producing a new config.
+/// Top-level keys in `delta` replace keys in `cfg.params`; keys absent
+/// from `delta` are kept. Used by [`AppState::apply_block_params`] to
+/// turn a per-block delta on `"src"` into a full [`SourceConfig`] for
+/// [`AppState::patch_source`] to apply.
+fn merge_into_params(
+    mut cfg: SourceConfig,
+    delta: serde_json::Map<String, serde_json::Value>,
+) -> SourceConfig {
+    let mut merged = match std::mem::replace(&mut cfg.params, serde_json::Value::Null) {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    for (k, v) in delta {
+        merged.insert(k, v);
+    }
+    cfg.params = serde_json::Value::Object(merged);
+    cfg
+}
+
+/// Compute a shallow top-level delta between two source configs. Returns
+/// the changed keys when a hot-apply attempt is meaningful:
+///
+/// - types match (type change always rebuilds — it's a different block),
+/// - at least one top-level param key differs.
+///
+/// Callers hand the delta to `live_reconfigure_block("src", …)` where the
+/// block's `apply_live_params` whitelist decides rebuild-vs-hot. Nested
+/// objects (e.g. the `settings` sub-map for driver `writeSetting` keys)
+/// are compared as opaque values, so any change there surfaces as a
+/// single `"settings"` key on the delta and the hot path (which doesn't
+/// understand `settings`) will correctly fall back to rebuild.
+fn shallow_source_delta(
+    current: &SourceConfig,
+    next: &SourceConfig,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if current.type_name != next.type_name {
+        return None;
+    }
+    let current_obj = current.params.as_object();
+    let next_obj = next.params.as_object()?;
+    let mut delta = serde_json::Map::new();
+    for (k, v) in next_obj {
+        let same = current_obj
+            .and_then(|c| c.get(k))
+            .is_some_and(|cur| cur == v);
+        if !same {
+            delta.insert(k.clone(), v.clone());
+        }
+    }
+    if let Some(c) = current_obj {
+        // Keys removed in `next` aren't expressible as a shallow delta —
+        // fall through to full rebuild by bailing out.
+        for k in c.keys() {
+            if !next_obj.contains_key(k) {
+                return None;
+            }
+        }
+    }
+    Some(delta)
 }
 
 /// Preset filenames come in via untrusted HTTP bodies. Accept only

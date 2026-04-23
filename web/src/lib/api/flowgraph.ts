@@ -50,6 +50,23 @@ export interface ReconfigurePlan {
 }
 
 /**
+ * Post-apply snapshot of the driver state returned by `PATCH /api/source`
+ * against a running SoapySource. Every field is optional — drivers vary
+ * in what they implement, and the server omits fields the getter
+ * refused. Used by the store to reconcile the user's optimistic write
+ * against what the hardware actually accepted (AGC varying IFGR, driver
+ * clamping BW to the ladder, tune-step rounding, etc).
+ */
+export interface SoapyReadback {
+  sample_rate_hz?: number;
+  center_freq_hz?: number;
+  bandwidth_hz?: number;
+  gain_db?: number;
+  agc?: boolean;
+  antenna?: string;
+}
+
+/**
  * Wire shape of the PATCH /api/flowgraph and /api/source responses.
  * `applied: false` means the patch was stored but no pipeline was
  * running — the stored doc will take effect on the next start. The
@@ -61,6 +78,9 @@ export interface ReconfigureResponse {
   changes: ParamChange[];
   structural_count: number;
   noop: boolean;
+  /** Present on `PATCH /api/source` when the source is a SoapySource
+   *  and the pipeline is running. `undefined` otherwise. */
+  source_readback?: SoapyReadback;
 }
 
 /** GET /api/flowgraph — currently-applied preset doc. */

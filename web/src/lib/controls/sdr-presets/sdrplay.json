@@ -5,5 +5,6 @@
   "sample_rate_choices_hz": [500000, 1000000, 2000000, 4000000, 6000000, 8000000, 10000000],
   "max_sample_rate_hz": 10000000,
   "if_filter_ladder_hz": [200000, 300000, 600000, 1536000, 5000000, 6000000, 7000000, 8000000],
-  "notes": "IF filter picked as the largest ladder entry ≤ Fs. SDRplay's own default of 200 kHz brick-walls the spectrum at ±100 kHz, and any filter wider than Fs makes the driver silently upclock Fs — so we pick from the ladder explicitly rather than leaving it to the driver. Advertised max of 10.66 MS/s fails activateStream in practice; clamped to 10 MS/s."
+  "hidden_settings": ["rfgain_sel"],
+  "notes": "IF filter picked as the largest ladder entry ≤ Fs. SDRplay's own default of 200 kHz brick-walls the spectrum at ±100 kHz, and any filter wider than Fs makes the driver silently upclock Fs — so we pick from the ladder explicitly rather than leaving it to the driver. Advertised max of 10.66 MS/s fails activateStream in practice; clamped to 10 MS/s. `rfgain_sel` hidden from the advanced panel because it duplicates the `RFGR` gain element (same LNA state, two Soapy surfaces)."
 }

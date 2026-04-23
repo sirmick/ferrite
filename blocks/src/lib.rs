@@ -66,7 +66,7 @@ pub use real_decimator::{RealF32Decimator, RealF32DecimatorParams};
 pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hold, SpectrumStats};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
-pub use soapy_source::{SoapySource, SoapySourceParams};
+pub use soapy_source::{SoapyReadback, SoapySource, SoapySourceParams};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use tee_iq_f32::TeeIqF32;
 pub use ws_bridge::{

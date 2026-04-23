@@ -35,6 +35,11 @@ All fields except `driver_key` and `sample_rate_hz` are optional:
   is unreachable in practice (SDRplay advertises 10.66 MS/s but
   `activateStream()` fails above 10 MS/s). Clamps both the quick list
   and the advanced panel.
+- `hidden_settings` — `getSettingInfo` keys to suppress in the
+  advanced panel. Used when a driver surfaces the same underlying knob
+  twice (e.g. SDRplay's `rfgain_sel` duplicates the `RFGR` gain
+  element). Keeps "one control per capability" without device-specific
+  code in the UI.
 - `if_filter_ladder_hz` — for drivers whose IF filter behaviour needs
   an explicit pick. When present the UI chooses the largest ladder
   entry ≤ `sample_rate_hz` and forwards it as `bandwidth_hz`; when

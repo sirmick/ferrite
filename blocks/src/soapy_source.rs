@@ -135,6 +135,30 @@ impl Default for SoapySourceParams {
     }
 }
 
+/// Snapshot of the driver's current state, read back via Soapy getters
+/// after each reconfigure. See [`SoapySource::readback`].
+///
+/// All fields are `Option` because drivers vary in what they implement —
+/// some have no bandwidth control, some no AGC, some refuse to return a
+/// gain when AGC is on. `serde(skip_serializing_if = "Option::is_none")`
+/// keeps the wire shape compact so the UI sees only the fields the
+/// driver actually reports.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SoapyReadback {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate_hz: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center_freq_hz: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bandwidth_hz: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gain_db: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agc: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub antenna: Option<String>,
+}
+
 type RingHandle = Arc<Mutex<IqRing>>;
 
 pub struct SoapySource {
@@ -340,6 +364,28 @@ impl SoapySource {
     #[must_use]
     pub fn underrun_samples(&self) -> u64 {
         self.underrun_samples
+    }
+
+    /// Query the driver for its current state. Used by the server after
+    /// every `PATCH /api/source` so the UI's `params` reflect what the
+    /// hardware is actually doing, not what the user last wrote — AGC
+    /// varies IFGR under user gain, drivers silently clamp BW to the
+    /// nearest filter, and some tune-steps round the centre frequency.
+    ///
+    /// Each field is best-effort: drivers that don't support a given
+    /// getter leave the slot `None`. The UI treats `None` as "keep the
+    /// optimistic value" rather than clobbering with a default.
+    pub fn readback(&self) -> SoapyReadback {
+        let dir = Direction::Rx;
+        let ch = self.channel;
+        SoapyReadback {
+            sample_rate_hz: self.device.sample_rate(dir, ch).ok(),
+            center_freq_hz: self.device.frequency(dir, ch).ok(),
+            bandwidth_hz: self.device.bandwidth(dir, ch).ok(),
+            gain_db: self.device.gain(dir, ch).ok(),
+            agc: self.device.gain_mode(dir, ch).ok(),
+            antenna: self.device.antenna(dir, ch).ok().filter(|s| !s.is_empty()),
+        }
     }
 }
 

@@ -1,10 +1,10 @@
 <script lang="ts">
-  // Hot/live source controls — gain, antenna, AGC. Mounted in the spectrum
-  // header next to the nixies (#70). Each commit goes through
-  // `pipeline.patchSourceParams`, which the server applies live for the
-  // whitelisted keys (`gain_db`, `antenna`, `agc`, `center_freq_hz`)
-  // without rebuilding the flowgraph. Driver-specific knobs live in the
-  // Settings → Input panel and restart on change.
+  // Curated "quick" source controls — gain, antenna, AGC. Mounted next
+  // to the nixies in the spectrum header. Every commit goes through
+  // `pipeline.patchSourceParams`; the server decides whether the delta
+  // is live-applicable (whitelist: `gain_db`, `antenna`, `agc`,
+  // `center_freq_hz`) or needs a rebuild. Same wire path as the advanced
+  // panel, just a curated subset of controls.
 
   import { pipeline } from '$lib/pipeline.svelte';
 
@@ -29,25 +29,41 @@
     return Number.isFinite(n) ? n : fallback;
   }
 
-  // Routes through `setBlockParam('src', …)`, which on the server hits
-  // `apply_live_params` for the whitelisted hot keys (`gain_db`,
-  // `antenna`, `agc`, `center_freq_hz`). That's the no-rebuild path.
-  // Going through `patchSourceParams` here would trigger a full source
-  // teardown + reopen on every drag tick, which thrashes the driver
-  // (RTL-SDR's R820T loses PLL lock on rapid reopens).
-  const SRC_ID = 'src';
+  // Every commit goes through `patchSourceParams`. The server inspects
+  // the delta: whitelisted keys live-apply (no rebuild); others trigger
+  // full source reconstruction. Kept deliberately simple here — no
+  // client-side branching on which keys are hot. Same wire path the
+  // advanced panel uses.
+
+  // Trailing-edge debounce for the scrubbable gain slider. `oninput`
+  // fires on every pixel of the drag; without this we'd ship ~60
+  // patches/sec for a one-second drag, overwhelming the hot path even
+  // though Soapy itself would accept them all. 50ms smooths the drag to
+  // ~20 patches/sec — imperceptible lag, vastly less churn.
+  const GAIN_DEBOUNCE_MS = 50;
+  let gainDebounce: ReturnType<typeof setTimeout> | undefined;
+  let pendingGain: number | undefined;
 
   function commitGain(v: number) {
     if (v === gainDb) return;
-    void pipeline.setBlockParam(SRC_ID, 'gain_db', v);
+    pendingGain = v;
+    if (gainDebounce !== undefined) clearTimeout(gainDebounce);
+    gainDebounce = setTimeout(() => {
+      gainDebounce = undefined;
+      const next = pendingGain;
+      pendingGain = undefined;
+      if (next !== undefined && next !== gainDb) {
+        void pipeline.patchSourceParams({ gain_db: next });
+      }
+    }, GAIN_DEBOUNCE_MS);
   }
   function commitAntenna(v: string) {
     if (v === antenna) return;
-    void pipeline.setBlockParam(SRC_ID, 'antenna', v);
+    void pipeline.patchSourceParams({ antenna: v });
   }
   function commitAgc(v: boolean) {
     if (v === agc) return;
-    void pipeline.setBlockParam(SRC_ID, 'agc', v);
+    void pipeline.patchSourceParams({ agc: v });
   }
 </script>
 

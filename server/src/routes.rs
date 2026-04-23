@@ -16,7 +16,7 @@ use axum::{
 };
 use ferrite_runtime::{FlowgraphDoc, SourceConfig};
 use http::StatusCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::app_state::{AppState, PipelineBlock, PipelineStatus, PresetEntry, UiSink};
@@ -169,6 +169,13 @@ pub struct ReconfigureResponse {
     pub changes: Vec<ParamChangeDto>,
     pub structural_count: usize,
     pub noop: bool,
+    /// Post-apply snapshot of the driver state for the `src` block.
+    /// Present on `PATCH /api/source` against a running `SoapySource`
+    /// so the UI can reconcile its optimistic `params` with what the
+    /// hardware actually accepted (drivers silently clamp BW, AGC
+    /// varies IFGR, tune-step rounds the centre freq, etc).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_readback: Option<ferrite_blocks::SoapyReadback>,
 }
 
 fn reconfigure_response(plan: Option<ferrite_runtime::ReconfigurePlan>) -> ReconfigureResponse {
@@ -179,6 +186,7 @@ fn reconfigure_response(plan: Option<ferrite_runtime::ReconfigurePlan>) -> Recon
             changes: Vec::new(),
             structural_count: 0,
             noop: true,
+            source_readback: None,
         },
         Some(p) => ReconfigureResponse {
             applied: true,
@@ -196,6 +204,7 @@ fn reconfigure_response(plan: Option<ferrite_runtime::ReconfigurePlan>) -> Recon
                 .collect(),
             structural_count: p.structural.len(),
             noop: p.is_noop(),
+            source_readback: None,
         },
     }
 }
@@ -225,16 +234,21 @@ pub async fn get_source(State(state): State<AppState>) -> Json<SourceConfig> {
 }
 
 /// `PATCH /api/source` — store a new source config. Same rules as
-/// `PATCH /api/flowgraph`.
+/// `PATCH /api/flowgraph`. The response carries a `source_readback` when
+/// the running source is a `SoapySource`, so the UI can reconcile its
+/// optimistic `params` with what the driver actually accepted.
 pub async fn patch_source(
     State(state): State<AppState>,
     Json(new_source): Json<SourceConfig>,
 ) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
+    tracing::info!(type_name = %new_source.type_name, params = ?new_source.params, "PATCH /api/source");
     let plan = state
         .patch_source(new_source)
         .await
         .map_err(|e| bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
-    Ok(Json(reconfigure_response(plan)))
+    let mut resp = reconfigure_response(plan);
+    resp.source_readback = state.source_readback().await;
+    Ok(Json(resp))
 }
 
 #[derive(Serialize)]
@@ -254,6 +268,7 @@ pub async fn pipeline_status(State(state): State<AppState>) -> Json<PipelineStat
 pub async fn pipeline_start(
     State(state): State<AppState>,
 ) -> Result<Json<PipelineStatusResponse>, (StatusCode, Json<ApiError>)> {
+    tracing::info!("POST /api/pipeline/start");
     state
         .start()
         .await
@@ -433,6 +448,37 @@ pub async fn load_preset(
 /// [`FrameBus`]: crate::frame_bus::FrameBus
 pub async fn ws_preset(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_preset(socket, state))
+}
+
+/// Payload for `POST /api/debug/log` — a single log entry forwarded
+/// from the browser so it shows up in the ferrited log stream
+/// alongside server-origin messages. `source` tags the origin (e.g.
+/// `"console"`, `"client"`, `"pipeline"`) so the server log stays
+/// filterable; `level` is `error | warn | info | debug`.
+#[derive(Deserialize)]
+pub struct BrowserLogEntry {
+    pub level: String,
+    pub message: String,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// `POST /api/debug/log` — browser → server log forwarder. Dev-only
+/// diagnostic: the UI's `logs.push('client', ...)` calls and any
+/// hooked `console.*` calls fan out through here so the operator
+/// watching ferrited stdout gets the full story without opening
+/// DevTools. Fire-and-forget on the client side.
+pub async fn browser_log(Json(entry): Json<BrowserLogEntry>) -> StatusCode {
+    let src = entry.source.as_deref().unwrap_or("browser");
+    // We bind `target: "browser"` so `RUST_LOG=browser=info` can
+    // isolate these; the source tag appears as a structured field.
+    match entry.level.as_str() {
+        "error" => tracing::error!(target: "browser", source = src, "{}", entry.message),
+        "warn" => tracing::warn!(target: "browser", source = src, "{}", entry.message),
+        "debug" => tracing::debug!(target: "browser", source = src, "{}", entry.message),
+        _ => tracing::info!(target: "browser", source = src, "{}", entry.message),
+    }
+    StatusCode::NO_CONTENT
 }
 
 async fn handle_preset(mut socket: WebSocket, state: AppState) {

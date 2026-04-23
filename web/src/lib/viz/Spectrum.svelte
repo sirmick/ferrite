@@ -4,7 +4,7 @@
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
-  import { rangesToChoices } from '$lib/controls/optionsModel';
+  import { quickRateChoices, bandwidthForRate } from '$lib/controls/optionsModel';
   import Nixie from '$lib/controls/Nixie.svelte';
   import LiveControls from '$lib/controls/LiveControls.svelte';
   import FftControls from './FftControls.svelte';
@@ -60,17 +60,17 @@
   let fade = $state(false);
   let maxHold = $state(false);
 
-  // Sample-rate dropdown. Hardware sources give us explicit rate
-  // ladders via sourceCaps; software sources (sine, file) don't
-  // advertise any, so we fall back to a read-only display. The current
-  // rate is always included — devices sometimes report ranges that
-  // don't cover what the preset happens to ship with.
+  // Sample-rate dropdown by the nixies: preset-curated short list.
+  // Software sources (sine, file) have no advertised rate ladder, so
+  // the list is empty and the UI collapses to a read-only display.
+  // The current rate is always included even when it's not in the
+  // curated list — the user may have set it explicitly from the
+  // advanced panel in `InputControls`, and leaving the value absent
+  // here would render the `<select>` blank.
   let rateChoices = $derived.by(() => {
     const caps = pipeline.sourceCaps;
     if (!caps || caps.kind !== 'hardware') return [] as number[];
-    const ch = caps.capabilities.rx_channels[0];
-    if (!ch) return [] as number[];
-    const choices = rangesToChoices(ch.sample_rate_ranges_hz);
+    const choices = quickRateChoices(caps.capabilities);
     const rate = axes?.sample_rate_hz;
     if (rate !== undefined && !choices.some((c) => Math.abs(c - rate) < 1)) {
       choices.push(rate);
@@ -88,7 +88,17 @@
   function onRateChange(ev: Event) {
     const v = Number((ev.target as HTMLSelectElement).value);
     if (!Number.isFinite(v) || v === axes?.sample_rate_hz) return;
-    void pipeline.patchSourceParams({ sample_rate_hz: v });
+    // Couple BW to Fs via the preset's IF-filter ladder when the driver
+    // has one. Drivers with no ladder (RTL-SDR, HackRF) leave BW alone —
+    // `bandwidthForRate` returns null and we omit the key from the
+    // patch so the driver keeps its current behaviour.
+    const caps = pipeline.sourceCaps;
+    const patch: Record<string, unknown> = { sample_rate_hz: v };
+    if (caps?.kind === 'hardware') {
+      const bw = bandwidthForRate(caps.capabilities, v);
+      if (bw !== null) patch.bandwidth_hz = bw;
+    }
+    void pipeline.patchSourceParams(patch);
   }
 
   function commitCenter(hz: number) {

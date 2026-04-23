@@ -12,6 +12,7 @@ interface Preset {
   sample_rate_choices_hz?: number[];
   max_sample_rate_hz?: number;
   if_filter_ladder_hz?: number[];
+  hidden_settings?: string[];
   notes?: string;
 }
 
@@ -22,6 +23,7 @@ const KNOWN_FIELDS = new Set([
   'sample_rate_choices_hz',
   'max_sample_rate_hz',
   'if_filter_ladder_hz',
+  'hidden_settings',
   'notes',
 ]);
 
@@ -77,6 +79,15 @@ describe('sdr-presets schema', () => {
         expect(p.sample_rate_hz).toBeLessThanOrEqual(p.max_sample_rate_hz);
         for (const c of p.sample_rate_choices_hz ?? []) {
           expect(c).toBeLessThanOrEqual(p.max_sample_rate_hz);
+        }
+      });
+
+      it('hidden_settings (if present) is a list of non-empty strings', () => {
+        if (p.hidden_settings === undefined) return;
+        expect(Array.isArray(p.hidden_settings)).toBe(true);
+        for (const k of p.hidden_settings) {
+          expect(typeof k).toBe('string');
+          expect(k.length).toBeGreaterThan(0);
         }
       });
 
