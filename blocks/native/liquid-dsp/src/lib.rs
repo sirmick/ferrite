@@ -297,6 +297,175 @@ impl<T> Drop for Firfilt<T> {
 // single-threaded but movable. Send only, not Sync.
 unsafe impl<T: Send> Send for Firfilt<T> {}
 
+/// Real-valued integer-rate decimating FIR filter — wraps liquid's
+/// `firdecim_rrrf`. Consumes `factor` input samples per call to
+/// [`Self::execute`] and produces one filtered output. Equivalent to
+/// running a real FIR at the input rate then keeping every
+/// `factor`-th sample, but liquid's polyphase decomposition does
+/// the work at the output rate.
+pub struct Firdecim {
+    inner: sys::firdecim_rrrf,
+    factor: u32,
+}
+
+impl Firdecim {
+    /// Build from explicit FIR taps. `factor >= 2`, `taps.len() >=
+    /// factor`. The caller is responsible for the filter design (we
+    /// just convolve + decimate); a windowed-sinc with cutoff
+    /// ≤ 1/(2·factor) of the input rate is the typical choice.
+    pub fn from_taps(factor: u32, taps: &[f32]) -> Result<Self, &'static str> {
+        if factor < 2 {
+            return Err("firdecim: factor must be >= 2");
+        }
+        let h_len = u32::try_from(taps.len()).map_err(|_| "firdecim: too many taps")?;
+        if h_len < factor {
+            return Err("firdecim: taps.len() must be >= factor");
+        }
+        // SAFETY: liquid copies the tap buffer internally; NULL on
+        // bad config is mapped to Err.
+        let inner = unsafe { sys::firdecim_rrrf_create(factor, taps.as_ptr() as *mut f32, h_len) };
+        if inner.is_null() {
+            return Err("firdecim_rrrf_create returned NULL");
+        }
+        Ok(Self { inner, factor })
+    }
+
+    /// Decimation factor passed at construction.
+    #[must_use]
+    pub const fn factor(&self) -> u32 {
+        self.factor
+    }
+
+    /// Push `factor` samples in, read one filtered sample out.
+    /// `input.len()` must equal `factor`.
+    pub fn execute(&mut self, input: &[f32]) -> f32 {
+        assert_eq!(
+            input.len() as u32,
+            self.factor,
+            "firdecim::execute: input slice must be exactly `factor` samples"
+        );
+        let mut y: f32 = 0.0;
+        // SAFETY: `inner` is valid; input is `factor` floats; y is a
+        // writable f32 stack slot.
+        unsafe {
+            sys::firdecim_rrrf_execute(self.inner, input.as_ptr() as *mut f32, &mut y);
+        }
+        y
+    }
+
+    /// Reset filter state (zeros the delay line + decimation phase).
+    pub fn reset(&mut self) {
+        // SAFETY: `inner` is valid.
+        unsafe {
+            sys::firdecim_rrrf_reset(self.inner);
+        }
+    }
+}
+
+impl Drop for Firdecim {
+    fn drop(&mut self) {
+        // SAFETY: `inner` returned by `firdecim_rrrf_create`, dropped
+        // at most once.
+        unsafe {
+            if !self.inner.is_null() {
+                sys::firdecim_rrrf_destroy(self.inner);
+            }
+        }
+    }
+}
+
+// SAFETY: liquid handles are single-threaded but movable.
+unsafe impl Send for Firdecim {}
+
+/// Complex-input/output integer-rate decimating FIR filter — wraps
+/// liquid's `firdecim_crcf` (complex input, complex output, real
+/// taps). Same polyphase semantics as [`Firdecim`].
+pub struct FirdecimCx {
+    inner: sys::firdecim_crcf,
+    factor: u32,
+}
+
+impl FirdecimCx {
+    /// Build from real FIR taps. Same constraints as [`Firdecim::from_taps`].
+    /// `firdecim_crcf` uses real taps applied to complex samples
+    /// (`re` and `im` filtered with the same coefficients).
+    pub fn from_taps(factor: u32, taps: &[f32]) -> Result<Self, &'static str> {
+        if factor < 2 {
+            return Err("firdecim_cx: factor must be >= 2");
+        }
+        let h_len = u32::try_from(taps.len()).map_err(|_| "firdecim_cx: too many taps")?;
+        if h_len < factor {
+            return Err("firdecim_cx: taps.len() must be >= factor");
+        }
+        // SAFETY: liquid copies the tap buffer.
+        let inner = unsafe { sys::firdecim_crcf_create(factor, taps.as_ptr() as *mut f32, h_len) };
+        if inner.is_null() {
+            return Err("firdecim_crcf_create returned NULL");
+        }
+        Ok(Self { inner, factor })
+    }
+
+    #[must_use]
+    pub const fn factor(&self) -> u32 {
+        self.factor
+    }
+
+    /// Push `factor` complex samples in, read one filtered complex
+    /// out. `input` is interleaved Complex<f32> as bindgen sees it
+    /// (`__BindgenComplex<f32>`); we expose it as `(re, im)` pairs
+    /// per output to keep the wrapper agnostic of `num_complex`.
+    /// Returns `(re, im)`.
+    pub fn execute(&mut self, input: &[(f32, f32)]) -> (f32, f32) {
+        assert_eq!(
+            input.len() as u32,
+            self.factor,
+            "firdecim_cx::execute: input slice must be exactly `factor` samples"
+        );
+        // Repackage `(re, im)` into `__BindgenComplex<f32>`. The
+        // memory layout is identical (two consecutive f32s); we
+        // could transmute, but a small stack-allocated copy stays
+        // miri-friendly and the cost vanishes for typical factor
+        // (2..16).
+        //
+        // For larger blocks the caller can switch to `execute_block`
+        // (not exposed here yet) which avoids per-sample marshalling.
+        let mut buf: Vec<sys::__BindgenComplex<f32>> = input
+            .iter()
+            .map(|&(re, im)| sys::__BindgenComplex { re, im })
+            .collect();
+        let mut y = sys::__BindgenComplex { re: 0.0, im: 0.0 };
+        // SAFETY: `inner` is valid; `buf` has `factor` complex slots;
+        // `y` is a writable __BindgenComplex stack slot.
+        unsafe {
+            sys::firdecim_crcf_execute(self.inner, buf.as_mut_ptr(), &mut y);
+        }
+        (y.re, y.im)
+    }
+
+    /// Reset filter state.
+    pub fn reset(&mut self) {
+        // SAFETY: `inner` is valid.
+        unsafe {
+            sys::firdecim_crcf_reset(self.inner);
+        }
+    }
+}
+
+impl Drop for FirdecimCx {
+    fn drop(&mut self) {
+        // SAFETY: `inner` returned by `firdecim_crcf_create`, dropped
+        // at most once.
+        unsafe {
+            if !self.inner.is_null() {
+                sys::firdecim_crcf_destroy(self.inner);
+            }
+        }
+    }
+}
+
+// SAFETY: liquid handles are single-threaded but movable.
+unsafe impl Send for FirdecimCx {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +511,83 @@ mod tests {
         assert!(
             peak < 0.05,
             "lowpass should reject Nyquist signal, got peak={peak}"
+        );
+    }
+
+    #[test]
+    fn firdecim_decimates_real_dc_to_unity() {
+        // Hann-windowed-sinc LPF normalised to DC=1; decimation by 4
+        // of an all-ones input should settle to 1.0 once the delay
+        // line fills.
+        use core::f32::consts::PI;
+        let factor = 4u32;
+        let n = 41usize;
+        let m = (n - 1) as f32 / 2.0;
+        let cutoff = 0.4_f32 / factor as f32;
+        let mut taps: Vec<f32> = (0..n)
+            .map(|i| {
+                let k = i as f32 - m;
+                let ideal = if k.abs() < 1e-7 {
+                    2.0 * cutoff
+                } else {
+                    (2.0 * PI * cutoff * k).sin() / (PI * k)
+                };
+                let w = 0.5 - 0.5 * (2.0 * PI * i as f32 / (n - 1) as f32).cos();
+                ideal * w
+            })
+            .collect();
+        let sum: f32 = taps.iter().sum();
+        for t in &mut taps {
+            *t /= sum;
+        }
+        let mut dec = Firdecim::from_taps(factor, &taps).expect("create");
+        // Push 4 samples per execute call until steady state.
+        let chunk = vec![1.0_f32; factor as usize];
+        let mut last = 0.0;
+        for _ in 0..40 {
+            last = dec.execute(&chunk);
+        }
+        assert!(
+            (last - 1.0).abs() < 1e-4,
+            "DC steady-state should be 1.0, got {last}"
+        );
+    }
+
+    #[test]
+    fn firdecim_cx_passes_iq_dc() {
+        // Same idea, complex side: a constant (1, 1) IQ stream
+        // through a unit-DC-gain decimator should steady-state at
+        // (1, 1).
+        use core::f32::consts::PI;
+        let factor = 4u32;
+        let n = 41usize;
+        let m = (n - 1) as f32 / 2.0;
+        let cutoff = 0.4_f32 / factor as f32;
+        let mut taps: Vec<f32> = (0..n)
+            .map(|i| {
+                let k = i as f32 - m;
+                let ideal = if k.abs() < 1e-7 {
+                    2.0 * cutoff
+                } else {
+                    (2.0 * PI * cutoff * k).sin() / (PI * k)
+                };
+                let w = 0.5 - 0.5 * (2.0 * PI * i as f32 / (n - 1) as f32).cos();
+                ideal * w
+            })
+            .collect();
+        let sum: f32 = taps.iter().sum();
+        for t in &mut taps {
+            *t /= sum;
+        }
+        let mut dec = FirdecimCx::from_taps(factor, &taps).expect("create");
+        let chunk = vec![(1.0_f32, 1.0_f32); factor as usize];
+        let mut last = (0.0, 0.0);
+        for _ in 0..40 {
+            last = dec.execute(&chunk);
+        }
+        assert!(
+            (last.0 - 1.0).abs() < 1e-4 && (last.1 - 1.0).abs() < 1e-4,
+            "DC steady-state should be (1,1), got {last:?}"
         );
     }
 

@@ -1,28 +1,34 @@
-//! Integer-factor decimator with a windowed-sinc anti-aliasing LPF.
+//! Integer-factor decimator with a windowed-sinc anti-aliasing LPF,
+//! backed by liquid-dsp's `firdecim_crcf`.
 //!
 //! One IQ-in, one IQ-out. Takes every Mth filtered sample, where the
-//! filter removes everything above the output Nyquist so the decimation
-//! does not alias.
+//! filter removes everything above the output Nyquist so the
+//! decimation does not alias.
 //!
 //! ### Filter
 //!
-//! Direct-form FIR with real coefficients applied to complex samples
-//! (taps multiply `re` and `im` identically). Coefficients are a
-//! Hann-windowed sinc, normalised so DC gain = 1. This is simple, cheap
-//! to understand, and good enough for Phase B/D use; swapping in a
-//! polyphase decomposition or a Kaiser design can happen if profiling
-//! says it matters.
+//! Hann-windowed sinc designed in-house (`design_lpf` below); fed to
+//! liquid's polyphase decimator engine. Same coefficients, same
+//! response, but liquid only computes the taps that contribute to
+//! each output sample (~`factor`× fewer multiplies than a naive
+//! scalar convolution).
 //!
 //! ### State
 //!
-//! A delay line of `num_taps` complex samples (ring buffer) and a
-//! modulo-`factor` phase counter. The phase counter emits an output
-//! on every `factor`-th input, which preserves sample-rate semantics
-//! across [`Block::process`] calls of arbitrary size (and across a
-//! single call whose output buffer fills before all inputs are
-//! consumed — unread inputs stay in the delay line).
+//! Liquid's `firdecim_crcf` owns the FIR delay line and the
+//! decimation phase. We buffer up `factor` input samples in a small
+//! scratch `chunk` so we can hand them to liquid's `_execute` (which
+//! takes exactly `factor` samples per call); the chunk-fill index
+//! preserves phase across [`Block::process`] calls of arbitrary
+//! size, including the case where the output buffer fills before
+//! all inputs have been consumed.
+//!
+//! Public API (params, ports, registry name `Decimator`) is
+//! unchanged from the previous hand-rolled implementation, so
+//! presets and callers see no difference except a tiny perf bump.
 
 use anyhow::{bail, Result};
+use ferrite_liquid_dsp::FirdecimCx;
 use num_complex::Complex;
 use serde::Deserialize;
 
@@ -72,13 +78,12 @@ impl Default for DecimatorParams {
 pub struct Decimator {
     factor: usize,
     taps: Vec<f32>,
-    /// Ring buffer of the last `num_taps` input samples. `delay_idx` is
-    /// the position where the next input sample will be written — i.e.
-    /// the oldest sample sits at `delay_idx` immediately after a write.
-    delay: Vec<Complex<f32>>,
-    delay_idx: usize,
-    /// Counts inputs modulo `factor`. When it rolls to 0 we emit.
-    phase: usize,
+    inner: FirdecimCx,
+    /// Scratch buffer of size `factor` — liquid's `_execute` wants
+    /// exactly `factor` complex samples per call, so we accumulate
+    /// across `process()` invocations until the chunk is ready.
+    chunk: Vec<(f32, f32)>,
+    chunk_len: usize,
 }
 
 impl Decimator {
@@ -98,12 +103,20 @@ impl Decimator {
             );
         }
         let taps = design_lpf(params.num_taps, params.cutoff_normalized);
+        // liquid's firdecim wants `factor >= 2`. For factor=1 we use a
+        // passthrough fast-path in `process()` and never touch the
+        // wrapper, so the inner instance is sized at max(2, factor)
+        // just to keep the field present and avoid `Option<>` ceremony.
+        let factor_u32 = u32::try_from(params.factor.max(2))
+            .map_err(|_| anyhow::anyhow!("factor exceeds u32"))?;
+        let inner = FirdecimCx::from_taps(factor_u32, &taps)
+            .map_err(|e| anyhow::anyhow!("firdecim_crcf: {e}"))?;
         Ok(Self {
             factor: params.factor,
-            delay: vec![Complex::new(0.0, 0.0); taps.len()],
             taps,
-            delay_idx: 0,
-            phase: 0,
+            inner,
+            chunk: vec![(0.0, 0.0); params.factor.max(1)],
+            chunk_len: 0,
         })
     }
 
@@ -116,24 +129,6 @@ impl Decimator {
     #[must_use]
     pub const fn factor(&self) -> usize {
         self.factor
-    }
-
-    /// Convolve the delay line with the filter at the current delay-idx.
-    /// The oldest sample sits at `delay_idx` (just-overwritten position),
-    /// so walking forward from there iterates old → new.
-    fn fir_output(&self) -> Complex<f32> {
-        let n = self.taps.len();
-        let mut acc = Complex::new(0.0_f32, 0.0);
-        let mut idx = self.delay_idx;
-        // taps[0] is the coefficient for the oldest sample.
-        for &t in &self.taps {
-            acc += self.delay[idx] * t;
-            idx += 1;
-            if idx == n {
-                idx = 0;
-            }
-        }
-        acc
     }
 }
 
@@ -224,27 +219,34 @@ impl Block for Decimator {
             return Ok(Work::new());
         };
 
-        let n = self.taps.len();
+        // factor=1 degenerate case — straight passthrough, never
+        // hand off to liquid (which insists on factor >= 2).
+        if self.factor == 1 {
+            let n = src.len().min(dst.len());
+            dst[..n].copy_from_slice(&src[..n]);
+            let mut w = Work::new();
+            w.consumed[0] = n;
+            w.produced[0] = n;
+            return Ok(w);
+        }
+
         let mut consumed = 0;
         let mut produced = 0;
         for &x in src {
-            // Would the next output overflow the output buffer? Stop
-            // before consuming the input so the scheduler can call us
-            // again when there's space.
-            if self.phase + 1 == self.factor && produced == dst.len() {
+            // Reserve room for one more output before consuming an
+            // input that would complete a chunk — the scheduler will
+            // re-call us when there's space.
+            if self.chunk_len + 1 == self.factor && produced == dst.len() {
                 break;
             }
-            self.delay[self.delay_idx] = x;
-            self.delay_idx += 1;
-            if self.delay_idx == n {
-                self.delay_idx = 0;
-            }
+            self.chunk[self.chunk_len] = (x.re, x.im);
+            self.chunk_len += 1;
             consumed += 1;
-            self.phase += 1;
-            if self.phase == self.factor {
-                self.phase = 0;
-                dst[produced] = self.fir_output();
+            if self.chunk_len == self.factor {
+                let (re, im) = self.inner.execute(&self.chunk[..self.factor]);
+                dst[produced] = Complex::new(re, im);
                 produced += 1;
+                self.chunk_len = 0;
             }
         }
 
