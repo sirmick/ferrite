@@ -466,6 +466,108 @@ impl Drop for FirdecimCx {
 // SAFETY: liquid handles are single-threaded but movable.
 unsafe impl Send for FirdecimCx {}
 
+/// Numerically-controlled oscillator — wraps liquid's `nco_crcf`.
+/// Maintains a phase accumulator + sin/cos lookup; consumes complex
+/// IQ samples and rotates them by the current phase, with optional
+/// PLL helpers we don't expose yet.
+///
+/// Two backends: `LIQUID_NCO` is a 1024-entry lookup table with
+/// linear interpolation (fast, deterministic, no SIMD), and
+/// `LIQUID_VCO` computes sin/cos directly each sample (more
+/// accurate, slightly slower). We default to `LIQUID_NCO` because
+/// the channelizer mixer is on the per-sample hot path and table
+/// precision is fine at typical SDR rates.
+pub struct Nco {
+    inner: sys::nco_crcf,
+}
+
+impl Nco {
+    /// Build a new NCO. `LIQUID_NCO` (table-based) is the right default
+    /// for mixer use — millions of samples/sec, no need for the
+    /// extra precision the direct-sin/cos `VCO` flavour gives.
+    pub fn new() -> Result<Self, &'static str> {
+        // SAFETY: `nco_crcf_create` allocates internally; NULL on
+        // failure (we treat that as Err).
+        let inner = unsafe { sys::nco_crcf_create(sys::liquid_ncotype_LIQUID_NCO) };
+        if inner.is_null() {
+            return Err("nco_crcf_create returned NULL");
+        }
+        Ok(Self { inner })
+    }
+
+    /// Set the per-sample phase increment in radians. The sign
+    /// convention pairs with the chosen `mix_*_one` direction:
+    ///
+    /// - To pull an input tone at `+f Hz` down to baseband via
+    ///   [`Self::mix_down_one`] (which itself does `y = x·exp(-jθ)`),
+    ///   set `omega = +2π·f/Fs`. Positive frequency in, negative
+    ///   rotation out — they cancel.
+    /// - To shift a baseband signal up by `+f Hz` via a future
+    ///   `mix_up_one`, the same `omega = +2π·f/Fs` would push the
+    ///   spectrum up.
+    pub fn set_frequency(&mut self, omega: f32) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::nco_crcf_set_frequency(self.inner, omega);
+        }
+    }
+
+    /// Get the current per-sample phase increment.
+    #[must_use]
+    pub fn frequency(&self) -> f32 {
+        // SAFETY: `inner` is a valid handle.
+        unsafe { sys::nco_crcf_get_frequency(self.inner) }
+    }
+
+    /// Set the absolute phase (radians). Useful for re-syncing two
+    /// NCOs or driving from an external phase estimator. Independent
+    /// of frequency.
+    pub fn set_phase(&mut self, phi: f32) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::nco_crcf_set_phase(self.inner, phi);
+        }
+    }
+
+    /// Mix one IQ sample down by the current NCO phase, then advance.
+    /// Equivalent to `y = x · exp(-jθ)`. Returns `(re, im)`.
+    pub fn mix_down_one(&mut self, re: f32, im: f32) -> (f32, f32) {
+        let x = sys::__BindgenComplex { re, im };
+        let mut y = sys::__BindgenComplex { re: 0.0, im: 0.0 };
+        // SAFETY: `inner` is valid; `y` is a writable stack slot.
+        // `nco_crcf_mix_down` rotates by current phase, writes y,
+        // then steps the phase by the configured frequency.
+        unsafe {
+            sys::nco_crcf_mix_down(self.inner, x, &mut y);
+            sys::nco_crcf_step(self.inner);
+        }
+        (y.re, y.im)
+    }
+
+    /// Reset phase to zero (frequency unchanged).
+    pub fn reset(&mut self) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::nco_crcf_reset(self.inner);
+        }
+    }
+}
+
+impl Drop for Nco {
+    fn drop(&mut self) {
+        // SAFETY: `inner` returned by `nco_crcf_create`, dropped at
+        // most once.
+        unsafe {
+            if !self.inner.is_null() {
+                sys::nco_crcf_destroy(self.inner);
+            }
+        }
+    }
+}
+
+// SAFETY: liquid handles are single-threaded but movable.
+unsafe impl Send for Nco {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +690,42 @@ mod tests {
         assert!(
             (last.0 - 1.0).abs() < 1e-4 && (last.1 - 1.0).abs() < 1e-4,
             "DC steady-state should be (1,1), got {last:?}"
+        );
+    }
+
+    #[test]
+    fn nco_mixes_tone_down_to_dc() {
+        // Generate a +1 kHz IQ tone at 48 kHz, set the NCO to mix
+        // it down to baseband (omega = -2π·f/Fs), and verify the
+        // output is steady-state DC near (1, 0). Drift over many
+        // samples would expose a phase-accumulator bug — run for
+        // 8192 samples to make sure the table NCO doesn't wander.
+        use core::f32::consts::TAU;
+        let fs = 48_000.0_f32;
+        let f = 1_000.0_f32;
+        let n = 8192usize;
+        let mut nco = Nco::new().expect("create");
+        // `mix_down` already negates internally — `y = x·exp(-jθ)` —
+        // so the NCO frequency must be the *positive* tone frequency
+        // (in radians/sample) to land the rotation at zero net phase.
+        nco.set_frequency(TAU * f / fs);
+
+        let mut re_sum = 0.0_f32;
+        let mut im_sum = 0.0_f32;
+        for i in 0..n {
+            let t = i as f32 / fs;
+            let x_re = (TAU * f * t).cos();
+            let x_im = (TAU * f * t).sin();
+            let (y_re, y_im) = nco.mix_down_one(x_re, x_im);
+            re_sum += y_re;
+            im_sum += y_im;
+        }
+        // Steady-state mean = (1.0, 0.0) for a perfect mixer.
+        let mean_re = re_sum / n as f32;
+        let mean_im = im_sum / n as f32;
+        assert!(
+            (mean_re - 1.0).abs() < 0.01 && mean_im.abs() < 0.01,
+            "NCO didn't mix tone to DC: mean=({mean_re}, {mean_im})"
         );
     }
 

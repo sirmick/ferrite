@@ -1,4 +1,4 @@
-//! Frequency-shift + LPF + decimate in one block.
+//! Frequency-shift + LPF + decimate in one block, backed by liquid-dsp.
 //!
 //! The classic "single-channel tuner" used to pluck a narrowband signal
 //! out of a wideband IQ stream. One IQ-in, one IQ-out, at rate
@@ -10,25 +10,29 @@
 //!
 //! ```text
 //!                         ┌── e^(-j·2π·f_shift·n/fs) ──┐
-//!         x[n] ────────►  │         mixer              │ ──► LPF ──► ↓M ──► y[m]
+//!         x[n] ────────►  │         mixer (Nco)        │ ──► LPF + ↓M (FirdecimCx) ──► y[m]
 //!                         └────────────────────────────┘
 //! ```
 //!
-//! - The mixer shifts the target frequency to DC. A phase accumulator
-//!   wraps to `(-π, π]` each sample so we never lose precision to a
-//!   growing counter, and `sincosf` runs per-sample — cheap enough for
-//!   a few-MS/s input and avoids the magnitude drift of rotator
-//!   multiplication.
-//! - The LPF is the same Hann-windowed sinc used by [`crate::Decimator`],
-//!   sized by `cutoff_normalized` relative to the input rate. The
-//!   decimator invariant `total_out = total_in / factor` holds across
-//!   arbitrary `process()` call sizes, same as Decimator.
+//! - The mixer is liquid's `nco_crcf` in table-based mode — a
+//!   1024-entry sin/cos LUT with linear interpolation, fed a
+//!   per-sample phase increment. Cheap, drift-free over long runs,
+//!   no `sincosf()` syscall per sample.
+//! - The LPF + decimation is liquid's `firdecim_crcf` polyphase
+//!   engine with the same Hann-windowed-sinc taps the previous
+//!   hand-rolled implementation used (designed by the in-crate
+//!   `design_lpf` helper). Polyphase only computes the taps that
+//!   contribute to each output sample, so the per-output cost is
+//!   `num_taps / factor` multiplies instead of `num_taps`.
 //!
-//! `freq_shift_hz` is the only param with `ReconfigureScope::SelfBlock`:
-//! the VFO can retune without tearing down the pipeline.
+//! Public API (params, ports, registry name `Channelizer`) is
+//! identical to the previous version, so every shipped preset and
+//! the live VFO retune path work unchanged. `freq_shift_hz` is still
+//! the only `ReconfigureScope::SelfBlock` param: live retuning maps
+//! to `Nco::set_frequency` without tearing down the FIR.
 
 use anyhow::{bail, Result};
-use core::f32::consts::{PI, TAU};
+use ferrite_liquid_dsp::{FirdecimCx, Nco};
 use num_complex::Complex;
 use serde::Deserialize;
 
@@ -132,18 +136,24 @@ impl Default for ChannelizerParams {
 pub struct Channelizer {
     factor: usize,
     taps: Vec<f32>,
-    /// Ring buffer of the last `num_taps` **mixed** samples. `delay_idx`
-    /// is the next write slot, which after the write is the oldest entry.
-    delay: Vec<Complex<f32>>,
-    delay_idx: usize,
-    /// Inputs modulo `factor`. Rolls to 0 → emit one output.
-    decim_phase: usize,
+    /// Liquid NCO that owns the mixer's phase accumulator + sin/cos
+    /// table. We feed it `omega = +2π·f/Fs` and call `mix_down_one`,
+    /// which internally does `y = x · exp(-jθ)` — the negation is in
+    /// liquid's mixer, not in our omega sign.
+    nco: Nco,
+    /// Liquid polyphase decimator. Owns the FIR delay line and
+    /// emits one output every `factor` inputs (via the `chunk`
+    /// scratch buffer below — liquid's `_execute` insists on
+    /// exactly `factor` samples per call).
+    decim: FirdecimCx,
+    chunk: Vec<(f32, f32)>,
+    chunk_len: usize,
 
     input_rate_hz: f64,
-    /// Current mixer phase, radians, wrapped to `(-π, π]`.
-    mix_phase: f32,
-    /// Radians per sample; recomputed on `set_freq_shift`.
-    mix_omega: f32,
+    /// Last-applied `freq_shift_hz`. Stored so `set_freq_shift` can
+    /// be called fresh without recomputing from the NCO's internal
+    /// state, and so [`Self::freq_shift_hz`] is a cheap getter.
+    freq_shift_hz: f64,
 }
 
 impl Channelizer {
@@ -173,23 +183,35 @@ impl Channelizer {
             );
         }
         let taps = crate::decimator::design_lpf(params.num_taps, params.cutoff_normalized);
-        let omega = omega_for(params.freq_shift_hz, params.input_rate_hz);
+        // liquid's firdecim wants `factor >= 2`; for factor=1 the
+        // process() loop has a passthrough fast path, so the inner
+        // instance is sized at max(2, factor) just to satisfy the
+        // wrapper's invariant.
+        let factor_u32 = u32::try_from(params.factor.max(2))
+            .map_err(|_| anyhow::anyhow!("factor exceeds u32"))?;
+        let decim = FirdecimCx::from_taps(factor_u32, &taps)
+            .map_err(|e| anyhow::anyhow!("firdecim_crcf: {e}"))?;
+        let mut nco = Nco::new().map_err(|e| anyhow::anyhow!("nco_crcf: {e}"))?;
+        nco.set_frequency(omega_for(params.freq_shift_hz, params.input_rate_hz));
         Ok(Self {
             factor: params.factor,
-            delay: vec![Complex::new(0.0, 0.0); taps.len()],
             taps,
-            delay_idx: 0,
-            decim_phase: 0,
+            nco,
+            decim,
+            chunk: vec![(0.0, 0.0); params.factor.max(1)],
+            chunk_len: 0,
             input_rate_hz: params.input_rate_hz,
-            mix_phase: 0.0,
-            mix_omega: omega,
+            freq_shift_hz: params.freq_shift_hz,
         })
     }
 
-    /// Retune the VFO without interrupting sample flow. The mixer phase
-    /// stays continuous (no pop); only the per-sample increment changes.
+    /// Retune the VFO without interrupting sample flow. The mixer's
+    /// phase accumulator stays continuous (no pop); only the
+    /// per-sample increment changes.
     pub fn set_freq_shift(&mut self, freq_shift_hz: f64) {
-        self.mix_omega = omega_for(freq_shift_hz, self.input_rate_hz);
+        self.freq_shift_hz = freq_shift_hz;
+        self.nco
+            .set_frequency(omega_for(freq_shift_hz, self.input_rate_hz));
     }
 
     #[must_use]
@@ -205,24 +227,7 @@ impl Channelizer {
     /// Current mixer frequency shift, Hz. Useful for tests and status.
     #[must_use]
     pub fn freq_shift_hz(&self) -> f64 {
-        #[allow(clippy::cast_lossless)]
-        let omega = self.mix_omega as f64;
-        omega * self.input_rate_hz / -core::f64::consts::TAU
-    }
-
-    /// Convolve the delay line with the LPF at the current `delay_idx`.
-    fn fir_output(&self) -> Complex<f32> {
-        let n = self.taps.len();
-        let mut acc = Complex::new(0.0_f32, 0.0);
-        let mut idx = self.delay_idx;
-        for &t in &self.taps {
-            acc += self.delay[idx] * t;
-            idx += 1;
-            if idx == n {
-                idx = 0;
-            }
-        }
-        acc
+        self.freq_shift_hz
     }
 }
 
@@ -320,11 +325,14 @@ impl Block for Channelizer {
     fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
         // If the scheduler knows the input rate, it wins — keeps the
         // mixer in sync even if construction-time params were stale.
+        // We rebuild the NCO frequency at the new rate; the FIR taps
+        // are normalised against the input rate (cutoff_normalized)
+        // so they stay valid as long as the *factor* doesn't change.
         if let Some(rate) = ctx.input_rate("in") {
             if rate > 0.0 && (rate - self.input_rate_hz).abs() > f64::EPSILON {
-                let shift = self.freq_shift_hz();
+                let shift = self.freq_shift_hz;
                 self.input_rate_hz = rate;
-                self.mix_omega = omega_for(shift, rate);
+                self.nco.set_frequency(omega_for(shift, rate));
             }
         }
         Ok(())
@@ -366,39 +374,42 @@ impl Block for Channelizer {
             return Ok(Work::new());
         };
 
-        let n = self.taps.len();
+        // factor=1 degenerate case — straight passthrough through the
+        // mixer only. liquid's firdecim refuses factor < 2; this
+        // path keeps the block usable as a pure tuner.
+        if self.factor == 1 {
+            let n = src.len().min(dst.len());
+            for i in 0..n {
+                let (re, im) = self.nco.mix_down_one(src[i].re, src[i].im);
+                dst[i] = Complex::new(re, im);
+            }
+            let mut w = Work::new();
+            w.consumed[0] = n;
+            w.produced[0] = n;
+            return Ok(w);
+        }
+
         let mut consumed = 0;
         let mut produced = 0;
         for &x in src {
-            if self.decim_phase + 1 == self.factor && produced == dst.len() {
+            // Reserve room for one more output before consuming the
+            // input that would complete a chunk — backpressure stays
+            // honest across calls.
+            if self.chunk_len + 1 == self.factor && produced == dst.len() {
                 break;
             }
-
-            // Mix: y = x · e^(j·phase). mix_omega is already signed, so
-            // positive freq_shift yields a negative omega and shifts the
-            // input down in frequency by the expected amount.
-            let (sin_p, cos_p) = self.mix_phase.sin_cos();
-            let mixed = Complex::new(x.re * cos_p - x.im * sin_p, x.re * sin_p + x.im * cos_p);
-
-            self.mix_phase += self.mix_omega;
-            // Keep phase small for FP stability across long streams.
-            if self.mix_phase > PI {
-                self.mix_phase -= TAU;
-            } else if self.mix_phase <= -PI {
-                self.mix_phase += TAU;
-            }
-
-            self.delay[self.delay_idx] = mixed;
-            self.delay_idx += 1;
-            if self.delay_idx == n {
-                self.delay_idx = 0;
-            }
+            // Mix down with liquid's NCO (does y = x·exp(-jθ); we
+            // configured frequency = +2π·f/Fs so the shift lands the
+            // target tone at DC), then push to the chunk.
+            let (re, im) = self.nco.mix_down_one(x.re, x.im);
+            self.chunk[self.chunk_len] = (re, im);
+            self.chunk_len += 1;
             consumed += 1;
-            self.decim_phase += 1;
-            if self.decim_phase == self.factor {
-                self.decim_phase = 0;
-                dst[produced] = self.fir_output();
+            if self.chunk_len == self.factor {
+                let (yr, yi) = self.decim.execute(&self.chunk[..self.factor]);
+                dst[produced] = Complex::new(yr, yi);
                 produced += 1;
+                self.chunk_len = 0;
             }
         }
 
@@ -417,9 +428,11 @@ impl BlockFactory for Channelizer {
 }
 
 fn omega_for(freq_shift_hz: f64, input_rate_hz: f64) -> f32 {
-    // `exp(j·ω·n)` with ω = -2π·f/fs shifts a tone at +f down to DC.
+    // liquid's `nco_mix_down` does `y = x · exp(-jθ)` internally, so
+    // pulling a tone at `+f Hz` down to DC needs `ω = +2π·f/Fs` here.
+    // The negation is liquid's, not ours.
     #[allow(clippy::cast_possible_truncation)]
-    let omega = (-core::f64::consts::TAU * freq_shift_hz / input_rate_hz) as f32;
+    let omega = (core::f64::consts::TAU * freq_shift_hz / input_rate_hz) as f32;
     omega
 }
 

@@ -113,10 +113,13 @@ fn main() {
         // M2 surface — keep this list tight. New wrappers append.
         .allowlist_function("firfilt_rrrf_.*")
         .allowlist_function("firdecim_(?:rrrf|crcf)_.*")
+        .allowlist_function("nco_crcf_.*")
         .allowlist_function("ampmodem_.*")
         .allowlist_function("liquid_(?:libversion|error_str)")
         .allowlist_type("firfilt_rrrf")
         .allowlist_type("firdecim_(?:rrrf|crcf)")
+        .allowlist_type("nco_crcf")
+        .allowlist_type("liquid_ncotype")
         .allowlist_type("ampmodem")
         .allowlist_type("liquid_ampmodem_type")
         .allowlist_type("liquid_float_complex")
