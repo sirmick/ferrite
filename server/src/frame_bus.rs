@@ -33,19 +33,36 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
 use crate::app_state::FrameBytes;
 
-/// Default per-subscriber queue depth. At 2.4 MS/s IQ with
-/// ~1000-sample ticks, 1024 slots is ~400 ms of headroom — plenty to
-/// absorb async-scheduling hiccups, far short of unbounded growth.
-pub const DEFAULT_SUBSCRIBER_CAPACITY: usize = 1024;
+/// Default per-subscriber queue depth. The scheduler ticks at
+/// ~2.5 kHz in release builds and the cross-env WsBridgeTx emits one
+/// frame per tick per stream — so a preset with a ui:fft sink and an
+/// IQ-bridge emits ~5000 frames/sec through the bus. 16384 slots is
+/// ~3 s of headroom under that load; keeps momentary WS-write stalls
+/// (HMR reconnect, browser tab resuming, OS scheduler hiccup) from
+/// tripping the drop path on a still-healthy subscriber.
+pub const DEFAULT_SUBSCRIBER_CAPACITY: usize = 16384;
+
+/// Minimum gap between consecutive "subscriber full" warnings per sub.
+/// Without this, a slow subscriber produces one warn per dropped frame
+/// — hundreds per second — which rides the `/ws/logs` broadcast back
+/// into the (already overloaded) browser client and compounds the
+/// backlog. Counting drops in between keeps visibility without the
+/// feedback loop.
+const DROP_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
 struct Sub {
     id: u64,
     tx: mpsc::Sender<FrameBytes>,
+    /// Drops since the last emitted warning. Reset on log.
+    dropped_since_log: u64,
+    /// Wall-clock of the last drop-warning log. `None` means never.
+    last_drop_log_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -68,10 +85,12 @@ impl FrameBus {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(capacity);
-        self.inner
-            .lock()
-            .expect("FrameBus lock")
-            .push(Sub { id, tx });
+        self.inner.lock().expect("FrameBus lock").push(Sub {
+            id,
+            tx,
+            dropped_since_log: 0,
+            last_drop_log_at: None,
+        });
         tracing::debug!(id, capacity, "frame bus: subscribed");
         rx
     }
@@ -81,13 +100,23 @@ impl FrameBus {
     /// only *that* subscriber's copy. Closed senders are pruned.
     pub fn send(&self, bytes: FrameBytes) {
         let mut subs = self.inner.lock().expect("FrameBus lock");
-        subs.retain(|sub| match sub.tx.try_send(bytes.clone()) {
+        subs.retain_mut(|sub| match sub.tx.try_send(bytes.clone()) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!(
-                    id = sub.id,
-                    "frame bus: subscriber full, dropping one frame"
-                );
+                sub.dropped_since_log += 1;
+                let now = Instant::now();
+                let due = sub
+                    .last_drop_log_at
+                    .map_or(true, |t| now.duration_since(t) >= DROP_LOG_INTERVAL);
+                if due {
+                    tracing::warn!(
+                        id = sub.id,
+                        dropped = sub.dropped_since_log,
+                        "frame bus: subscriber full, dropping frames"
+                    );
+                    sub.last_drop_log_at = Some(now);
+                    sub.dropped_since_log = 0;
+                }
                 true
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {

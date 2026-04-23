@@ -156,13 +156,21 @@ pub fn split_for_environment(
             (true, false) => {
                 let sid = CROSS_ENV_STREAM_BASE + crossing_index;
                 let bridge_id = format!("__bridge_tx_{sid}");
+                // Batch IQ into ~4 kS chunks before emitting. The
+                // scheduler ticks at ~2.5 kHz; one frame per tick
+                // saturates the WS with ~2500 tiny messages/sec, which
+                // is faster than the browser's postcard decoder can
+                // drain over a dev proxy → subscriber queues fill and
+                // drop. 4096 samples per frame gives ~30 frames/sec
+                // through a 250 kS/s channelizer, 32 kB per message —
+                // comfortable under a localhost proxy.
                 insert_bridge(
                     &mut new_blocks,
                     doc,
                     bridge_id.clone(),
                     "WsBridgeTx",
                     env,
-                    json!({ "stream_id": sid }),
+                    json!({ "stream_id": sid, "min_samples_per_frame": 4096 }),
                 )?;
                 new_wires.push(Wire::new(wire.src.clone(), format!("{bridge_id}.in")));
                 crossing_index += 1;

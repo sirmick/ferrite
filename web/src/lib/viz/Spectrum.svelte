@@ -225,30 +225,33 @@
     });
   });
 
-  // The display range that actually drives the y-axis labels and the
-  // byte→pixel LUT. Auto-scale writes here; manual overrides (not yet
-  // UI-exposed as inputs) can be added later. Kept independent from
-  // the fixed server window.
-  let displayFloorDbfs = $derived(clientControls.get('client.spectrum.displayFloorDbfs'));
-  let displayCeilDbfs = $derived(clientControls.get('client.spectrum.displayCeilDbfs'));
+  // Manual display range from the client store. Persistence here is
+  // fine: the user sets these explicitly and we want them back on
+  // reload. When auto-scale is on, its live EMA overrides this path
+  // and drives the renderer directly — see below.
+  let manualFloorDbfs = $derived(clientControls.get('client.spectrum.displayFloorDbfs'));
+  let manualCeilDbfs = $derived(clientControls.get('client.spectrum.displayCeilDbfs'));
   $effect(() => {
-    if (!renderer) return;
-    renderer.setDisplayRange({ floorDbfs: displayFloorDbfs, ceilDbfs: displayCeilDbfs });
+    if (!renderer || autoScale) return;
+    renderer.setDisplayRange({ floorDbfs: manualFloorDbfs, ceilDbfs: manualCeilDbfs });
   });
 
   $effect(() => {
     renderer?.setFeatures({ fade, maxHold });
   });
 
-  // Auto-scale: pure client-side display stretch. Chases the signal's
-  // running p10/p99 and writes back into the client store's
-  // `displayFloorDbfs`/`displayCeilDbfs` so the renderer sees it via
-  // the $derived reads above. Persists across reloads for free.
+  // Auto-scale: ephemeral, not persisted. Writes straight to the
+  // renderer on every FFT frame — routing through `applyControl` +
+  // `clientControls.set` used to localStorage-write ~30×/sec during
+  // EMA convergence (`JSON.stringify` + `setItem` are synchronous and
+  // block the main thread for ~1 ms each), visibly tanking FPS on
+  // wideband presets. The auto-scale *toggle* still lives in the
+  // store (`client.spectrum.autoScale`) — that's user intent — but
+  // the computed floor/ceil are transient runtime state.
   const AUTO_SCALE_ALPHA = 0.08; // ~0.5s response at 30 Hz FFT
   const AUTO_FLOOR_MARGIN_DB = 5;
   const AUTO_CEIL_HEADROOM_DB = 10;
   const AUTO_MIN_WINDOW_DB = 20;
-  const AUTO_COMMIT_HYSTERESIS_DB = 0.5; // store writes only on meaningful moves
 
   let autoFloorEma: number | undefined;
   let autoCeilEma: number | undefined;
@@ -285,17 +288,7 @@
         nextCeil = mid + AUTO_MIN_WINDOW_DB / 2;
       }
       nextCeil = Math.min(nextCeil, c);
-      // Skip writes that would change the stored value by less than
-      // the meter's noise floor — `applyControl` persists to localStorage
-      // on every set, and driving it per-frame is wasteful.
-      const curF = clientControls.get('client.spectrum.displayFloorDbfs');
-      const curC = clientControls.get('client.spectrum.displayCeilDbfs');
-      if (Math.abs(nextFloor - curF) >= AUTO_COMMIT_HYSTERESIS_DB) {
-        void applyControl('client.spectrum.displayFloorDbfs', Math.round(nextFloor * 10) / 10);
-      }
-      if (Math.abs(nextCeil - curC) >= AUTO_COMMIT_HYSTERESIS_DB) {
-        void applyControl('client.spectrum.displayCeilDbfs', Math.round(nextCeil * 10) / 10);
-      }
+      renderer?.setDisplayRange({ floorDbfs: nextFloor, ceilDbfs: nextCeil });
     });
     return () => {
       renderer?.onStats(() => {});

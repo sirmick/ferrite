@@ -284,9 +284,13 @@ mod tests {
                 stream_id, payload, ..
             } => {
                 assert_eq!(stream_id, 1000);
-                // SineSource defaults to DEFAULT_FRAMES_HINT (1024)
-                // samples per tick; each complex sample is 8 bytes.
-                assert_eq!(payload.len(), 1024 * 8);
+                // env_split now sets `min_samples_per_frame: 4096` on
+                // auto-inserted bridges — the scheduler ticks at kHz
+                // rates and one frame per tick saturates the browser's
+                // WS decoder. The batch flushes on the first tick whose
+                // accumulator reaches the threshold, which for a
+                // 1024-sample ticker lands at 4×1024 = 4096 samples.
+                assert_eq!(payload.len(), 4096 * 8);
             }
             other => panic!("expected IqF32 frame, got {other:?}"),
         }

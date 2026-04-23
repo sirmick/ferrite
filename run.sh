@@ -4,7 +4,7 @@
 # prefixed with [ferrited] / [web]. Ctrl-C stops both.
 #
 # No flowgraph or source is started — pick those from the UI:
-#   1. open http://<host>:5173/
+#   1. open http://<host>:10000/
 #   2. choose a preset from the header dropdown
 #   3. configure the source via the Source dialog
 #   4. click Start
@@ -42,21 +42,21 @@ prefix() {
   done
 }
 
-echo "[run] ferrited → http://0.0.0.0:8088/  (REST + WS)"
-echo "[run] vite     → http://0.0.0.0:5173/  (UI; proxies /api and /ws → ferrited)"
+echo "[run] ferrited → http://0.0.0.0:10001/  (REST + WS)"
+echo "[run] vite     → http://0.0.0.0:10000/  (UI; proxies /api and /ws → ferrited)"
 echo "[run] open the vite URL in a browser; pick preset + source from the UI"
 echo
 
-# ferrited on 0.0.0.0:8088, logs prefixed via process substitution
+# ferrited on 0.0.0.0:10001, logs prefixed via process substitution
 RUST_LOG="${RUST_LOG:-info}" \
   ./target/release/ferrited \
-    --bind 0.0.0.0:8088 \
+    --bind 0.0.0.0:10001 \
     --flowgraph "$PLACEHOLDER_FLOWGRAPH" \
     > >(prefix '[ferrited]') 2> >(prefix '[ferrited]' >&2) &
 FERRITED_PID=$!
 
-# vite dev on 0.0.0.0:5173 (proxies /api and /ws to ferrited)
-( cd web && pnpm dev --host 0.0.0.0 --port 5173 ) \
+# vite dev on 0.0.0.0:10000 (proxies /api and /ws to ferrited)
+( cd web && pnpm dev --host 0.0.0.0 --port 10000 ) \
     > >(prefix '[web     ]') 2> >(prefix '[web     ]' >&2) &
 VITE_PID=$!
 

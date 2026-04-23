@@ -70,10 +70,23 @@ pub trait BridgeSink: Send + Sync {
 
 /// Stream identifier carried on both ends of a bridge pair. Unique
 /// within a graph; the server allocates it at preset-load time.
+///
+/// `min_samples_per_frame` batches per-tick emissions so the wire sees
+/// ~30–60 frames/sec rather than one per scheduler tick (2.5 kHz).
+/// Each WS message has fixed overhead (framing + postcard + dispatch);
+/// at 2500 fps the browser can't drain fast enough and frames pile up
+/// in the subscriber queue. Setting this to, e.g., 4096 IQ samples at
+/// 250 kS/s gives ~60 fps on the wire, 2–3 kB per message — plenty of
+/// headroom for the browser runner to consume.
+///
+/// Zero (the default) disables batching: every tick emits whatever
+/// samples arrived, preserving the original behaviour for tests that
+/// tick by hand.
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct WsBridgeParams {
     pub stream_id: u32,
+    pub min_samples_per_frame: usize,
 }
 
 /// `WsBridgeTxFftU8` params — adds a `frame_size` on top of the shared
@@ -138,12 +151,20 @@ const fn stream_id_u16(stream_id: u32) -> u16 {
 pub struct WsBridgeTx {
     params: WsBridgeParams,
     sink: Option<Arc<dyn BridgeSink>>,
+    /// Accumulator for `min_samples_per_frame` batching. Filled on each
+    /// `process` call; flushed when it reaches the threshold. Empty when
+    /// batching is disabled (`min_samples_per_frame == 0`).
+    batch: Vec<Complex<f32>>,
 }
 
 impl WsBridgeTx {
     #[must_use]
-    pub const fn new(params: WsBridgeParams) -> Self {
-        Self { params, sink: None }
+    pub fn new(params: WsBridgeParams) -> Self {
+        Self {
+            params,
+            sink: None,
+            batch: Vec::with_capacity(params.min_samples_per_frame),
+        }
     }
 
     #[must_use]
@@ -170,6 +191,23 @@ impl WsBridgeTx {
         }
         out
     }
+
+    /// Emit the buffered samples as one frame. Clears the batch.
+    fn flush(&mut self, samples: &[Complex<f32>]) {
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        if samples.is_empty() {
+            return;
+        }
+        let payload = Self::encode_iq_f32(samples);
+        sink.push(Frame::IqF32 {
+            stream_id: stream_id_u16(self.params.stream_id),
+            seq: 0,
+            timestamp_ns: 0,
+            payload,
+        });
+    }
 }
 
 #[ferrite_blocks_macros::ferrite_block]
@@ -195,14 +233,22 @@ impl Block for WsBridgeTx {
         let mut w = Work::new();
         if let Some(port) = io.inputs.iter().find(|p| p.name == "in") {
             if let Some(slice) = port.as_iq_f32() {
-                if let Some(sink) = &self.sink {
-                    let payload = Self::encode_iq_f32(slice);
-                    sink.push(Frame::IqF32 {
-                        stream_id: stream_id_u16(self.params.stream_id),
-                        seq: 0,
-                        timestamp_ns: 0,
-                        payload,
-                    });
+                if self.params.min_samples_per_frame == 0 {
+                    // No batching: emit every tick.
+                    self.flush(slice);
+                } else {
+                    self.batch.extend_from_slice(slice);
+                    if self.batch.len() >= self.params.min_samples_per_frame {
+                        // Take ownership of the batch buffer, emit, reset
+                        // with the same capacity. One allocation per
+                        // flush — negligible compared to the WS overhead
+                        // it saves.
+                        let drained = std::mem::replace(
+                            &mut self.batch,
+                            Vec::with_capacity(self.params.min_samples_per_frame),
+                        );
+                        self.flush(&drained);
+                    }
                 }
                 // Consume whatever arrived regardless of sink presence:
                 // an unwired bridge still needs to relieve upstream
@@ -635,7 +681,10 @@ mod tests {
 
     #[test]
     fn tx_consumes_all_input_samples() {
-        let mut tx = WsBridgeTx::new(WsBridgeParams { stream_id: 7 });
+        let mut tx = WsBridgeTx::new(WsBridgeParams {
+            stream_id: 7,
+            ..Default::default()
+        });
         let input = vec![Complex::new(1.0_f32, 0.0); 32];
         let mut inputs = [InputPort {
             name: "in",
@@ -806,7 +855,10 @@ mod tests {
     #[test]
     fn iq_tx_pushes_iq_f32_frame_with_le_interleaved_floats() {
         let sink = Arc::new(CapturingSink::default());
-        let mut tx = WsBridgeTx::new(WsBridgeParams { stream_id: 1234 });
+        let mut tx = WsBridgeTx::new(WsBridgeParams {
+            stream_id: 1234,
+            ..Default::default()
+        });
         tx.attach_sink(sink.clone());
 
         let input = vec![Complex::new(1.0_f32, 2.0), Complex::new(3.0, 4.0)];
@@ -841,7 +893,10 @@ mod tests {
 
     #[test]
     fn iq_tx_without_sink_still_drains_upstream() {
-        let mut tx = WsBridgeTx::new(WsBridgeParams { stream_id: 9 });
+        let mut tx = WsBridgeTx::new(WsBridgeParams {
+            stream_id: 9,
+            ..Default::default()
+        });
         let input = vec![Complex::new(1.0_f32, 0.0); 16];
         let mut inputs = [InputPort {
             name: "in",
@@ -991,7 +1046,10 @@ mod tests {
     #[test]
     fn events_tx_emits_one_json_event_per_complete_line() {
         let sink = Arc::new(CapturingSink::default());
-        let mut tx = WsBridgeTxEvents::new(WsBridgeParams { stream_id: 2000 });
+        let mut tx = WsBridgeTxEvents::new(WsBridgeParams {
+            stream_id: 2000,
+            ..Default::default()
+        });
         tx.attach_sink(sink.clone());
 
         let input = b"{\"digit\":\"1\"}\n{\"digit\":\"2\"}\n".to_vec();
@@ -1030,7 +1088,10 @@ mod tests {
     #[test]
     fn events_tx_reassembles_events_across_process_calls() {
         let sink = Arc::new(CapturingSink::default());
-        let mut tx = WsBridgeTxEvents::new(WsBridgeParams { stream_id: 7 });
+        let mut tx = WsBridgeTxEvents::new(WsBridgeParams {
+            stream_id: 7,
+            ..Default::default()
+        });
         tx.attach_sink(sink.clone());
 
         // First call: partial line, no frame emitted.
@@ -1070,7 +1131,10 @@ mod tests {
 
     #[test]
     fn events_tx_without_sink_still_drains_upstream() {
-        let mut tx = WsBridgeTxEvents::new(WsBridgeParams { stream_id: 1 });
+        let mut tx = WsBridgeTxEvents::new(WsBridgeParams {
+            stream_id: 1,
+            ..Default::default()
+        });
         let input = b"{\"x\":1}\n".to_vec();
         let mut inputs = [InputPort {
             name: "in",
@@ -1095,7 +1159,10 @@ mod tests {
         let sink = Arc::new(CapturingSink::default());
         let sink_dyn: Arc<dyn BridgeSink> = sink.clone();
 
-        let mut iq_tx = WsBridgeTx::new(WsBridgeParams { stream_id: 1000 });
+        let mut iq_tx = WsBridgeTx::new(WsBridgeParams {
+            stream_id: 1000,
+            ..Default::default()
+        });
         iq_tx.attach_sink(Arc::clone(&sink_dyn));
         let mut fft_tx = WsBridgeTxFftU8::new(WsBridgeFftU8Params {
             stream_id: 1,
