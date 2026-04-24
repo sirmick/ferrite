@@ -125,6 +125,7 @@ mod tests {
             stream_id: 1000,
             seq: 0,
             timestamp_ns: 0,
+            sample_rate_hz: 0,
             payload: payload.clone(),
         });
         let bytes = rx.recv().await.unwrap();
@@ -186,6 +187,7 @@ mod tests {
             stream_id,
             seq: 0,
             timestamp_ns: 0,
+            sample_rate_hz: 0,
             payload: sample.clone(),
         };
         sink.push(mk(1000));
@@ -223,6 +225,7 @@ mod tests {
             stream_id: 1,
             seq: 0,
             timestamp_ns: 0,
+            sample_rate_hz: 0,
             payload: iq,
         });
         sink.push(Frame::FftU8 {
@@ -260,6 +263,7 @@ mod tests {
             stream_id: 1000,
             seq: 0,
             timestamp_ns: 0,
+            sample_rate_hz: 0,
             payload: vec![],
         });
         sink.push(Frame::FftU8 {
@@ -282,6 +286,7 @@ mod tests {
             stream_id: 1000,
             seq: 0,
             timestamp_ns: 0,
+            sample_rate_hz: 0,
             payload: vec![1, 2, 3, 4],
         });
     }

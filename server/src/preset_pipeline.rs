@@ -260,6 +260,38 @@ async fn drive(
                 }
             }
             _ = diag_interval.tick() => {
+                // Refresh rate propagation before snapshotting so a
+                // live source-rate change reflects in downstream
+                // blocks' counters this tick. Cheap — rate-stable
+                // blocks no-op in their `update_rates`.
+                {
+                    let mut rt = runtime.lock().await;
+                    if let Err(err) = rt.refresh_rates() {
+                        tracing::warn!(?err, "refresh_rates failed");
+                    }
+                    // SoapySource stall watchdog: if the reader thread
+                    // hasn't pushed samples in > 2 s the driver is
+                    // likely hung (common with RTL-SDR USB glitches /
+                    // HackRF resets). Log once per second we're over
+                    // the threshold so operators see it immediately
+                    // without rooting through flowdiag counters.
+                    if let Some(src) =
+                        rt.block_typed::<ferrite_blocks::SoapySource>(SOURCE_ID)
+                    {
+                        if let Some(stalled) = src.stalled_ns() {
+                            if stalled > 2_000_000_000 {
+                                #[allow(clippy::cast_precision_loss)]
+                                let secs = stalled as f64 / 1e9;
+                                tracing::warn!(
+                                    target: "flowdiag",
+                                    stalled_secs = secs,
+                                    "SoapySource reader hasn't delivered in {:.1}s — driver likely hung",
+                                    secs,
+                                );
+                            }
+                        }
+                    }
+                }
                 let rt = runtime.lock().await;
                 let snap = rt.diag_snapshot();
                 drop(rt);

@@ -44,10 +44,19 @@ pub const VFO_STREAM_BASE: u16 = FFT_STREAM + 1;
 pub enum Frame {
     /// Baseband IQ samples. `payload` is interleaved little-endian
     /// `f32` pairs, `[re0, im0, re1, im1, …]`, 8 bytes per sample.
+    ///
+    /// `sample_rate_hz` is the declared rate at the producer's output
+    /// port, rounded to the nearest integer Hz. `0` means "unknown /
+    /// legacy frame"; the consumer should fall back to whatever its
+    /// config or a previous frame told it. Non-zero lets a receiver
+    /// pick up the actual runtime rate rather than a preset-time guess
+    /// — essential when the producer's rate depends on the actual SDR
+    /// ladder (e.g. a channelizer at `round(source_rate/target)`).
     IqF32 {
         stream_id: u16,
         seq: u32,
         timestamp_ns: u64,
+        sample_rate_hz: u32,
         payload: Vec<u8>,
     },
     /// Log-magnitude FFT bins, one `u8` per bin.
@@ -142,6 +151,11 @@ mod wasm_bindings {
         /// u64 timestamp — serialized as a BigInt by the configured
         /// serde-wasm-bindgen serializer.
         timestamp_ns: u64,
+        /// Declared sample rate at the producer's output port. Non-zero
+        /// for `IqF32` frames emitted by a `WsBridgeTx` that had its
+        /// rate populated via `InitCtx.input_rate`; zero for `FftU8` /
+        /// `JsonEvent` / legacy IQ frames where rate isn't meaningful.
+        sample_rate_hz: u32,
         #[serde(with = "serde_bytes")]
         payload: &'a [u8],
     }
@@ -165,12 +179,14 @@ mod wasm_bindings {
                 stream_id,
                 seq,
                 timestamp_ns,
+                sample_rate_hz,
                 payload,
             } => JsFrame {
                 payload_type: PT_IQ_F32,
                 stream_id: *stream_id,
                 seq: *seq,
                 timestamp_ns: *timestamp_ns,
+                sample_rate_hz: *sample_rate_hz,
                 payload,
             },
             Frame::FftU8 {
@@ -183,6 +199,7 @@ mod wasm_bindings {
                 stream_id: *stream_id,
                 seq: *seq,
                 timestamp_ns: *timestamp_ns,
+                sample_rate_hz: 0,
                 payload,
             },
             Frame::JsonEvent {
@@ -195,6 +212,7 @@ mod wasm_bindings {
                 stream_id: *stream_id,
                 seq: *seq,
                 timestamp_ns: *timestamp_ns,
+                sample_rate_hz: 0,
                 payload,
             },
         };
@@ -228,6 +246,7 @@ mod tests {
             stream_id: 1000,
             seq: 0xDEAD_BEEF,
             timestamp_ns: 0x0123_4567_89AB_CDEF,
+            sample_rate_hz: 0,
             payload: bytes,
         };
         let wire = f.to_postcard().unwrap();
@@ -267,6 +286,7 @@ mod tests {
             stream_id: 1,
             seq: 0,
             timestamp_ns: 0,
+            sample_rate_hz: 0,
             payload: vec![],
         };
         let b = Frame::FftU8 {
@@ -279,6 +299,7 @@ mod tests {
             stream_id: 2,
             seq: 0,
             timestamp_ns: 0,
+            sample_rate_hz: 0,
             payload: vec![],
         };
         assert_ne!(a.stream_key(), b.stream_key(), "variant tag differs");
@@ -291,6 +312,7 @@ mod tests {
             stream_id: 10,
             seq: 0,
             timestamp_ns: 0,
+            sample_rate_hz: 0,
             payload: vec![],
         };
         iq.set_envelope(42, 9_000_000_000);

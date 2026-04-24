@@ -86,6 +86,13 @@ struct ReaderCounters {
     ring_drops: AtomicU64,
     timestamp_gaps: AtomicU64,
     samples_pushed: AtomicU64,
+    /// Monotonic nanoseconds (from `CLOCK_MONOTONIC` via `Instant`,
+    /// relative to an arbitrary epoch captured at block construction)
+    /// of the most recent successful `ring.write()`. Zero until the
+    /// first push. Stalled readers can be detected by comparing this
+    /// to `now()` — a gap > a few ticks' worth of samples is a sign
+    /// the driver hung (common with RTL-SDR on reset / USB glitches).
+    last_sample_at_ns: AtomicU64,
 }
 
 /// Construction-time params. All fields are optional in the JSON preset;
@@ -179,6 +186,10 @@ pub struct SoapySource {
     /// Samples the process() hot path could not deliver because the
     /// ring was empty. Zero on a healthy run.
     underrun_samples: u64,
+    /// Monotonic anchor shared with the reader thread so the block's
+    /// main side can compute "seconds since last pushed sample" from
+    /// the atomic counter the reader updates.
+    start_instant: std::time::Instant,
 }
 
 impl SoapySource {
@@ -330,7 +341,24 @@ impl SoapySource {
             reader: None,
             ticks: 0,
             underrun_samples: 0,
+            start_instant: std::time::Instant::now(),
         })
+    }
+
+    /// Nanoseconds since the reader thread last successfully pushed a
+    /// batch of samples into the ring, or `None` if no samples have
+    /// landed yet (reader just spawned, or driver is wedged from the
+    /// start). Driver hangs show up here as a monotonically increasing
+    /// value that never resets — operator-facing code can log a warning
+    /// when the gap exceeds a few tick periods.
+    #[must_use]
+    pub fn stalled_ns(&self) -> Option<u64> {
+        let last = self.counters.last_sample_at_ns.load(Ordering::Relaxed);
+        if last == 0 {
+            return None;
+        }
+        let now = self.start_instant.elapsed().as_nanos() as u64;
+        Some(now.saturating_sub(last))
     }
 
     /// Post-configure readback — what the hardware actually locked to.
@@ -548,6 +576,7 @@ impl Block for SoapySource {
         let reader_counters = self.counters.clone();
         let reader_stop = self.stop.clone();
         let rate_hz = self.sample_rate_hz;
+        let reader_anchor = self.start_instant;
         let reader = thread::Builder::new()
             .name("soapy-rx".into())
             .spawn(move || {
@@ -557,6 +586,7 @@ impl Block for SoapySource {
                     &reader_ring,
                     &reader_counters,
                     &reader_stop,
+                    reader_anchor,
                 );
             })
             .context("spawn soapy reader thread")?;
@@ -625,6 +655,7 @@ fn run_reader(
     ring: &RingHandle,
     counters: &Arc<ReaderCounters>,
     stop: &Arc<AtomicBool>,
+    start_instant: std::time::Instant,
 ) {
     let mut staging: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); READER_CHUNK];
     // Timestamp bookkeeping: the expected next time_ns, updated after
@@ -672,6 +703,10 @@ fn run_reader(
                 counters
                     .samples_pushed
                     .fetch_add(pushed as u64, Ordering::Relaxed);
+                if pushed > 0 {
+                    let now_ns = start_instant.elapsed().as_nanos() as u64;
+                    counters.last_sample_at_ns.store(now_ns, Ordering::Relaxed);
+                }
                 if pushed < n {
                     counters
                         .ring_drops

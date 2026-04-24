@@ -202,6 +202,37 @@ impl RuntimeHandle {
         Ok(())
     }
 
+    /// Record the sample rate advertised by an arriving frame on the
+    /// named `WsBridgeRx`. The browser runner reads
+    /// `frame.sample_rate_hz` and calls this whenever it's non-zero so
+    /// dynamic source-rate changes cross the WS boundary. Cheap;
+    /// actual propagation to downstream blocks happens on the next
+    /// `refreshRates()` sweep.
+    #[wasm_bindgen(js_name = setBridgeRxRate)]
+    pub fn set_bridge_rx_rate(
+        &mut self,
+        block_id: &str,
+        sample_rate_hz: f64,
+    ) -> Result<(), JsError> {
+        let src = self
+            .rt
+            .block_typed::<WsBridgeRx>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no WsBridgeRx block named {block_id:?}")))?;
+        src.set_advertised_rate(sample_rate_hz);
+        Ok(())
+    }
+
+    /// Re-run the rate-propagation pass across the graph. Intended to
+    /// be called once per second from the tick loop so `WsBridgeRx`'s
+    /// dynamically observed rate (updated via `setBridgeRxRate`)
+    /// re-propagates to downstream resamplers / demods.
+    #[wasm_bindgen(js_name = refreshRates)]
+    pub fn refresh_rates(&mut self) -> Result<(), JsError> {
+        self.rt
+            .refresh_rates()
+            .map_err(|e| JsError::new(&format!("{e:#}")))
+    }
+
     /// Complex samples currently buffered inside the named `WsBridgeRx`
     /// — written by `pushIq` but not yet emitted on the output port.
     /// Useful for test assertions and for surfacing queue depth to the

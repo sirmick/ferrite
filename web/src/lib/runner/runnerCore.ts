@@ -60,6 +60,9 @@ interface BridgeCounter {
   /** Cumulative `WsBridgeRx::dropped_samples` snapshot at the last
    *  diag report — printed as a delta so ring overflow is visible. */
   droppedBaseline: bigint;
+  /** Last rate advertised on a frame — used to skip redundant
+   *  `setBridgeRxRate` calls across the wasm boundary. */
+  lastRateHz: number;
 }
 
 interface LoadedState {
@@ -203,6 +206,14 @@ export class RunnerCore {
     if (state.diagTimer !== null) return;
     state.diagTimer = setInterval(() => {
       if (this.loaded !== state || !state.running) return;
+      // Re-run rate propagation so any WsBridgeRx that received a
+      // frame with a new `sampleRateHz` this second updates its
+      // downstream resamp/demod. Cheap for rate-stable graphs.
+      try {
+        state.rt.refreshRates();
+      } catch {
+        /* best-effort; don't block the diag loop on a rebuild error */
+      }
       const bridgeSummary = state.bridges
         .map((b) => {
           const total = safeBigint(() => state.rt.iqDroppedSamples(b.blockId));
@@ -295,12 +306,32 @@ function wireBlocks(
     const block = raw as { type?: string; params?: Record<string, unknown> };
     if (block.type === 'WsBridgeRx') {
       const streamId = Number(block.params?.stream_id ?? 0);
-      const counter: BridgeCounter = { blockId, streamId, samples: 0, droppedBaseline: 0n };
+      const counter: BridgeCounter = {
+        blockId,
+        streamId,
+        samples: 0,
+        droppedBaseline: 0n,
+        lastRateHz: 0,
+      };
       bridges.push(counter);
       const unsub = client.subscribe(streamId, (frame) => {
         if (frame.header.payloadType !== PayloadType.IqF32) return;
         const samples = viewIqF32(frame.payload);
         counter.samples += samples.length / 2; // complex pairs → IQ samples
+        // When the producer advertises its runtime output rate on the
+        // frame, forward it to the Rx block so the next
+        // `refreshRates()` sweep propagates the live rate to
+        // downstream resamp/demod blocks. Skip the wasm roundtrip if
+        // the rate hasn't changed.
+        const rate = frame.header.sampleRateHz;
+        if (rate > 0 && rate !== counter.lastRateHz) {
+          counter.lastRateHz = rate;
+          try {
+            rt.setBridgeRxRate(blockId, rate);
+          } catch {
+            /* block type/id guaranteed by this code path; swallow */
+          }
+        }
         rt.pushIq(blockId, samples);
       });
       subscribers.push(unsub);

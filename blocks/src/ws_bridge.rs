@@ -155,6 +155,11 @@ pub struct WsBridgeTx {
     /// `process` call; flushed when it reaches the threshold. Empty when
     /// batching is disabled (`min_samples_per_frame == 0`).
     batch: Vec<Complex<f32>>,
+    /// Last input-port rate observed via `InitCtx.input_rate`. Stamped
+    /// onto every emitted `Frame::IqF32` so the receiving `WsBridgeRx`
+    /// on the other side of the WS boundary learns the actual runtime
+    /// rate rather than relying on a preset-time guess.
+    input_rate_hz: f64,
 }
 
 impl WsBridgeTx {
@@ -164,6 +169,7 @@ impl WsBridgeTx {
             params,
             sink: None,
             batch: Vec::with_capacity(params.min_samples_per_frame),
+            input_rate_hz: 0.0,
         }
     }
 
@@ -201,10 +207,13 @@ impl WsBridgeTx {
             return;
         }
         let payload = Self::encode_iq_f32(samples);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let sample_rate_hz = self.input_rate_hz.round().max(0.0) as u32;
         sink.push(Frame::IqF32 {
             stream_id: stream_id_u16(self.params.stream_id),
             seq: 0,
             timestamp_ns: 0,
+            sample_rate_hz,
             payload,
         });
     }
@@ -225,7 +234,23 @@ impl Block for WsBridgeTx {
         }
     }
 
-    fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
+    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 {
+                self.input_rate_hz = rate;
+            }
+        }
+        Ok(())
+    }
+
+    fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
+        // Source retuned — pick up the new rate so outgoing frames
+        // advertise the current runtime value to the far-side Rx.
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 {
+                self.input_rate_hz = rate;
+            }
+        }
         Ok(())
     }
 
@@ -387,6 +412,20 @@ impl WsBridgeRx {
             tmp.push(Complex::new(chunk[0], chunk[1]));
         }
         self.push(&tmp);
+    }
+
+    /// Record the sample rate advertised by the most recent incoming
+    /// `Frame::IqF32`. Runner glue (server transport decoder, browser
+    /// `FrameClient`) calls this on each frame that carries a non-zero
+    /// `sample_rate_hz`. The stored rate feeds `output_rate_hz()`, which
+    /// the runtime's `refresh_rates()` sweep uses to re-advertise the
+    /// live rate to downstream blocks (resamp, demod) — so a runtime
+    /// source-rate change propagates across the WS boundary without a
+    /// full preset reconfigure.
+    pub fn set_advertised_rate(&mut self, rate_hz: f64) {
+        if rate_hz > 0.0 && rate_hz.is_finite() {
+            self.params.sample_rate_hz = rate_hz;
+        }
     }
 }
 

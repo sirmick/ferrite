@@ -44,6 +44,15 @@ pub struct SineSourceParams {
     pub center_freq_hz: f64,
     pub tone_freq_abs_hz: f64,
     pub amplitude: f32,
+    /// When `true`, the block caps its emission rate to `rate_hz`
+    /// (wall-clock throttled) so downstream rate-aware blocks see an
+    /// input rate matching what the preset advertises — critical when
+    /// SineSource stands in for a real SDR in a live pipeline.
+    /// Defaults to `false` so unit tests (which tick synchronously and
+    /// expect deterministic buffer-fill behavior) keep working without
+    /// modification; set to `true` explicitly in any preset JSON where
+    /// the block is driving actual listening.
+    pub throttle: bool,
 }
 
 impl Default for SineSourceParams {
@@ -53,6 +62,7 @@ impl Default for SineSourceParams {
             center_freq_hz: 100_000_000.0,
             tone_freq_abs_hz: 100_001_000.0,
             amplitude: 0.25,
+            throttle: false,
         }
     }
 }
@@ -61,6 +71,16 @@ pub struct SineSource {
     params: SineSourceParams,
     phase: u32,
     phase_inc: u32,
+    /// Wall-clock reference captured on first `process` call. Used to
+    /// throttle emission to the declared `rate_hz` — without this the
+    /// block runs as fast as the scheduler's work-loop asks, producing
+    /// `N·rate_hz` samples per wall second and blowing past every
+    /// downstream block's advertised rate. Native-only; wasm32 lacks
+    /// `Instant`, so throttling is disabled there.
+    #[cfg(not(target_arch = "wasm32"))]
+    start: Option<std::time::Instant>,
+    #[cfg(not(target_arch = "wasm32"))]
+    emitted: u64,
 }
 
 impl SineSource {
@@ -70,6 +90,10 @@ impl SineSource {
             params,
             phase: 0,
             phase_inc: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            start: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            emitted: 0,
         };
         s.recompute_phase_inc();
         s
@@ -201,10 +225,38 @@ impl Block for SineSource {
         else {
             return Ok(Work::new());
         };
+
+        // Wall-clock throttle: cap the per-tick emission so long-run
+        // output averages to the declared `rate_hz`. Without this the
+        // block emits as fast as the scheduler asks, and downstream
+        // rate-aware blocks (channelizer, resamp) see input rates far
+        // above their configured target — the preset's advertised
+        // rate becomes a polite lie. `throttle: false` (test default)
+        // bypasses to preserve deterministic single-call output; wasm
+        // likewise bypasses because `Instant::now()` panics there.
+        #[cfg(not(target_arch = "wasm32"))]
+        let budget = if self.params.throttle {
+            let now = std::time::Instant::now();
+            let start = *self.start.get_or_insert(now);
+            let elapsed_s = now.duration_since(start).as_secs_f64();
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let target = (elapsed_s * self.params.rate_hz) as u64;
+            target.saturating_sub(self.emitted)
+        } else {
+            u64::MAX
+        };
+        #[cfg(target_arch = "wasm32")]
+        let budget = u64::MAX;
+
+        let n = (out.len() as u64).min(budget) as usize;
+        if n == 0 {
+            return Ok(Work::new());
+        }
+
         let amp = self.params.amplitude;
         let inc = self.phase_inc;
         let mut phase = self.phase;
-        for s in out.iter_mut() {
+        for s in out.iter_mut().take(n) {
             #[allow(clippy::cast_precision_loss)]
             let frac = phase as f32 * INV_PHASE_SCALE;
             let theta = frac * core::f32::consts::TAU;
@@ -213,7 +265,10 @@ impl Block for SineSource {
             phase = phase.wrapping_add(inc);
         }
         self.phase = phase;
-        let n = out.len();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.emitted = self.emitted.saturating_add(n as u64);
+        }
         let mut w = Work::new();
         w.produced[0] = n;
         Ok(w)
@@ -239,6 +294,8 @@ mod tests {
             center_freq_hz: 0.0,
             tone_freq_abs_hz: 0.0,
             amplitude: 0.5,
+            // Deterministic single-call output for tests.
+            throttle: false,
         }
     }
 

@@ -22,6 +22,11 @@ export interface FrameHeader {
   readonly streamId: number;
   readonly seq: number;
   readonly timestampNs: bigint;
+  /** Producer-declared sample rate for IQ frames (0 for FFT/event/
+   *  legacy IQ). Non-zero values let the runner call
+   *  `setBridgeRxRate` so dynamic source-rate changes cross the WS
+   *  boundary to the rate-propagation pass. */
+  readonly sampleRateHz: number;
 }
 
 export interface ParsedFrame {
@@ -59,6 +64,7 @@ interface WasmFrame {
   stream_id: number;
   seq: number;
   timestamp_ns: bigint;
+  sample_rate_hz: number;
   payload: Uint8Array;
 }
 
@@ -82,6 +88,7 @@ export function decodeFrame(input: ArrayBuffer | Uint8Array): ParsedFrame {
       streamId: out.stream_id,
       seq: out.seq,
       timestampNs: out.timestamp_ns,
+      sampleRateHz: out.sample_rate_hz ?? 0,
     },
     payload: out.payload,
   };

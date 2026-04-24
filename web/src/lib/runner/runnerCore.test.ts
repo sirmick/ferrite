@@ -94,6 +94,7 @@ class FakeFrameClient {
         streamId,
         seq: 0,
         timestampNs: 0n,
+        sampleRateHz: 0,
       },
       payload: new Uint8Array(floats.buffer, floats.byteOffset, floats.byteLength),
     };

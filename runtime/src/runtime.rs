@@ -713,6 +713,78 @@ impl Runtime {
         Ok(())
     }
 
+    /// Re-run the input-rate propagation pass and call `update_rates`
+    /// on every block whose upstream rate changed since the last init.
+    /// Called from the driver loop (server-side `drive`, browser-side
+    /// runner tick) every second or so. Blocks whose rates are stable
+    /// skip the rebuild — `update_rates` checks and returns quickly.
+    ///
+    /// This is how dynamic rate changes cross the WS boundary:
+    /// `WsBridgeRx::set_advertised_rate` updates its stored rate when a
+    /// frame with a non-zero `sample_rate_hz` lands; the next
+    /// `refresh_rates` walk sees that Rx advertises a different rate
+    /// and propagates it to downstream `RealF32Resamp` / demod blocks
+    /// so their ratios stay in sync with the live stream.
+    ///
+    /// Cheap: O(blocks × input_ports) reads, plus whatever rate-
+    /// sensitive blocks do in their `update_rates`. No-op for graphs
+    /// that haven't gone through `init` yet.
+    pub fn refresh_rates(&mut self) -> Result<()> {
+        if !matches!(
+            self.state,
+            RuntimeState::Initialized | RuntimeState::Running
+        ) {
+            return Ok(());
+        }
+        let frames_hint = self.frames_hint;
+        let mut wire_producer: Vec<Option<(usize, usize)>> = vec![None; self.wires.len()];
+        for (bi, entry) in self.entries.iter().enumerate() {
+            for (pi, slot) in entry.outputs.iter().enumerate() {
+                if let OutputSlot::Wire(widx) = slot {
+                    wire_producer[*widx] = Some((bi, pi));
+                }
+            }
+        }
+        let mut block_out_rate: Vec<f64> = vec![0.0; self.entries.len()];
+        for i in 0..self.entries.len() {
+            let input_meta: Vec<(&str, PortMeta)> = self.entries[i]
+                .spec
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(port_idx, port_spec)| {
+                    let rate = self.entries[i].input_wires[port_idx]
+                        .and_then(|widx| wire_producer[widx])
+                        .map(|(pb, _)| block_out_rate[pb])
+                        .unwrap_or(0.0);
+                    (
+                        port_spec.name,
+                        PortMeta {
+                            sample_rate_hz: rate,
+                            center_freq_hz: 0.0,
+                        },
+                    )
+                })
+                .collect();
+            let in0_rate = input_meta
+                .first()
+                .map(|(_, m)| m.sample_rate_hz)
+                .unwrap_or(0.0);
+            let ctx = InitCtx {
+                input_meta: &input_meta,
+                output_meta: &[],
+                frames_hint,
+            };
+            let id = self.entries[i].id.clone();
+            self.entries[i]
+                .block
+                .update_rates(&ctx)
+                .with_context(|| format!("refresh_rates block {id:?}"))?;
+            block_out_rate[i] = self.entries[i].block.output_rate_hz(0).unwrap_or(in0_rate);
+        }
+        Ok(())
+    }
+
     /// Transition `Initialized → Running`. A no-op beyond the state
     /// flip today — there is no internal timer. Tests that only need
     /// to drive `tick()` directly can skip this call.
