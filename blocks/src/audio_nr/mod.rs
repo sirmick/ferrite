@@ -805,6 +805,33 @@ mod tests {
     }
 
     #[test]
+    fn spectral_enable_attenuates_white_noise_mono() {
+        let mut rng = 0xBADCAFE_u32;
+        let input: Vec<f32> = (0..32_768)
+            .map(|_| {
+                rng ^= rng << 13;
+                rng ^= rng >> 17;
+                rng ^= rng << 5;
+                (rng as f32 / u32::MAX as f32 - 0.5) * 0.2
+            })
+            .collect();
+        let mut b = AudioNrMono::new(AudioNrParams {
+            spectral_enable: true,
+            spectral_oversub: 2.0,
+            spectral_floor: 0.1,
+            spectral_noise_alpha: 0.1,
+            sample_rate_hz: 48_000.0,
+            ..Default::default()
+        })
+        .unwrap();
+        let out = run_mono(&mut b, &input);
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        let warm = 2048;
+        let suppression = 20.0 * (rms(&input[warm..]) / rms(&out[warm..])).log10();
+        assert!(suppression > 3.0, "expected ≥3 dB, got {suppression:.1}");
+    }
+
+    #[test]
     fn rejects_invalid_params() {
         assert!(AudioNrMono::new(AudioNrParams {
             sample_rate_hz: 0.0,
