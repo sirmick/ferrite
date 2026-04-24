@@ -192,6 +192,12 @@ pub struct RdsDemod {
     /// Phase 3: 26-bit block assembler with CRC-10 / offset-word
     /// sync detection.
     block_sync: BlockSync,
+    /// Phase 4: group assembler → PI / PS / PTY / TP state.
+    parser: GroupParser,
+    /// UTF-8 JSON events queued for drain on the `events` output port.
+    /// Newline-delimited so a downstream `EventsSink` or UI shim can
+    /// split them cleanly — same convention `StereoDecoder` uses.
+    events_out: Vec<u8>,
 }
 
 impl RdsDemod {
@@ -255,6 +261,8 @@ impl RdsDemod {
             accum_q: 0.0,
             bit_sync,
             block_sync: BlockSync::new(),
+            parser: GroupParser::new(),
+            events_out: Vec::new(),
         })
     }
 
@@ -347,12 +355,18 @@ impl RdsDemod {
             self.accum_q = 0.0;
             self.decim_phase = 0;
 
-            // Chain: decimated I → bit sync → block sync. Bits and
-            // block events stay inside the block for now; the Phase 4
-            // group parser hangs off `self.block_sync` in a follow-up
-            // and emits JSON via a new output port.
+            // Chain: decimated I → bit sync → block sync → group
+            // parser. The parser accumulates 4 blocks per group,
+            // updates PI / PS / PTY / TP state, and returns a
+            // compact change set whenever something new was decoded;
+            // we serialize that to newline-delimited JSON into
+            // `events_out` for the `events` port drain.
             if let Some(bit) = self.bit_sync.push(out_i) {
-                let _ = self.block_sync.push(bit);
+                if let Some(block) = self.block_sync.push(bit) {
+                    if let Some(update) = self.parser.push_block(block) {
+                        update.write_json(&mut self.events_out);
+                    }
+                }
             }
 
             Some((out_i, out_q))
@@ -372,10 +386,16 @@ impl Block for RdsDemod {
                 name: "in",
                 port_type: PortType::RealF32,
             }],
-            outputs: &[PortSpec {
-                name: "data",
-                port_type: PortType::RealF32,
-            }],
+            outputs: &[
+                PortSpec {
+                    name: "data",
+                    port_type: PortType::RealF32,
+                },
+                PortSpec {
+                    name: "events",
+                    port_type: PortType::Events,
+                },
+            ],
             params: &[ParamSpec {
                 key: "sample_rate_hz",
                 label: "MPX sample rate",
@@ -426,43 +446,90 @@ impl Block for RdsDemod {
     }
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
-        let Some(src) = io
+        // Resolve the input up front so the outputs can be iterated
+        // mutably afterwards without overlapping borrows.
+        let src: Vec<f32> = io
             .inputs
             .iter()
             .find(|p| p.name == "in")
             .and_then(InputPort::as_real_f32)
-        else {
-            return Ok(Work::new());
-        };
-        let Some(dst) = io
-            .outputs
-            .iter_mut()
-            .find(|p| p.name == "data")
-            .and_then(OutputPort::as_real_f32_mut)
-        else {
-            return Ok(Work::new());
-        };
+            .map(<[f32]>::to_vec)
+            .unwrap_or_default();
+
+        // Capacity of the data port caps how many decimated soft
+        // samples we can emit this tick. Capacity of the events port
+        // caps how many JSON bytes we can drain. We size consumption
+        // against the data cap so the scheduler re-presents excess.
+        let mut data_cap = usize::MAX;
+        let mut events_cap = 0_usize;
+        for port in io.outputs.iter() {
+            match port.name {
+                "data" => {
+                    if let crate::block::OutBuf::RealF32(buf) = &port.buf {
+                        data_cap = buf.len();
+                    }
+                }
+                "events" => {
+                    if let crate::block::OutBuf::Events(buf) = &port.buf {
+                        events_cap = buf.len();
+                    }
+                }
+                _ => {}
+            }
+        }
 
         let mut consumed = 0;
-        let mut produced = 0;
+        let mut pending_data = Vec::with_capacity(data_cap.min(src.len()));
         for &x in src.iter() {
             consumed += 1;
             if let Some((i, _q)) = self.pump(x) {
-                if produced >= dst.len() {
-                    // Output port full — stop consuming so the
-                    // scheduler re-presents the remainder next tick.
+                if pending_data.len() >= data_cap {
+                    // Data port full — back out the consumption and
+                    // stash the sample so it re-emits on the next
+                    // pump. The decimator accumulator takes the
+                    // computed sample back in.
                     consumed -= 1;
-                    self.decim_phase = self.decim; // re-emit on next pump
-                    self.accum_i += i; // keep the sample we just consumed
+                    self.decim_phase = self.decim;
+                    self.accum_i += i;
                     break;
                 }
-                dst[produced] = i;
-                produced += 1;
+                pending_data.push(i);
             }
         }
+
+        // Write the pending data + drain events into the typed
+        // output buffers.
+        let mut produced_data = 0;
+        let mut produced_events = 0;
+        for port in io.outputs.iter_mut() {
+            match port.name {
+                "data" => {
+                    if let Some(dst) = OutputPort::as_real_f32_mut(port) {
+                        let k = dst.len().min(pending_data.len());
+                        dst[..k].copy_from_slice(&pending_data[..k]);
+                        produced_data = k;
+                    }
+                }
+                "events" => {
+                    if let crate::block::OutBuf::Events(dst) = &mut port.buf {
+                        let take = self.events_out.len().min(dst.len());
+                        if take > 0 {
+                            dst[..take].copy_from_slice(&self.events_out[..take]);
+                            self.events_out.drain(..take);
+                            produced_events = take;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let _ = events_cap; // retained for symmetry; drain logic
+                            // reads port length live above.
         let mut w = Work::new();
         w.consumed[0] = consumed;
-        w.produced[0] = produced;
+        w.produced[0] = produced_data;
+        w.produced[1] = produced_events;
         Ok(w)
     }
 }
@@ -752,6 +819,221 @@ impl BlockSync {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4: Group parser — accumulate 4 blocks into groups, extract
+// PI / PS / PTY / TP / TA, emit newline-delimited JSON events on each
+// state change.
+// ---------------------------------------------------------------------------
+//
+// An RDS group is always 4 consecutive blocks: (A, B, C | C′, D). The
+// block sync emits blocks in that order once locked. Block roles:
+//
+//   A: PI (Programme Identification) — 16-bit station ID, repeats
+//      unchanged in every group from a given transmitter.
+//   B: Group type (top 4 bits) + variant A/B (bit 11) + TP (bit 10) +
+//      PTY (bits 9..5) + 5 type-specific bits.
+//   C / C′: type-specific payload. C′ variant B groups repeat PI here.
+//   D: type-specific payload.
+//
+// PS (8-char station name) is spread over 4 successive 0A or 0B
+// groups: block B bits 0..1 give the segment index, block D gives two
+// ASCII chars. We emit on every update — callers see the name filling
+// in character pairs from left to right as groups arrive.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GroupUpdate {
+    pi_changed: Option<u16>,
+    pty_changed: Option<u8>,
+    tp_changed: Option<bool>,
+    ta_changed: Option<bool>,
+    /// Snapshot of the PS buffer whenever a new character pair lands
+    /// or the name completes a full sweep. `None` means no PS change
+    /// in this group.
+    ps_changed: Option<[u8; 8]>,
+}
+
+impl GroupUpdate {
+    const fn empty() -> Self {
+        Self {
+            pi_changed: None,
+            pty_changed: None,
+            tp_changed: None,
+            ta_changed: None,
+            ps_changed: None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pi_changed.is_none()
+            && self.pty_changed.is_none()
+            && self.tp_changed.is_none()
+            && self.ta_changed.is_none()
+            && self.ps_changed.is_none()
+    }
+
+    /// Serialize this update as one newline-terminated JSON object
+    /// appended to `out`. Only present fields are emitted, so
+    /// downstream consumers can merge into the authoritative state
+    /// without re-sending unchanged ones.
+    fn write_json(&self, out: &mut Vec<u8>) {
+        use std::io::Write;
+        if self.is_empty() {
+            return;
+        }
+        out.extend_from_slice(br#"{"t":"rds""#);
+        if let Some(pi) = self.pi_changed {
+            let _ = write!(out, r#","pi":{}"#, pi);
+        }
+        if let Some(pty) = self.pty_changed {
+            let _ = write!(out, r#","pty":{}"#, pty);
+        }
+        if let Some(tp) = self.tp_changed {
+            let _ = write!(out, r#","tp":{}"#, tp);
+        }
+        if let Some(ta) = self.ta_changed {
+            let _ = write!(out, r#","ta":{}"#, ta);
+        }
+        if let Some(ps) = self.ps_changed {
+            out.extend_from_slice(br#","ps":""#);
+            // ASCII-only escape — replace control bytes with spaces.
+            // Non-printables land in malformed PS frames occasionally;
+            // fall-through to space keeps downstream JSON parsers
+            // happy without an extra transform.
+            for &b in &ps {
+                let ch = if (0x20..=0x7E).contains(&b) { b } else { b' ' };
+                match ch {
+                    b'"' => out.extend_from_slice(b"\\\""),
+                    b'\\' => out.extend_from_slice(b"\\\\"),
+                    _ => out.push(ch),
+                }
+            }
+            out.push(b'"');
+        }
+        out.extend_from_slice(b"}\n");
+    }
+}
+
+struct GroupParser {
+    /// The four most recent blocks assembled into a group slot,
+    /// indexed by offset role (A=0, B=1, C/C'=2, D=3). Each slot
+    /// stores the 16-bit data payload or `None` if we haven't yet
+    /// seen that offset in the current group.
+    slots: [Option<u16>; 4],
+    /// Authoritative state. Event emission compares against these.
+    pi: Option<u16>,
+    pty: Option<u8>,
+    tp: Option<bool>,
+    ta: Option<bool>,
+    ps_buf: [u8; 8],
+    ps_seen_segments: u8,
+    /// Last fully-sent PS snapshot — emits only when content changes.
+    last_emitted_ps: Option<[u8; 8]>,
+}
+
+impl GroupParser {
+    const fn new() -> Self {
+        Self {
+            slots: [None; 4],
+            pi: None,
+            pty: None,
+            tp: None,
+            ta: None,
+            ps_buf: [b' '; 8],
+            ps_seen_segments: 0,
+            last_emitted_ps: None,
+        }
+    }
+
+    fn push_block(&mut self, block: RdsBlock) -> Option<GroupUpdate> {
+        // Map offset → slot index. Use the A slot as the group-start
+        // anchor; seeing A resets the pipeline so an out-of-order
+        // block can't poison a later group.
+        let idx = match block.offset {
+            BlockOffset::A => 0,
+            BlockOffset::B => 1,
+            BlockOffset::C | BlockOffset::CPrime => 2,
+            BlockOffset::D => 3,
+        };
+        if idx == 0 {
+            self.slots = [None; 4];
+        }
+        self.slots[idx] = Some(block.data);
+
+        // Parse on the D block only when we have at least A and B —
+        // everything PS/PTY/PI-related is derivable from those.
+        if idx != 3 {
+            return None;
+        }
+        let (Some(a), Some(b)) = (self.slots[0], self.slots[1]) else {
+            return None;
+        };
+        let d = self.slots[3]?;
+        let c_or_cprime = self.slots[2];
+
+        let mut update = GroupUpdate::empty();
+
+        // Block A: PI.
+        if self.pi != Some(a) {
+            self.pi = Some(a);
+            update.pi_changed = Some(a);
+        }
+
+        // Block B parse.
+        let group_type_code = (b >> 12) & 0x0F;
+        let variant_b = (b >> 11) & 0x01 == 1;
+        let tp = (b >> 10) & 0x01 == 1;
+        let pty = ((b >> 5) & 0x1F) as u8;
+        let b_low5 = (b & 0x1F) as u8;
+
+        if self.tp != Some(tp) {
+            self.tp = Some(tp);
+            update.tp_changed = Some(tp);
+        }
+        if self.pty != Some(pty) {
+            self.pty = Some(pty);
+            update.pty_changed = Some(pty);
+        }
+
+        // Group-type-specific handling. V1: 0A + 0B for PS + TA.
+        if group_type_code == 0 {
+            // Group 0A/0B layout of block B's low 5 bits:
+            //   bit 4: TA flag
+            //   bit 3: Music/Speech
+            //   bit 2: DI (decoder identification) bit
+            //   bits 1..0: PS segment index (0..3)
+            let ta = (b_low5 >> 4) & 0x01 == 1;
+            if self.ta != Some(ta) {
+                self.ta = Some(ta);
+                update.ta_changed = Some(ta);
+            }
+            let seg = (b_low5 & 0x03) as usize;
+            // Block D holds the two PS chars for this segment,
+            // regardless of 0A vs 0B.
+            let ch_hi = ((d >> 8) & 0xFF) as u8;
+            let ch_lo = (d & 0xFF) as u8;
+            self.ps_buf[seg * 2] = ch_hi;
+            self.ps_buf[seg * 2 + 1] = ch_lo;
+            self.ps_seen_segments |= 1 << seg;
+            // Only emit PS snapshots once all 4 segments have been
+            // seen at least once — avoids broadcasting half-filled
+            // names on first-seek. After that, emit on any change.
+            if self.ps_seen_segments == 0b1111 {
+                if self.last_emitted_ps != Some(self.ps_buf) {
+                    self.last_emitted_ps = Some(self.ps_buf);
+                    update.ps_changed = Some(self.ps_buf);
+                }
+            }
+        }
+
+        let _ = (variant_b, c_or_cprime); // future: RT, AF, CT
+        if update.is_empty() {
+            None
+        } else {
+            Some(update)
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 mod tests {
@@ -864,9 +1146,9 @@ mod tests {
         );
     }
 
-    // ----- Phase 2/3 unit tests ----------------------------------------
+    // ----- Phase 2/3/4 unit tests --------------------------------------
 
-    use super::{rds_syndrome, BitSync, BlockOffset, BlockSync};
+    use super::{rds_syndrome, BitSync, BlockOffset, BlockSync, GroupParser, RdsBlock};
 
     #[test]
     fn crc_syndrome_of_valid_codeword_is_offset() {
@@ -987,5 +1269,87 @@ mod tests {
             (BlockOffset::B, 0x5678),
             "first emitted block should be B/0x5678"
         );
+    }
+
+    #[test]
+    fn group_parser_assembles_ps_from_four_0a_groups() {
+        // Build four 0A groups that spell "KEXP 90 " across 4 segments
+        // of 2 chars each: seg 0 "KE", seg 1 "XP", seg 2 " 9", seg 3
+        // "0 ". PI is constant across groups; PTY = 22 (Rock per RBDS);
+        // TP = true. Verify the parser eventually emits a PS update
+        // carrying the full name after the fourth group.
+        let pi: u16 = 0xABCD;
+        let pty: u16 = 22;
+        let tp: u16 = 1;
+        // Group type 0A = code 0, variant-A bit = 0 → top 5 bits = 0.
+        // Block B: gggg_vttt_tt__ddddd — we manually pack:
+        //   bits 15..11 = 0 (group code 0, variant A)
+        //   bit 10 = TP = 1
+        //   bits 9..5 = PTY
+        //   bits 4..0 = 00000 | seg  (TA=0, M/S=0, DI=0)
+        let make_b = |seg: u16| (tp << 10) | (pty << 5) | seg;
+
+        let ps_chars: [&[u8; 2]; 4] = [b"KE", b"XP", b" 9", b"0 "];
+
+        let mut parser = GroupParser::new();
+        let mut updates = Vec::new();
+        for (seg, pair) in ps_chars.iter().enumerate() {
+            let d = u16::from(pair[0]) << 8 | u16::from(pair[1]);
+            let blocks = [
+                RdsBlock {
+                    offset: BlockOffset::A,
+                    data: pi,
+                },
+                RdsBlock {
+                    offset: BlockOffset::B,
+                    data: make_b(seg as u16),
+                },
+                RdsBlock {
+                    offset: BlockOffset::C,
+                    data: 0x0000,
+                },
+                RdsBlock {
+                    offset: BlockOffset::D,
+                    data: d,
+                },
+            ];
+            for blk in blocks {
+                if let Some(u) = parser.push_block(blk) {
+                    updates.push(u);
+                }
+            }
+        }
+
+        // First update (from group 1, seg 0): PI + PTY + TP set, no
+        // PS yet (we only emit PS once all 4 segments are seen).
+        let first = updates[0];
+        assert_eq!(first.pi_changed, Some(pi));
+        assert_eq!(first.pty_changed, Some(pty as u8));
+        assert_eq!(first.tp_changed, Some(true));
+        assert_eq!(first.ps_changed, None);
+
+        // The PS-complete event must land somewhere in the stream and
+        // carry the full assembled name.
+        let ps_event = updates
+            .iter()
+            .find_map(|u| u.ps_changed)
+            .expect("should emit a PS snapshot after the 4th segment");
+        assert_eq!(&ps_event, b"KEXP 90 ");
+    }
+
+    #[test]
+    fn group_parser_serializes_expected_json() {
+        let mut out = Vec::new();
+        let update = super::GroupUpdate {
+            pi_changed: Some(0x1234),
+            pty_changed: Some(22),
+            tp_changed: Some(true),
+            ta_changed: None,
+            ps_changed: Some(*b"KEXP 90 "),
+        };
+        update.write_json(&mut out);
+        let s = std::str::from_utf8(&out).unwrap();
+        let expected = "{\"t\":\"rds\",\"pi\":4660,\"pty\":22,\"tp\":true,\"ps\":\"KEXP 90 \"}\n";
+        assert_eq!(s, expected, "full JSON: {s}");
     }
 }
