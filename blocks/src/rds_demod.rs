@@ -185,6 +185,13 @@ pub struct RdsDemod {
     /// decimation stage (in addition to the explicit 2.4 kHz LPF).
     accum_i: f32,
     accum_q: f32,
+
+    /// Phase 2: Manchester bit sync + differential decoder fed from
+    /// the decimated I stream.
+    bit_sync: BitSync,
+    /// Phase 3: 26-bit block assembler with CRC-10 / offset-word
+    /// sync detection.
+    block_sync: BlockSync,
 }
 
 impl RdsDemod {
@@ -224,6 +231,10 @@ impl RdsDemod {
 
         let alpha_lock = 1.0 - (-core::f32::consts::TAU * 20.0 / fs).exp();
 
+        #[allow(clippy::cast_precision_loss)]
+        let out_rate = fs / decim as f32;
+        let bit_sync = BitSync::new(out_rate);
+
         Ok(Self {
             params,
             sample_rate_hz: fs,
@@ -242,6 +253,8 @@ impl RdsDemod {
             alpha_lock,
             accum_i: 0.0,
             accum_q: 0.0,
+            bit_sync,
+            block_sync: BlockSync::new(),
         })
     }
 
@@ -333,6 +346,15 @@ impl RdsDemod {
             self.accum_i = 0.0;
             self.accum_q = 0.0;
             self.decim_phase = 0;
+
+            // Chain: decimated I → bit sync → block sync. Bits and
+            // block events stay inside the block for now; the Phase 4
+            // group parser hangs off `self.block_sync` in a follow-up
+            // and emits JSON via a new output port.
+            if let Some(bit) = self.bit_sync.push(out_i) {
+                let _ = self.block_sync.push(bit);
+            }
+
             Some((out_i, out_q))
         } else {
             None
@@ -452,6 +474,284 @@ impl BlockFactory for RdsDemod {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2: Manchester bit sync + differential decode
+// ---------------------------------------------------------------------------
+//
+// RDS source bits S[n] are transmitted as T[n] = S[n] XOR T[n-1]
+// (differential) then Manchester-encoded: T[n]=1 is a low→high
+// transition mid-symbol, T[n]=0 is high→low. Receiver reverses:
+// recover T_r[n] from the symbol, then S_r[n] = T_r[n] XOR T_r[n-1].
+//
+// Bit sync uses a fractional-rate two-half integrator. At the input
+// rate of ~9.5 kS/s (8 × 1187.5 baud), one symbol spans ~8 samples.
+// We accumulate the first half and second half of each symbol window
+// separately; the sign of `second - first` is the received T bit
+// (Manchester polarity). `samples_per_bit` is a float because the
+// MPX-to-output decimation doesn't divide evenly into the symbol
+// rate; the fractional carry over `samples_in_bit` keeps the timing
+// aligned to the baud clock on average.
+
+struct BitSync {
+    first_half: f32,
+    second_half: f32,
+    samples_in_bit: f32,
+    samples_per_bit: f32,
+    half_bit: f32,
+    last_raw: bool,
+}
+
+impl BitSync {
+    fn new(input_rate_hz: f32) -> Self {
+        let samples_per_bit = input_rate_hz / RDS_BAUD;
+        Self {
+            first_half: 0.0,
+            second_half: 0.0,
+            samples_in_bit: 0.0,
+            samples_per_bit,
+            half_bit: samples_per_bit / 2.0,
+            last_raw: false,
+        }
+    }
+
+    /// Push one soft sample; return `Some(bit)` each time a full
+    /// symbol completes. `bit` is the differentially-decoded source
+    /// bit (true = 1).
+    fn push(&mut self, sample: f32) -> Option<bool> {
+        if self.samples_in_bit < self.half_bit {
+            self.first_half += sample;
+        } else {
+            self.second_half += sample;
+        }
+        self.samples_in_bit += 1.0;
+
+        if self.samples_in_bit >= self.samples_per_bit {
+            // Manchester: low→high transition means T=1. Sign of
+            // `second − first` picks that out directly.
+            let raw = self.second_half > self.first_half;
+            let decoded = raw != self.last_raw;
+            self.last_raw = raw;
+
+            self.first_half = 0.0;
+            self.second_half = 0.0;
+            // Fractional carry: don't reset to zero — keep the
+            // remainder so we don't drift over many symbols. This is
+            // what makes an 8.08-samples-per-bit decimation stable.
+            self.samples_in_bit -= self.samples_per_bit;
+
+            Some(decoded)
+        } else {
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Block sync + CRC-10
+// ---------------------------------------------------------------------------
+//
+// RDS groups are 4 × 26-bit blocks of 16 data + 10 check bits. The
+// check is CRC-10 (g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1 =
+// 0x5B9) with an offset word XORed onto the transmitted check. The
+// five offsets (A, B, C, C', D) identify which block-in-group the
+// decoder is looking at.
+//
+// Key algebraic trick: the syndrome of a received 26-bit block is
+// exactly the offset word that was added. Valid codeword c satisfies
+// `c mod g(x) = 0`; transmitted `t = c XOR offset` (with offset in
+// the low 10 bits) gives `t mod g(x) = offset`. So we compute the
+// syndrome of every rolling 26-bit window and look up the offset.
+//
+// Sync hysteresis: a single 10-bit syndrome match could be random
+// (1-in-205 per bit at 5 offsets). We require 2 consecutive correct
+// block positions to declare sync, and 2 consecutive misses to drop
+// it — matches every hobby-grade RDS decoder's behaviour.
+
+/// RDS check-word offset words, per the ITU / IEC 62106 spec.
+/// `C_PRIME` is only used in 0B/2B-variant group layouts.
+mod offsets {
+    pub const A: u16 = 0x0FC;
+    pub const B: u16 = 0x198;
+    pub const C: u16 = 0x168;
+    pub const C_PRIME: u16 = 0x350;
+    pub const D: u16 = 0x1B4;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockOffset {
+    A,
+    B,
+    C,
+    CPrime,
+    D,
+}
+
+impl BlockOffset {
+    fn syndrome(self) -> u16 {
+        match self {
+            Self::A => offsets::A,
+            Self::B => offsets::B,
+            Self::C => offsets::C,
+            Self::CPrime => offsets::C_PRIME,
+            Self::D => offsets::D,
+        }
+    }
+
+    fn from_syndrome(s: u16) -> Option<Self> {
+        match s {
+            offsets::A => Some(Self::A),
+            offsets::B => Some(Self::B),
+            offsets::C => Some(Self::C),
+            offsets::C_PRIME => Some(Self::CPrime),
+            offsets::D => Some(Self::D),
+            _ => None,
+        }
+    }
+}
+
+/// Compute the 10-bit CRC-RDS syndrome of a 26-bit received word.
+/// `word` must fit in the low 26 bits. Shift-register reduction over
+/// the generator `g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1`.
+fn rds_syndrome(word: u32) -> u16 {
+    const G: u32 = 0b1_0110_1110_01; // 11-bit, bit 10 is the reducing term
+    let mut reg = word & 0x3FF_FFFF;
+    // Reduce from bit 25 down to bit 10.
+    for i in (10..26).rev() {
+        if (reg >> i) & 1 == 1 {
+            reg ^= G << (i - 10);
+        }
+    }
+    (reg & 0x3FF) as u16
+}
+
+/// A successfully-CRC-matched 26-bit RDS block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RdsBlock {
+    /// Offset word identified during sync — tells us which block-in-
+    /// group position this is.
+    pub offset: BlockOffset,
+    /// 16-bit data payload.
+    pub data: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncState {
+    /// Every bit is a candidate sync point; look for any offset
+    /// syndrome match, then transition to Candidate.
+    Searching,
+    /// Saw one syndrome hit; wait 26 bits and verify a second block
+    /// lands. If it does, promote to Locked. If not, drop back to
+    /// Searching — the initial hit was a stray 1-in-205 coincidence.
+    Candidate { bits_until_check: u32 },
+    /// Tracking block boundaries every 26 bits; emits a block on each
+    /// boundary whose syndrome parses as a valid offset word.
+    Locked {
+        bits_until_boundary: u32,
+        consecutive_bad: u32,
+    },
+}
+
+struct BlockSync {
+    /// 26-bit rolling window of most recent bits.
+    window: u32,
+    state: SyncState,
+}
+
+impl BlockSync {
+    /// Drop back to searching after this many consecutive bad CRCs.
+    const UNLOCK_THRESHOLD: u32 = 2;
+
+    fn new() -> Self {
+        Self {
+            window: 0,
+            state: SyncState::Searching,
+        }
+    }
+
+    fn push(&mut self, bit: bool) -> Option<RdsBlock> {
+        self.window = ((self.window << 1) & 0x3FF_FFFF) | u32::from(bit);
+
+        match self.state {
+            SyncState::Searching => {
+                let syndrome = rds_syndrome(self.window);
+                if BlockOffset::from_syndrome(syndrome).is_some() {
+                    // First match — don't emit yet; wait a full block
+                    // period for a confirming second hit.
+                    self.state = SyncState::Candidate {
+                        bits_until_check: 26,
+                    };
+                }
+                None
+            }
+            SyncState::Candidate { bits_until_check } => {
+                let remaining = bits_until_check - 1;
+                if remaining > 0 {
+                    self.state = SyncState::Candidate {
+                        bits_until_check: remaining,
+                    };
+                    return None;
+                }
+                let syndrome = rds_syndrome(self.window);
+                if let Some(off) = BlockOffset::from_syndrome(syndrome) {
+                    // Confirmation hit — lock in and emit this block.
+                    self.state = SyncState::Locked {
+                        bits_until_boundary: 26,
+                        consecutive_bad: 0,
+                    };
+                    return Some(RdsBlock {
+                        offset: off,
+                        data: ((self.window >> 10) & 0xFFFF) as u16,
+                    });
+                }
+                // False alarm on the first hit — back to searching.
+                // (`Searching` re-evaluates from *this* bit; the
+                // rolling window is the same object.)
+                self.state = SyncState::Searching;
+                None
+            }
+            SyncState::Locked {
+                bits_until_boundary,
+                consecutive_bad,
+            } => {
+                let remaining = bits_until_boundary - 1;
+                if remaining > 0 {
+                    self.state = SyncState::Locked {
+                        bits_until_boundary: remaining,
+                        consecutive_bad,
+                    };
+                    return None;
+                }
+                let syndrome = rds_syndrome(self.window);
+                if let Some(off) = BlockOffset::from_syndrome(syndrome) {
+                    self.state = SyncState::Locked {
+                        bits_until_boundary: 26,
+                        consecutive_bad: 0,
+                    };
+                    return Some(RdsBlock {
+                        offset: off,
+                        data: ((self.window >> 10) & 0xFFFF) as u16,
+                    });
+                }
+                let bad = consecutive_bad + 1;
+                if bad >= Self::UNLOCK_THRESHOLD {
+                    self.state = SyncState::Searching;
+                } else {
+                    self.state = SyncState::Locked {
+                        bits_until_boundary: 26,
+                        consecutive_bad: bad,
+                    };
+                }
+                None
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_synced(&self) -> bool {
+        matches!(self.state, SyncState::Locked { .. })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 mod tests {
@@ -561,6 +861,131 @@ mod tests {
         assert!(
             (out_rate - 9_500.0).abs() < 1_000.0,
             "output rate off: {out_rate}"
+        );
+    }
+
+    // ----- Phase 2/3 unit tests ----------------------------------------
+
+    use super::{rds_syndrome, BitSync, BlockOffset, BlockSync};
+
+    #[test]
+    fn crc_syndrome_of_valid_codeword_is_offset() {
+        // Hand-rolled golden: encode `data = 0x1234`, compute
+        // `c(x) = data · x^10 mod g(x)`, form codeword = data·x^10 XOR c,
+        // then XOR the offset A onto the check bits. Syndrome of the
+        // resulting 26-bit word must come back as `offset`.
+        let data: u32 = 0x1234;
+        let shifted = data << 10;
+        // Compute crc10 check bits by reducing `shifted` modulo g.
+        let check = rds_syndrome(shifted);
+        let codeword = shifted | u32::from(check);
+        // Sanity: a valid codeword has syndrome zero.
+        assert_eq!(rds_syndrome(codeword), 0);
+        // Apply offset A; syndrome should become A.
+        let tx = codeword ^ u32::from(BlockOffset::A.syndrome());
+        assert_eq!(rds_syndrome(tx), BlockOffset::A.syndrome());
+        assert_eq!(
+            BlockOffset::from_syndrome(rds_syndrome(tx)),
+            Some(BlockOffset::A)
+        );
+    }
+
+    #[test]
+    fn bit_sync_recovers_differential_encoded_bits() {
+        // Encode `source = [1, 0, 1, 1, 0, 0, 1]` differentially, then
+        // render each T bit as a Manchester symbol (8 samples per bit:
+        // 4 high then 4 low for T=0, 4 low then 4 high for T=1).
+        // Feed it to BitSync and verify the decoded stream matches the
+        // original source. Starts at `last_raw = false`, so the very
+        // first emitted bit is `T[0] XOR 0 = T[0]` — that's also the
+        // source S[0] given the initial condition `T[-1] = 0`.
+        let fs_out = 9_500.0_f32; // matches 240 kHz / decim=25
+        let source = [true, false, true, true, false, false, true];
+
+        // Differentially encode: T[n] = S[n] XOR T[n-1], T[-1]=false.
+        let mut t = false;
+        let transmitted: Vec<bool> = source
+            .iter()
+            .map(|&s| {
+                t ^= s;
+                t
+            })
+            .collect();
+
+        // Render each T as 8 Manchester samples. 1 → [-1;4]+[+1;4],
+        // 0 → [+1;4]+[-1;4]. The detector emits `raw = second_half >
+        // first_half`, so for T=1 we need second_half > first_half.
+        let samples_per_bit = 8_usize;
+        let half = samples_per_bit / 2;
+        let mut mpx = Vec::new();
+        for &t in &transmitted {
+            for i in 0..samples_per_bit {
+                let first_half = i < half;
+                let high = if t { !first_half } else { first_half };
+                mpx.push(if high { 1.0_f32 } else { -1.0 });
+            }
+        }
+
+        let mut bs = BitSync::new(fs_out);
+        // At fs_out=9500, samples_per_bit = 8.0 exactly — no fractional
+        // drift. Each 8 samples emits one bit.
+        let mut decoded = Vec::new();
+        for &s in &mpx {
+            if let Some(bit) = bs.push(s) {
+                decoded.push(bit);
+            }
+        }
+        assert_eq!(decoded, source.to_vec());
+    }
+
+    #[test]
+    fn block_sync_locks_on_offset_and_emits_blocks() {
+        // Build a synthetic bit stream: two valid blocks back-to-back
+        // with offsets A and B. After the sync hysteresis (2 consecutive
+        // matches), a block with offset A should emerge, followed by
+        // block B.
+        fn build_block(data: u32, off: BlockOffset) -> u32 {
+            let shifted = (data & 0xFFFF) << 10;
+            let check = rds_syndrome(shifted);
+            let codeword = shifted | u32::from(check);
+            codeword ^ u32::from(off.syndrome())
+        }
+
+        let a = build_block(0x1234, BlockOffset::A);
+        let b = build_block(0x5678, BlockOffset::B);
+
+        let mut stream = Vec::<bool>::new();
+        for &word in &[a, b] {
+            for i in (0..26).rev() {
+                stream.push(((word >> i) & 1) == 1);
+            }
+        }
+
+        let mut bsync = BlockSync::new();
+        let mut blocks = Vec::<(BlockOffset, u16)>::new();
+        // Prepend 32 zero bits so the `good_run` counter can't fire
+        // inside uninitialised-window territory before the real data.
+        for _ in 0..32 {
+            bsync.push(false);
+        }
+        for bit in stream {
+            if let Some(blk) = bsync.push(bit) {
+                blocks.push((blk.offset, blk.data));
+            }
+        }
+        // First emitted block is block B (locks after A's second-hit
+        // confirmation lands inside B), then the next call would need
+        // a third block to verify — we only built two, so exactly one
+        // block emits. That's enough to prove the lock path works;
+        // tighter sequencing is covered by the group-parser tests in
+        // the follow-up commit.
+        assert!(bsync.is_synced(), "block sync should have locked");
+        assert!(!blocks.is_empty(), "expected at least one block after sync");
+        let (off, data) = blocks[0];
+        assert_eq!(
+            (off, data),
+            (BlockOffset::B, 0x5678),
+            "first emitted block should be B/0x5678"
         );
     }
 }
