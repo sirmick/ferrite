@@ -175,8 +175,8 @@ mod tests {
         assert_eq!(
             s.order,
             vec![
-                "src", "tee", "chan", "fft", "logmag", "rssi", "demod", "decim", "audio_nr",
-                "audio"
+                "src", "tee", "chan", "fft", "logmag", "rssi", "demod", "tee_mpx", "decim",
+                "audio_nr", "audio", "rds"
             ]
         );
     }
@@ -187,7 +187,7 @@ mod tests {
         let v = validate_doc(&doc).unwrap();
         let s = Schedule::from_validated(&v).unwrap();
         // audio_nr sits between decim (48 kHz resampler) and the
-        // AudioSink; decim feeds from demod directly now.
+        // AudioSink; MPX tee fans demod into audio and RDS paths.
         let audio = &s.wire_plan["audio"];
         assert_eq!(audio["in"].source_block, "audio_nr");
         assert_eq!(audio["in"].source_port, "out");
@@ -195,8 +195,14 @@ mod tests {
         assert_eq!(audio_nr["in"].source_block, "decim");
         assert_eq!(audio_nr["in"].source_port, "out");
         let decim = &s.wire_plan["decim"];
-        assert_eq!(decim["in"].source_block, "demod");
-        assert_eq!(decim["in"].source_port, "out");
+        assert_eq!(decim["in"].source_block, "tee_mpx");
+        assert_eq!(decim["in"].source_port, "out0");
+        let rds = &s.wire_plan["rds"];
+        assert_eq!(rds["in"].source_block, "tee_mpx");
+        assert_eq!(rds["in"].source_port, "out1");
+        let tee_mpx = &s.wire_plan["tee_mpx"];
+        assert_eq!(tee_mpx["in"].source_block, "demod");
+        assert_eq!(tee_mpx["in"].source_port, "out");
         // demod reads from the rssi probe (pass-through), which in turn
         // reads from the channelizer's 240 kS/s IQ.
         let demod = &s.wire_plan["demod"];

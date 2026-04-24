@@ -66,6 +66,17 @@
         "max_deviation_hz": 75000
       }
     },
+    "tee_mpx": {
+      "type": "TeeRealF32",
+      "placement": "browser"
+    },
+    "rds": {
+      "type": "RdsDemod",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 240000.0
+      }
+    },
     "decim": {
       "type": "RealF32Resamp",
       "placement": "browser",
@@ -127,7 +138,19 @@
     ],
     [
       "demod.out",
+      "tee_mpx.in"
+    ],
+    [
+      "tee_mpx.out0",
       "decim.in"
+    ],
+    [
+      "tee_mpx.out1",
+      "rds.in"
+    ],
+    [
+      "rds.events",
+      "ui:rds"
     ],
     [
       "decim.out",

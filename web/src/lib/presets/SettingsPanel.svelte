@@ -4,6 +4,7 @@
   import InputControls from '$lib/controls/InputControls.svelte';
   import AudioPanel from './AudioPanel.svelte';
   import RssiMeter from '$lib/rssi/RssiMeter.svelte';
+  import RdsReadout from '$lib/rds/RdsReadout.svelte';
 
   // Container for everything the user reaches for after the source is
   // open. Order from top to bottom: Receiver (the live demod knobs you
@@ -67,6 +68,7 @@
             no demod block — pick a preset from the Catalog tab.
           </p>
         {/if}
+        <RdsReadout />
       </div>
     </details>
 
