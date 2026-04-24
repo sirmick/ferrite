@@ -16,24 +16,27 @@
 //! 57 kHz   : RDS subcarrier (ignored here)
 //! ```
 //!
-//! ### Algorithm — pilot-squaring, no PLL
-//!
-//! A PLL would track the pilot more robustly under noise, but a simple
-//! "square and band-pass" scheme gives a clean 38 kHz reference in
-//! exchange for ~200 taps of FIR and is entirely stateless beyond its
-//! delay lines.
+//! ### Algorithm — PLL-locked pilot, 2× phase for 38 kHz
 //!
 //! ```text
-//! pilot     = BPF_19k(MPX)
-//! ref_38k   = pilot · pilot          // DC + 38 kHz (pilot²)
-//! ref_38k   = BPF_38k(ref_38k)       // keep only 38 kHz component
-//! ref_38k  /= peak_ref_38k           // normalise to ±1
-//! lmr_raw   = MPX · ref_38k          // mix L−R down to baseband
-//! l_minus_r = LPF_15k(lmr_raw) · 2   // recover L−R (factor 2 from the mix)
-//! l_plus_r  = LPF_15k(MPX)           // recover L+R
-//! L         = (l_plus_r + l_minus_r) / 2
-//! R         = (l_plus_r − l_minus_r) / 2
+//! pilot       = BPF_19k(MPX)
+//! // liquid's nco_crcf PLL locks its complex exponential to the pilot:
+//! (I, Q)      = pilot · conj(nco.cexp())           // mix pilot down to DC
+//! err         = Q                                  // small-angle ≈ atan2(Q, I)
+//! nco.pll_step(err)                                // adjust phase/freq
+//! nco.step()                                       // advance by nominal ω
+//! ref_38k     = cos(2 · nco.phase)                 // double for 38 kHz
+//! lmr_raw     = delayed_MPX · ref_38k · 2          // mix L−R down to baseband
+//! l_minus_r   = LPF_15k(lmr_raw)
+//! l_plus_r    = LPF_15k(delayed_MPX)
+//! L           = (l_plus_r + l_minus_r) / 2
+//! R           = (l_plus_r − l_minus_r) / 2
 //! ```
+//!
+//! A PLL tracks the pilot by phase instead of amplitude, so it degrades
+//! gracefully under weak-pilot conditions where a squaring detector
+//! would lose the reference's DC offset. It also produces a pure
+//! unit-amplitude sinusoid without a peak-tracker normalisation step.
 //!
 //! ### Pilot lock
 //!
@@ -44,6 +47,7 @@
 //! hysteresis so transient drops don't chatter.
 
 use anyhow::{bail, Result};
+use ferrite_liquid_dsp::Nco;
 use serde::Deserialize;
 
 use crate::block::{
@@ -159,30 +163,33 @@ impl LowPass {
     }
 }
 
-// Filter lengths. Chosen so the narrowest transition (19 kHz pilot BPF
-// with ≈ 1 kHz transition region) gets adequate stopband rejection, and
-// all three filters share the same group delay → no per-path timing fix-
-// ups.
+// Filter lengths. Pilot BPF is 161 taps — narrow enough to isolate the
+// 19 kHz pilot from the L+R passband below and the L−R sidebands above.
+// Audio LPFs are the same length; their group delay matches the pilot
+// BPF's so the three signal paths land co-timed at the matrix step.
 const NUM_TAPS_PILOT: usize = 161;
-const NUM_TAPS_REF: usize = 161;
 const NUM_TAPS_AUDIO: usize = 161;
+
+/// Target loop bandwidth for the pilot PLL, as a fraction of the input
+/// sample rate. Narrow enough to reject the L+R and L−R energy that
+/// leaks through the pilot BPF's shoulders; wide enough to acquire in
+/// a few tens of ms under typical broadcast conditions.
+const PLL_BANDWIDTH_NORM: f32 = 5e-4;
 
 pub struct StereoDecoder {
     pilot_bpf: BandPass,
-    ref_bpf: BandPass,
+    /// NCO PLL-locked to the filtered pilot. Its phase is held at 19
+    /// kHz; doubling it gives the 38 kHz reference for the L−R mixer.
+    pilot_nco: Nco,
     lpf_sum: LowPass,
     lpf_diff: LowPass,
 
-    /// Delay line for MPX so the `lpf_sum` tap aligns with the `lpf_diff`
-    /// path (which goes through an extra multiply and another FIR).
+    /// Delay line for MPX so the audio paths align with the PLL
+    /// reference — which has zero group delay after lock, but the
+    /// pilot BPF the PLL reads still introduces its own delay.
     mpx_delay: Vec<f32>,
     mpx_delay_write: usize,
     mpx_delay_len: usize,
-
-    /// Running peak tracker on `ref_38k` so the reference is normalised
-    /// to ≈ ±1 regardless of the pilot amplitude at the current RF
-    /// level. Uses a decay-hold peak detector.
-    ref_peak: f32,
 
     /// Smoothed pilot RMS² for lock detection.
     pilot_power: f32,
@@ -226,19 +233,23 @@ impl StereoDecoder {
 
         let fs = params.sample_rate_hz;
         let pilot_bpf = BandPass::new(fs, 18_500.0, 19_500.0, NUM_TAPS_PILOT);
-        let ref_bpf = BandPass::new(fs, 37_000.0, 39_000.0, NUM_TAPS_REF);
         let lpf_sum = LowPass::new(fs, 15_000.0, NUM_TAPS_AUDIO);
         let lpf_diff = LowPass::new(fs, 15_000.0, NUM_TAPS_AUDIO);
 
-        // Align raw MPX with the 38 kHz reference: ref_38k at sample
-        // index i is a function of MPX[i − pilot_bpf.delay − ref_bpf.delay],
-        // so the multiply `mpx_delayed · ref_38k` must use MPX from
-        // exactly the same lag. The same `mpx_delayed` also feeds
-        // lpf_sum, whose output ends up at the same time as lpf_diff's
-        // (since both LPFs are identical length). Result: L+R and L−R
-        // outputs are co-timed, and the matrix step sees the same
-        // instant on both.
-        let mpx_delay_len = pilot_bpf.group_delay() + ref_bpf.group_delay();
+        // NCO running nominally at 19 kHz; the PLL pulls it toward the
+        // pilot's actual phase each sample. Starting the NCO at the
+        // nominal frequency gives the PLL a tight capture range (we
+        // just need to absorb a few Hz of residual offset) rather than
+        // asking it to find 19 kHz from scratch.
+        let mut pilot_nco = Nco::new().map_err(|e| anyhow::anyhow!("nco_crcf: {e}"))?;
+        pilot_nco.set_frequency(core::f32::consts::TAU * 19_000.0 / fs);
+        pilot_nco.pll_set_bandwidth(PLL_BANDWIDTH_NORM);
+
+        // Align MPX with the pilot path: the PLL output is in-phase
+        // with the *filtered* pilot, so MPX needs to be delayed by the
+        // pilot BPF's group delay (and only that — the PLL itself adds
+        // no deterministic lag once locked).
+        let mpx_delay_len = pilot_bpf.group_delay();
         let mpx_delay = vec![0.0; mpx_delay_len.max(1)];
 
         let alpha_lock = 1.0 - (-(1.0 / fs) / (params.lock_tau_ms * 1e-3)).exp();
@@ -250,20 +261,12 @@ impl StereoDecoder {
 
         Ok(Self {
             pilot_bpf,
-            ref_bpf,
+            pilot_nco,
             lpf_sum,
             lpf_diff,
             mpx_delay,
             mpx_delay_write: 0,
             mpx_delay_len,
-            // Start at 0; the first sample that makes it through the two
-            // BPFs instantly pulls the peak up to its absolute value.
-            // Initialising at 1.0 (the nominal "unit cosine" guess) would
-            // leave us dividing by that for tens of thousands of samples
-            // while the slow decay settles — pilot² at MPX × 0.1 sits
-            // around 0.005, which would take ≈ 100k samples (0.4 s at
-            // 240 kHz) to reach from 1.0 at the current decay rate.
-            ref_peak: 0.0,
             pilot_power: 0.0,
             alpha_lock,
             lock_threshold_power,
@@ -279,13 +282,6 @@ impl StereoDecoder {
     #[must_use]
     pub const fn pilot_locked(&self) -> bool {
         self.pilot_locked
-    }
-
-    /// Current tracked peak of the 38 kHz reference — useful for debugging
-    /// stereo lock issues.
-    #[must_use]
-    pub const fn ref_peak(&self) -> f32 {
-        self.ref_peak
     }
 
     fn emit_lock_event(&mut self) {
@@ -411,25 +407,23 @@ impl Block for StereoDecoder {
                 self.pilot_locked = true;
             }
 
-            // 38 kHz reference via squaring + BPF.
-            let sq = pilot * pilot;
-            let mut ref_38k = self.ref_bpf.step(sq);
+            // PLL step: mix the filtered pilot against the NCO's
+            // current complex exponential. When locked, (I, Q) sits at
+            // (pilot_amplitude, 0); Q is the small-angle phase error
+            // that pulls the loop toward zero.
+            let (c, s) = self.pilot_nco.cexpf();
+            // pilot (real) · conj(c + j s) = pilot · (c − j s)
+            let mix_q = -pilot * s;
+            self.pilot_nco.pll_step(mix_q);
+            self.pilot_nco.step();
 
-            // Decay-hold peak tracker so ref_38k is normalised to ±1.
-            // Fast attack (instant track upward) + slow decay; keeps us
-            // stable during AGC swings without AGC-pumping audibly.
-            let abs = ref_38k.abs();
-            if abs > self.ref_peak {
-                self.ref_peak = abs;
-            } else {
-                self.ref_peak *= 0.99995;
-            }
-            if self.ref_peak > 1e-6 {
-                ref_38k /= self.ref_peak;
-            }
+            // 38 kHz reference = cos(2 · θ) = 2·cos²(θ) − 1. Uses the
+            // NCO's post-step phase; one cos call, no trig doubling.
+            let ref_38k = 2.0 * c * c - 1.0;
 
-            // Delay the raw MPX so its LPF_sum output lines up with the
-            // LPF_diff output (which sits behind two extra FIRs).
+            // Delay raw MPX to line up with the pilot BPF output (and
+            // hence with the PLL reference). Same-length LPFs downstream
+            // keep L+R and L−R paths co-timed into the matrix.
             let mpx_delayed = if self.mpx_delay_len == 0 {
                 mpx
             } else {
@@ -442,10 +436,8 @@ impl Block for StereoDecoder {
             // L+R = LPF(delayed MPX).
             let l_plus_r = self.lpf_sum.step(mpx_delayed);
 
-            // L−R = LPF(delayed MPX · ref_38k) · 2. The delayed MPX is
-            // the same lag as ref_38k — essential for the mixer to land
-            // L−R at baseband cleanly; mixing the present MPX sample
-            // with an old reference just smears the sideband.
+            // L−R = LPF(delayed MPX · ref_38k) · 2. Factor 2 recovers
+            // the original amplitude from the coherent demod.
             let l_minus_r = self.lpf_diff.step(mpx_delayed * ref_38k) * 2.0;
 
             out_l[i] = 0.5 * (l_plus_r + l_minus_r);

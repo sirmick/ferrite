@@ -388,6 +388,56 @@ impl Nco {
         (y.re, y.im)
     }
 
+    /// Advance the NCO phase by one sample without mixing anything.
+    /// Used inside PLL loops after `pll_step` has already updated the
+    /// phase correction.
+    pub fn step(&mut self) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::nco_crcf_step(self.inner);
+        }
+    }
+
+    /// Configure the internal PLL loop bandwidth. Larger values track
+    /// faster (at the cost of more jitter); smaller values are quieter
+    /// but slower to acquire.
+    pub fn pll_set_bandwidth(&mut self, bw: f32) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::nco_crcf_pll_set_bandwidth(self.inner, bw);
+        }
+    }
+
+    /// Feed one phase-error measurement (radians) to the PLL. Liquid
+    /// adjusts the NCO's phase and frequency proportionally to the
+    /// bandwidth set via [`Self::pll_set_bandwidth`].
+    pub fn pll_step(&mut self, phase_error: f32) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::nco_crcf_pll_step(self.inner, phase_error);
+        }
+    }
+
+    /// Current complex exponential output at the NCO's phase
+    /// (`cos θ + j sin θ`). Does NOT advance the phase.
+    pub fn cexpf(&mut self) -> (f32, f32) {
+        let mut y = sys::__BindgenComplex { re: 0.0, im: 0.0 };
+        // SAFETY: `inner` is valid; `y` is a writable stack slot.
+        unsafe {
+            sys::nco_crcf_cexpf(self.inner, &mut y);
+        }
+        (y.re, y.im)
+    }
+
+    /// Current phase of the NCO in radians. Useful for deriving a
+    /// harmonic (e.g. doubling a locked pilot phase for a 2× reference).
+    /// Does NOT advance the phase.
+    #[must_use]
+    pub fn phase(&self) -> f32 {
+        // SAFETY: `inner` is a valid handle.
+        unsafe { sys::nco_crcf_get_phase(self.inner) }
+    }
+
     /// Reset phase to zero (frequency unchanged).
     pub fn reset(&mut self) {
         // SAFETY: `inner` is a valid handle.
