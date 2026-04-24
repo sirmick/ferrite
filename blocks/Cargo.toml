@@ -26,6 +26,10 @@ anyhow                = "1"
 ferrite-blocks-macros = { path = "../blocks-macros", version = "0.0.1" }
 ferrite-liquid-dsp    = { path = "native/liquid-dsp", version = "0.0.1" }
 inventory             = "0.3"
+# Pure-Rust port of Xiph RNNoise. No C deps, wasm32-clean, ~50 kB with
+# embedded GRU weights. Used by audio_nr::neural. DeepFilterNet3 via
+# tract-onnx is the V2 upgrade path once wasm-perf is measured.
+nnnoiseless           = { version = "0.5", default-features = false }
 num-complex           = { version = "0.4", default-features = false, features = ["std"] }
 postcard              = { version = "1", default-features = false, features = ["alloc"] }
 rustfft               = { version = "6", default-features = false }

@@ -402,6 +402,7 @@ impl Chain {
         self.deemph.recompute(p.deemph_tau_us, rate_hz);
         self.blanker
             .recompute(p.blanker_threshold_db, p.blanker_hold_ms, rate_hz);
+        self.neural.set_input_rate(rate_hz);
     }
 
     fn run(&mut self, p: &AudioNrParams, buf: &mut [f32]) {
@@ -829,6 +830,40 @@ mod tests {
         let warm = 2048;
         let suppression = 20.0 * (rms(&input[warm..]) / rms(&out[warm..])).log10();
         assert!(suppression > 3.0, "expected ≥3 dB, got {suppression:.1}");
+    }
+
+    #[test]
+    fn neural_enable_attenuates_white_noise_at_48k() {
+        // Mirror of the neural-stage test but exercised through the
+        // block wiring — proves `neural_enable` + rate propagation +
+        // params validation all line up end-to-end.
+        let fs = 48_000.0_f32;
+        let n = 2 * fs as usize;
+        let mut rng = 0x42_42_42_42_u32;
+        let input: Vec<f32> = (0..n)
+            .map(|_| {
+                rng ^= rng << 13;
+                rng ^= rng >> 17;
+                rng ^= rng << 5;
+                (rng as f32 / u32::MAX as f32 - 0.5) * 0.2
+            })
+            .collect();
+        let mut b = AudioNrMono::new(AudioNrParams {
+            neural_enable: true,
+            neural_attenuation_db: 30.0,
+            sample_rate_hz: fs,
+            ..Default::default()
+        })
+        .unwrap();
+        let out = run_mono(&mut b, &input);
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        let warm = 5 * super::neural::NEURAL_FRAME_SIZE;
+        let db = 20.0 * (rms(&input[warm..]) / rms(&out[warm..])).log10();
+        // RNNoise's response is input-dependent; a synthetic xorshift
+        // stream isn't the richest noise source. 1 dB is the floor the
+        // test defends against a *non-functional* neural path — real
+        // speech-in-noise gets 10–15 dB.
+        assert!(db > 1.0, "expected ≥1 dB RNNoise suppression, got {db:.1}");
     }
 
     #[test]
