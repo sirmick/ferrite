@@ -178,9 +178,11 @@ mod tests {
         );
         assert_eq!(
             doc.blocks.keys().cloned().collect::<Vec<_>>(),
-            vec!["audio", "chan", "decim", "demod", "fft", "logmag", "rssi", "src", "tee"],
+            vec![
+                "audio", "chan", "decim", "deemph", "demod", "fft", "logmag", "rssi", "src", "tee"
+            ],
         );
-        assert_eq!(doc.wires.len(), 10);
+        assert_eq!(doc.wires.len(), 11);
         // Spot-check one block's params survived the round-trip. Demod
         // now runs at the 240 kHz channel rate, not the 48 kHz audio
         // rate — the RealF32Decimator handles the final drop.

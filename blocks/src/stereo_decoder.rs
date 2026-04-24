@@ -197,6 +197,12 @@ pub struct StereoDecoder {
     lock_threshold_power: f32,
     unlock_threshold_power: f32,
     pilot_locked: bool,
+    /// Smoothed [0..1] blend factor applied to L−R before the matrix.
+    /// 0 → fully mono (L=R=L+R); 1 → fully stereo. Tracks a ramp of
+    /// `pilot_power` between the unlock and lock thresholds so weak
+    /// pilots taper out the noisy L−R path instead of snapping off.
+    /// Same smoother as `pilot_power`; transitions take a few ms.
+    blend: f32,
 
     /// Event scheduler.
     emit_stride: u64,
@@ -272,6 +278,7 @@ impl StereoDecoder {
             lock_threshold_power,
             unlock_threshold_power,
             pilot_locked: false,
+            blend: 0.0,
             emit_stride,
             samples_until_emit: emit_stride,
             pending: Vec::new(),
@@ -407,6 +414,20 @@ impl Block for StereoDecoder {
                 self.pilot_locked = true;
             }
 
+            // Smooth blend toward the current target: 0 below the
+            // unlock threshold, 1 above the lock threshold, linearly
+            // ramped in between. Uses the same α as `pilot_power` so
+            // fades and the lock bit track the same time constant.
+            let blend_target = if self.pilot_power <= self.unlock_threshold_power {
+                0.0
+            } else if self.pilot_power >= self.lock_threshold_power {
+                1.0
+            } else {
+                (self.pilot_power - self.unlock_threshold_power)
+                    / (self.lock_threshold_power - self.unlock_threshold_power)
+            };
+            self.blend += self.alpha_lock * (blend_target - self.blend);
+
             // PLL step: mix the filtered pilot against the NCO's
             // current complex exponential. When locked, (I, Q) sits at
             // (pilot_amplitude, 0); Q is the small-angle phase error
@@ -437,8 +458,12 @@ impl Block for StereoDecoder {
             let l_plus_r = self.lpf_sum.step(mpx_delayed);
 
             // L−R = LPF(delayed MPX · ref_38k) · 2. Factor 2 recovers
-            // the original amplitude from the coherent demod.
-            let l_minus_r = self.lpf_diff.step(mpx_delayed * ref_38k) * 2.0;
+            // the original amplitude from the coherent demod. Scaled
+            // by the smoothed blend factor so a weak/absent pilot
+            // fades L−R to zero and both outputs converge on L+R — a
+            // clean mono signal, no doubled hiss from the 23–53 kHz
+            // L−R noise window.
+            let l_minus_r = self.lpf_diff.step(mpx_delayed * ref_38k) * 2.0 * self.blend;
 
             out_l[i] = 0.5 * (l_plus_r + l_minus_r);
             out_r[i] = 0.5 * (l_plus_r - l_minus_r);
@@ -635,12 +660,15 @@ mod tests {
         // Distinct tones in L (800 Hz) and R (2000 Hz). After decode L
         // should have high energy at 800 Hz and low at 2000 Hz, and
         // vice versa for R. Easiest check: correlate each output with
-        // its own source.
+        // its own source. Use a short `lock_tau_ms` so the stereo-
+        // blend ramp (driven by the same smoother as pilot lock) is
+        // fully up within the test window rather than still climbing.
         let fs = 240_000.0_f32;
         let n = 32768;
         let mpx = make_mpx(fs, n, 800.0, 2_000.0, 0.1);
         let mut dec = StereoDecoder::new(StereoDecoderParams {
             sample_rate_hz: fs,
+            lock_tau_ms: 10.0,
             ..Default::default()
         })
         .unwrap();
@@ -668,6 +696,39 @@ mod tests {
         assert!(
             r_dot_refr > 5.0 * r_dot_refl,
             "R channel should carry R tone, got R·R={r_dot_refr} R·L={r_dot_refl}"
+        );
+    }
+
+    #[test]
+    fn weak_pilot_blends_outputs_toward_mono() {
+        // Same L/R tones as `stereo_mpx_separates_left_from_right`
+        // but with the pilot below the unlock threshold — the L−R
+        // path should fade out and L should end up equal to R.
+        let fs = 240_000.0_f32;
+        let n = 48_000;
+        // Pilot amp 0.0005 → power ≈ 1.25e-7, far below the default
+        // 4e-4 lock-threshold² = 1.6e-7… still close, use 0.0001 to
+        // guarantee unlock.
+        let mpx = make_mpx(fs, n, 800.0, 2_000.0, 0.0001);
+        let mut dec = StereoDecoder::new(StereoDecoderParams {
+            sample_rate_hz: fs,
+            lock_tau_ms: 10.0,
+            ..Default::default()
+        })
+        .unwrap();
+        let out = run(&mut dec, &mpx);
+        // Tail of the output — blend should be fully collapsed to 0.
+        let tail_l = &out.left[n / 2..];
+        let tail_r = &out.right[n / 2..];
+        let diff: f32 = tail_l
+            .iter()
+            .zip(tail_r.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f32>()
+            / tail_l.len() as f32;
+        assert!(
+            diff < 0.01,
+            "mono fallback: L and R should match when pilot is absent, got avg |L−R| = {diff}"
         );
     }
 

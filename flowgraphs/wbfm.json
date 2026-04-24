@@ -79,6 +79,13 @@
       "params": {
         "buffer_samples": 8192
       }
+    },
+    "deemph": {
+      "type": "FmDeEmphasis",
+      "placement": "browser",
+      "params": {
+        "tau_us": 75.0
+      }
     }
   },
   "wires": [
@@ -116,11 +123,15 @@
     ],
     [
       "demod.out",
-      "decim.in"
+      "deemph.in"
     ],
     [
       "decim.out",
       "audio.in"
+    ],
+    [
+      "deemph.out",
+      "decim.in"
     ]
   ]
 }

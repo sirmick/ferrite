@@ -92,6 +92,20 @@
       "params": {
         "buffer_samples": 8192
       }
+    },
+    "deemph_l": {
+      "type": "FmDeEmphasis",
+      "placement": "browser",
+      "params": {
+        "tau_us": 75.0
+      }
+    },
+    "deemph_r": {
+      "type": "FmDeEmphasis",
+      "placement": "browser",
+      "params": {
+        "tau_us": 75.0
+      }
     }
   },
   "wires": [
@@ -125,11 +139,11 @@
     ],
     [
       "stereo.left",
-      "decim_l.in"
+      "deemph_l.in"
     ],
     [
       "stereo.right",
-      "decim_r.in"
+      "deemph_r.in"
     ],
     [
       "decim_l.out",
@@ -138,6 +152,14 @@
     [
       "decim_r.out",
       "audio_r.in"
+    ],
+    [
+      "deemph_l.out",
+      "decim_l.in"
+    ],
+    [
+      "deemph_r.out",
+      "decim_r.in"
     ]
   ]
 }
