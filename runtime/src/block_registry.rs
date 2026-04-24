@@ -93,7 +93,7 @@ mod tests {
                 "blocks":{
                     "src":   {"type":"SineSource","params":{"rate_hz":250000}},
                     "decim": {"type":"Decimator","params":{"factor":5,"num_taps":41,"cutoff_normalized":0.08}},
-                    "demod": {"type":"FmDemod","params":{"sample_rate_hz":50000,"max_deviation_hz":75000}}
+                    "demod": {"type":"FmDemod","params":{"sample_rate_hz":50000,"max_deviation_hz":5000}}
                 },
                 "wires":[["src.out","decim.in"],["decim.out","demod.in"]]
             }"#,

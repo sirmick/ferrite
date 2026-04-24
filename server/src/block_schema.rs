@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn am_demod_schema_surfaces_both_params_with_correct_scopes() {
+    fn am_demod_schema_surfaces_params_with_correct_scopes() {
         let schemas = all_block_schemas();
         let am = schemas
             .iter()
@@ -234,8 +234,8 @@ mod tests {
             .find(|p| p.key == "sample_rate_hz")
             .unwrap();
         assert_eq!(rate.reconfig_scope, "sourceRestart");
-        let tau = am.params.iter().find(|p| p.key == "bias_tau_ms").unwrap();
-        assert_eq!(tau.reconfig_scope, "downstream");
+        let gain = am.params.iter().find(|p| p.key == "audio_gain").unwrap();
+        assert_eq!(gain.reconfig_scope, "downstream");
     }
 
     #[test]

@@ -3,7 +3,9 @@
   "name": "am-audio-record",
   "label": "AM audio record (headless)",
   "description": "All-native AM receiver that writes demodulated mono audio to /tmp/ferrite-am-audio.wav. Source → Channelizer (10×, tight filter) → Decimator (5×) → AmDemod @ 48 kHz with post-demod gain → FileAudioSink. AM has a 10 kHz channel so the discriminator stays at audio rate — no aliasing concern. The envelope detector leaves a small AC residual after the DC blocker, so audio_gain ≈ 20 brings a strong station to a playable level. Tune center_freq_hz to the station of interest (AM broadcast is 530–1700 kHz; shortwave lives higher) before invoking `ferrited --flowgraph am-audio-record.json --source-type SoapySource --source-args driver=sdrplay --run-for-secs 30 --start`.",
-  "environments": ["node"],
+  "environments": [
+    "node"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -39,7 +41,6 @@
       "placement": "node",
       "params": {
         "sample_rate_hz": 48000,
-        "bias_tau_ms": 100,
         "audio_gain": 20.0
       }
     },
@@ -54,9 +55,21 @@
     }
   },
   "wires": [
-    ["src.out", "chan.in"],
-    ["chan.out", "decim.in"],
-    ["decim.out", "demod.in"],
-    ["demod.out", "audio.in"]
+    [
+      "src.out",
+      "chan.in"
+    ],
+    [
+      "chan.out",
+      "decim.in"
+    ],
+    [
+      "decim.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio.in"
+    ]
   ]
 }
