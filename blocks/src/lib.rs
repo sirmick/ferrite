@@ -28,7 +28,6 @@ pub mod fft;
 pub mod file_audio_sink;
 pub mod file_sink;
 pub mod file_source;
-pub mod fm_deemph;
 pub mod fm_demod;
 pub mod frame;
 pub mod log_mag_u8;
@@ -41,7 +40,6 @@ pub mod sine;
 pub mod soapy_retry;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_source;
-pub mod spectral_nr;
 pub mod spsc_ring;
 pub mod squelch;
 pub mod ssb_demod;
@@ -67,7 +65,6 @@ pub use fft::{FftBlock, FftBlockParams, FftWindow};
 pub use file_audio_sink::{FileAudioSink, FileAudioSinkParams};
 pub use file_sink::{FileIqSink, FileIqSinkParams, IqSinkFormat, WriteSeek};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
-pub use fm_deemph::{FmDeEmphasis, FmDeEmphasisParams};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
@@ -77,7 +74,6 @@ pub use rssi_probe::{RssiProbe, RssiProbeParams};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
 pub use soapy_source::{SoapyReadback, SoapySource, SoapySourceParams};
-pub use spectral_nr::{SpectralNr, SpectralNrParams};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use squelch::{Squelch, SquelchParams};
 pub use ssb_demod::{Sideband, SsbDemod, SsbDemodParams};
@@ -141,9 +137,7 @@ mod tests {
             "Decimator",
             "RealF32Resamp",
             "Channelizer",
-            "FmDeEmphasis",
             "FmDemod",
-            "SpectralNr",
             "SsbDemod",
             "Squelch",
             "RssiProbe",

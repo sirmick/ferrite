@@ -179,7 +179,8 @@ mod tests {
         assert_eq!(
             doc.blocks.keys().cloned().collect::<Vec<_>>(),
             vec![
-                "audio", "chan", "decim", "deemph", "demod", "fft", "logmag", "rssi", "src", "tee"
+                "audio", "audio_nr", "chan", "decim", "demod", "fft", "logmag", "rssi", "src",
+                "tee"
             ],
         );
         assert_eq!(doc.wires.len(), 11);

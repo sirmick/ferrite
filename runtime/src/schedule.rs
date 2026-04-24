@@ -167,14 +167,16 @@ mod tests {
         let s = Schedule::from_validated(&v).unwrap();
         // wbfm.json fans the raw source through a tee into two parallel
         // chains: an FFT tap (fft → logmag → ui:fft) and the audio
-        // chain (chan → demod @ 240 kHz → RealF32Decimator → audio).
-        // Demodulating *before* the decimator is what keeps the ±75 kHz
-        // peak deviation away from the audio-rate Nyquist. Producers
-        // land before consumers; sibling ties break alphabetically.
+        // chain (chan → demod @ 240 kHz → RealF32Resamp → AudioNrMono
+        // → AudioSink). Demodulating *before* the resampler is what
+        // keeps the ±75 kHz peak deviation away from the audio-rate
+        // Nyquist. Producers land before consumers; sibling ties break
+        // alphabetically.
         assert_eq!(
             s.order,
             vec![
-                "src", "tee", "chan", "fft", "logmag", "rssi", "demod", "deemph", "decim", "audio"
+                "src", "tee", "chan", "fft", "logmag", "rssi", "demod", "decim", "audio_nr",
+                "audio"
             ]
         );
     }
@@ -184,14 +186,17 @@ mod tests {
         let doc = FlowgraphDoc::from_json(WBFM).unwrap();
         let v = validate_doc(&doc).unwrap();
         let s = Schedule::from_validated(&v).unwrap();
-        // decim now sits downstream of deemph → demod and carries real
-        // audio at the channel rate before the fractional resampler.
+        // audio_nr sits between decim (48 kHz resampler) and the
+        // AudioSink; decim feeds from demod directly now.
+        let audio = &s.wire_plan["audio"];
+        assert_eq!(audio["in"].source_block, "audio_nr");
+        assert_eq!(audio["in"].source_port, "out");
+        let audio_nr = &s.wire_plan["audio_nr"];
+        assert_eq!(audio_nr["in"].source_block, "decim");
+        assert_eq!(audio_nr["in"].source_port, "out");
         let decim = &s.wire_plan["decim"];
-        assert_eq!(decim["in"].source_block, "deemph");
+        assert_eq!(decim["in"].source_block, "demod");
         assert_eq!(decim["in"].source_port, "out");
-        let deemph = &s.wire_plan["deemph"];
-        assert_eq!(deemph["in"].source_block, "demod");
-        assert_eq!(deemph["in"].source_port, "out");
         // demod reads from the rssi probe (pass-through), which in turn
         // reads from the channelizer's 240 kS/s IQ.
         let demod = &s.wire_plan["demod"];

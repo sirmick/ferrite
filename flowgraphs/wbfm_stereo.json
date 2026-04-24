@@ -81,6 +81,17 @@
         "stopband_db": 60.0
       }
     },
+    "audio_nr": {
+      "type": "AudioNrStereo",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "deemph_enable": true,
+        "deemph_tau_us": 75.0,
+        "neural_enable": true,
+        "neural_attenuation_db": 18.0
+      }
+    },
     "audio_l": {
       "type": "AudioSink",
       "params": {
@@ -91,20 +102,6 @@
       "type": "AudioSink",
       "params": {
         "buffer_samples": 8192
-      }
-    },
-    "deemph_l": {
-      "type": "FmDeEmphasis",
-      "placement": "browser",
-      "params": {
-        "tau_us": 75.0
-      }
-    },
-    "deemph_r": {
-      "type": "FmDeEmphasis",
-      "placement": "browser",
-      "params": {
-        "tau_us": 75.0
       }
     }
   },
@@ -139,27 +136,27 @@
     ],
     [
       "stereo.left",
-      "deemph_l.in"
-    ],
-    [
-      "stereo.right",
-      "deemph_r.in"
-    ],
-    [
-      "decim_l.out",
-      "audio_l.in"
-    ],
-    [
-      "decim_r.out",
-      "audio_r.in"
-    ],
-    [
-      "deemph_l.out",
       "decim_l.in"
     ],
     [
-      "deemph_r.out",
+      "stereo.right",
       "decim_r.in"
+    ],
+    [
+      "decim_l.out",
+      "audio_nr.left"
+    ],
+    [
+      "decim_r.out",
+      "audio_nr.right"
+    ],
+    [
+      "audio_nr.left",
+      "audio_l.in"
+    ],
+    [
+      "audio_nr.right",
+      "audio_r.in"
     ]
   ]
 }

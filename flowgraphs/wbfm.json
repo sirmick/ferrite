@@ -74,17 +74,21 @@
         "stopband_db": 60.0
       }
     },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "deemph_enable": true,
+        "deemph_tau_us": 75.0,
+        "neural_enable": true,
+        "neural_attenuation_db": 18.0
+      }
+    },
     "audio": {
       "type": "AudioSink",
       "params": {
         "buffer_samples": 8192
-      }
-    },
-    "deemph": {
-      "type": "FmDeEmphasis",
-      "placement": "browser",
-      "params": {
-        "tau_us": 75.0
       }
     }
   },
@@ -123,15 +127,15 @@
     ],
     [
       "demod.out",
-      "deemph.in"
+      "decim.in"
     ],
     [
       "decim.out",
-      "audio.in"
+      "audio_nr.in"
     ],
     [
-      "deemph.out",
-      "decim.in"
+      "audio_nr.out",
+      "audio.in"
     ]
   ]
 }
