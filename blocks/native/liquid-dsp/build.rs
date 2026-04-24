@@ -116,6 +116,7 @@ fn main() {
         .allowlist_function("nco_crcf_.*")
         .allowlist_function("ampmodem_.*")
         .allowlist_function("freqdem_.*")
+        .allowlist_function("eqlms_rrrf_.*")
         .allowlist_function("liquid_(?:libversion|error_str)")
         .allowlist_type("firdecim_(?:rrrf|crcf)")
         .allowlist_type("nco_crcf")
@@ -124,6 +125,7 @@ fn main() {
         .allowlist_type("liquid_ampmodem_type")
         .allowlist_type("freqdem")
         .allowlist_type("msresamp_rrrf")
+        .allowlist_type("eqlms_rrrf")
         .allowlist_type("liquid_float_complex")
         .allowlist_var("LIQUID_.*")
         // Emit cargo:rerun-if-changed for every header bindgen sees.
@@ -217,6 +219,12 @@ fn liquid_sources(vendor: &std::path::Path) -> Vec<PathBuf> {
         // exercised.
         ("modem", &["ampmodem.c", "modem.shim.c"]),
         ("nco", &["nco_crcf.c", "nco.utilities.c"]),
+        // Adaptive equalizers. `equalizer_rrrf.c` #includes both
+        // `eqlms.proto.c` and `eqrls.proto.c`; we only wrap the LMS
+        // flavour (used by audio_nr's adaptive auto-notch) but pulling
+        // in the RLS object code is free — wasm-ld drops unreferenced
+        // symbols.
+        ("equalization", &["equalizer_rrrf.c"]),
         // `msresamp` (and by extension the `firdespm_halfband` design
         // helper it reaches through) calls `qs1dsearch_*` out of the
         // optim module. Pull the one file we need; the rest of optim

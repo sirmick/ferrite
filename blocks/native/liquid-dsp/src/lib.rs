@@ -6,9 +6,10 @@
 //!
 //! Today's surface: real + complex polyphase decimators (`Firdecim`,
 //! `FirdecimCx`), an NCO-driven complex mixer (`Nco`), the analog AM/
-//! SSB modem (`Ampmodem`), the FM discriminator (`FreqDem`), and the
-//! multi-stage fractional resampler (`MsResamp`). New primitives get
-//! added here as blocks need them.
+//! SSB modem (`Ampmodem`), the FM discriminator (`FreqDem`), the
+//! multi-stage fractional resampler (`MsResamp`), and the real-valued
+//! LMS adaptive filter (`EqLms`). New primitives get added here as
+//! blocks need them.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -636,6 +637,113 @@ impl Drop for FreqDem {
 // SAFETY: liquid's freqdem is single-threaded but movable.
 unsafe impl Send for FreqDem {}
 
+/// Real-valued least-mean-squares adaptive filter — wraps liquid's
+/// `eqlms_rrrf`. Holds an `n`-tap FIR whose coefficients are updated
+/// online via the LMS gradient step, driven by an externally-supplied
+/// error signal.
+///
+/// Intended use in ferrite is the classic **prediction-error notch**:
+/// push delayed samples `x[n-Δ]`, execute the filter to get
+/// `y_hat[n]` (the filter's best linear prediction of the current
+/// sample from its past), step adaptation with `d = x[n]` and
+/// `d_hat = y_hat[n]`, and emit `e[n] = x[n] - y_hat[n]` as the
+/// notched output. The filter converges onto any narrowband
+/// (predictable) tones — heterodynes, CW carriers, power-line hum —
+/// and subtracting the prediction leaves broadband residual with
+/// those tones suppressed. No tuning knob, no spectral estimator;
+/// the gradient finds them.
+///
+/// Step size `bw` (liquid calls it "learning rate λ") trades
+/// convergence speed against residual jitter. 0.001–0.01 works well
+/// for audio-rate notch at 48 kHz.
+pub struct EqLms {
+    inner: sys::eqlms_rrrf,
+    n: u32,
+}
+
+impl EqLms {
+    /// Build an LMS equalizer with `n` taps, initial coefficients
+    /// `[1, 0, 0, …]` (pass-through). `n` must be >= 2.
+    pub fn new(n: u32) -> Result<Self, &'static str> {
+        if n < 2 {
+            return Err("eqlms: n must be >= 2");
+        }
+        // SAFETY: liquid copies the tap buffer internally if non-NULL;
+        // we pass NULL to request the default `[1, 0, …]` init.
+        let inner = unsafe { sys::eqlms_rrrf_create(std::ptr::null_mut(), n) };
+        if inner.is_null() {
+            return Err("eqlms_rrrf_create returned NULL");
+        }
+        Ok(Self { inner, n })
+    }
+
+    /// Filter length (number of taps).
+    #[must_use]
+    pub const fn length(&self) -> u32 {
+        self.n
+    }
+
+    /// Set the LMS step size (`0 < bw <= ~1`; typical audio: 0.001–0.01).
+    pub fn set_bw(&mut self, bw: f32) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::eqlms_rrrf_set_bw(self.inner, bw);
+        }
+    }
+
+    /// Push one sample into the internal delay line.
+    pub fn push(&mut self, x: f32) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::eqlms_rrrf_push(self.inner, x);
+        }
+    }
+
+    /// Compute the filter's current dot-product output (`y = h · x`)
+    /// without advancing the delay line or updating taps.
+    pub fn execute(&mut self) -> f32 {
+        let mut y: f32 = 0.0;
+        // SAFETY: `inner` is valid; `y` is a writable stack slot.
+        unsafe {
+            sys::eqlms_rrrf_execute(self.inner, &mut y);
+        }
+        y
+    }
+
+    /// One LMS adaptation step: tap update driven by `err = d - d_hat`.
+    /// Call after [`Self::push`] + [`Self::execute`] with `d` the
+    /// desired sample and `d_hat` the filter's output.
+    pub fn step(&mut self, d: f32, d_hat: f32) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::eqlms_rrrf_step(self.inner, d, d_hat);
+        }
+    }
+
+    /// Zero taps and clear the delay line.
+    pub fn reset(&mut self) {
+        // SAFETY: `inner` is a valid handle.
+        unsafe {
+            sys::eqlms_rrrf_reset(self.inner);
+        }
+    }
+}
+
+impl Drop for EqLms {
+    fn drop(&mut self) {
+        // SAFETY: `inner` was returned by `eqlms_rrrf_create` and is
+        // destroyed at most once.
+        unsafe {
+            if !self.inner.is_null() {
+                sys::eqlms_rrrf_destroy(self.inner);
+            }
+        }
+    }
+}
+
+// SAFETY: liquid handles are single-threaded but movable.
+unsafe impl Send for EqLms {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,6 +920,77 @@ mod tests {
             ratio_db > 30.0,
             "USB image rejection should beat 30 dB, got {ratio_db:.1} dB \
              (match={r_match:.4}, image={r_image:.4})"
+        );
+    }
+
+    #[test]
+    fn eqlms_predicts_and_notches_a_tone() {
+        // Classic LMS prediction-error notch: feed `x[n] = tone +
+        // noise`, push delayed samples so the adaptive filter only
+        // sees uncorrelated noise in its recent history for the
+        // broadband part but a correlated copy for the tonal part.
+        // The filter converges onto the tone; subtracting its
+        // prediction leaves the broadband residual (noise) with the
+        // tone notched out.
+        use core::f32::consts::TAU;
+        let fs = 48_000.0_f32;
+        let f = 3_000.0_f32; // heterodyne-ish inside an SSB passband
+        let n_samples = 40_000usize;
+        let taps = 64u32;
+        let delay = 1usize; // smallest that still decorrelates white noise
+
+        // Simple deterministic noise source — a seeded LCG so the test
+        // isn't flaky and we don't need a rand crate dep.
+        let mut rng_state: u32 = 0xDEAD_BEEF;
+        let mut noise = || -> f32 {
+            rng_state = rng_state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            ((rng_state >> 8) & 0x00FF_FFFF) as f32 / 8_388_608.0 - 1.0
+        };
+
+        let mut eq = EqLms::new(taps).expect("create");
+        eq.set_bw(0.01);
+
+        // Delay line for the predictor input.
+        let mut dline = vec![0.0_f32; delay];
+        let mut residuals = Vec::with_capacity(n_samples);
+        for i in 0..n_samples {
+            let t = i as f32 / fs;
+            let x = (TAU * f * t).cos() * 0.5 + noise() * 0.1;
+            // Push the *delayed* version of x so the predictor can't
+            // see the current noise sample; only the tone survives
+            // the decorrelation gap.
+            let delayed = dline[0];
+            dline.copy_within(1.., 0);
+            dline[delay - 1] = x;
+            eq.push(delayed);
+            let y_hat = eq.execute();
+            let e = x - y_hat;
+            eq.step(x, y_hat);
+            residuals.push(e);
+        }
+
+        // Compare tone-band energy in the *last quarter* (converged
+        // state) against the first quarter (pre-convergence). Narrow
+        // DFT at bin f / (Fs / N_window).
+        let goertzel = |xs: &[f32]| -> f32 {
+            let k = TAU * f / fs;
+            let c = 2.0 * k.cos();
+            let (mut s1, mut s2) = (0.0_f32, 0.0_f32);
+            for &x in xs {
+                let s0 = x + c * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            (s1 * s1 + s2 * s2 - c * s1 * s2).sqrt() / xs.len() as f32
+        };
+        let q = n_samples / 4;
+        let mag_start = goertzel(&residuals[0..q]);
+        let mag_end = goertzel(&residuals[3 * q..]);
+        let suppression_db = 20.0 * (mag_start / mag_end.max(1e-9)).log10();
+        assert!(
+            suppression_db > 15.0,
+            "LMS should suppress the tone by >15 dB after convergence, \
+             got {suppression_db:.1} dB (start={mag_start:.4}, end={mag_end:.4})"
         );
     }
 }
