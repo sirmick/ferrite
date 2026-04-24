@@ -62,6 +62,9 @@ pub struct RealF32Decimator {
     /// samples per call). Filled across `process()` invocations.
     chunk: Vec<f32>,
     chunk_len: usize,
+    /// Input rate cached at init, used to report `output_rate_hz =
+    /// input / factor` during rate propagation. `0.0` pre-init.
+    input_rate_hz: f64,
 }
 
 impl RealF32Decimator {
@@ -98,6 +101,7 @@ impl RealF32Decimator {
             inner,
             chunk: vec![0.0; params.factor.max(1)],
             chunk_len: 0,
+            input_rate_hz: 0.0,
         })
     }
 
@@ -167,8 +171,30 @@ impl Block for RealF32Decimator {
         }
     }
 
-    fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
+    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 {
+                self.input_rate_hz = rate;
+            }
+        }
         Ok(())
+    }
+
+    fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 {
+                self.input_rate_hz = rate;
+            }
+        }
+        Ok(())
+    }
+
+    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+        if self.input_rate_hz <= 0.0 || self.factor == 0 {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        Some(self.input_rate_hz / self.factor as f64)
     }
 
     fn relative_rate(&self, _in_port: usize, _out_port: usize) -> (u32, u32) {

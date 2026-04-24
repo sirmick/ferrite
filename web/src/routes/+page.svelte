@@ -1,6 +1,7 @@
 <script lang="ts">
   import Workspace from '$lib/layout/Workspace.svelte';
   import LogPanel from '$lib/layout/LogPanel.svelte';
+  import FlowPanel from '$lib/layout/FlowPanel.svelte';
   import Split from '$lib/layout/Split.svelte';
   import BandsPanel from '$lib/presets/BandsPanel.svelte';
   import SettingsPanel from '$lib/presets/SettingsPanel.svelte';
@@ -23,7 +24,7 @@
   let lastFrameSize = $state(0);
   let showSource = $state(false);
   let showFlowgraph = $state(false);
-  type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs';
+  type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs' | 'flow';
   let leftTab = $state<LeftTab>('bands');
 
   // Opening the Logs tab acks the error badge. Errors that arrive
@@ -238,6 +239,12 @@
                 ></span>
               {/if}
             </button>
+            <button
+              type="button"
+              class="flex-1 px-2 py-1 text-[color:var(--color-muted)] hover:bg-slate-900"
+              class:tab-active={leftTab === 'flow'}
+              onclick={() => (leftTab = 'flow')}>Flow</button
+            >
           </div>
           <div class="min-h-0 flex-1">
             {#if leftTab === 'bands'}
@@ -249,6 +256,8 @@
               />
             {:else if leftTab === 'settings'}
               <SettingsPanel />
+            {:else if leftTab === 'flow'}
+              <FlowPanel />
             {:else}
               <LogPanel />
             {/if}

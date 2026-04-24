@@ -2,6 +2,8 @@
 // sources: the `/ws/logs` stream (server tracing), the browser console
 // (patched in `init()`), and explicit calls from session/WS code paths.
 
+import { flow, parseFlowdiagLine } from './flowStore.svelte';
+
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace';
 export type LogSource = 'server' | 'client' | 'vite';
 
@@ -24,6 +26,12 @@ class LogStore {
   private nextId = 1;
 
   push(source: LogSource, level: LogLevel, text: string): void {
+    // Peel off `flowdiag side=… {json}` lines and feed the Flow store.
+    // Still push them into the log stream so the raw JSON is greppable
+    // on the Logs tab; the tab also forwards client-side ones to the
+    // server so ferrited's stdout gets the full record.
+    const flowdiag = parseFlowdiagLine(text);
+    if (flowdiag) flow.ingest(flowdiag.side, flowdiag.snap);
     const entry: LogEntry = {
       id: this.nextId++,
       t: Date.now(),

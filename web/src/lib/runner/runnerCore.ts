@@ -223,6 +223,18 @@ export class RunnerCore {
         .join(' ');
       const text = `runner 1s: ticks=${state.ticks} rx[${bridgeSummary}] audio[${audioSummary}]`;
       postDiag(text);
+      // Full block-flow snapshot from the Rust runtime. Dump it as a
+      // single log line tagged `flowdiag` so the server-side forwarder
+      // funnels it into ferrited stdout and the new Flow tab on the
+      // main thread can ingest it for its live table. Swallow throws
+      // so the line-text diag above is never held hostage to JSON
+      // parse/serialize issues here.
+      try {
+        const json = state.rt.diagSnapshot();
+        postDiag(`flowdiag side=browser ${json}`);
+      } catch {
+        /* best-effort */
+      }
       state.ticks = 0;
       for (const b of state.bridges) b.samples = 0;
       for (const a of state.audio) a.drained = 0;

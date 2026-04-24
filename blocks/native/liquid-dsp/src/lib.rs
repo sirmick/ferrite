@@ -568,6 +568,111 @@ impl Drop for Nco {
 // SAFETY: liquid handles are single-threaded but movable.
 unsafe impl Send for Nco {}
 
+/// Multi-stage fractional resampler for real-float samples. Wraps
+/// liquid's `msresamp_rrrf`, a cascade of half-band stages followed by
+/// an arbitrary-rate Farrow interpolator. Handles any output:input
+/// ratio — use this when an integer decimator/interpolator can't close
+/// the gap (e.g. 200 kHz → 48 kHz audio, ratio 0.24).
+///
+/// Liquid writes a *variable* number of output samples per execute
+/// call; callers allocate `⌈1 + 2·r·nx⌉` output slots to be safe.
+/// [`Self::max_output_for`] does the sizing.
+pub struct MsResamp {
+    inner: sys::msresamp_rrrf,
+    rate: f32,
+}
+
+impl MsResamp {
+    /// Create a resampler at the given rate = output/input (e.g. `0.24`
+    /// for 200k → 48k). `stopband_db` is stop-band attenuation for the
+    /// internal filters; 60 dB is a safe default for audio.
+    pub fn new(rate: f32, stopband_db: f32) -> Result<Self, &'static str> {
+        if !(rate > 0.0 && rate.is_finite()) {
+            return Err("msresamp: rate must be > 0");
+        }
+        if !(stopband_db > 0.0 && stopband_db.is_finite()) {
+            return Err("msresamp: stopband_db must be > 0");
+        }
+        // SAFETY: scalar args, liquid returns NULL on internal alloc
+        // failure or bad config which we surface as Err.
+        let inner = unsafe { sys::msresamp_rrrf_create(rate, stopband_db) };
+        if inner.is_null() {
+            return Err("msresamp_rrrf_create returned NULL");
+        }
+        Ok(Self { inner, rate })
+    }
+
+    /// Execute one batch. Returns the number of output samples written
+    /// into `output`. Caller must size `output` at
+    /// `max_output_for(input.len())` to avoid an overflow assertion
+    /// from liquid.
+    pub fn execute(&mut self, input: &[f32], output: &mut [f32]) -> usize {
+        if input.is_empty() {
+            return 0;
+        }
+        let max_out = self.max_output_for(input.len());
+        let out_cap = output.len().min(max_out);
+        let mut ny: std::os::raw::c_uint = 0;
+        // SAFETY: `inner` valid until Drop; liquid reads `input.len()`
+        // f32s from `input`, writes at most `max_out` f32s into
+        // `output`. `ny` out-parameter is the actual count.
+        unsafe {
+            sys::msresamp_rrrf_execute(
+                self.inner,
+                input.as_ptr() as *mut f32,
+                input.len() as std::os::raw::c_uint,
+                output.as_mut_ptr(),
+                &mut ny,
+            );
+        }
+        let written = ny as usize;
+        // Defensive clamp: liquid shouldn't exceed the cap but the API
+        // returns a raw count so keep the slice honest.
+        written.min(out_cap)
+    }
+
+    /// Upper bound on output samples for a given input count. Use to
+    /// size the `output` slice before `execute`.
+    #[must_use]
+    pub fn max_output_for(&self, input_len: usize) -> usize {
+        // The header comment says ⌈1 + 2·r·nx⌉ is safe; we add a small
+        // +8 margin to absorb liquid's occasional one-off surplus at
+        // state transitions. Cheap; this is an allocation size, not a
+        // per-sample path.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let bound = (1.0 + 2.0 * self.rate as f64 * input_len as f64).ceil() as usize + 8;
+        bound
+    }
+
+    /// Configured output/input rate.
+    #[must_use]
+    pub const fn rate(&self) -> f32 {
+        self.rate
+    }
+
+    pub fn reset(&mut self) {
+        // SAFETY: `inner` valid until Drop.
+        unsafe {
+            sys::msresamp_rrrf_reset(self.inner);
+        }
+    }
+}
+
+impl Drop for MsResamp {
+    fn drop(&mut self) {
+        // SAFETY: `inner` returned by msresamp_rrrf_create, dropped at
+        // most once.
+        unsafe {
+            if !self.inner.is_null() {
+                sys::msresamp_rrrf_destroy(self.inner);
+            }
+        }
+    }
+}
+
+// SAFETY: liquid's msresamp is single-threaded but movable.
+unsafe impl Send for MsResamp {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

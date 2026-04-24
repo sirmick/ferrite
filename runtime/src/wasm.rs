@@ -227,6 +227,18 @@ impl RuntimeHandle {
         Ok(src.dropped_samples())
     }
 
+    /// Cumulative per-block flow snapshot as a JSON string. Shape is
+    /// [`ferrite_runtime::DiagSnapshot`] serialized via serde — the JS
+    /// side parses it and emits deltas against its last cached copy.
+    /// Returning a string keeps the wasm_bindgen surface tiny (one owned
+    /// `String` vs a ~40-field JsValue tree); parse cost is ~microseconds
+    /// for a 10-block preset at 1 Hz.
+    #[wasm_bindgen(js_name = diagSnapshot)]
+    pub fn diag_snapshot(&self) -> Result<String, JsError> {
+        serde_json::to_string(&self.rt.diag_snapshot())
+            .map_err(|e| JsError::new(&format!("diag snapshot serialize: {e}")))
+    }
+
     /// Drain every buffered event from the named `EventsSink` as an
     /// array of UTF-8 JSON strings (one event per entry, no trailing
     /// newline). Mirrors [`Self::drain_audio`] — the JS host calls this

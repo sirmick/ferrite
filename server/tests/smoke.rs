@@ -387,7 +387,7 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
             } => {
                 *counts.entry((stream_id, "FftU8")).or_default() += 1;
                 if stream_id == 1002 {
-                    assert_eq!(payload.len(), 65536, "expected 65536 FFT bins");
+                    assert_eq!(payload.len(), 16384, "expected 16384 FFT bins");
                     saw_fft = true;
                 }
             }

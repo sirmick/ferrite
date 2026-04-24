@@ -113,6 +113,7 @@ fn main() {
         // M2 surface — keep this list tight. New wrappers append.
         .allowlist_function("firfilt_rrrf_.*")
         .allowlist_function("firdecim_(?:rrrf|crcf)_.*")
+        .allowlist_function("msresamp_rrrf_.*")
         .allowlist_function("nco_crcf_.*")
         .allowlist_function("ampmodem_.*")
         .allowlist_function("liquid_(?:libversion|error_str)")
@@ -215,6 +216,16 @@ fn liquid_sources(vendor: &std::path::Path) -> Vec<PathBuf> {
         // exercised.
         ("modem", &["ampmodem.c", "modem.shim.c"]),
         ("nco", &["nco_crcf.c", "nco.utilities.c"]),
+        // `msresamp` (and by extension the `firdespm_halfband` design
+        // helper it reaches through) calls `qs1dsearch_*` out of the
+        // optim module. Pull the one file we need; the rest of optim
+        // (gradient search, etc.) isn't referenced.
+        ("optim", &["qs1dsearch.c"]),
+        // firdespm_halfband also reaches for `fft_execute`/`fft_free`
+        // when evaluating stop-band response. Pull fftf.c (float API
+        // surface) + fft_utilities.c; the proto.c files are #include-d
+        // from fftf.c itself.
+        ("fft", &["fftf.c", "fft_utilities.c"]),
         (
             "utility",
             &[

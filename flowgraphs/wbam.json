@@ -23,9 +23,7 @@
       "params": {
         "input_rate_hz": 2400000.0,
         "freq_shift_hz": 0.0,
-        "factor": 10,
-        "num_taps": 81,
-        "cutoff_normalized": 0.03125
+        "output_rate_hz": 24000.0
       }
     },
     "tee": {
@@ -36,7 +34,7 @@
       "type": "FFT",
       "placement": "node",
       "params": {
-        "size": 65536,
+        "size": 16384,
         "window": "hann",
         "max_frames_per_second": 30
       }
@@ -45,19 +43,10 @@
       "type": "LogMagU8",
       "placement": "node",
       "params": {
-        "size": 65536,
+        "size": 16384,
         "floor_dbfs": -100.0,
         "ceil_dbfs": 0.0,
         "alpha": 0.3
-      }
-    },
-    "decim": {
-      "type": "Decimator",
-      "placement": "browser",
-      "params": {
-        "factor": 5,
-        "num_taps": 41,
-        "cutoff_normalized": 0.08
       }
     },
     "demod": {
@@ -73,6 +62,14 @@
       "type": "AudioSink",
       "params": {
         "buffer_samples": 8192
+      }
+    },
+    "resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
       }
     }
   },
@@ -91,7 +88,7 @@
     ],
     [
       "chan.out",
-      "decim.in"
+      "demod.in"
     ],
     [
       "fft.out",
@@ -102,11 +99,11 @@
       "ui:fft"
     ],
     [
-      "decim.out",
-      "demod.in"
+      "demod.out",
+      "resamp.in"
     ],
     [
-      "demod.out",
+      "resamp.out",
       "audio.in"
     ]
   ]

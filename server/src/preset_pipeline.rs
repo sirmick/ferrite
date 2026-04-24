@@ -225,6 +225,23 @@ async fn drive(
     let mut interval = tokio::time::interval(tick_period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tokio::pin!(shutdown);
+    // 1 Hz flow-table probe — dumps one JSON-encoded `DiagSnapshot` via
+    // tracing so an operator tailing ferrited stdout (or the browser-side
+    // Flow tab) can see per-block sample throughput, process-time, and
+    // ring fill without instrumenting anything else. Logged at INFO
+    // with target="flowdiag" so `RUST_LOG=flowdiag=info` isolates it.
+    let mut diag_interval = tokio::time::interval(Duration::from_secs(1));
+    diag_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Skip the immediate tick so the first sample covers a real 1-sec
+    // window rather than the sliver between `start` and now.
+    diag_interval.tick().await;
+    // Previous cumulative `process_ns` per block, keyed by block id.
+    // Lets the reporter emit a per-block "% of wall-clock spent in
+    // process()" alongside the raw JSON — the same thing the UI will
+    // compute from successive JSON snapshots, but pre-baked into the log
+    // line so an operator doesn't have to diff two JSON blobs by hand.
+    let mut prev_ns: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut prev_instant = std::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -240,6 +257,40 @@ async fn drive(
                     tracing::error!(?err, "preset tick failed");
                     let _ = rt.stop();
                     return Err(err);
+                }
+            }
+            _ = diag_interval.tick() => {
+                let rt = runtime.lock().await;
+                let snap = rt.diag_snapshot();
+                drop(rt);
+                let now = std::time::Instant::now();
+                let window_ns = now.duration_since(prev_instant).as_nanos() as u64;
+                prev_instant = now;
+                // Per-block delta process_ns → % of wall-clock in a
+                // short summary line. Skip on the very first sample
+                // where prev is empty (no delta yet).
+                if window_ns > 0 {
+                    let mut parts = Vec::with_capacity(snap.blocks.len());
+                    for b in &snap.blocks {
+                        let prev = prev_ns.get(&b.id).copied().unwrap_or(b.process_ns_cum);
+                        let delta = b.process_ns_cum.saturating_sub(prev);
+                        prev_ns.insert(b.id.clone(), b.process_ns_cum);
+                        #[allow(clippy::cast_precision_loss)]
+                        let pct = (delta as f64) * 100.0 / (window_ns as f64);
+                        if pct >= 0.1 {
+                            parts.push(format!("{}={:.1}%", b.id, pct));
+                        }
+                    }
+                    if !parts.is_empty() {
+                        tracing::info!(target: "flowdiag", "flowcpu side=node {}", parts.join(" "));
+                    }
+                }
+                // Canonical flow snapshot line. Same format the browser
+                // runner emits via `postDiag`; the browser-side
+                // `parseFlowdiagLine` picks either up with one regex.
+                match serde_json::to_string(&snap) {
+                    Ok(json) => tracing::info!(target: "flowdiag", "flowdiag side=node {json}"),
+                    Err(err) => tracing::warn!(?err, "flowdiag serialize"),
                 }
             }
         }

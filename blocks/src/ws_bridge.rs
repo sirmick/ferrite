@@ -294,6 +294,13 @@ pub struct WsBridgeRxParams {
     pub stream_id: u32,
     /// Ring capacity in complex samples. Power of two recommended.
     pub buffer_samples: usize,
+    /// Nominal sample rate of the IQ stream arriving on `stream_id`.
+    /// Populated by `env_split` from the producing block's declared
+    /// output rate when the bridge is inserted — lets downstream
+    /// rate-aware blocks (e.g. `RealF32Resamp`) read this through
+    /// `InitCtx.input_rate("in")` and snap their ratio to the actual
+    /// wire rate. Zero when the producer didn't declare a rate.
+    pub sample_rate_hz: f64,
 }
 
 impl Default for WsBridgeRxParams {
@@ -301,6 +308,7 @@ impl Default for WsBridgeRxParams {
         Self {
             stream_id: 0,
             buffer_samples: DEFAULT_RX_BUFFER_SAMPLES,
+            sample_rate_hz: 0.0,
         }
     }
 }
@@ -401,6 +409,17 @@ impl Block for WsBridgeRx {
         self.ring.reset();
         self.dropped_samples = 0;
         Ok(())
+    }
+
+    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+        // Stamped by `env_split::producer_output_rate_hz` at split
+        // time — the rate the other half's producer declares. `None`
+        // when that walk couldn't resolve a rate from the doc.
+        if self.params.sample_rate_hz > 0.0 {
+            Some(self.params.sample_rate_hz)
+        } else {
+            None
+        }
     }
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
@@ -705,6 +724,7 @@ mod tests {
         let mut rx = WsBridgeRx::new(WsBridgeRxParams {
             stream_id: 3,
             buffer_samples: 64,
+            sample_rate_hz: 0.0,
         });
         let mut out = vec![Complex::new(0.0_f32, 0.0); 16];
         let mut outputs = [OutputPort {
@@ -740,6 +760,7 @@ mod tests {
         let mut rx = WsBridgeRx::new(WsBridgeRxParams {
             stream_id: 0,
             buffer_samples: 8,
+            sample_rate_hz: 0.0,
         });
         rx.push(&[
             Complex::new(1.0, 2.0),
@@ -776,6 +797,7 @@ mod tests {
         let mut rx = WsBridgeRx::new(WsBridgeRxParams {
             stream_id: 0,
             buffer_samples: 2,
+            sample_rate_hz: 0.0,
         });
         rx.push(&[
             Complex::new(1.0, 0.0),
@@ -791,6 +813,7 @@ mod tests {
         let mut rx = WsBridgeRx::new(WsBridgeRxParams {
             stream_id: 0,
             buffer_samples: 4,
+            sample_rate_hz: 0.0,
         });
         rx.push_interleaved(&[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(rx.buffered_samples(), 2);
@@ -814,6 +837,7 @@ mod tests {
         let mut rx = WsBridgeRx::new(WsBridgeRxParams {
             stream_id: 0,
             buffer_samples: 4,
+            sample_rate_hz: 0.0,
         });
         rx.push_interleaved(&[0.1, 0.2, 0.3]);
         assert_eq!(rx.buffered_samples(), 1);
@@ -824,6 +848,7 @@ mod tests {
         let mut rx = WsBridgeRx::new(WsBridgeRxParams {
             stream_id: 0,
             buffer_samples: 2,
+            sample_rate_hz: 0.0,
         });
         rx.push(&[
             Complex::new(1.0, 0.0),
@@ -846,6 +871,7 @@ mod tests {
         let mut rx = WsBridgeRx::new(WsBridgeRxParams {
             stream_id: 0,
             buffer_samples: 4,
+            sample_rate_hz: 0.0,
         });
         rx.push(&[Complex::new(1.0, 2.0)]);
         rx.stop().unwrap();

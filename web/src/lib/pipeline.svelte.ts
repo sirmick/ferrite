@@ -343,10 +343,20 @@ export interface PipelineAxes {
 }
 
 export function currentAxes(store = pipeline): PipelineAxes | null {
-  const p = store.source?.params;
-  if (!p) return null;
-  const center = typeof p.center_freq_hz === 'number' ? p.center_freq_hz : null;
-  const rate = typeof p.sample_rate_hz === 'number' ? p.sample_rate_hz : null;
+  const p = (store.source?.params ?? {}) as Record<string, unknown>;
+  // Fall back to the flowgraph's `src` block when the current
+  // SourceConfig is empty — lets the Nixie/VFO show up immediately on
+  // preset load, before the user has opened the Source dialog and
+  // picked hardware. The preset declares the target tune in its `src`
+  // params; once the user picks a device the readback overwrites
+  // pipeline.source and that takes precedence.
+  const srcBlock = store.flowgraph?.blocks?.src?.params as Record<string, unknown> | undefined;
+  const pick = (key: 'center_freq_hz' | 'sample_rate_hz'): number | null => {
+    const v = p[key] ?? srcBlock?.[key];
+    return typeof v === 'number' ? v : null;
+  };
+  const center = pick('center_freq_hz');
+  const rate = pick('sample_rate_hz');
   if (center === null || rate === null) return null;
   return { center_freq_hz: center, sample_rate_hz: rate };
 }

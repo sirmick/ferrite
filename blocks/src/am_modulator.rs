@@ -197,6 +197,13 @@ impl Block for AmModulator {
         (out_n, in_n)
     }
 
+    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+        // Rate-changing block: declare the configured output so the
+        // runtime's rate-propagation pass reports the upsampled rate
+        // to downstream consumers rather than the 1:1 fallback.
+        Some(f64::from(self.params.output_rate_hz))
+    }
+
     fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
         Ok(())
     }

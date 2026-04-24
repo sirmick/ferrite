@@ -287,6 +287,24 @@ impl SoapySource {
 
         let actual_rate = device.sample_rate(dir, ch).unwrap_or(params.sample_rate_hz);
         let actual_freq = device.frequency(dir, ch).unwrap_or(params.center_freq_hz);
+        // Log when the driver snaps the requested rate to its supported
+        // ladder — this is the signal for downstream rate-aware blocks
+        // to rebuild. Picked up via tracing target so an operator can
+        // isolate it with `RUST_LOG=flowdiag=info`.
+        if (actual_rate - params.sample_rate_hz).abs() > 1.0 {
+            tracing::warn!(
+                target: "flowdiag",
+                requested_rate_hz = params.sample_rate_hz,
+                actual_rate_hz = actual_rate,
+                "SoapySDR snapped sample rate to nearest supported",
+            );
+        } else {
+            tracing::info!(
+                target: "flowdiag",
+                actual_rate_hz = actual_rate,
+                "SoapySDR sample rate set",
+            );
+        }
 
         let mut stream: RxStream<Complex<f32>> = device
             .rx_stream::<Complex<f32>>(&[ch])

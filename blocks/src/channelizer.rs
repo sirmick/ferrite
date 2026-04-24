@@ -154,6 +154,12 @@ pub struct Channelizer {
     /// be called fresh without recomputing from the NCO's internal
     /// state, and so [`Self::freq_shift_hz`] is a cheap getter.
     freq_shift_hz: f64,
+    /// Target output rate in Hz when the preset used rate-target mode
+    /// (`output_rate_hz: …`). Stored so `init()` can recompute `factor`
+    /// against the scheduler-supplied input rate if the construction
+    /// rate was stale (common: preset says 2.4 MS/s but the SDR ladder
+    /// snapped the source to 2 MS/s). `None` in legacy factor-mode.
+    target_output_rate_hz: Option<f64>,
 }
 
 impl Channelizer {
@@ -163,6 +169,7 @@ impl Channelizer {
     pub fn new(params: ChannelizerParams) -> Result<Self> {
         // Collapse rate-target mode down to concrete factor + FIR sizing.
         // No-op for legacy presets that set `factor` directly.
+        let target_output_rate_hz = params.output_rate_hz;
         let params = params.resolve();
         if params.factor == 0 {
             bail!("channelizer factor must be >= 1");
@@ -202,7 +209,52 @@ impl Channelizer {
             chunk_len: 0,
             input_rate_hz: params.input_rate_hz,
             freq_shift_hz: params.freq_shift_hz,
+            target_output_rate_hz,
         })
+    }
+
+    /// Rebuild the filter + decim + chunk buffer for a new actual input
+    /// rate. Used by `init()` when the scheduler-supplied rate differs
+    /// from what construction-time params declared — lets presets name a
+    /// target output rate (e.g. 240 kHz) and have the channelizer snap
+    /// its factor + FIR to whatever the source actually produces. No-op
+    /// in factor-mode (`target_output_rate_hz == None`).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn rebuild_for_input_rate(&mut self, input_rate_hz: f64) -> Result<()> {
+        let Some(target_out) = self.target_output_rate_hz else {
+            // Legacy factor-mode: update the NCO but leave factor/FIR.
+            self.input_rate_hz = input_rate_hz;
+            self.nco
+                .set_frequency(omega_for(self.freq_shift_hz, input_rate_hz));
+            return Ok(());
+        };
+        if !(target_out > 0.0 && input_rate_hz > 0.0) {
+            return Ok(());
+        }
+        let new_factor = ((input_rate_hz / target_out).round() as usize).max(1);
+        self.input_rate_hz = input_rate_hz;
+        if new_factor == self.factor {
+            self.nco
+                .set_frequency(omega_for(self.freq_shift_hz, input_rate_hz));
+            return Ok(());
+        }
+        // Same cutoff formula as ChannelizerParams::resolve so a
+        // re-init lands on the same taps a fresh construct would.
+        let num_taps = 8 * new_factor + 1;
+        let cutoff = 0.4 / new_factor as f32;
+        let taps = crate::decimator::design_lpf(num_taps, cutoff);
+        let factor_u32 =
+            u32::try_from(new_factor.max(2)).map_err(|_| anyhow::anyhow!("factor exceeds u32"))?;
+        let decim = FirdecimCx::from_taps(factor_u32, &taps)
+            .map_err(|e| anyhow::anyhow!("firdecim_crcf rebuild: {e}"))?;
+        self.factor = new_factor;
+        self.taps = taps;
+        self.decim = decim;
+        self.chunk = vec![(0.0, 0.0); new_factor.max(1)];
+        self.chunk_len = 0;
+        self.nco
+            .set_frequency(omega_for(self.freq_shift_hz, input_rate_hz));
+        Ok(())
     }
 
     /// Retune the VFO without interrupting sample flow. The mixer's
@@ -228,6 +280,36 @@ impl Channelizer {
     #[must_use]
     pub fn freq_shift_hz(&self) -> f64 {
         self.freq_shift_hz
+    }
+
+    /// Shared core of [`Block::init`] and [`Block::update_rates`] — if
+    /// the scheduler's input rate differs from what this instance was
+    /// built against, rebuild FIR + decim via
+    /// [`Self::rebuild_for_input_rate`] and emit one `flowdiag` line
+    /// tagged with `phase` so operators can distinguish first-build
+    /// from live adaptation.
+    fn sync_to_ctx_rate(
+        &mut self,
+        ctx: &crate::block::InitCtx<'_>,
+        phase: &'static str,
+    ) -> Result<()> {
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 && (rate - self.input_rate_hz).abs() > f64::EPSILON {
+                self.rebuild_for_input_rate(rate)?;
+            }
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let actual_out = self.input_rate_hz / self.factor as f64;
+        tracing::info!(
+            target: "flowdiag",
+            block = "Channelizer",
+            input_rate_hz = self.input_rate_hz,
+            factor = self.factor,
+            target_output_rate_hz = self.target_output_rate_hz,
+            actual_output_rate_hz = actual_out,
+            "{phase}",
+        );
+        Ok(())
     }
 }
 
@@ -323,19 +405,23 @@ impl Block for Channelizer {
     }
 
     fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
-        // If the scheduler knows the input rate, it wins — keeps the
-        // mixer in sync even if construction-time params were stale.
-        // We rebuild the NCO frequency at the new rate; the FIR taps
-        // are normalised against the input rate (cutoff_normalized)
-        // so they stay valid as long as the *factor* doesn't change.
-        if let Some(rate) = ctx.input_rate("in") {
-            if rate > 0.0 && (rate - self.input_rate_hz).abs() > f64::EPSILON {
-                let shift = self.freq_shift_hz;
-                self.input_rate_hz = rate;
-                self.nco.set_frequency(omega_for(shift, rate));
-            }
+        self.sync_to_ctx_rate(ctx, "channelizer init")
+    }
+
+    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+        if self.factor == 0 {
+            return None;
         }
-        Ok(())
+        #[allow(clippy::cast_precision_loss)]
+        Some(self.input_rate_hz / self.factor as f64)
+    }
+
+    fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
+        // Same job as the rate path inside `init()`, but safe for a
+        // carried-over instance whose one-time external setup already
+        // ran. Different log phase so an operator can tell whether a
+        // rebuild was first-construct or live rate adaptation.
+        self.sync_to_ctx_rate(ctx, "channelizer rate update")
     }
 
     /// Live VFO retune — the reason this block exists. Only `freq_shift_hz`

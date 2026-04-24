@@ -84,6 +84,11 @@ pub struct Decimator {
     /// across `process()` invocations until the chunk is ready.
     chunk: Vec<(f32, f32)>,
     chunk_len: usize,
+    /// Input rate cached from `InitCtx` at init, so `output_rate_hz`
+    /// can report `input_rate / factor` for the rate-propagation pass.
+    /// `0.0` before init — `output_rate_hz` returns `None` in that
+    /// window, matching the trait default.
+    input_rate_hz: f64,
 }
 
 impl Decimator {
@@ -117,6 +122,7 @@ impl Decimator {
             inner,
             chunk: vec![(0.0, 0.0); params.factor.max(1)],
             chunk_len: 0,
+            input_rate_hz: 0.0,
         })
     }
 
@@ -191,8 +197,33 @@ impl Block for Decimator {
         }
     }
 
-    fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
+    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+        // Snapshot the negotiated input rate so `output_rate_hz` can
+        // report `input / factor` for the rate-propagation pass.
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 {
+                self.input_rate_hz = rate;
+            }
+        }
         Ok(())
+    }
+
+    fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
+        // Carried-over instance picking up a new upstream rate.
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 {
+                self.input_rate_hz = rate;
+            }
+        }
+        Ok(())
+    }
+
+    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+        if self.input_rate_hz <= 0.0 || self.factor == 0 {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        Some(self.input_rate_hz / self.factor as f64)
     }
 
     fn relative_rate(&self, _in_port: usize, _out_port: usize) -> (u32, u32) {

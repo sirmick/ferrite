@@ -23,9 +23,7 @@
       "params": {
         "input_rate_hz": 2400000.0,
         "freq_shift_hz": 0.0,
-        "factor": 10,
-        "num_taps": 81,
-        "cutoff_normalized": 0.05
+        "output_rate_hz": 240000.0
       }
     },
     "tee": {
@@ -36,7 +34,7 @@
       "type": "FFT",
       "placement": "node",
       "params": {
-        "size": 65536,
+        "size": 16384,
         "window": "hann",
         "max_frames_per_second": 30
       }
@@ -45,7 +43,7 @@
       "type": "LogMagU8",
       "placement": "node",
       "params": {
-        "size": 65536,
+        "size": 16384,
         "alpha": 0.3
       }
     },
@@ -68,21 +66,19 @@
       }
     },
     "decim_l": {
-      "type": "RealF32Decimator",
+      "type": "RealF32Resamp",
       "placement": "browser",
       "params": {
-        "factor": 5,
-        "num_taps": 41,
-        "cutoff_normalized": 0.08
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
       }
     },
     "decim_r": {
-      "type": "RealF32Decimator",
+      "type": "RealF32Resamp",
       "placement": "browser",
       "params": {
-        "factor": 5,
-        "num_taps": 41,
-        "cutoff_normalized": 0.08
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
       }
     },
     "audio_l": {

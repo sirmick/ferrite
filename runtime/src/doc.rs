@@ -216,7 +216,7 @@ mod tests {
         );
         assert_eq!(
             doc.blocks.keys().cloned().collect::<Vec<_>>(),
-            vec!["audio", "chan", "decim", "demod", "fft", "logmag", "src", "tee"],
+            vec!["audio", "chan", "demod", "fft", "logmag", "resamp", "src", "tee"],
         );
         let demod = doc.blocks.get("demod").expect("demod block present");
         assert_eq!(demod.type_name, "AmDemod");

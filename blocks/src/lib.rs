@@ -31,6 +31,7 @@ pub mod fm_demod;
 pub mod frame;
 pub mod log_mag_u8;
 pub mod real_decimator;
+pub mod real_resamp;
 pub mod registry;
 pub mod render;
 pub mod rssi_probe;
@@ -67,6 +68,7 @@ pub use fm_demod::{FmDemod, FmDemodParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 pub use real_decimator::{RealF32Decimator, RealF32DecimatorParams};
+pub use real_resamp::{RealF32Resamp, RealF32ResampParams};
 pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hold, SpectrumStats};
 pub use rssi_probe::{RssiProbe, RssiProbeParams};
 pub use sine::{SineSource, SineSourceParams};
@@ -134,6 +136,7 @@ mod tests {
             "LogMagU8",
             "Decimator",
             "RealF32Decimator",
+            "RealF32Resamp",
             "Channelizer",
             "FmDemod",
             "SsbDemod",

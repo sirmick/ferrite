@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use num_complex::Complex;
+use serde::{Deserialize, Serialize};
 
 use ferrite_blocks::{
     Block, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort, PortMeta, PortType,
@@ -71,6 +72,37 @@ const SOURCE_RING_TICKS: f64 = 4.0;
 /// claim progress without moving any samples — real graphs settle in
 /// O(depth) passes.
 const MAX_TICK_PASSES: usize = 1024;
+
+/// One port's cumulative counters. `samples_cum` is consumed (input) or
+/// produced (output). `buffered` is the ring depth at snapshot time
+/// (inputs only; 0 for outputs — a wire belongs to its reader).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagPort {
+    pub name: String,
+    pub samples_cum: u64,
+    pub buffered: usize,
+}
+
+/// Per-block entry in a [`DiagSnapshot`]. Cumulative counters — the
+/// consumer subtracts against the previous snapshot to get a rate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagBlock {
+    pub id: String,
+    pub type_name: String,
+    pub process_calls_cum: u64,
+    /// Total time inside `process()` in nanoseconds. Native runtime
+    /// populates this from [`std::time::Instant`]; wasm leaves it at 0.
+    pub process_ns_cum: u64,
+    pub inputs: Vec<DiagPort>,
+    pub outputs: Vec<DiagPort>,
+}
+
+/// What `Runtime::diag_snapshot` returns. One entry per block, in
+/// topological order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagSnapshot {
+    pub blocks: Vec<DiagBlock>,
+}
 
 /// The tick pump. Owns every block instance, every inter-block ring
 /// buffer, and the topological run order. Single-threaded by design —
@@ -131,6 +163,20 @@ struct BlockEntry {
     /// `produced[j]` = last-reported count for output port `j`, for
     /// introspection (tests, dashboards). Does not feed scheduling.
     produced: Vec<usize>,
+    /// Monotonic per-port counters for the 1 Hz flow-table probe. Reset
+    /// never — the JS/UI consumer takes deltas between snapshots so
+    /// counters survive reconfigure reuse and never race a reader.
+    in_samples_cum: Vec<u64>,
+    out_samples_cum: Vec<u64>,
+    /// Number of `process()` calls. Multiple per tick is normal (work
+    /// loop re-runs until the block stops making progress).
+    process_calls_cum: u64,
+    /// Total wall-clock time spent inside `process()` in nanoseconds.
+    /// Native only — wasm leaves this at 0 because `Instant::now()` is a
+    /// no-op panic on wasm32-unknown-unknown. Surface the wasm gap in
+    /// the UI as "— " rather than "0%" so the reader knows it's missing
+    /// rather than idle.
+    process_ns_cum: u64,
     /// `true` when this block instance was moved over from a previous
     /// runtime during reconfigure (its `init()` has already been called
     /// and, for stateful blocks like `SoapySource`, its reader thread
@@ -483,6 +529,10 @@ impl Runtime {
                 outputs,
                 input_wires,
                 produced: vec![0; spec.outputs.len()],
+                in_samples_cum: vec![0; spec.inputs.len()],
+                out_samples_cum: vec![0; spec.outputs.len()],
+                process_calls_cum: 0,
+                process_ns_cum: 0,
                 carried_over: false,
             });
         }
@@ -513,33 +563,151 @@ impl Runtime {
         self.state
     }
 
+    /// Snapshot of per-block counters + per-wire ring depth for the 1 Hz
+    /// flow-table probe. Cumulative since block construction — the
+    /// consumer (JS-side diag loop or server `drive`) takes deltas
+    /// between successive snapshots to get per-second rates. Cheap: walks
+    /// the entries + wires arrays, no locking beyond the caller's
+    /// outer mutex.
+    #[must_use]
+    pub fn diag_snapshot(&self) -> DiagSnapshot {
+        let mut blocks = Vec::with_capacity(self.entries.len());
+        for (idx, e) in self.entries.iter().enumerate() {
+            // Input buffered depth: look up the wire each input is
+            // connected to. Each wire has one reader, so `readable_len`
+            // is what this block sees queued.
+            let inputs = e
+                .spec
+                .inputs
+                .iter()
+                .zip(e.in_samples_cum.iter())
+                .enumerate()
+                .map(|(j, (port, samples))| DiagPort {
+                    name: port.name.to_string(),
+                    samples_cum: *samples,
+                    buffered: e.input_wires[j]
+                        .map(|widx| self.wires[widx].borrow().available_read(0))
+                        .unwrap_or(0),
+                })
+                .collect();
+            let outputs = e
+                .spec
+                .outputs
+                .iter()
+                .zip(e.out_samples_cum.iter())
+                .map(|(port, samples)| DiagPort {
+                    name: port.name.to_string(),
+                    samples_cum: *samples,
+                    buffered: 0,
+                })
+                .collect();
+            let _ = idx;
+            blocks.push(DiagBlock {
+                id: e.id.clone(),
+                type_name: e.spec.type_name.to_string(),
+                process_calls_cum: e.process_calls_cum,
+                process_ns_cum: e.process_ns_cum,
+                inputs,
+                outputs,
+            });
+        }
+        DiagSnapshot { blocks }
+    }
+
     /// Call `init` on every block in topological order. Required before
-    /// any `tick`. Blocks are free to ignore `frames_hint`; rate
-    /// metadata in `InitCtx` is empty today and gets populated when
-    /// the negotiation phase lands. Rings are reset so a re-initialised
-    /// graph starts from a clean state.
+    /// any `tick`. The runtime propagates per-port sample rates through
+    /// `InitCtx.input_meta` — for each block, it collects each input's
+    /// rate from the producing block's `output_rate_hz(port)` (already
+    /// initialised on an earlier pass, since topo order). Rate-changing
+    /// blocks like `Channelizer` use this to snap their factor / FIR
+    /// sizing to the source's actual rate, not whatever the preset
+    /// JSON declared. Rings are reset so a re-initialised graph starts
+    /// from a clean state.
     pub fn init(&mut self) -> Result<()> {
         self.require_state(RuntimeState::Created, "init")?;
         let frames_hint = self.frames_hint;
         for ring in &self.wires {
             ring.borrow_mut().reset();
         }
-        for entry in &mut self.entries {
-            if entry.carried_over {
-                // Reused from a previous runtime — its init() has already
-                // run (and, for stateful blocks, set up external state
-                // like reader threads that must not be duplicated).
-                continue;
+
+        // Reverse-index: wire index → (producer block index, out port
+        // index). Every connected wire has exactly one producer.
+        let mut wire_producer: Vec<Option<(usize, usize)>> = vec![None; self.wires.len()];
+        for (bi, entry) in self.entries.iter().enumerate() {
+            for (pi, slot) in entry.outputs.iter().enumerate() {
+                if let OutputSlot::Wire(widx) = slot {
+                    wire_producer[*widx] = Some((bi, pi));
+                }
             }
+        }
+
+        // Cache each block's resolved output rate as we iterate topo.
+        // Accounts for blocks whose `output_rate_hz()` returns None
+        // (default impl) by falling back to a 1:1 pass-through: rate
+        // equals input[0]'s rate. This lets pipelines like `src →
+        // chan → demod → resamp` propagate rates across intermediate
+        // blocks (e.g. FmDemod) without every one needing to override
+        // `output_rate_hz`.
+        let mut block_out_rate: Vec<f64> = vec![0.0; self.entries.len()];
+        for i in 0..self.entries.len() {
+            // Build per-input-port (name, PortMeta) with rate resolved
+            // from the producing block. Producer ran earlier in topo
+            // order (entries are topo-sorted at construction), so
+            // `block_out_rate[producer]` is valid by now.
+            let input_meta: Vec<(&str, PortMeta)> = self.entries[i]
+                .spec
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(port_idx, port_spec)| {
+                    let rate = self.entries[i].input_wires[port_idx]
+                        .and_then(|widx| wire_producer[widx])
+                        .map(|(pb, _)| block_out_rate[pb])
+                        .unwrap_or(0.0);
+                    (
+                        port_spec.name,
+                        PortMeta {
+                            sample_rate_hz: rate,
+                            center_freq_hz: 0.0,
+                        },
+                    )
+                })
+                .collect();
+            let in0_rate = input_meta
+                .first()
+                .map(|(_, m)| m.sample_rate_hz)
+                .unwrap_or(0.0);
             let mut ctx = InitCtx {
-                input_meta: &[],
+                input_meta: &input_meta,
                 output_meta: &[],
                 frames_hint,
             };
-            entry
-                .block
-                .init(&mut ctx)
-                .with_context(|| format!("init block {:?}", entry.id))?;
+            let id = self.entries[i].id.clone();
+            if self.entries[i].carried_over {
+                // Reused from a previous runtime — its init() has
+                // already run (and, for stateful blocks, set up external
+                // state like reader threads that must not be
+                // duplicated). If an upstream rate changed (source
+                // retuned while the channelizer was preserved), rate-
+                // aware blocks rebuild their FIR / decim / resampler
+                // via `update_rates` without re-running the one-time
+                // init path.
+                self.entries[i]
+                    .block
+                    .update_rates(&ctx)
+                    .with_context(|| format!("update_rates block {id:?}"))?;
+            } else {
+                self.entries[i]
+                    .block
+                    .init(&mut ctx)
+                    .with_context(|| format!("init block {id:?}"))?;
+            }
+            // Cache this block's output rate for downstream InitCtx.
+            // Prefer the block's own `output_rate_hz(0)` (sources +
+            // rate-changers); fall back to input[0]'s rate as a 1:1
+            // pass-through for sync blocks (FmDemod, Tee, RssiProbe,
+            // Squelch, …) that don't override the trait method.
+            block_out_rate[i] = self.entries[i].block.output_rate_hz(0).unwrap_or(in0_rate);
         }
         self.state = RuntimeState::Initialized;
         Ok(())
@@ -755,9 +923,18 @@ impl Runtime {
                 // block id in context. `AssertUnwindSafe` is sound here
                 // because the runtime halts on error; the block's
                 // internal state may be corrupt but we won't reuse it.
+                #[cfg(not(target_arch = "wasm32"))]
+                let t0 = std::time::Instant::now();
                 let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     entry_mut.block.process(&mut io)
                 }));
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    entry_mut.process_ns_cum = entry_mut
+                        .process_ns_cum
+                        .saturating_add(t0.elapsed().as_nanos() as u64);
+                }
+                entry_mut.process_calls_cum = entry_mut.process_calls_cum.saturating_add(1);
                 match panic_result {
                     Ok(res) => res.with_context(|| format!("process block {:?}", entry_mut.id))?,
                     Err(payload) => {
@@ -779,9 +956,16 @@ impl Runtime {
         for j in 0..spec.outputs.len() {
             let produced = work.produced[j];
             self.entries[i].produced[j] += produced;
+            self.entries[i].out_samples_cum[j] =
+                self.entries[i].out_samples_cum[j].saturating_add(produced as u64);
             if produced > 0 {
                 any_progress = true;
             }
+        }
+        for j in 0..spec.inputs.len() {
+            let consumed = work.consumed[j];
+            self.entries[i].in_samples_cum[j] =
+                self.entries[i].in_samples_cum[j].saturating_add(consumed as u64);
         }
 
         // 6. Advance writers (connected outputs) and readers

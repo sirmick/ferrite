@@ -534,6 +534,25 @@ pub trait Block: Send + AsAny {
         None
     }
 
+    /// React to an updated input-rate negotiation without going through
+    /// the full `init()` path. The runtime calls this during
+    /// reconfigure for carried-over blocks (instances preserved across
+    /// preset swap) when the scheduler's propagation pass reports that
+    /// an input port's rate changed upstream — typically because the
+    /// SoapySDR driver snapped a new rate, or the user retuned the
+    /// source from the UI.
+    ///
+    /// Default is a no-op, which is right for rate-insensitive blocks
+    /// (`TeeIqF32`, `Squelch`, etc.). Rate-changing blocks override:
+    /// `Channelizer` rebuilds its FIR + decim for a new factor;
+    /// `RealF32Resamp` rebuilds the liquid `msresamp` for the new
+    /// ratio. Unlike `init()`, this MUST NOT set up external state
+    /// (reader threads, device streams) — those were created on the
+    /// prior runtime and carried into this one.
+    fn update_rates(&mut self, _ctx: &InitCtx<'_>) -> Result<()> {
+        Ok(())
+    }
+
     /// Flush and release. Must be idempotent.
     fn stop(&mut self) -> Result<()> {
         Ok(())

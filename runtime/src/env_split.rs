@@ -178,13 +178,23 @@ pub fn split_for_environment(
             (false, true) => {
                 let sid = CROSS_ENV_STREAM_BASE + crossing_index;
                 let bridge_id = format!("__bridge_rx_{sid}");
+                // Propagate the producer's declared output rate across
+                // the WS boundary so downstream rate-aware blocks on
+                // this side (e.g. RealF32Resamp) can read it at init.
+                // `producer_output_rate_hz` walks the doc upstream from
+                // the wire source until it hits a block declaring a
+                // known rate.
+                let mut params = json!({ "stream_id": sid });
+                if let Some(rate) = producer_output_rate_hz(doc, &wire.src) {
+                    params["sample_rate_hz"] = json!(rate);
+                }
                 insert_bridge(
                     &mut new_blocks,
                     doc,
                     bridge_id.clone(),
                     "WsBridgeRx",
                     env,
-                    json!({ "stream_id": sid }),
+                    params,
                 )?;
                 new_wires.push(Wire::new(format!("{bridge_id}.out"), wire.dst.clone()));
                 crossing_index += 1;
@@ -217,6 +227,80 @@ fn producer_frame_size(doc: &FlowgraphDoc, source_endpoint: &str) -> Option<usiz
     let params = decl.params.as_ref()?;
     let size = params.get("size")?.as_u64()?;
     usize::try_from(size).ok()
+}
+
+/// Walk the doc upstream from `source_endpoint`, returning the declared
+/// output sample rate of the producing block. Lets env_split stamp the
+/// rate onto a `WsBridgeRx` so downstream rate-aware blocks on the
+/// consumer side (e.g. `RealF32Resamp`) can read it via
+/// `InitCtx.input_rate`. `None` when the chain doesn't declare a rate
+/// we can derive statically — a conservative signal to the consumer
+/// that it must fall back to a default or fail loudly.
+///
+/// Handled block types:
+/// - Source primitives: `sample_rate_hz` field on params.
+/// - `Channelizer`, `Decimator`, `RealF32Decimator`, `RealF32Resamp`:
+///   explicit `output_rate_hz` when present; otherwise derive from
+///   upstream input × `1/factor`.
+/// - Pass-through blocks (Tee, FmDemod, RssiProbe, SsbDemod, AmDemod,
+///   Squelch, StereoDecoder branches): same rate as upstream.
+/// - Everything else: `None`.
+fn producer_output_rate_hz(doc: &FlowgraphDoc, source_endpoint: &str) -> Option<f64> {
+    fn rate_of_block(doc: &FlowgraphDoc, block_id: &str, depth: usize) -> Option<f64> {
+        if depth > 32 {
+            // Runaway walk guard. A well-formed preset won't hit this.
+            return None;
+        }
+        let decl = doc.blocks.get(block_id)?;
+        let params = decl.params.as_ref();
+        let read = |key: &str| -> Option<f64> { params?.get(key)?.as_f64() };
+        // Some blocks declare their own output rate explicitly — trust
+        // that first, whatever type they are.
+        if let Some(out) = read("output_rate_hz") {
+            if out > 0.0 {
+                return Some(out);
+            }
+        }
+        match decl.type_name.as_str() {
+            // Sources: preset declares the output rate directly.
+            "SoapySource" | "Source" | "SineSource" | "FileIqSource" | "DtmfAudioSource" => {
+                read("sample_rate_hz").filter(|r| *r > 0.0)
+            }
+            // Rate-dividing blocks: `output = input / factor` when
+            // `output_rate_hz` isn't set (legacy factor-mode).
+            "Channelizer" | "Decimator" | "RealF32Decimator" => {
+                let factor = read("factor")?;
+                if factor <= 0.0 {
+                    return None;
+                }
+                let input =
+                    read("input_rate_hz").or_else(|| upstream_rate(doc, block_id, depth + 1))?;
+                Some(input / factor)
+            }
+            // Everything else: pass through upstream rate. Covers Tee,
+            // FmDemod, AmDemod, SsbDemod, RssiProbe, Squelch, StereoDecoder,
+            // FFT/LogMag (frame rate, but the wire carries bin streams at
+            // the FFT's sample rate for our purposes), etc.
+            _ => upstream_rate(doc, block_id, depth + 1),
+        }
+    }
+
+    fn upstream_rate(doc: &FlowgraphDoc, block_id: &str, depth: usize) -> Option<f64> {
+        // Find the wire whose destination sits on this block and walk
+        // back to its producer. Takes the first matching wire — blocks
+        // with multiple input ports (StereoDecoder etc.) fall out here
+        // with whichever upstream happens to be first, which matches
+        // the 1:1 rate assumption for those types.
+        let in_wire = doc
+            .wires
+            .iter()
+            .find(|w| split_endpoint(&w.dst).0 == block_id)?;
+        let (producer_id, _) = split_endpoint(&in_wire.src);
+        rate_of_block(doc, producer_id, depth)
+    }
+
+    let (block_id, _) = split_endpoint(source_endpoint);
+    rate_of_block(doc, block_id, 0)
 }
 
 /// Resolve the source port's type and map it to the matching WsBridgeTx
