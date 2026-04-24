@@ -36,6 +36,11 @@ pub struct BlankerStage {
     env: f32,
     hold: u32,
     input_rate_hz: f64,
+    /// Seeded-envelope flag. Before the first non-zero input sample,
+    /// `env` is zero and *any* signal would trigger the threshold
+    /// comparison — pathological on a cold start. We seed `env` from
+    /// the first magnitude seen and only then engage the detector.
+    primed: bool,
 }
 
 impl BlankerStage {
@@ -49,6 +54,7 @@ impl BlankerStage {
             env: 0.0,
             hold: 0,
             input_rate_hz: 0.0,
+            primed: false,
         };
         s.recompute(threshold_db, hold_ms, input_rate_hz);
         s
@@ -80,6 +86,7 @@ impl BlankerStage {
     pub fn reset(&mut self) {
         self.env = 0.0;
         self.hold = 0;
+        self.primed = false;
     }
 
     /// Zero-hole blanker. When a sample exceeds `threshold · env`, emit
@@ -89,6 +96,16 @@ impl BlankerStage {
     pub fn run(&mut self, buf: &mut [f32]) {
         for x in buf {
             let mag = x.abs();
+            // Seed the envelope from the first real sample so the
+            // threshold detector has a sensible reference immediately.
+            // Without this, a cold env=0 causes every sample to look
+            // like an impulse and the blanker locks into a stuck-on
+            // loop that silences the whole stream.
+            if !self.primed && mag > 0.0 {
+                self.env = mag;
+                self.primed = true;
+            }
+
             // Envelope: fast attack when mag > env, slow release
             // otherwise. Gate the update on the hold state so an
             // ongoing blanking event doesn't train the envelope with

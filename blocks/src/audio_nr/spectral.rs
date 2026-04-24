@@ -232,7 +232,11 @@ impl SpectralStage {
                     let inst = (gamma - 1.0).max(0.0);
                     let xi = alpha_snr * self.prior_snr[k] + (1.0 - alpha_snr) * inst;
                     let xi = xi.max(1e-6);
-                    let nu = xi / (1.0 + xi) * gamma;
+                    // Clamp ν above zero — E1(0) diverges and our
+                    // Abramowitz approximation asserts x > 0. Tiny-ν
+                    // regime is physically "no speech" so base ≈ 0
+                    // anyway; the clamp just keeps the math defined.
+                    let nu = (xi / (1.0 + xi) * gamma).max(1e-6);
                     // G(ξ, ν) = (ξ/(1+ξ)) · exp(½ · E1(ν))
                     let base = xi / (1.0 + xi);
                     let g_raw = base * (0.5 * expint_e1(nu)).exp();
