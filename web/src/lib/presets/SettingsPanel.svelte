@@ -17,8 +17,15 @@
   // loads the matching flowgraph in one click and is the single source
   // of truth for "what mode am I in".
   const DEMOD_ID = 'demod';
+  // Noise-reduction section looks up the single audio_nr block that
+  // ships in every analog-mode preset (AudioNrMono or AudioNrStereo,
+  // same id so the UI binds once). If a preset doesn't have an NR
+  // block (e.g. digital-mode / recording flowgraphs) the section
+  // quietly hides itself.
+  const AUDIO_NR_ID = 'audio_nr';
 
   let demodBlock = $derived(pipeline.blocks[DEMOD_ID]);
+  let audioNrBlock = $derived(pipeline.blocks[AUDIO_NR_ID]);
   let presetLabel = $derived(pipeline.flowgraph?.label ?? pipeline.flowgraph?.name ?? '—');
 </script>
 
@@ -73,6 +80,23 @@
         <AudioPanel />
       </div>
     </details>
+
+    {#if audioNrBlock}
+      <details class="settings-section">
+        <summary
+          class="cursor-pointer select-none text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-fg)]"
+        >
+          Noise Reduction
+        </summary>
+        <div class="mt-2 flex flex-col gap-1 pl-1">
+          <div class="flex items-baseline justify-between text-[10px]">
+            <span class="text-[color:var(--color-muted)]">block</span>
+            <span class="font-mono text-slate-500">{audioNrBlock.type_name}</span>
+          </div>
+          <BlockParams block={audioNrBlock} hideSourceRestart />
+        </div>
+      </details>
+    {/if}
 
     <details class="settings-section">
       <summary
