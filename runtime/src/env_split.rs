@@ -239,9 +239,9 @@ fn producer_frame_size(doc: &FlowgraphDoc, source_endpoint: &str) -> Option<usiz
 ///
 /// Handled block types:
 /// - Source primitives: `sample_rate_hz` field on params.
-/// - `Channelizer`, `Decimator`, `RealF32Decimator`, `RealF32Resamp`:
-///   explicit `output_rate_hz` when present; otherwise derive from
-///   upstream input × `1/factor`.
+/// - `Channelizer`, `Decimator`, `RealF32Resamp`: explicit
+///   `output_rate_hz` when present; otherwise derive from upstream
+///   input × `1/factor`.
 /// - Pass-through blocks (Tee, FmDemod, RssiProbe, SsbDemod, AmDemod,
 ///   Squelch, StereoDecoder branches): same rate as upstream.
 /// - Everything else: `None`.
@@ -268,7 +268,7 @@ fn producer_output_rate_hz(doc: &FlowgraphDoc, source_endpoint: &str) -> Option<
             }
             // Rate-dividing blocks: `output = input / factor` when
             // `output_rate_hz` isn't set (legacy factor-mode).
-            "Channelizer" | "Decimator" | "RealF32Decimator" => {
+            "Channelizer" | "Decimator" => {
                 let factor = read("factor")?;
                 if factor <= 0.0 {
                     return None;

@@ -3,7 +3,9 @@
   "name": "fm-audio-record",
   "label": "FM audio record (headless)",
   "description": "All-native FM receiver that writes demodulated mono audio to /tmp/ferrite-fm-audio.wav. Source → Channelizer (10× → 240 kHz) → FmDemod @ 240 kHz → RealF32Decimator (5× → 48 kHz) → FileAudioSink. The demod sits at channel rate, not audio rate, so the ±75 kHz peak deviation is well inside the discriminator Nyquist; decimation to audio happens on the real post-discriminator signal where aliasing is not a concern. Designed for `ferrited --flowgraph fm-audio-record.json --source-type SoapySource --source-args driver=rtlsdr --run-for-secs 30 --start`.",
-  "environments": ["node"],
+  "environments": [
+    "node"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -20,9 +22,7 @@
       "params": {
         "input_rate_hz": 2400000.0,
         "freq_shift_hz": 0.0,
-        "factor": 10,
-        "num_taps": 81,
-        "cutoff_normalized": 0.05
+        "output_rate_hz": 240000.0
       }
     },
     "demod": {
@@ -34,12 +34,11 @@
       }
     },
     "decim": {
-      "type": "RealF32Decimator",
+      "type": "RealF32Resamp",
       "placement": "node",
       "params": {
-        "factor": 5,
-        "num_taps": 41,
-        "cutoff_normalized": 0.08
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
       }
     },
     "audio": {
@@ -53,9 +52,21 @@
     }
   },
   "wires": [
-    ["src.out", "chan.in"],
-    ["chan.out", "demod.in"],
-    ["demod.out", "decim.in"],
-    ["decim.out", "audio.in"]
+    [
+      "src.out",
+      "chan.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "decim.in"
+    ],
+    [
+      "decim.out",
+      "audio.in"
+    ]
   ]
 }

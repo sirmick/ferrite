@@ -1,13 +1,12 @@
 //! Fractional resampler for real float streams — wraps liquid-dsp's
 //! `msresamp_rrrf` in a Ferrite block.
 //!
-//! Unlike [`crate::real_decimator::RealF32Decimator`] which needs an
-//! integer factor, this block handles arbitrary rate ratios: e.g. 200
-//! kS/s → 48 kS/s (ratio 0.24), 240 kS/s → 48 kS/s (ratio 0.2), or any
-//! upsample. The ratio comes from `output_rate_hz / input_rate_hz` at
-//! init time, so the preset just declares the target audio rate and the
-//! block snaps to whatever the source's actual channelizer output is —
-//! no preset rewrite needed when the SDR ladder snaps the source rate.
+//! Arbitrary rate ratios: e.g. 200 kS/s → 48 kS/s (ratio 0.24), 240
+//! kS/s → 48 kS/s (ratio 0.2), or any upsample. The ratio comes from
+//! `output_rate_hz / input_rate_hz` at init time, so the preset just
+//! declares the target audio rate and the block snaps to whatever the
+//! source's actual channelizer output is — no preset rewrite needed
+//! when the SDR ladder snaps the source rate.
 
 use anyhow::{bail, Result};
 use ferrite_liquid_dsp::MsResamp;

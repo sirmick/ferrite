@@ -43,93 +43,49 @@ use crate::block::{
 
 /// Construction-time params.
 ///
-/// Two ways to specify rate. Pick one:
-/// - **Legacy**: set `factor` directly. Output rate = input / factor.
-/// - **Rate-target**: set `output_rate_hz` and let the block derive
-///   `factor = round(input_rate_hz / output_rate_hz)`. Used by presets
-///   that want a stable output rate (e.g. 240 kHz into an FM demod)
-///   regardless of the source's current sample rate — which `compose`
-///   pushes into `input_rate_hz` at runtime. When `output_rate_hz` is
-///   set, `num_taps` and `cutoff_normalized` are auto-derived from
-///   the computed factor; preset authors should leave them out.
+/// `output_rate_hz` is the channel bandwidth the preset commits to.
+/// At init, the scheduler reports the actual source rate; the block
+/// picks `factor = round(input_rate_hz / output_rate_hz)` and realises
+/// a polyphase FIR sized for that factor. `input_rate_hz` in the JSON
+/// is only a construction-time hint used when the block is instantiated
+/// outside a runtime (e.g. unit tests); init overrides it with the
+/// scheduler-negotiated rate.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct ChannelizerParams {
-    /// Wideband input sample rate, Hz.
+    /// Wideband input sample rate, Hz. Construction-time hint; init's
+    /// `ctx.input_rate("in")` wins once the runtime populates it.
     pub input_rate_hz: f64,
     /// Frequency to pull to baseband, in Hz relative to the input's
     /// centre frequency. Positive values tune to RF above centre.
     pub freq_shift_hz: f64,
-    /// Integer decimation factor M ≥ 1. Output rate = input / M.
-    /// Ignored when `output_rate_hz` is set.
-    pub factor: usize,
-    /// Target output sample rate, Hz. When set and positive, the block
-    /// computes `factor = round(input_rate_hz / output_rate_hz)` and
-    /// overrides the raw `factor`, `num_taps`, and `cutoff_normalized`
-    /// fields. `None` leaves legacy behaviour intact.
-    pub output_rate_hz: Option<f64>,
-    /// FIR length. Default `8·M+1`, matching `DecimatorParams`.
-    pub num_taps: usize,
-    /// LPF cutoff as a fraction of the **input** rate, 0 < fc < 0.5.
-    /// Default `0.4/M` leaves a 20 % transition below output Nyquist.
-    pub cutoff_normalized: f32,
+    /// Target output sample rate, Hz. The block rebuilds its factor +
+    /// FIR at init (and on live source-rate changes) to approximate
+    /// this — actual output = `input_rate / round(input_rate / output_rate)`,
+    /// typically within 1–5 % of the target. A downstream fractional
+    /// resampler (`RealF32Resamp`) eats the residual drift when audio
+    /// sinks need exact rates.
+    pub output_rate_hz: f64,
 }
 
 impl ChannelizerParams {
-    /// Sensible defaults for a given factor against a known input rate.
+    /// Shorthand for tests and defaults.
     #[must_use]
-    pub fn new(input_rate_hz: f64, freq_shift_hz: f64, factor: usize) -> Self {
-        #[allow(clippy::cast_precision_loss)]
-        let cutoff_normalized = if factor == 0 {
-            0.4
-        } else {
-            0.4 / factor as f32
-        };
+    pub const fn new(input_rate_hz: f64, freq_shift_hz: f64, output_rate_hz: f64) -> Self {
         Self {
             input_rate_hz,
             freq_shift_hz,
-            factor,
-            output_rate_hz: None,
-            num_taps: 8 * factor + 1,
-            cutoff_normalized,
-        }
-    }
-
-    /// Resolve the rate-target mode into concrete values. Returns the
-    /// params as-is when `output_rate_hz` is unset or invalid. When
-    /// set, derives `factor` from `input_rate_hz / output_rate_hz`
-    /// (clamped to ≥ 1) and rewrites `num_taps` + `cutoff_normalized`
-    /// to match the new factor, so the FIR stays well-matched across
-    /// source-rate changes.
-    #[must_use]
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
-    pub fn resolve(self) -> Self {
-        let Some(out) = self.output_rate_hz else {
-            return self;
-        };
-        if !(out > 0.0 && self.input_rate_hz > 0.0) {
-            return self;
-        }
-        let factor = ((self.input_rate_hz / out).round() as usize).max(1);
-        Self {
-            factor,
-            num_taps: 8 * factor + 1,
-            cutoff_normalized: 0.4 / factor as f32,
-            ..self
+            output_rate_hz,
         }
     }
 }
 
 impl Default for ChannelizerParams {
     fn default() -> Self {
-        // 2 MS/s wideband, centre of band, 4× decimation (500 kS/s out).
-        // Matches the WBFM preset's channelizer so a flowgraph can omit
-        // params entirely and still get a sensible tuner.
-        Self::new(2_000_000.0, 0.0, 4)
+        // 2 MS/s wideband, centre of band, 500 kS/s channel (4×
+        // decimation). Matches a WBFM-ish preset so a flowgraph can
+        // omit params entirely and still get a sensible tuner.
+        Self::new(2_000_000.0, 0.0, 500_000.0)
     }
 }
 
@@ -154,95 +110,80 @@ pub struct Channelizer {
     /// be called fresh without recomputing from the NCO's internal
     /// state, and so [`Self::freq_shift_hz`] is a cheap getter.
     freq_shift_hz: f64,
-    /// Target output rate in Hz when the preset used rate-target mode
-    /// (`output_rate_hz: …`). Stored so `init()` can recompute `factor`
-    /// against the scheduler-supplied input rate if the construction
-    /// rate was stale (common: preset says 2.4 MS/s but the SDR ladder
-    /// snapped the source to 2 MS/s). `None` in legacy factor-mode.
-    target_output_rate_hz: Option<f64>,
+    /// Target output rate in Hz. `rebuild_for_input_rate` derives
+    /// `factor = round(input_rate / target)` each time the scheduler
+    /// reports a fresh upstream rate, so a preset says 240 kHz and
+    /// the block lands the closest integer decimation whether the SDR
+    /// is at 2 MS/s, 10 MS/s, or anywhere between.
+    target_output_rate_hz: f64,
 }
 
 impl Channelizer {
     /// Constructs a channelizer with the supplied params. Fails on
-    /// `factor == 0`, `num_taps < 3`, non-positive input rate, or an
-    /// out-of-range cutoff.
+    /// non-positive input rate or non-positive output rate. The FIR
+    /// + decim are sized for `factor = round(input / output)` here as
+    /// a construction-time hint; `init()` rebuilds at the scheduler-
+    /// reported input rate if it differs.
     pub fn new(params: ChannelizerParams) -> Result<Self> {
-        // Collapse rate-target mode down to concrete factor + FIR sizing.
-        // No-op for legacy presets that set `factor` directly.
-        let target_output_rate_hz = params.output_rate_hz;
-        let params = params.resolve();
-        if params.factor == 0 {
-            bail!("channelizer factor must be >= 1");
-        }
-        if params.num_taps < 3 {
-            bail!("channelizer num_taps must be >= 3");
-        }
         if !(params.input_rate_hz.is_finite() && params.input_rate_hz > 0.0) {
             bail!(
                 "channelizer input_rate_hz must be > 0, got {}",
                 params.input_rate_hz
             );
         }
-        if !(params.cutoff_normalized > 0.0 && params.cutoff_normalized < 0.5) {
+        if !(params.output_rate_hz.is_finite() && params.output_rate_hz > 0.0) {
             bail!(
-                "channelizer cutoff_normalized must be in (0, 0.5), got {}",
-                params.cutoff_normalized
+                "channelizer output_rate_hz must be > 0, got {}",
+                params.output_rate_hz
             );
         }
-        let taps = crate::decimator::design_lpf(params.num_taps, params.cutoff_normalized);
-        // liquid's firdecim wants `factor >= 2`; for factor=1 the
-        // process() loop has a passthrough fast path, so the inner
-        // instance is sized at max(2, factor) just to satisfy the
-        // wrapper's invariant.
-        let factor_u32 = u32::try_from(params.factor.max(2))
-            .map_err(|_| anyhow::anyhow!("factor exceeds u32"))?;
-        let decim = FirdecimCx::from_taps(factor_u32, &taps)
-            .map_err(|e| anyhow::anyhow!("firdecim_crcf: {e}"))?;
-        let mut nco = Nco::new().map_err(|e| anyhow::anyhow!("nco_crcf: {e}"))?;
-        nco.set_frequency(omega_for(params.freq_shift_hz, params.input_rate_hz));
-        Ok(Self {
-            factor: params.factor,
-            taps,
-            nco,
-            decim,
-            chunk: vec![(0.0, 0.0); params.factor.max(1)],
+        let mut s = Self {
+            factor: 0,
+            taps: Vec::new(),
+            nco: Nco::new().map_err(|e| anyhow::anyhow!("nco_crcf: {e}"))?,
+            // firdecim requires factor ≥ 2 at construction; we overwrite
+            // `decim` immediately in `rebuild_for_input_rate`. The taps
+            // here are just placeholders to satisfy the ctor.
+            decim: FirdecimCx::from_taps(2, &[0.5, 0.5])
+                .map_err(|e| anyhow::anyhow!("firdecim_crcf placeholder: {e}"))?,
+            chunk: Vec::new(),
             chunk_len: 0,
             input_rate_hz: params.input_rate_hz,
             freq_shift_hz: params.freq_shift_hz,
-            target_output_rate_hz,
-        })
+            target_output_rate_hz: params.output_rate_hz,
+        };
+        s.rebuild_for_input_rate(params.input_rate_hz)?;
+        Ok(s)
     }
 
-    /// Rebuild the filter + decim + chunk buffer for a new actual input
-    /// rate. Used by `init()` when the scheduler-supplied rate differs
-    /// from what construction-time params declared — lets presets name a
-    /// target output rate (e.g. 240 kHz) and have the channelizer snap
-    /// its factor + FIR to whatever the source actually produces. No-op
-    /// in factor-mode (`target_output_rate_hz == None`).
+    /// (Re)build FIR + polyphase decim + chunk buffer for a new input
+    /// rate. `factor = round(input / target_output)`, clamped to ≥ 1.
+    /// FIR is Kaiser-windowed-sinc sized `8·factor+1` with normalised
+    /// cutoff `0.4/factor` — leaves ~20 % transition below output
+    /// Nyquist. Called from both the constructor (initial sizing) and
+    /// from `Block::init` / `Block::update_rates` when the scheduler
+    /// reports a source-rate change.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn rebuild_for_input_rate(&mut self, input_rate_hz: f64) -> Result<()> {
-        let Some(target_out) = self.target_output_rate_hz else {
-            // Legacy factor-mode: update the NCO but leave factor/FIR.
-            self.input_rate_hz = input_rate_hz;
-            self.nco
-                .set_frequency(omega_for(self.freq_shift_hz, input_rate_hz));
-            return Ok(());
-        };
-        if !(target_out > 0.0 && input_rate_hz > 0.0) {
-            return Ok(());
+        if !(input_rate_hz > 0.0 && self.target_output_rate_hz > 0.0) {
+            bail!(
+                "channelizer rebuild: need positive rates, got input={input_rate_hz} output={}",
+                self.target_output_rate_hz,
+            );
         }
-        let new_factor = ((input_rate_hz / target_out).round() as usize).max(1);
+        let new_factor = ((input_rate_hz / self.target_output_rate_hz).round() as usize).max(1);
         self.input_rate_hz = input_rate_hz;
         if new_factor == self.factor {
             self.nco
                 .set_frequency(omega_for(self.freq_shift_hz, input_rate_hz));
             return Ok(());
         }
-        // Same cutoff formula as ChannelizerParams::resolve so a
-        // re-init lands on the same taps a fresh construct would.
         let num_taps = 8 * new_factor + 1;
         let cutoff = 0.4 / new_factor as f32;
         let taps = crate::decimator::design_lpf(num_taps, cutoff);
+        // liquid's firdecim wants factor ≥ 2; factor=1 takes the
+        // passthrough fast path in `process()` so the wrapper instance
+        // is sized at max(2, factor) just to satisfy that invariant.
         let factor_u32 =
             u32::try_from(new_factor.max(2)).map_err(|_| anyhow::anyhow!("factor exceeds u32"))?;
         let decim = FirdecimCx::from_taps(factor_u32, &taps)
@@ -343,55 +284,18 @@ impl Block for Channelizer {
                     reconfig_scope: ReconfigureScope::SelfBlock,
                 },
                 ParamSpec {
-                    key: "factor",
-                    label: "Decimation factor",
-                    kind: ParamKind::Range {
-                        min: 1.0,
-                        max: 1024.0,
-                        step: 1.0,
-                        default: 4.0,
-                        unit: "",
-                    },
-                    // Changes output rate; downstream chain re-inits.
-                    reconfig_scope: ReconfigureScope::Downstream,
-                },
-                ParamSpec {
                     key: "output_rate_hz",
                     label: "Output rate",
                     kind: ParamKind::Range {
-                        min: 0.0,
+                        min: 1.0,
                         max: 10.0e6,
                         step: 1.0,
-                        default: 0.0,
+                        default: 240_000.0,
                         unit: "Hz",
                     },
-                    // When set, auto-derives `factor` (and FIR) from the
-                    // ratio to `input_rate_hz`. Same downstream scope as
-                    // `factor` — output rate change triggers a tear-down.
-                    reconfig_scope: ReconfigureScope::Downstream,
-                },
-                ParamSpec {
-                    key: "num_taps",
-                    label: "FIR length",
-                    kind: ParamKind::Range {
-                        min: 3.0,
-                        max: 2048.0,
-                        step: 2.0,
-                        default: 33.0,
-                        unit: "taps",
-                    },
-                    reconfig_scope: ReconfigureScope::Downstream,
-                },
-                ParamSpec {
-                    key: "cutoff_normalized",
-                    label: "Cutoff (× input rate)",
-                    kind: ParamKind::Range {
-                        min: 0.001,
-                        max: 0.499,
-                        step: 0.001,
-                        default: 0.1,
-                        unit: "",
-                    },
+                    // Target channel rate. Factor + FIR auto-derive
+                    // from `input_rate / output_rate` at init; downstream
+                    // chain reinits since the actual output shifts.
                     reconfig_scope: ReconfigureScope::Downstream,
                 },
             ],
@@ -555,65 +459,33 @@ mod tests {
     }
 
     #[test]
-    fn output_rate_hz_derives_factor_from_input_rate() {
+    fn factor_derives_from_rates() {
         // 8 MS/s source, target 240 kHz channel → factor = round(8M/240k) = 33.
-        let params = ChannelizerParams {
-            input_rate_hz: 8_000_000.0,
-            freq_shift_hz: 0.0,
-            factor: 1, // garbage, ignored
-            output_rate_hz: Some(240_000.0),
-            num_taps: 7,             // garbage, auto-overridden
-            cutoff_normalized: 0.01, // garbage, auto-overridden
-        };
-        let ch = Channelizer::new(params).unwrap();
+        let ch = Channelizer::new(ChannelizerParams::new(8_000_000.0, 0.0, 240_000.0)).unwrap();
         assert_eq!(ch.factor(), 33);
         // FIR sizing tracks the derived factor (8*33 + 1).
         assert_eq!(ch.taps().len(), 8 * 33 + 1);
     }
 
     #[test]
-    fn output_rate_hz_unset_leaves_factor_alone() {
-        // Legacy mode: explicit factor wins, output_rate_hz: None.
-        let ch = Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 4)).unwrap();
+    fn integer_ratio_rates_land_on_exact_factor() {
+        // 2 MS/s → 500 kHz channel = factor 4.
+        let ch = Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 500_000.0)).unwrap();
         assert_eq!(ch.factor(), 4);
     }
 
     #[test]
     fn constructor_rejects_bad_params() {
-        assert!(Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 0)).is_err());
-        assert!(Channelizer::new(ChannelizerParams {
-            input_rate_hz: 2.0e6,
-            freq_shift_hz: 0.0,
-            factor: 4,
-            output_rate_hz: None,
-            num_taps: 2,
-            cutoff_normalized: 0.1,
-        })
-        .is_err());
-        assert!(Channelizer::new(ChannelizerParams {
-            input_rate_hz: 0.0,
-            freq_shift_hz: 0.0,
-            factor: 4,
-            output_rate_hz: None,
-            num_taps: 33,
-            cutoff_normalized: 0.1,
-        })
-        .is_err());
-        assert!(Channelizer::new(ChannelizerParams {
-            input_rate_hz: 2.0e6,
-            freq_shift_hz: 0.0,
-            factor: 4,
-            output_rate_hz: None,
-            num_taps: 33,
-            cutoff_normalized: 0.5,
-        })
-        .is_err());
+        assert!(Channelizer::new(ChannelizerParams::new(0.0, 0.0, 240_000.0)).is_err());
+        assert!(Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 0.0)).is_err());
+        assert!(Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, -1.0)).is_err());
     }
 
     #[test]
     fn freq_shift_zero_passes_dc() {
         // freq_shift=0 reduces the channelizer to a plain decimator.
-        let mut ch = Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 4)).unwrap();
+        // 2 MS/s → 500 kS/s = factor 4.
+        let mut ch = Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 500_000.0)).unwrap();
         let input = vec![Complex::new(1.0_f32, 0.0); 8 * ch.taps().len()];
         let (out, _, produced) = run(&mut ch, &input, input.len() / 4 + 4);
         for s in &out[produced.saturating_sub(4)..produced] {
@@ -624,7 +496,8 @@ mod tests {
 
     #[test]
     fn rate_invariant_holds_across_calls() {
-        let mut ch = Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 5)).unwrap();
+        // 2 MS/s → 400 kS/s = factor 5.
+        let mut ch = Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 400_000.0)).unwrap();
         let sizes = [0_usize, 1, 4, 5, 6, 9, 10, 17, 23, 31, 50];
         let mut total_in = 0;
         let mut total_out = 0;
@@ -641,20 +514,11 @@ mod tests {
     #[test]
     fn tunes_a_tone_to_baseband() {
         // Input: complex exponential at +200 kHz against 2 MS/s.
-        // After tuning to +200 kHz and decimating by 8 → output rate
-        // 250 kS/s, the tone should land at DC.
+        // Target 250 kS/s channel → factor 8, tone at DC after mixing.
         let fs = 2.0e6;
         let tone_hz = 200_000.0;
-        let factor = 8;
-        let params = ChannelizerParams {
-            input_rate_hz: fs,
-            freq_shift_hz: tone_hz,
-            factor,
-            output_rate_hz: None,
-            num_taps: 129,
-            cutoff_normalized: 0.4 / factor as f32,
-        };
-        let mut ch = Channelizer::new(params).unwrap();
+        let mut ch = Channelizer::new(ChannelizerParams::new(fs, tone_hz, 250_000.0)).unwrap();
+        let factor = ch.factor();
 
         let n = 8192_usize;
         let input: Vec<Complex<f32>> = (0..n)
@@ -665,12 +529,10 @@ mod tests {
             .collect();
         let (out, _, produced) = run(&mut ch, &input, n / factor + 4);
 
-        // Skip warmup: ~num_taps/factor outputs are transient.
-        let warm = params.num_taps / params.factor + 4;
+        // Skip warmup: ~num_taps/factor outputs are transient. FIR is
+        // sized 8*factor+1, so roughly 8 warmup samples.
+        let warm = 8 + 4;
         assert!(produced > warm, "no steady-state samples produced");
-        // The tone should be (nearly) a DC complex constant of magnitude 1
-        // rotating slowly — after mixing, phase is ~constant, magnitude
-        // is preserved by the unit-gain LPF.
         let avg_mag: f32 = out[warm..produced]
             .iter()
             .map(|c| (c.re * c.re + c.im * c.im).sqrt())
@@ -686,16 +548,8 @@ mod tests {
     fn out_of_band_tone_is_rejected() {
         // Tune to 0; input is a tone way outside the decimated passband.
         let fs = 2.0e6;
-        let factor = 8;
-        let params = ChannelizerParams {
-            input_rate_hz: fs,
-            freq_shift_hz: 0.0,
-            factor,
-            output_rate_hz: None,
-            num_taps: 129,
-            cutoff_normalized: 0.4 / factor as f32,
-        };
-        let mut ch = Channelizer::new(params).unwrap();
+        let mut ch = Channelizer::new(ChannelizerParams::new(fs, 0.0, 250_000.0)).unwrap();
+        let factor = ch.factor();
 
         // Tone at +600 kHz with fs=2 MS/s → normalized 0.3, well outside
         // the post-decim passband of ±125 kHz (0.0625 normalized).
@@ -709,7 +563,7 @@ mod tests {
             .collect();
         let (out, _, produced) = run(&mut ch, &input, n / factor + 4);
 
-        let warm = params.num_taps / params.factor + 4;
+        let warm = 8 + 4;
         let rms: f32 = (out[warm..produced]
             .iter()
             .map(|c| c.re * c.re + c.im * c.im)
@@ -725,16 +579,8 @@ mod tests {
         // for second half. Retune between halves and confirm both halves
         // demodulate to near-DC in their own windows.
         let fs = 2.0e6;
-        let factor = 8;
-        let params = ChannelizerParams {
-            input_rate_hz: fs,
-            freq_shift_hz: 100_000.0,
-            factor,
-            output_rate_hz: None,
-            num_taps: 129,
-            cutoff_normalized: 0.4 / factor as f32,
-        };
-        let mut ch = Channelizer::new(params).unwrap();
+        let mut ch = Channelizer::new(ChannelizerParams::new(fs, 100_000.0, 250_000.0)).unwrap();
+        let factor = ch.factor();
 
         let half = 4096_usize;
         let tone_a = 100_000.0_f32;
@@ -765,7 +611,7 @@ mod tests {
         assert!(p_a > 0 && p_b > 0);
 
         // Second-half settled magnitude should match baseband unit-tone.
-        let warm = params.num_taps / params.factor + 4;
+        let warm = 8 + 4;
         let avg_mag: f32 = b_out[warm..p_b]
             .iter()
             .map(|c| (c.re * c.re + c.im * c.im).sqrt())
@@ -779,7 +625,8 @@ mod tests {
 
     #[test]
     fn output_backpressure_pauses_cleanly() {
-        let mut ch = Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 4)).unwrap();
+        // 2 MS/s → 500 kS/s channel = factor 4.
+        let mut ch = Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 500_000.0)).unwrap();
         let input = vec![Complex::new(1.0_f32, 0.0); 40];
         let (_, consumed_a, produced_a) = run(&mut ch, &input, 2);
         assert_eq!(produced_a, 2);
