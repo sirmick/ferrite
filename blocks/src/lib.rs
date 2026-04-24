@@ -31,6 +31,7 @@ pub mod file_source;
 pub mod fm_demod;
 pub mod frame;
 pub mod log_mag_u8;
+pub mod rds_demod;
 pub mod real_resamp;
 pub mod registry;
 pub mod render;
@@ -45,6 +46,7 @@ pub mod squelch;
 pub mod ssb_demod;
 pub mod stereo_decoder;
 pub mod tee_iq_f32;
+pub mod tee_real_f32;
 pub mod ws_bridge;
 
 pub use am_demod::{AmDemod, AmDemodParams};
@@ -68,6 +70,7 @@ pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
+pub use rds_demod::{RdsDemod, RdsDemodParams};
 pub use real_resamp::{RealF32Resamp, RealF32ResampParams};
 pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hold, SpectrumStats};
 pub use rssi_probe::{RssiProbe, RssiProbeParams};
@@ -79,6 +82,7 @@ pub use squelch::{Squelch, SquelchParams};
 pub use ssb_demod::{Sideband, SsbDemod, SsbDemodParams};
 pub use stereo_decoder::{StereoDecoder, StereoDecoderParams};
 pub use tee_iq_f32::TeeIqF32;
+pub use tee_real_f32::TeeRealF32;
 pub use ws_bridge::{
     BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx,
     WsBridgeTxEvents, WsBridgeTxFftU8,
@@ -141,6 +145,7 @@ mod tests {
             "SsbDemod",
             "Squelch",
             "RssiProbe",
+            "RdsDemod",
             "StereoDecoder",
             "AmDemod",
             "AmModulator",
@@ -150,6 +155,7 @@ mod tests {
             "DtmfDecoder",
             "EventsSink",
             "TeeIqF32",
+            "TeeRealF32",
             "WsBridgeTx",
             "WsBridgeTxFftU8",
             "WsBridgeTxEvents",
