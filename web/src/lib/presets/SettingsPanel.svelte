@@ -4,30 +4,22 @@
   import InputControls from '$lib/controls/InputControls.svelte';
   import AudioPanel from './AudioPanel.svelte';
   import RssiMeter from '$lib/rssi/RssiMeter.svelte';
-  import { RECEIVERS, applyRecipe, detectReceiver, findRecipe, type ReceiverId } from './receivers';
 
   // Container for everything the user reaches for after the source is
-  // open: SDR-side knobs (Input) and demod-side knobs (Receiver).
-  // Source/channelizer/FFT/audio plumbing lives in their own surfaces
-  // (source dialog, spectrum toolbar, FFT controls strip).
+  // open. Order from top to bottom: Receiver (the live demod knobs you
+  // tweak per-station), Audio (volume + meters), then Input (SDR-side
+  // settings — typically configured once and forgotten). The Input
+  // section starts collapsed so the surface stays focused on the
+  // controls actively used while listening.
+  //
+  // Switching demodulator (FM ↔ AM ↔ SSB) used to be a Mode dropdown
+  // here; that's now a Catalog-tab choice — picking a different preset
+  // loads the matching flowgraph in one click and is the single source
+  // of truth for "what mode am I in".
   const DEMOD_ID = 'demod';
 
-  let activeId = $derived(detectReceiver(pipeline.flowgraph));
-  let applying = $state(false);
   let demodBlock = $derived(pipeline.blocks[DEMOD_ID]);
-
-  async function swapTo(id: ReceiverId) {
-    if (applying || !pipeline.flowgraph) return;
-    const recipe = findRecipe(id);
-    applying = true;
-    try {
-      const next = applyRecipe(pipeline.flowgraph, recipe);
-      if (next === null) return;
-      await pipeline.patchFlowgraph(next);
-    } finally {
-      applying = false;
-    }
-  }
+  let presetLabel = $derived(pipeline.flowgraph?.label ?? pipeline.flowgraph?.name ?? '—');
 </script>
 
 <div
@@ -42,43 +34,13 @@
       <summary
         class="cursor-pointer select-none text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-fg)]"
       >
-        Input
-      </summary>
-      <div class="mt-2 flex flex-col gap-3 pl-1">
-        <InputControls />
-        <RssiMeter />
-      </div>
-    </details>
-
-    <details open class="settings-section">
-      <summary
-        class="cursor-pointer select-none text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-fg)]"
-      >
         Receiver
       </summary>
       <div class="mt-2 flex flex-col gap-3 pl-1">
-        <label class="grid gap-1">
-          <span class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]"
-            >Mode</span
-          >
-          <select
-            class="rounded border border-slate-800 bg-slate-900 px-2 py-1"
-            value={activeId ?? ''}
-            onchange={(e) => {
-              const next = (e.currentTarget as HTMLSelectElement).value as ReceiverId;
-              void swapTo(next);
-            }}
-            disabled={applying || pipeline.phase === 'busy'}
-          >
-            {#if activeId === null}
-              <option value="" disabled>— custom —</option>
-            {/if}
-            {#each RECEIVERS as r (r.id)}
-              <option value={r.id}>{r.label}</option>
-            {/each}
-          </select>
-        </label>
-
+        <div class="flex items-baseline justify-between text-[10px]">
+          <span class="text-[color:var(--color-muted)]">preset</span>
+          <span class="font-mono text-slate-300">{presetLabel}</span>
+        </div>
         {#if demodBlock}
           <section class="flex flex-col gap-1">
             <header class="flex items-baseline justify-between">
@@ -93,6 +55,10 @@
               <BlockParams block={demodBlock} hideSourceRestart />
             {/if}
           </section>
+        {:else}
+          <p class="text-[10px] text-slate-600">
+            no demod block — pick a preset from the Catalog tab.
+          </p>
         {/if}
       </div>
     </details>
@@ -105,6 +71,18 @@
       </summary>
       <div class="mt-2 pl-1">
         <AudioPanel />
+      </div>
+    </details>
+
+    <details class="settings-section">
+      <summary
+        class="cursor-pointer select-none text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-fg)]"
+      >
+        Input
+      </summary>
+      <div class="mt-2 flex flex-col gap-3 pl-1">
+        <InputControls />
+        <RssiMeter />
       </div>
     </details>
 

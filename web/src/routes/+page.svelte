@@ -243,7 +243,10 @@
             {#if leftTab === 'bands'}
               <BandsPanel />
             {:else if leftTab === 'catalog'}
-              <SignalCatalog />
+              <SignalCatalog
+                activeSlug={pipeline.flowgraph?.name ?? null}
+                onPick={(entry) => void pipeline.loadPreset(entry.slug)}
+              />
             {:else if leftTab === 'settings'}
               <SettingsPanel />
             {:else}

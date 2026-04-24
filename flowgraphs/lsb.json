@@ -2,8 +2,11 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "lsb",
   "label": "Lower sideband (voice)",
-  "description": "Lower-sideband SSB receiver — 80 m and 40 m amateur phone, 160 m. Same signal chain as the USB preset; only `sideband: lsb` differs. Source 2.4 MS/s IQ → channelizer factor 50 → SsbDemod at 48 kS/s → AudioSink. Server-side FFT/LogMagU8 spectrum chain is identical to the other receivers.",
-  "environments": ["node", "browser"],
+  "description": "Lower-sideband SSB voice — amateur 80 m, 40 m, 160 m phone bands by convention. Same signal chain as USB; pick the matching mode for the band you're tuned to or audio sounds inverted.",
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -33,15 +36,16 @@
       "type": "FFT",
       "placement": "node",
       "params": {
-        "size": 16384,
-        "window": "hann"
+        "size": 65536,
+        "window": "hann",
+        "max_frames_per_second": 30
       }
     },
     "logmag": {
       "type": "LogMagU8",
       "placement": "node",
       "params": {
-        "size": 16384,
+        "size": 65536,
         "alpha": 0.3
       }
     },
@@ -62,12 +66,33 @@
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["demod.out", "audio.in"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "demod.out",
+      "audio.in"
+    ]
   ]
 }

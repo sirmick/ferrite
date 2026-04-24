@@ -47,11 +47,19 @@ export function buildCatalog(modules: Readonly<Record<string, unknown>>): {
         continue;
       }
       const d = doc as FlowgraphDoc;
+      // Drop headless / node-only presets — they're useful from the
+      // CLI (`am-audio-record`, `fm-audio-record`, `capture_fm`) but
+      // can't be selected from the browser because they have no
+      // AudioSink for the WASM runtime to attach to. Keeping them in
+      // the catalog would just confuse users who click them and get
+      // silence with no error.
+      const envs = d.environments ?? [];
+      if (!envs.includes('browser')) continue;
       entries.push({
         slug: d.name ?? slug,
         label: d.label ?? d.name ?? slug,
         description: d.description,
-        environments: d.environments ?? [],
+        environments: envs,
         doc: d,
       });
     } catch (err) {

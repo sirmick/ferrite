@@ -2,8 +2,11 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "nbfm",
   "label": "Narrowband FM (voice)",
-  "description": "Narrowband FM receiver for VHF voice — NOAA weather, marine, aircraft (FM mode), 2 m / 70 cm amateur, public safety. Source 2.4 MS/s IQ. Channelizer decimates by 50 to a 48 kS/s baseband (~12 kHz one-sided post-LPF, comfortably passes ±5 kHz deviation + audio sidebands and rejects aliases). FmDemod runs at 48 kS/s with `max_deviation_hz: 5000` — same block as WBFM, narrower scaling. Output goes straight to the AudioSink at the AudioContext rate; no post-demod decimator needed because the channelizer already lands us on 48 kS/s. Server-side FFT/LogMagU8 spectrum chain matches WBFM so the visualisation is identical.",
-  "environments": ["node", "browser"],
+  "description": "Narrowband FM voice — 25 kHz channels: NOAA weather radio, marine VHF, public safety, FRS/GMRS, 2 m and 70 cm amateur. ±5 kHz deviation. Pick a frequency from the Bands tab to land on a known channel.",
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -33,15 +36,16 @@
       "type": "FFT",
       "placement": "node",
       "params": {
-        "size": 16384,
-        "window": "hann"
+        "size": 65536,
+        "window": "hann",
+        "max_frames_per_second": 30
       }
     },
     "logmag": {
       "type": "LogMagU8",
       "placement": "node",
       "params": {
-        "size": 16384,
+        "size": 65536,
         "alpha": 0.3
       }
     },
@@ -61,12 +65,33 @@
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["demod.out", "audio.in"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "demod.out",
+      "audio.in"
+    ]
   ]
 }

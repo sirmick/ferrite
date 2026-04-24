@@ -2,8 +2,11 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "wbam",
   "label": "AM broadcast",
-  "description": "Wideband AM receiver authored as one cross-env doc. Structurally a mirror of wbfm.json — TeeIqF32 fans the raw 2.4 MS/s source into a server-side FFT → LogMagU8 → ui:fft tap (full-RF view) and an audio chain where a Channelizer picks the listening frequency, a 5× decim brings it to 48 kHz, and an envelope-detector AM demod with a 100 ms DC-blocker feeds the AudioSink. The source block params match wbfm.json so a receivers-pane toggle can swap just the demod chain.",
-  "environments": ["node", "browser"],
+  "description": "AM broadcast — medium wave (540–1700 kHz), shortwave, and aviation (118–137 MHz, AM mode). Envelope demodulation with carrier-derived gain. Tune to a strong station first to verify your antenna is in the right band.",
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -33,15 +36,16 @@
       "type": "FFT",
       "placement": "node",
       "params": {
-        "size": 16384,
-        "window": "hann"
+        "size": 65536,
+        "window": "hann",
+        "max_frames_per_second": 30
       }
     },
     "logmag": {
       "type": "LogMagU8",
       "placement": "node",
       "params": {
-        "size": 16384,
+        "size": 65536,
         "floor_dbfs": -100.0,
         "ceil_dbfs": 0.0,
         "alpha": 0.3
@@ -73,13 +77,37 @@
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "decim.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["decim.out", "demod.in"],
-    ["demod.out", "audio.in"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "decim.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "decim.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio.in"
+    ]
   ]
 }

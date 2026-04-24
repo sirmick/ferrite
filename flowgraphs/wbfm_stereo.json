@@ -2,8 +2,11 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "wbfm_stereo",
   "label": "FM broadcast (stereo)",
-  "description": "Wideband FM receiver with stereo decoding. Source 2.4 MS/s IQ, channelizer factor 10 → 240 kS/s, FmDemod at 240 kS/s outputs the MPX composite, StereoDecoder splits into L/R at 240 kS/s, each channel decimated 5× to 48 kHz and fed to its own AudioSink (audio_l, audio_r). The browser runtime detects the _l/_r suffix convention and routes the two sinks through a ChannelMerger to the destination's left and right channels. Pilot-lock events land at ui:stereo for a UI indicator. Server-side FFT/LogMag spectrum chain identical to mono wbfm.",
-  "environments": ["node", "browser"],
+  "description": "Wideband FM broadcast with stereo decoding — same 87.9–107.9 MHz band as the mono preset, but recovers the L/R channels from the 38 kHz subcarrier when the 19 kHz pilot is detected. Falls back gracefully to L+R sum if the station isn't transmitting in stereo.",
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -33,15 +36,16 @@
       "type": "FFT",
       "placement": "node",
       "params": {
-        "size": 16384,
-        "window": "hann"
+        "size": 65536,
+        "window": "hann",
+        "max_frames_per_second": 30
       }
     },
     "logmag": {
       "type": "LogMagU8",
       "placement": "node",
       "params": {
-        "size": 16384,
+        "size": 65536,
         "alpha": 0.3
       }
     },
@@ -95,17 +99,49 @@
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["demod.out", "stereo.in"],
-    ["stereo.left", "decim_l.in"],
-    ["stereo.right", "decim_r.in"],
-    ["stereo.events", "ui:stereo"],
-    ["decim_l.out", "audio_l.in"],
-    ["decim_r.out", "audio_r.in"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "demod.out",
+      "stereo.in"
+    ],
+    [
+      "stereo.left",
+      "decim_l.in"
+    ],
+    [
+      "stereo.right",
+      "decim_r.in"
+    ],
+    [
+      "decim_l.out",
+      "audio_l.in"
+    ],
+    [
+      "decim_r.out",
+      "audio_r.in"
+    ]
   ]
 }
