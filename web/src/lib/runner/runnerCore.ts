@@ -46,6 +46,9 @@ interface AudioBinding {
   readonly scratch: Float32Array;
   /** Samples drained from this block since the last diag report. */
   drained: number;
+  /** Cumulative `AudioSink::dropped_samples` snapshot taken at the last
+   *  diag report, so the next tick can print the delta. */
+  droppedBaseline: bigint;
 }
 
 /** Per-bridge inbound counter. Incremented from the WS subscription
@@ -54,6 +57,9 @@ interface BridgeCounter {
   readonly blockId: string;
   readonly streamId: number;
   samples: number;
+  /** Cumulative `WsBridgeRx::dropped_samples` snapshot at the last
+   *  diag report — printed as a delta so ring overflow is visible. */
+  droppedBaseline: bigint;
 }
 
 interface LoadedState {
@@ -198,9 +204,23 @@ export class RunnerCore {
     state.diagTimer = setInterval(() => {
       if (this.loaded !== state || !state.running) return;
       const bridgeSummary = state.bridges
-        .map((b) => `${b.blockId}(#${b.streamId})=${b.samples}`)
+        .map((b) => {
+          const total = safeBigint(() => state.rt.iqDroppedSamples(b.blockId));
+          const drops = total - b.droppedBaseline;
+          b.droppedBaseline = total;
+          const dropTag = drops > 0n ? ` drop=${drops}` : '';
+          return `${b.blockId}(#${b.streamId})=${b.samples}${dropTag}`;
+        })
         .join(' ');
-      const audioSummary = state.audio.map((a) => `${a.blockId}=${a.drained}`).join(' ');
+      const audioSummary = state.audio
+        .map((a) => {
+          const total = safeBigint(() => state.rt.audioDroppedSamples(a.blockId));
+          const drops = total - a.droppedBaseline;
+          a.droppedBaseline = total;
+          const dropTag = drops > 0n ? ` drop=${drops}` : '';
+          return `${a.blockId}=${a.drained}${dropTag}`;
+        })
+        .join(' ');
       const text = `runner 1s: ticks=${state.ticks} rx[${bridgeSummary}] audio[${audioSummary}]`;
       postDiag(text);
       state.ticks = 0;
@@ -263,7 +283,7 @@ function wireBlocks(
     const block = raw as { type?: string; params?: Record<string, unknown> };
     if (block.type === 'WsBridgeRx') {
       const streamId = Number(block.params?.stream_id ?? 0);
-      const counter: BridgeCounter = { blockId, streamId, samples: 0 };
+      const counter: BridgeCounter = { blockId, streamId, samples: 0, droppedBaseline: 0n };
       bridges.push(counter);
       const unsub = client.subscribe(streamId, (frame) => {
         if (frame.header.payloadType !== PayloadType.IqF32) return;
@@ -277,7 +297,13 @@ function wireBlocks(
         Number(block.params?.buffer_samples ?? DEFAULT_AUDIO_SINK_CAPACITY),
       );
       const writer = AudioRingWriter.create(capacity);
-      audio.push({ blockId, writer, scratch: new Float32Array(capacity), drained: 0 });
+      audio.push({
+        blockId,
+        writer,
+        scratch: new Float32Array(capacity),
+        drained: 0,
+        droppedBaseline: 0n,
+      });
       audioSabs[blockId] = writer.sab;
     }
   }
@@ -302,4 +328,14 @@ function throwNoRuntime(): never {
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/** Wraps a wasm drop-counter call so a transient throw (block went
+ *  away mid-reconfigure) doesn't kill the diag loop for the session. */
+function safeBigint(fn: () => bigint): bigint {
+  try {
+    return fn();
+  } catch {
+    return 0n;
+  }
 }
