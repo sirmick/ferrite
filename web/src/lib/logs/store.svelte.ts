@@ -13,6 +13,24 @@ export interface LogEntry {
   source: LogSource;
   level: LogLevel;
   text: string;
+  /** Tracing target / category prefix on the line (e.g. `decoder::pocsag`,
+   *  `flowdiag`, `ferrited::main`). Parsed from `text` at push time so
+   *  the panel filter can group by it. `null` for lines with no parseable
+   *  prefix (free-text client output, vite messages). */
+  category: string | null;
+}
+
+/** Match a `target: message` prefix at the start of a line. The target
+ *  is whatever the tracing emitter set (`tracing::info!(target: "X", …)`)
+ *  or the module path that defaults to. We accept colons inside the
+ *  target itself (`decoder::pocsag`, `ferrite_blocks::audio_nr`) by
+ *  splitting on the FIRST `: ` (with the trailing space) — `decoder::`
+ *  contains `::` not `: `, so the split picks the right boundary. */
+const CATEGORY_RE = /^([A-Za-z_][\w:]*)\s*:\s/;
+
+export function categoryOfText(text: string): string | null {
+  const m = CATEGORY_RE.exec(text);
+  return m ? m[1] : null;
 }
 
 const MAX_ENTRIES = 500;
@@ -23,7 +41,29 @@ class LogStore {
    *  Drives the red dot on the sidebar's Logs tab so errors don't go
    *  unseen while the tab isn't active. Call `ackErrors()` on tab-open. */
   unreadErrors = $state<number>(0);
+  /** Categories the user has muted. Mute = drop from on-screen entries
+   *  display only; the line is still pushed (so unmuting later doesn't
+   *  reveal a hole) and still forwarded to the server. Session-only —
+   *  not persisted, since the set of categories the user cares about is
+   *  task-bound and not a long-lived preference. */
+  mutedCategories = $state<Set<string>>(new Set());
+  /** Categories ever seen on this session. The filter dropdown enumerates
+   *  this set so the user can mute things they've actually observed
+   *  rather than a hard-coded list. */
+  knownCategories = $state<Set<string>>(new Set());
   private nextId = 1;
+
+  toggleMute(category: string): void {
+    const next = new Set(this.mutedCategories);
+    if (next.has(category)) next.delete(category);
+    else next.add(category);
+    this.mutedCategories = next;
+  }
+
+  unmuteAll(): void {
+    if (this.mutedCategories.size === 0) return;
+    this.mutedCategories = new Set();
+  }
 
   push(source: LogSource, level: LogLevel, text: string): void {
     // Peel off `flowdiag side=… {json}` lines and feed the Flow store.
@@ -38,12 +78,20 @@ class LogStore {
       if (source === 'client') forwardToServer(level, text);
       return;
     }
+    const category = categoryOfText(text);
+    if (category && !this.knownCategories.has(category)) {
+      // Mutate via fresh Set so $state tracks the change.
+      const next = new Set(this.knownCategories);
+      next.add(category);
+      this.knownCategories = next;
+    }
     const entry: LogEntry = {
       id: this.nextId++,
       t: Date.now(),
       source,
       level,
       text,
+      category,
     };
     const next =
       this.entries.length >= MAX_ENTRIES
@@ -61,6 +109,8 @@ class LogStore {
   clear(): void {
     this.entries = [];
     this.unreadErrors = 0;
+    // Don't clear `knownCategories` — the filter dropdown should keep
+    // listing them so the user can re-mute after a clear.
   }
 
   /** Mark the error badge as read. Called when the Logs tab gains focus. */
