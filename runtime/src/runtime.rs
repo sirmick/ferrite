@@ -90,8 +90,9 @@ pub struct DiagBlock {
     pub id: String,
     pub type_name: String,
     pub process_calls_cum: u64,
-    /// Total time inside `process()` in nanoseconds. Native runtime
-    /// populates this from [`std::time::Instant`]; wasm leaves it at 0.
+    /// Wall-clock nanoseconds spent inside `process()` cumulatively.
+    /// Sourced from `web_time::Instant`, which transparently uses
+    /// `std::time::Instant` on native and `performance.now()` on wasm.
     pub process_ns_cum: u64,
     pub inputs: Vec<DiagPort>,
     pub outputs: Vec<DiagPort>,
@@ -172,10 +173,9 @@ struct BlockEntry {
     /// loop re-runs until the block stops making progress).
     process_calls_cum: u64,
     /// Total wall-clock time spent inside `process()` in nanoseconds.
-    /// Native only — wasm leaves this at 0 because `Instant::now()` is a
-    /// no-op panic on wasm32-unknown-unknown. Surface the wasm gap in
-    /// the UI as "— " rather than "0%" so the reader knows it's missing
-    /// rather than idle.
+    /// Sourced via `web_time::Instant`, which works on both native
+    /// (std clock) and wasm (`performance.now()`); both sides report
+    /// real numbers in `flowdiag` snapshots.
     process_ns_cum: u64,
     /// `true` when this block instance was moved over from a previous
     /// runtime during reconfigure (its `init()` has already been called
@@ -995,12 +995,11 @@ impl Runtime {
                 // block id in context. `AssertUnwindSafe` is sound here
                 // because the runtime halts on error; the block's
                 // internal state may be corrupt but we won't reuse it.
-                #[cfg(not(target_arch = "wasm32"))]
-                let t0 = std::time::Instant::now();
+                let t0 = web_time::Instant::now();
                 let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     entry_mut.block.process(&mut io)
                 }));
-                #[cfg(not(target_arch = "wasm32"))]
+                #[allow(clippy::cast_possible_truncation)]
                 {
                     entry_mut.process_ns_cum = entry_mut
                         .process_ns_cum
