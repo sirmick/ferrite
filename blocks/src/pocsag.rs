@@ -184,16 +184,35 @@ impl Block for PocsagDemod {
             return Ok(Work::new());
         }
 
-        // Push samples into all three baud-rate decoders sequentially.
-        // The shim drain buffer is per-thread; pushing-then-draining
-        // each decoder serialises access so two rates can't tangle
-        // their output bytes together. multimon's per-decoder
-        // process() is also serialised by the runtime tick loop, so
-        // there's no concurrency to worry about here.
+        // Push samples into every decoder sequentially. The shim
+        // drain buffer is per-thread; pushing-then-draining each
+        // decoder serialises access so two rates can't tangle their
+        // output bytes together. multimon's per-decoder process()
+        // is also serialised by the runtime tick loop, so there's
+        // no concurrency to worry about here.
+        //
+        // Tracing target is split per protocol family so the Logs
+        // panel category dropdown can mute POCSAG and FLEX
+        // independently. tracing requires `target:` to be a string
+        // literal; we branch on the family rather than computing a
+        // runtime string.
         for d in &mut self.decoders {
             d.push(src);
-            for line in d.drain_lines() {
-                tracing::info!(target: "decoder::pocsag", "{line}");
+            let lines = d.drain_lines();
+            if lines.is_empty() {
+                continue;
+            }
+            match d.kind() {
+                Decoder::Pocsag512 | Decoder::Pocsag1200 | Decoder::Pocsag2400 => {
+                    for line in lines {
+                        tracing::info!(target: "decoder::pocsag", "{line}");
+                    }
+                }
+                Decoder::Flex | Decoder::FlexNext => {
+                    for line in lines {
+                        tracing::info!(target: "decoder::flex", "{line}");
+                    }
+                }
             }
         }
 
