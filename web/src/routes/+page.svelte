@@ -3,6 +3,7 @@
   import LogPanel from '$lib/layout/LogPanel.svelte';
   import FlowPanel from '$lib/layout/FlowPanel.svelte';
   import Split from '$lib/layout/Split.svelte';
+  import HealthDots from '$lib/layout/HealthDots.svelte';
   import BandsPanel from '$lib/presets/BandsPanel.svelte';
   import SettingsPanel from '$lib/presets/SettingsPanel.svelte';
   import SignalCatalog from '$lib/presets/SignalCatalog.svelte';
@@ -156,6 +157,7 @@
       <span class="text-xs text-[color:var(--color-muted)]">pre-alpha</span>
     </div>
     <div class="flex items-center gap-4 text-xs text-[color:var(--color-muted)]">
+      <HealthDots />
       <span>wasm: {wasmStatus}</span>
       <span>
         ws: {pipeline.wsStatus}
