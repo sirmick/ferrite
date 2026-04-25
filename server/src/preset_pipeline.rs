@@ -283,7 +283,7 @@ async fn drive(
                                 #[allow(clippy::cast_precision_loss)]
                                 let secs = stalled as f64 / 1e9;
                                 tracing::warn!(
-                                    target: "flowdiag",
+                                    target: "flowdiag::node",
                                     stalled_secs = secs,
                                     "SoapySource reader hasn't delivered in {:.1}s — driver likely hung",
                                     secs,
@@ -314,14 +314,16 @@ async fn drive(
                         }
                     }
                     if !parts.is_empty() {
-                        tracing::info!(target: "flowdiag", "flowcpu side=node {}", parts.join(" "));
+                        tracing::info!(target: "flowdiag::node", "flowcpu side=node {}", parts.join(" "));
                     }
                 }
                 // Canonical flow snapshot line. Same format the browser
                 // runner emits via `postDiag`; the browser-side
                 // `parseFlowdiagLine` picks either up with one regex.
+                // Tagged `flowdiag::node` so it can be muted separately
+                // from browser-side `flowdiag::browser`.
                 match serde_json::to_string(&snap) {
-                    Ok(json) => tracing::info!(target: "flowdiag", "flowdiag side=node {json}"),
+                    Ok(json) => tracing::info!(target: "flowdiag::node", "flowdiag side=node {json}"),
                     Err(err) => tracing::warn!(?err, "flowdiag serialize"),
                 }
             }

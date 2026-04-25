@@ -496,13 +496,24 @@ pub async fn browser_log(Json(entry): Json<BrowserLogEntry>) -> StatusCode {
     // regardless of which runtime side produced it. `tracing` requires
     // `target:` to be a string literal, so we branch on the route
     // rather than computing a runtime string.
-    let is_flowdiag = entry.message.starts_with("flowdiag side=");
+    // Browser-side flowdiag is now tagged with the `flowdiag::browser`
+    // category prefix at source. It still carries the legacy
+    // `flowdiag side=browser` substring so the receiving regex on
+    // either side keeps parsing it; the `contains` check finds either
+    // shape so we route correctly even if the prefix gets stripped.
+    let is_flowdiag = entry.message.contains("flowdiag side=");
     if is_flowdiag {
         match entry.level.as_str() {
-            "error" => tracing::error!(target: "flowdiag", source = src, "{}", entry.message),
-            "warn" => tracing::warn!(target: "flowdiag", source = src, "{}", entry.message),
-            "debug" => tracing::debug!(target: "flowdiag", source = src, "{}", entry.message),
-            _ => tracing::info!(target: "flowdiag", source = src, "{}", entry.message),
+            "error" => {
+                tracing::error!(target: "flowdiag::browser", source = src, "{}", entry.message)
+            }
+            "warn" => {
+                tracing::warn!(target: "flowdiag::browser", source = src, "{}", entry.message)
+            }
+            "debug" => {
+                tracing::debug!(target: "flowdiag::browser", source = src, "{}", entry.message)
+            }
+            _ => tracing::info!(target: "flowdiag::browser", source = src, "{}", entry.message),
         }
     } else {
         match entry.level.as_str() {

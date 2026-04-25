@@ -232,17 +232,18 @@ export class RunnerCore {
           return `${a.blockId}=${a.drained}${dropTag}`;
         })
         .join(' ');
-      // Lines are emitted with a category prefix (`runner: …`,
-      // `flowdiag: …`) so the Logs panel parses them into the same
-      // category-tagged badges the server-side tracing lines arrive
-      // with. The Flow tab's parser also looks for `flowdiag side=`
-      // anywhere in the text, so the leading category prefix doesn't
-      // break ingestion.
+      // Lines are emitted with a category prefix so the Logs panel
+      // parses them into the same category-tagged badges that
+      // server-side tracing lines arrive with. The Flow tab's parser
+      // looks for `flowdiag side=` anywhere in the text, so the
+      // leading category prefix doesn't break ingestion. Browser-
+      // side flowdiag uses its own `flowdiag::browser` category so
+      // it can be muted separately from server-side `flowdiag::node`.
       const text = `runner: runner 1s: ticks=${state.ticks} rx[${bridgeSummary}] audio[${audioSummary}]`;
       postDiag(text);
       try {
         const json = state.rt.diagSnapshot();
-        postDiag(`flowdiag: flowdiag side=browser ${json}`);
+        postDiag(`flowdiag::browser: flowdiag side=browser ${json}`);
       } catch {
         /* best-effort */
       }
