@@ -490,13 +490,27 @@ pub struct BrowserLogEntry {
 /// DevTools. Fire-and-forget on the client side.
 pub async fn browser_log(Json(entry): Json<BrowserLogEntry>) -> StatusCode {
     let src = entry.source.as_deref().unwrap_or("browser");
-    // We bind `target: "browser"` so `RUST_LOG=browser=info` can
-    // isolate these; the source tag appears as a structured field.
-    match entry.level.as_str() {
-        "error" => tracing::error!(target: "browser", source = src, "{}", entry.message),
-        "warn" => tracing::warn!(target: "browser", source = src, "{}", entry.message),
-        "debug" => tracing::debug!(target: "browser", source = src, "{}", entry.message),
-        _ => tracing::info!(target: "browser", source = src, "{}", entry.message),
+    // Browser-side flowdiag rides through here too — route it under
+    // the same `flowdiag` target the node-side runtime emits with, so
+    // `RUST_LOG=flowdiag=info` continues to isolate every flow snapshot
+    // regardless of which runtime side produced it. `tracing` requires
+    // `target:` to be a string literal, so we branch on the route
+    // rather than computing a runtime string.
+    let is_flowdiag = entry.message.starts_with("flowdiag side=");
+    if is_flowdiag {
+        match entry.level.as_str() {
+            "error" => tracing::error!(target: "flowdiag", source = src, "{}", entry.message),
+            "warn" => tracing::warn!(target: "flowdiag", source = src, "{}", entry.message),
+            "debug" => tracing::debug!(target: "flowdiag", source = src, "{}", entry.message),
+            _ => tracing::info!(target: "flowdiag", source = src, "{}", entry.message),
+        }
+    } else {
+        match entry.level.as_str() {
+            "error" => tracing::error!(target: "browser", source = src, "{}", entry.message),
+            "warn" => tracing::warn!(target: "browser", source = src, "{}", entry.message),
+            "debug" => tracing::debug!(target: "browser", source = src, "{}", entry.message),
+            _ => tracing::info!(target: "browser", source = src, "{}", entry.message),
+        }
     }
     StatusCode::NO_CONTENT
 }

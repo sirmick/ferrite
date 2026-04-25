@@ -27,11 +27,17 @@ class LogStore {
 
   push(source: LogSource, level: LogLevel, text: string): void {
     // Peel off `flowdiag side=… {json}` lines and feed the Flow store.
-    // Still push them into the log stream so the raw JSON is greppable
-    // on the Logs tab; the tab also forwards client-side ones to the
-    // server so ferrited's stdout gets the full record.
+    // We don't add them to `entries` — at 1 Hz × two sides they'd
+    // dominate the on-screen Logs tab, and the Flow tab is the right
+    // place to look at flow data anyway. Client-origin lines still get
+    // forwarded to the server so ferrited's stdout has the full
+    // record (and routes them under target=flowdiag on landing).
     const flowdiag = parseFlowdiagLine(text);
-    if (flowdiag) flow.ingest(flowdiag.side, flowdiag.snap);
+    if (flowdiag) {
+      flow.ingest(flowdiag.side, flowdiag.snap);
+      if (source === 'client') forwardToServer(level, text);
+      return;
+    }
     const entry: LogEntry = {
       id: this.nextId++,
       t: Date.now(),
