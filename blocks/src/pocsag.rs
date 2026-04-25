@@ -23,7 +23,7 @@
 //! Browser-placed decoders would need a different log emit path.
 
 use anyhow::{bail, Result};
-use ferrite_multimon_ng::{Decoder, MultimonDemod};
+use ferrite_multimon_ng::{pocsag as pocsag_cfg, Decoder, MultimonDemod};
 use serde::Deserialize;
 
 use crate::block::{
@@ -42,6 +42,13 @@ pub struct PocsagDemodParams {
     /// reads the live rate at `init()` / `update_rates()` and warns
     /// if it doesn't match `POCSAG_INPUT_RATE_HZ`.
     pub sample_rate_hz: f32,
+    /// Surface partial-CRC decodes too — useful while bringing up a
+    /// new install ("the decoder did see POCSAG-shaped activity, the
+    /// message just had too many errors to repair"). Off for normal
+    /// operation since busy carriers spam the log with garbled
+    /// fragments. Note: this is a vendor *global*; toggling it on
+    /// any PocsagDemod instance affects all of them in-process.
+    pub show_partial: bool,
 }
 
 impl Default for PocsagDemodParams {
@@ -49,12 +56,18 @@ impl Default for PocsagDemodParams {
         Self {
             #[allow(clippy::cast_precision_loss)]
             sample_rate_hz: POCSAG_INPUT_RATE_HZ as f32,
+            show_partial: true,
         }
     }
 }
 
 pub struct PocsagDemod {
-    inner: MultimonDemod,
+    /// Three multimon decoders running in parallel on the same
+    /// 22050 Hz audio stream — POCSAG512, 1200, 2400. Each tries to
+    /// lock its own bit timing; whichever matches the incoming carrier
+    /// produces messages, the others sit silent. Cheap enough (a few
+    /// % CPU per rate at 22 kHz) to always run all three.
+    decoders: Vec<MultimonDemod>,
     /// Tracks whether we've already logged the off-rate warning, so
     /// it doesn't spam every tick.
     warned_off_rate: bool,
@@ -69,8 +82,17 @@ impl PocsagDemod {
                 params.sample_rate_hz
             );
         }
+        // Apply the vendor-global config once at construction. The
+        // `show_partial` knob is shared across every PocsagDemod
+        // instance in the process — last writer wins; a single block
+        // is the common case so this is effectively per-block.
+        pocsag_cfg::set_show_partial_decodes(params.show_partial);
         Ok(Self {
-            inner: MultimonDemod::new(Decoder::Pocsag1200),
+            decoders: vec![
+                MultimonDemod::new(Decoder::Pocsag512),
+                MultimonDemod::new(Decoder::Pocsag1200),
+                MultimonDemod::new(Decoder::Pocsag2400),
+            ],
             warned_off_rate: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
         })
@@ -100,16 +122,24 @@ impl Block for PocsagDemod {
                 port_type: PortType::RealF32,
             }],
             outputs: &[],
-            params: &[ParamSpec {
-                key: "sample_rate_hz",
-                label: "Input sample rate",
-                kind: ParamKind::EnumNumeric {
-                    values: &[22_050.0],
-                    default: 22_050.0,
-                    unit: "Hz",
+            params: &[
+                ParamSpec {
+                    key: "sample_rate_hz",
+                    label: "Input sample rate",
+                    kind: ParamKind::EnumNumeric {
+                        values: &[22_050.0],
+                        default: 22_050.0,
+                        unit: "Hz",
+                    },
+                    reconfig_scope: ReconfigureScope::SourceRestart,
                 },
-                reconfig_scope: ReconfigureScope::SourceRestart,
-            }],
+                ParamSpec {
+                    key: "show_partial",
+                    label: "Show partial decodes",
+                    kind: ParamKind::Toggle { default: true },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                },
+            ],
         }
     }
 
@@ -150,11 +180,17 @@ impl Block for PocsagDemod {
             return Ok(Work::new());
         }
 
-        // Push samples into the C decoder, then drain whatever lines
-        // it produced this tick and emit them via tracing.
-        self.inner.push(src);
-        for line in self.inner.drain_lines() {
-            tracing::info!(target: "decoder::pocsag", "{line}");
+        // Push samples into all three baud-rate decoders sequentially.
+        // The shim drain buffer is per-thread; pushing-then-draining
+        // each decoder serialises access so two rates can't tangle
+        // their output bytes together. multimon's per-decoder
+        // process() is also serialised by the runtime tick loop, so
+        // there's no concurrency to worry about here.
+        for d in &mut self.decoders {
+            d.push(src);
+            for line in d.drain_lines() {
+                tracing::info!(target: "decoder::pocsag", "{line}");
+            }
         }
 
         let mut w = Work::new();
@@ -192,7 +228,8 @@ mod tests {
     #[test]
     fn rejects_bad_params() {
         assert!(PocsagDemod::new(PocsagDemodParams {
-            sample_rate_hz: 0.0
+            sample_rate_hz: 0.0,
+            ..Default::default()
         })
         .is_err());
     }

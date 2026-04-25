@@ -25,6 +25,12 @@ size_t multimon_drain(char *dst, size_t cap);
 /* Hard-reset the buffer without reading. Used on block reset. */
 void multimon_reset_buffer(void);
 
+/* POCSAG family setters — write the corresponding global declared
+ * in vendor/pocsag.c. Centralised here so bindgen has a real header
+ * declaration to wrap (it can't see pure-.c globals). */
+void multimon_pocsag_set_show_partial(int enabled);
+void multimon_pocsag_set_polarity(int mode);
+
 #ifdef __cplusplus
 }
 #endif

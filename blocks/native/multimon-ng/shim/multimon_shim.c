@@ -90,3 +90,19 @@ size_t multimon_drain(char *dst, size_t cap) {
 void multimon_reset_buffer(void) {
     multimon_buffer_len = 0;
 }
+
+/* --- POCSAG family setters ------------------------------------------ */
+
+/* Forward-declare the vendor globals we mutate. Defined in
+ * vendor/pocsag.c; bindgen can't see them because they're not in
+ * any header, so we wrap them in functions and expose those instead. */
+extern int pocsag_show_partial_decodes;
+extern int pocsag_polarity;
+
+void multimon_pocsag_set_show_partial(int enabled) {
+    pocsag_show_partial_decodes = enabled ? 1 : 0;
+}
+
+void multimon_pocsag_set_polarity(int mode) {
+    pocsag_polarity = mode;
+}

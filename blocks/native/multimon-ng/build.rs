@@ -49,7 +49,13 @@ fn main() {
         .clang_arg(format!("-I{}", vendor.display()))
         .clang_arg(format!("-I{}", shim.display()))
         // Per-decoder externs we currently wrap:
+        .allowlist_var("demod_poc5")
         .allowlist_var("demod_poc12")
+        .allowlist_var("demod_poc24")
+        // POCSAG family runtime-tunable globals — wrapped via setter
+        // functions in the shim because bindgen can't see globals
+        // that are only defined in .c sources.
+        .allowlist_function("multimon_pocsag_.*")
         // Common shapes:
         .allowlist_type("demod_param")
         .allowlist_type("demod_state")
@@ -102,10 +108,16 @@ fn decoder_sources(vendor: &std::path::Path) -> Vec<PathBuf> {
         // the symbols. Negligible code size.
         vendor.join("cJSON.c"),
     ];
-    // POCSAG family — demod_poc12 wraps the 1200 baud receiver; the
-    // common pocsag.c carries the codeword assembler + character
-    // decoders + the `pocsag_*` config globals that callers tune.
+    // POCSAG family — demod_poc5/12/24 wrap the 512/1200/2400 baud
+    // receivers respectively. All three share `pocsag.c`, which
+    // carries the codeword assembler + character decoders + the
+    // `pocsag_*` config globals (mode, polarity, error correction,
+    // show-partial) that callers tune. Wrapping all three is cheap
+    // and lets a single PocsagDemod block try every rate in parallel
+    // — paging carriers in the wild are a mix of all three.
+    out.push(vendor.join("demod_poc5.c"));
     out.push(vendor.join("demod_poc12.c"));
+    out.push(vendor.join("demod_poc24.c"));
     out.push(vendor.join("pocsag.c"));
     out
 }

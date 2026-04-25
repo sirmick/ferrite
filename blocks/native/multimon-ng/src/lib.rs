@@ -56,8 +56,12 @@ use std::mem::MaybeUninit;
 /// variant here + a `pub fn from_kind` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decoder {
-    /// 1200 baud POCSAG paging — 22050 Hz audio in.
+    /// 512 baud POCSAG paging — 22050 Hz audio in.
+    Pocsag512,
+    /// 1200 baud POCSAG paging — 22050 Hz audio in. Most common rate.
     Pocsag1200,
+    /// 2400 baud POCSAG paging — 22050 Hz audio in.
+    Pocsag2400,
 }
 
 impl Decoder {
@@ -68,7 +72,9 @@ impl Decoder {
         // emitted by multimon — we just read its samplerate field.
         unsafe {
             match self {
+                Self::Pocsag512 => sys::demod_poc5.samplerate,
                 Self::Pocsag1200 => sys::demod_poc12.samplerate,
+                Self::Pocsag2400 => sys::demod_poc24.samplerate,
             }
         }
     }
@@ -80,7 +86,9 @@ impl Decoder {
         // static, so `'static` is correct.
         unsafe {
             let p = match self {
+                Self::Pocsag512 => sys::demod_poc5.name,
                 Self::Pocsag1200 => sys::demod_poc12.name,
+                Self::Pocsag2400 => sys::demod_poc24.name,
             };
             let bytes = std::ffi::CStr::from_ptr(p).to_bytes();
             std::str::from_utf8_unchecked(bytes)
@@ -90,7 +98,43 @@ impl Decoder {
     fn dem_par(self) -> *const sys::demod_param {
         // addr-of a `const` C static — no unsafe needed.
         match self {
+            Self::Pocsag512 => &raw const sys::demod_poc5,
             Self::Pocsag1200 => &raw const sys::demod_poc12,
+            Self::Pocsag2400 => &raw const sys::demod_poc24,
+        }
+    }
+}
+
+/// POCSAG family runtime knobs, settable from Rust. These are
+/// vendor globals defined in `pocsag.c` — there's only one set per
+/// process, so settings made here affect every `Decoder::Pocsag*`
+/// instance in the runtime.
+pub mod pocsag {
+    use super::sys;
+
+    /// Show messages even when the BCH(31,21) decoder couldn't fully
+    /// repair them. Off by default in multimon (avoids gibberish);
+    /// useful while bringing up a new install — at least proves the
+    /// decoder is locking on a sync word even if the message bytes
+    /// are too garbled to assemble.
+    pub fn set_show_partial_decodes(enabled: bool) {
+        // SAFETY: thin C-shim setter that just writes the int global
+        // declared in vendor/pocsag.c. multimon reads it during
+        // decode from the same thread; no race in the runtime's
+        // serialised tick model.
+        unsafe {
+            sys::multimon_pocsag_set_show_partial(i32::from(enabled));
+        }
+    }
+
+    /// Polarity preference: `0` = auto (try both, decoder picks the
+    /// stronger), `1` = normal only, `2` = inverted only. Auto is
+    /// almost always right; pin to one to halve the per-burst CPU
+    /// once you know the network's polarity.
+    pub fn set_polarity(mode: u8) {
+        // SAFETY: same single-int-global write justification as above.
+        unsafe {
+            sys::multimon_pocsag_set_polarity(i32::from(mode));
         }
     }
 }
@@ -228,13 +272,17 @@ mod tests {
     use super::{Decoder, MultimonDemod};
 
     #[test]
-    fn pocsag1200_sample_rate_is_22050() {
-        assert_eq!(Decoder::Pocsag1200.sample_rate_hz(), 22_050);
+    fn all_pocsag_rates_use_22050_input() {
+        for d in [Decoder::Pocsag512, Decoder::Pocsag1200, Decoder::Pocsag2400] {
+            assert_eq!(d.sample_rate_hz(), 22_050, "{:?}", d);
+        }
     }
 
     #[test]
-    fn pocsag1200_name_round_trips() {
+    fn pocsag_names_round_trip() {
+        assert_eq!(Decoder::Pocsag512.name(), "POCSAG512");
         assert_eq!(Decoder::Pocsag1200.name(), "POCSAG1200");
+        assert_eq!(Decoder::Pocsag2400.name(), "POCSAG2400");
     }
 
     #[test]
