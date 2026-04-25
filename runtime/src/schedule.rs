@@ -175,8 +175,19 @@ mod tests {
         assert_eq!(
             s.order,
             vec![
-                "src", "tee", "chan", "fft", "logmag", "rssi", "demod", "tee_mpx", "decim",
-                "audio_nr", "audio", "rds"
+                "src",
+                "tee",
+                "chan",
+                "chan_tee",
+                "demod_rds",
+                "fft",
+                "logmag",
+                "rds",
+                "rssi",
+                "demod",
+                "decim",
+                "audio_nr",
+                "audio"
             ]
         );
     }
@@ -186,31 +197,30 @@ mod tests {
         let doc = FlowgraphDoc::from_json(WBFM).unwrap();
         let v = validate_doc(&doc).unwrap();
         let s = Schedule::from_validated(&v).unwrap();
-        // audio_nr sits between decim (48 kHz resampler) and the
-        // AudioSink; MPX tee fans demod into audio and RDS paths.
-        let audio = &s.wire_plan["audio"];
-        assert_eq!(audio["in"].source_block, "audio_nr");
-        assert_eq!(audio["in"].source_port, "out");
-        let audio_nr = &s.wire_plan["audio_nr"];
-        assert_eq!(audio_nr["in"].source_block, "decim");
-        assert_eq!(audio_nr["in"].source_port, "out");
-        let decim = &s.wire_plan["decim"];
-        assert_eq!(decim["in"].source_block, "tee_mpx");
-        assert_eq!(decim["in"].source_port, "out0");
+        // chan_tee fans the channelizer's IQ to the audio chain
+        // (rssi → browser FmDemod) and to the node-side RDS chain
+        // (demod_rds → rds → ui:rds). Keeping RDS on the node side
+        // is forced by the WsBridgeTxEvents NativeOnly placement —
+        // a browser-placed event source can't currently feed a ui:
+        // sink, so events have to originate node-side.
         let rds = &s.wire_plan["rds"];
-        assert_eq!(rds["in"].source_block, "tee_mpx");
-        assert_eq!(rds["in"].source_port, "out1");
-        let tee_mpx = &s.wire_plan["tee_mpx"];
-        assert_eq!(tee_mpx["in"].source_block, "demod");
-        assert_eq!(tee_mpx["in"].source_port, "out");
-        // demod reads from the rssi probe (pass-through), which in turn
-        // reads from the channelizer's 240 kS/s IQ.
+        assert_eq!(rds["in"].source_block, "demod_rds");
+        assert_eq!(rds["in"].source_port, "out");
+        let demod_rds = &s.wire_plan["demod_rds"];
+        assert_eq!(demod_rds["in"].source_block, "chan_tee");
+        assert_eq!(demod_rds["in"].source_port, "out1");
+        let rssi = &s.wire_plan["rssi"];
+        assert_eq!(rssi["in"].source_block, "chan_tee");
+        assert_eq!(rssi["in"].source_port, "out0");
+        let chan_tee = &s.wire_plan["chan_tee"];
+        assert_eq!(chan_tee["in"].source_block, "chan");
+        assert_eq!(chan_tee["in"].source_port, "out");
         let demod = &s.wire_plan["demod"];
         assert_eq!(demod["in"].source_block, "rssi");
         assert_eq!(demod["in"].source_port, "out");
-        let rssi = &s.wire_plan["rssi"];
-        assert_eq!(rssi["in"].source_block, "chan");
-        assert_eq!(rssi["in"].source_port, "out");
+        let decim = &s.wire_plan["decim"];
+        assert_eq!(decim["in"].source_block, "demod");
+        assert_eq!(decim["in"].source_port, "out");
         // src has no inputs — still present with an empty map.
         assert!(s.wire_plan["src"].is_empty());
     }
