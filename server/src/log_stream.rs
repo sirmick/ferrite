@@ -46,11 +46,14 @@ where
         let meta = event.metadata();
         let mut line = String::with_capacity(96);
         let _ = write!(line, "[{}] ", meta.level());
-        if let Some(target) = meta.module_path() {
-            let _ = write!(line, "{target}: ");
-        } else {
-            let _ = write!(line, "{}: ", meta.target());
-        }
+        // Prefer the explicit `target` — it's what
+        // `tracing::info!(target: "decoder::pocsag", …)` sets, and it
+        // defaults to the module_path when the caller didn't override.
+        // Choosing target over module_path means decoder/log lines can
+        // declare their own category (`decoder::pocsag`,
+        // `decoder::flex`, …) instead of being filed under whatever
+        // file they happen to live in.
+        let _ = write!(line, "{}: ", meta.target());
         let mut visitor = MessageVisitor(&mut line);
         event.record(&mut visitor);
         let _ = self.tx.send(line);

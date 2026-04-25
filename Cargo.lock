@@ -417,6 +417,7 @@ dependencies = [
  "anyhow",
  "ferrite-blocks-macros",
  "ferrite-liquid-dsp",
+ "ferrite-multimon-ng",
  "inventory",
  "js-sys",
  "nnnoiseless",

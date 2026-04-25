@@ -20,11 +20,15 @@ wasm     = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_bytes", "de
 # Links libSoapySDR; enables the `SoapySource` block. Native only —
 # blocks with this feature panic at monomorphization on wasm32.
 soapysdr = ["dep:soapysdr"]
+# Links vendored multimon-ng; enables digital-mode decoder blocks
+# (PocsagDemod et al). Native only — multimon-ng is a C library.
+multimon = ["dep:ferrite-multimon-ng"]
 
 [dependencies]
 anyhow                = "1"
 ferrite-blocks-macros = { path = "../blocks-macros", version = "0.0.1" }
 ferrite-liquid-dsp    = { path = "native/liquid-dsp", version = "0.0.1" }
+ferrite-multimon-ng   = { path = "native/multimon-ng", version = "0.0.1", optional = true }
 inventory             = "0.3"
 # Pure-Rust port of Xiph RNNoise. No C deps, wasm32-clean, ~50 kB with
 # embedded GRU weights. Used by audio_nr::neural. DeepFilterNet3 via

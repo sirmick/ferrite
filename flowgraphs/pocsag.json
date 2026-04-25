@@ -1,0 +1,107 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "pocsag",
+  "label": "POCSAG pagers",
+  "description": "POCSAG pager messages — 929-932 MHz US pager band (also active in many other countries on local pager allocations). Default frequency 929.6125 MHz is a busy carrier in many US metros (hospitals, drive-thrus, on-call rotations). Decoded messages stream into the Logs tab under the `decoder::pocsag` category.",
+  "environments": [
+    "node"
+  ],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 929612500.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "freq_shift_hz": 0.0,
+        "output_rate_hz": 50000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "FmDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 50000,
+        "max_deviation_hz": 5000
+      }
+    },
+    "resamp": {
+      "type": "RealF32Resamp",
+      "placement": "node",
+      "params": {
+        "output_rate_hz": 22050.0,
+        "stopband_db": 60.0
+      }
+    },
+    "pocsag": {
+      "type": "PocsagDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 22050.0
+      }
+    }
+  },
+  "wires": [
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "demod.out",
+      "resamp.in"
+    ],
+    [
+      "resamp.out",
+      "pocsag.in"
+    ]
+  ]
+}

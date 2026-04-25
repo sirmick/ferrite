@@ -30,7 +30,7 @@ serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 anyhow      = "1"
 clap        = { version = "4", features = ["derive"] }
-ferrite-blocks = { path = "../blocks", features = ["soapysdr"] }
+ferrite-blocks = { path = "../blocks", features = ["soapysdr", "multimon"] }
 ferrite-runtime = { path = "../runtime" }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 postcard    = { version = "1", default-features = false, features = ["alloc"] }

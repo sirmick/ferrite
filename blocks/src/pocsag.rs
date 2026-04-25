@@ -1,0 +1,209 @@
+//! POCSAG paging decoder — wraps `multimon-ng`'s `demod_poc12`.
+//!
+//! Takes NBFM-demodulated audio at exactly 22050 Hz (POCSAG1200's
+//! native rate inside multimon-ng) and pumps it through the C
+//! decoder. Decoded message lines are routed to the project's
+//! tracing log under `decoder::pocsag` — the existing log panel
+//! shows them with no per-decoder UI work.
+//!
+//! ### Sample-rate contract
+//!
+//! Input must be 22050 Hz ± 1 Hz. multimon's bit-timing is hard-
+//! coded against the rate; off-rate audio decodes as garbage. The
+//! preset is expected to put a `RealF32Resamp` directly upstream of
+//! this block to bring the FmDemod output to 22050. If the live
+//! rate differs from the contract, the block runs but emits a one-
+//! shot warning (no decode work) — easier to diagnose than silent
+//! garbage.
+//!
+//! ### Placement
+//!
+//! `Placement::NativeOnly` — multimon-ng is a C library and the
+//! tracing infra it logs through lives on the server side anyway.
+//! Browser-placed decoders would need a different log emit path.
+
+use anyhow::{bail, Result};
+use ferrite_multimon_ng::{Decoder, MultimonDemod};
+use serde::Deserialize;
+
+use crate::block::{
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind, ParamSpec, Placement,
+    PortSpec, PortType, ReconfigureScope, Work,
+};
+
+/// Required input sample rate. Hard contract from multimon-ng's
+/// `demod_poc12`.
+pub const POCSAG_INPUT_RATE_HZ: u32 = 22_050;
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct PocsagDemodParams {
+    /// Construction-time hint for the input rate (Hz). The block
+    /// reads the live rate at `init()` / `update_rates()` and warns
+    /// if it doesn't match `POCSAG_INPUT_RATE_HZ`.
+    pub sample_rate_hz: f32,
+}
+
+impl Default for PocsagDemodParams {
+    fn default() -> Self {
+        Self {
+            #[allow(clippy::cast_precision_loss)]
+            sample_rate_hz: POCSAG_INPUT_RATE_HZ as f32,
+        }
+    }
+}
+
+pub struct PocsagDemod {
+    inner: MultimonDemod,
+    /// Tracks whether we've already logged the off-rate warning, so
+    /// it doesn't spam every tick.
+    warned_off_rate: bool,
+    input_rate_hz: f64,
+}
+
+impl PocsagDemod {
+    pub fn new(params: PocsagDemodParams) -> Result<Self> {
+        if !(params.sample_rate_hz.is_finite() && params.sample_rate_hz > 0.0) {
+            bail!(
+                "pocsag_demod: sample_rate_hz must be > 0 (got {})",
+                params.sample_rate_hz
+            );
+        }
+        Ok(Self {
+            inner: MultimonDemod::new(Decoder::Pocsag1200),
+            warned_off_rate: false,
+            input_rate_hz: f64::from(params.sample_rate_hz),
+        })
+    }
+
+    fn check_rate(&mut self, rate: f64) {
+        if !self.warned_off_rate && (rate - f64::from(POCSAG_INPUT_RATE_HZ)).abs() > 1.0 {
+            tracing::warn!(
+                target: "decoder::pocsag",
+                "input rate {rate} Hz != required {POCSAG_INPUT_RATE_HZ} Hz; \
+                 add a RealF32Resamp upstream"
+            );
+            self.warned_off_rate = true;
+        }
+        self.input_rate_hz = rate;
+    }
+}
+
+#[ferrite_blocks_macros::ferrite_block]
+impl Block for PocsagDemod {
+    fn spec() -> BlockSpec {
+        BlockSpec {
+            type_name: "PocsagDemod",
+            placement: Placement::NativeOnly,
+            inputs: &[PortSpec {
+                name: "in",
+                port_type: PortType::RealF32,
+            }],
+            outputs: &[],
+            params: &[ParamSpec {
+                key: "sample_rate_hz",
+                label: "Input sample rate",
+                kind: ParamKind::EnumNumeric {
+                    values: &[22_050.0],
+                    default: 22_050.0,
+                    unit: "Hz",
+                },
+                reconfig_scope: ReconfigureScope::SourceRestart,
+            }],
+        }
+    }
+
+    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 {
+                self.check_rate(rate);
+            }
+        }
+        Ok(())
+    }
+
+    fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 && (rate - self.input_rate_hz).abs() > f64::EPSILON {
+                // Reset the warning so a re-negotiated rate is
+                // re-evaluated; if we drifted off-rate, the user gets
+                // a fresh warning instead of a stale one.
+                self.warned_off_rate = false;
+                self.check_rate(rate);
+            }
+        }
+        Ok(())
+    }
+
+    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+        let Some(src) = io
+            .inputs
+            .iter()
+            .find(|p| p.name == "in")
+            .and_then(InputPort::as_real_f32)
+        else {
+            return Ok(Work::new());
+        };
+
+        let consumed = src.len();
+        if consumed == 0 {
+            return Ok(Work::new());
+        }
+
+        // Push samples into the C decoder, then drain whatever lines
+        // it produced this tick and emit them via tracing.
+        self.inner.push(src);
+        for line in self.inner.drain_lines() {
+            tracing::info!(target: "decoder::pocsag", "{line}");
+        }
+
+        let mut w = Work::new();
+        w.consumed[0] = consumed;
+        Ok(w)
+    }
+}
+
+impl BlockFactory for PocsagDemod {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: PocsagDemodParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(PocsagDemod::new(p)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PocsagDemod, PocsagDemodParams};
+    use crate::block::{Block, BlockIo, InBuf, InputPort, PortMeta};
+
+    fn run(block: &mut PocsagDemod, samples: &[f32]) {
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::RealF32(samples),
+        }];
+        let mut outputs: [crate::block::OutputPort; 0] = [];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut outputs,
+        };
+        let _ = block.process(&mut io).unwrap();
+    }
+
+    #[test]
+    fn rejects_bad_params() {
+        assert!(PocsagDemod::new(PocsagDemodParams {
+            sample_rate_hz: 0.0
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn silence_does_not_panic_or_emit() {
+        // 1 s of silence at 22050 Hz: pumps cleanly through the C
+        // decoder, no decoded messages. The smoke-test that the
+        // wrapper, BlockIo plumbing, and tracing emit path all hang
+        // together.
+        let mut b = PocsagDemod::new(PocsagDemodParams::default()).unwrap();
+        run(&mut b, &vec![0.0_f32; 22_050]);
+    }
+}
