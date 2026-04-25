@@ -459,6 +459,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-multimon-ng"
+version = "0.0.1"
+dependencies = [
+ "bindgen",
+ "cc",
+]
+
+[[package]]
 name = "ferrite-runtime"
 version = "0.0.1"
 dependencies = [

@@ -6,6 +6,7 @@ members = [
     "blocks-macros",
     "blocks/native/hello",
     "blocks/native/liquid-dsp",
+    "blocks/native/multimon-ng",
     "runtime",
 ]
 

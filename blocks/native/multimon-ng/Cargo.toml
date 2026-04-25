@@ -1,0 +1,17 @@
+[package]
+name        = "ferrite-multimon-ng"
+version     = "0.0.1"
+edition.workspace      = true
+rust-version.workspace = true
+license     = "GPL-3.0-or-later"
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+description = "Vendored multimon-ng + safe Rust wrappers for digital-mode decoders. Native-only (the demods aren't intended for the wasm runtime)."
+
+[lib]
+crate-type = ["rlib"]
+
+[build-dependencies]
+cc      = "1.0"
+bindgen = "0.70"
