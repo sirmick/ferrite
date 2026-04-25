@@ -12,6 +12,14 @@ description = "Vendored multimon-ng + safe Rust wrappers for digital-mode decode
 [lib]
 crate-type = ["rlib"]
 
+# Diagnostic CLI — point at a 22050 Hz mono WAV captured from a real
+# carrier (or a `gen_pocsag` synthesis), prints any decoded POCSAG
+# messages plus burst statistics. Useful for offline triage when a
+# live preset isn't surfacing decodes.
+[[bin]]
+name = "analyze-pocsag-wav"
+path = "src/bin/analyze_pocsag_wav.rs"
+
 [build-dependencies]
 cc      = "1.0"
 bindgen = "0.70"

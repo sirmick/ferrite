@@ -62,6 +62,13 @@ pub enum Decoder {
     Pocsag1200,
     /// 2400 baud POCSAG paging — 22050 Hz audio in.
     Pocsag2400,
+    /// Motorola FLEX paging (1600/3200/6400 bps 4-FSK) — 22050 Hz
+    /// audio in. Largely replaced POCSAG on US carrier networks.
+    Flex,
+    /// FLEX with multimon-ng's "next" decoder — same wire format,
+    /// different sync / error-recovery internals. Run alongside
+    /// [`Self::Flex`] for best capture rate.
+    FlexNext,
 }
 
 impl Decoder {
@@ -75,6 +82,8 @@ impl Decoder {
                 Self::Pocsag512 => sys::demod_poc5.samplerate,
                 Self::Pocsag1200 => sys::demod_poc12.samplerate,
                 Self::Pocsag2400 => sys::demod_poc24.samplerate,
+                Self::Flex => sys::demod_flex.samplerate,
+                Self::FlexNext => sys::demod_flex_next.samplerate,
             }
         }
     }
@@ -89,6 +98,8 @@ impl Decoder {
                 Self::Pocsag512 => sys::demod_poc5.name,
                 Self::Pocsag1200 => sys::demod_poc12.name,
                 Self::Pocsag2400 => sys::demod_poc24.name,
+                Self::Flex => sys::demod_flex.name,
+                Self::FlexNext => sys::demod_flex_next.name,
             };
             let bytes = std::ffi::CStr::from_ptr(p).to_bytes();
             std::str::from_utf8_unchecked(bytes)
@@ -101,6 +112,8 @@ impl Decoder {
             Self::Pocsag512 => &raw const sys::demod_poc5,
             Self::Pocsag1200 => &raw const sys::demod_poc12,
             Self::Pocsag2400 => &raw const sys::demod_poc24,
+            Self::Flex => &raw const sys::demod_flex,
+            Self::FlexNext => &raw const sys::demod_flex_next,
         }
     }
 }
@@ -272,17 +285,25 @@ mod tests {
     use super::{Decoder, MultimonDemod};
 
     #[test]
-    fn all_pocsag_rates_use_22050_input() {
-        for d in [Decoder::Pocsag512, Decoder::Pocsag1200, Decoder::Pocsag2400] {
+    fn all_paging_decoders_use_22050_input() {
+        for d in [
+            Decoder::Pocsag512,
+            Decoder::Pocsag1200,
+            Decoder::Pocsag2400,
+            Decoder::Flex,
+            Decoder::FlexNext,
+        ] {
             assert_eq!(d.sample_rate_hz(), 22_050, "{:?}", d);
         }
     }
 
     #[test]
-    fn pocsag_names_round_trip() {
+    fn paging_names_round_trip() {
         assert_eq!(Decoder::Pocsag512.name(), "POCSAG512");
         assert_eq!(Decoder::Pocsag1200.name(), "POCSAG1200");
         assert_eq!(Decoder::Pocsag2400.name(), "POCSAG2400");
+        assert_eq!(Decoder::Flex.name(), "FLEX");
+        assert_eq!(Decoder::FlexNext.name(), "FLEX_NEXT");
     }
 
     #[test]

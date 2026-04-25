@@ -62,11 +62,13 @@ impl Default for PocsagDemodParams {
 }
 
 pub struct PocsagDemod {
-    /// Three multimon decoders running in parallel on the same
-    /// 22050 Hz audio stream — POCSAG512, 1200, 2400. Each tries to
-    /// lock its own bit timing; whichever matches the incoming carrier
-    /// produces messages, the others sit silent. Cheap enough (a few
-    /// % CPU per rate at 22 kHz) to always run all three.
+    /// Five multimon decoders running in parallel on the same
+    /// 22050 Hz audio stream — POCSAG512, 1200, 2400, FLEX, FLEX_NEXT.
+    /// Each tries to lock its own bit timing / sync; whichever
+    /// matches the carrier produces messages, the others sit
+    /// silent. Cheap enough (a few % CPU per rate at 22 kHz) to
+    /// always run all of them. FLEX largely replaced POCSAG on US
+    /// carrier networks, so any "paging band" preset wants both.
     decoders: Vec<MultimonDemod>,
     /// Tracks whether we've already logged the off-rate warning, so
     /// it doesn't spam every tick.
@@ -92,6 +94,8 @@ impl PocsagDemod {
                 MultimonDemod::new(Decoder::Pocsag512),
                 MultimonDemod::new(Decoder::Pocsag1200),
                 MultimonDemod::new(Decoder::Pocsag2400),
+                MultimonDemod::new(Decoder::Flex),
+                MultimonDemod::new(Decoder::FlexNext),
             ],
             warned_off_rate: false,
             input_rate_hz: f64::from(params.sample_rate_hz),

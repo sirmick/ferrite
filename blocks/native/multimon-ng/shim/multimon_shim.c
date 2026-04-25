@@ -38,8 +38,11 @@ int timestamp = 0;
 int iso8601 = 0;
 char *label = NULL;
 int json_mode = 0;
-int flex_disable_timestamp = 0;
 bool fms_justhex = false;
+/* `flex_disable_timestamp` was previously owned here, but
+ * demod_flex.c defines it as well — pulling demod_flex.c into the
+ * build shifted ownership to the vendor source. Removed here to
+ * avoid the duplicate-symbol link error. */
 
 /* unixinput.c's `quit()` exits the process. Library callers don't want
  * that — the runtime handles lifecycle. Stub to a no-op. */

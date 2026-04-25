@@ -52,6 +52,8 @@ fn main() {
         .allowlist_var("demod_poc5")
         .allowlist_var("demod_poc12")
         .allowlist_var("demod_poc24")
+        .allowlist_var("demod_flex")
+        .allowlist_var("demod_flex_next")
         // POCSAG family runtime-tunable globals — wrapped via setter
         // functions in the shim because bindgen can't see globals
         // that are only defined in .c sources.
@@ -119,5 +121,13 @@ fn decoder_sources(vendor: &std::path::Path) -> Vec<PathBuf> {
     out.push(vendor.join("demod_poc12.c"));
     out.push(vendor.join("demod_poc24.c"));
     out.push(vendor.join("pocsag.c"));
+    // FLEX family — demod_flex.c is the classic 1600/3200/6400 bps
+    // 4-FSK paging mode that largely replaced POCSAG in the US in
+    // the 2000s. demod_flex_next.c is a newer multimon-ng variant
+    // with improved decoding. Both share the same 22050 Hz input
+    // rate as POCSAG, so a paging block can run all five in
+    // parallel on the same audio stream.
+    out.push(vendor.join("demod_flex.c"));
+    out.push(vendor.join("demod_flex_next.c"));
     out
 }
