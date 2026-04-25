@@ -235,7 +235,7 @@ mod tests {
         let demod = doc.blocks.get("demod").expect("demod block present");
         assert_eq!(demod.type_name, "AmDemod");
         let params = demod.params.as_ref().expect("demod has params");
-        assert_eq!(params["sample_rate_hz"].as_f64(), Some(48_000.0));
+        assert_eq!(params["sample_rate_hz"].as_f64(), Some(96_000.0));
         assert_eq!(params["audio_gain"].as_f64(), Some(20.0));
     }
 

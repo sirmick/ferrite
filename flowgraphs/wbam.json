@@ -23,7 +23,7 @@
       "params": {
         "input_rate_hz": 2400000.0,
         "freq_shift_hz": 0.0,
-        "output_rate_hz": 24000.0
+        "output_rate_hz": 96000.0
       }
     },
     "tee": {
@@ -53,7 +53,7 @@
       "type": "AmDemod",
       "placement": "browser",
       "params": {
-        "sample_rate_hz": 48000,
+        "sample_rate_hz": 96000,
         "audio_gain": 20.0
       }
     },
