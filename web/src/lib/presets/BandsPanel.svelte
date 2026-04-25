@@ -49,9 +49,29 @@
 <div
   class="flex h-full w-full flex-col border-r border-slate-800 bg-[color:var(--color-bg)] text-xs"
 >
-  <div class="flex items-center justify-between border-b border-slate-800 px-2 py-1">
+  <div class="flex items-center justify-between gap-2 border-b border-slate-800 px-2 py-1">
     <span class="font-semibold text-[color:var(--color-muted)]">Bands</span>
-    <span class="text-[10px] text-[color:var(--color-muted)]">click to tune</span>
+    <div class="flex items-center gap-2">
+      <a
+        href="https://www.ntia.gov/sites/default/files/2025-09/ntia-us-frequency-allocations.pdf"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="rounded border border-slate-700 px-1.5 py-0 text-[10px] leading-tight text-[color:var(--color-muted)] hover:border-slate-500 hover:text-slate-200"
+        title="NTIA US Frequency Allocations chart (PDF, Sep 2025)"
+      >
+        US chart ↗
+      </a>
+      <a
+        href="https://www.sigidwiki.com/wiki/Signal_Identification_Guide"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="rounded border border-slate-700 px-1.5 py-0 text-[10px] leading-tight text-[color:var(--color-muted)] hover:border-slate-500 hover:text-slate-200"
+        title="sigidwiki — Signal Identification Guide"
+      >
+        Signal Wiki ↗
+      </a>
+      <span class="text-[10px] text-[color:var(--color-muted)]">click to tune</span>
+    </div>
   </div>
   <div class="min-h-0 flex-1 overflow-y-auto">
     {#each bands as group (group.name)}

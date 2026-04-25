@@ -7,9 +7,10 @@
   import { quickRateChoices, bandwidthForRate } from '$lib/controls/optionsModel';
   import Nixie from '$lib/controls/Nixie.svelte';
   import LiveControls from '$lib/controls/LiveControls.svelte';
-  import FftControls from './FftControls.svelte';
   import { applyControl } from '$lib/control/dispatch';
   import { clientControls } from '$lib/control/clientStore.svelte';
+  import { bandplanUsa } from '$lib/presets/bandplan';
+  import { waterfallStore } from './waterfallStore.svelte';
 
   interface Props {
     client: FrameClient;
@@ -60,10 +61,11 @@
     return undefined;
   });
 
-  // Fixed wheel-nudge step. The nixie handles fine tuning (each digit
-  // is click-to-increment), so this just needs to be a sensible scroll
-  // rate for exploring the band.
-  const WHEEL_STEP_HZ = 10_000;
+  // Wheel pans the zoomed view across the source span — a fraction of
+  // the available headroom per notch. The nixies handle precision tuning
+  // and the SDR centre is the user's job; wheel here is purely a
+  // navigation aid for the visible window.
+  const WHEEL_PAN_FRACTION = 0.05;
 
   // Display toggles live in the client control store so they persist
   // across reloads and stay read/write through the same `applyControl`
@@ -71,6 +73,25 @@
   let fade = $derived(clientControls.get('client.spectrum.fade'));
   let maxHold = $derived(clientControls.get('client.spectrum.maxHold'));
   let autoScale = $derived(clientControls.get('client.spectrum.autoScale'));
+  let bandPlan = $derived(clientControls.get('client.spectrum.bandPlan'));
+  let viewZoom = $derived(clientControls.get('client.spectrum.viewZoom'));
+  let viewPan = $derived(clientControls.get('client.spectrum.viewPan'));
+
+  // Display-only view window. At zoom 1 the renderer paints the full
+  // axes span (no-op); at higher zoom we compute the visible centre by
+  // sliding `viewPan` ∈ [0,1] across the available headroom of the
+  // span. The renderer clamps internally too — this just keeps the UI
+  // and the click-to-tune projection in sync without a round-trip.
+  let viewWindow = $derived.by(() => {
+    if (!axes) return undefined;
+    const z = Math.max(1, viewZoom);
+    if (z <= 1) return undefined;
+    const span = axes.sample_rate_hz / z;
+    const headroom = axes.sample_rate_hz - span;
+    const fullMin = axes.center_freq_hz - axes.sample_rate_hz / 2;
+    const viewMin = fullMin + Math.max(0, Math.min(1, viewPan)) * headroom;
+    return { centerHz: viewMin + span / 2, rateHz: span };
+  });
 
   // Sample-rate dropdown by the nixies: preset-curated short list.
   // Software sources (sine, file) have no advertised rate ladder, so
@@ -134,10 +155,17 @@
   }
 
   function onWheel(ev: WheelEvent) {
-    if (!axes) return;
+    // Wheel down/right → pan view right (increase viewPan).
+    // No-op when zoom is 1× because there's no headroom to pan into.
+    if (viewZoom <= 1) return;
     ev.preventDefault();
-    const sign = ev.deltaY > 0 ? -1 : 1;
-    void applyControl('flow.src.center_freq_hz', axes.center_freq_hz + sign * WHEEL_STEP_HZ);
+    const dy = ev.deltaY;
+    const dx = ev.deltaX;
+    const delta = Math.abs(dx) > Math.abs(dy) ? dx : dy;
+    if (delta === 0) return;
+    const sign = delta > 0 ? 1 : -1;
+    const next = Math.max(0, Math.min(1, viewPan + sign * WHEEL_PAN_FRACTION));
+    if (next !== viewPan) void applyControl('client.spectrum.viewPan', next);
   }
 
   // Click = VFO; double-click = SDR centre. Native `click` fires twice
@@ -186,7 +214,12 @@
     renderer = new SpectrumRenderer(canvas);
     const ro = new ResizeObserver(() => renderer?.resize());
     ro.observe(canvas);
+    // The "reset" button lives in DisplayControls (sibling of the
+    // waterfall pane); install a renderer-bound impl on the shared
+    // store so a click reaches our renderer here. Cleared on teardown.
+    waterfallStore.resetMaxHold = () => renderer?.resetMaxHold();
     return () => {
+      waterfallStore.resetMaxHold = () => {};
       ro.disconnect();
       renderer?.destroy();
       renderer = undefined;
@@ -307,6 +340,20 @@
       vfoWidthHz: vfoBlock ? vfoWidthHz : undefined,
     });
   });
+
+  // Frequency-allocation ribbon above the trace. Toggle is persisted in
+  // the client control store; the data itself is a static build-time
+  // import so flipping it is a pure render-side concern.
+  $effect(() => {
+    if (!renderer) return;
+    renderer.setBandPlan(bandPlan ? bandplanUsa : undefined);
+  });
+
+  // Display-only zoom/pan into the FFT span. Renderer crops the trace,
+  // grid and band ribbon to the view window; click-to-tune respects it.
+  $effect(() => {
+    renderer?.setView(viewWindow);
+  });
 </script>
 
 <div class="flex h-full w-full flex-col">
@@ -315,16 +362,14 @@
       class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-800 bg-[color:var(--color-bg)] px-2 py-1 text-[11px] text-[color:var(--color-muted)]"
     >
       {#if vfoBlock}
-        <div class="flex items-center gap-1" title="VFO — what you're listening to">
-          <span class="mr-0.5 text-[9px] uppercase tracking-wider text-orange-400/70">vfo</span>
+        <span class="contents" title="VFO — what you're listening to (orange)">
           <Nixie hz={vfoAbsHz} onCommit={commitVfo} tone="orange" />
-        </div>
+        </span>
       {/if}
 
-      <div class="flex items-center gap-1" title="SDR centre — the RF tuner LO">
-        <span class="mr-0.5 text-[9px] uppercase tracking-wider text-emerald-400/70">sdr</span>
+      <span class="contents" title="SDR centre — the RF tuner LO (green)">
         <Nixie hz={axes.center_freq_hz} onCommit={commitCenter} tone="green" />
-      </div>
+      </span>
 
       <label class="flex items-center gap-1" title="sample rate / span">
         <span>rate</span>
@@ -344,95 +389,7 @@
       </label>
 
       <LiveControls />
-
-      <div class="mx-1 h-4 border-l border-slate-800"></div>
-
-      <label class="flex items-center gap-1" title="fade trail of recent traces">
-        <input
-          type="checkbox"
-          checked={fade}
-          onchange={(e) =>
-            void applyControl(
-              'client.spectrum.fade',
-              (e.currentTarget as HTMLInputElement).checked,
-            )}
-        />
-        <span>fade</span>
-      </label>
-      <label class="flex items-center gap-1" title="running max-hold trace">
-        <input
-          type="checkbox"
-          checked={maxHold}
-          onchange={(e) =>
-            void applyControl(
-              'client.spectrum.maxHold',
-              (e.currentTarget as HTMLInputElement).checked,
-            )}
-        />
-        <span>max hold</span>
-      </label>
-      {#if maxHold}
-        <button
-          type="button"
-          class="rounded border border-slate-700 px-1.5 py-0 text-[10px] leading-none hover:border-slate-500"
-          onclick={() => renderer?.resetMaxHold()}
-        >
-          reset
-        </button>
-      {/if}
-      <label
-        class="flex items-center gap-1"
-        title="auto-track floor/ceil to the signal (overrides the manual values below)"
-      >
-        <input
-          type="checkbox"
-          checked={autoScale}
-          onchange={(e) =>
-            void applyControl(
-              'client.spectrum.autoScale',
-              (e.currentTarget as HTMLInputElement).checked,
-            )}
-        />
-        <span>auto</span>
-      </label>
-
-      <label
-        class="flex items-center gap-1"
-        title="display floor (dBFS) — purely visual, server quantises to [-160, 0]"
-      >
-        <span>floor</span>
-        <input
-          type="number"
-          step="1"
-          min="-160"
-          max="0"
-          value={manualFloorDbfs}
-          disabled={autoScale}
-          class="w-14 rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-right text-slate-200 disabled:opacity-50"
-          onchange={(e) => {
-            const v = Number((e.currentTarget as HTMLInputElement).value);
-            if (Number.isFinite(v)) void applyControl('client.spectrum.displayFloorDbfs', v);
-          }}
-        />
-      </label>
-      <label class="flex items-center gap-1" title="display ceiling (dBFS) — purely visual">
-        <span>ceil</span>
-        <input
-          type="number"
-          step="1"
-          min="-160"
-          max="0"
-          value={manualCeilDbfs}
-          disabled={autoScale}
-          class="w-14 rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-right text-slate-200 disabled:opacity-50"
-          onchange={(e) => {
-            const v = Number((e.currentTarget as HTMLInputElement).value);
-            if (Number.isFinite(v)) void applyControl('client.spectrum.displayCeilDbfs', v);
-          }}
-        />
-      </label>
     </div>
-    <FftControls />
   {/if}
   <canvas
     bind:this={canvas}
@@ -440,6 +397,31 @@
     ondblclick={onDblClick}
     onwheel={onWheel}
     class="block min-h-0 w-full flex-1 cursor-crosshair"
-    title="click to tune VFO · double-click to re-centre SDR · wheel to nudge"
+    title="click to tune VFO · double-click to re-centre SDR · wheel to pan zoomed view"
   ></canvas>
+  {#if viewZoom > 1}
+    <!-- Horizontal scrollbar for the zoomed FFT/waterfall view. Sized
+         to match the plot's interior so the slider extents map directly
+         onto the visible spectrum range. -->
+    <div
+      class="border-t border-slate-800 bg-[color:var(--color-bg)]"
+      style:padding-left="44px"
+      style:padding-right="6px"
+    >
+      <input
+        type="range"
+        class="block w-full"
+        min={0}
+        max={1}
+        step={0.001}
+        value={viewPan}
+        title="pan zoomed view"
+        oninput={(e) =>
+          void applyControl(
+            'client.spectrum.viewPan',
+            Number((e.currentTarget as HTMLInputElement).value),
+          )}
+      />
+    </div>
+  {/if}
 </div>

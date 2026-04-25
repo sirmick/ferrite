@@ -1,10 +1,12 @@
-//! POCSAG paging decoder — wraps `multimon-ng`'s `demod_poc12`.
+//! Pager (POCSAG + FLEX) decoder — wraps `multimon-ng`'s
+//! `demod_poc12`, `demod_flex`, and `demod_flex_next`.
 //!
 //! Takes NBFM-demodulated audio at exactly 22050 Hz (POCSAG1200's
-//! native rate inside multimon-ng) and pumps it through the C
-//! decoder. Decoded message lines are routed to the project's
-//! tracing log under `decoder::pocsag` — the existing log panel
-//! shows them with no per-decoder UI work.
+//! native rate inside multimon-ng — FLEX shares the same plumbing)
+//! and pumps it through the C decoder. Decoded lines route to the
+//! project's tracing log split per protocol family: POCSAG goes to
+//! `decoder::pocsag`, FLEX goes to `decoder::flex` so the log panel
+//! can mute one without losing the other.
 //!
 //! ### Sample-rate contract
 //!
@@ -37,7 +39,7 @@ pub const POCSAG_INPUT_RATE_HZ: u32 = 22_050;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
-pub struct PocsagDemodParams {
+pub struct PagerDemodParams {
     /// Construction-time hint for the input rate (Hz). The block
     /// reads the live rate at `init()` / `update_rates()` and warns
     /// if it doesn't match `POCSAG_INPUT_RATE_HZ`.
@@ -47,11 +49,11 @@ pub struct PocsagDemodParams {
     /// message just had too many errors to repair"). Off for normal
     /// operation since busy carriers spam the log with garbled
     /// fragments. Note: this is a vendor *global*; toggling it on
-    /// any PocsagDemod instance affects all of them in-process.
+    /// any PagerDemod instance affects all of them in-process.
     pub show_partial: bool,
 }
 
-impl Default for PocsagDemodParams {
+impl Default for PagerDemodParams {
     fn default() -> Self {
         Self {
             #[allow(clippy::cast_precision_loss)]
@@ -61,7 +63,7 @@ impl Default for PocsagDemodParams {
     }
 }
 
-pub struct PocsagDemod {
+pub struct PagerDemod {
     /// Five multimon decoders running in parallel on the same
     /// 22050 Hz audio stream — POCSAG512, 1200, 2400, FLEX, FLEX_NEXT.
     /// Each tries to lock its own bit timing / sync; whichever
@@ -76,16 +78,16 @@ pub struct PocsagDemod {
     input_rate_hz: f64,
 }
 
-impl PocsagDemod {
-    pub fn new(params: PocsagDemodParams) -> Result<Self> {
+impl PagerDemod {
+    pub fn new(params: PagerDemodParams) -> Result<Self> {
         if !(params.sample_rate_hz.is_finite() && params.sample_rate_hz > 0.0) {
             bail!(
-                "pocsag_demod: sample_rate_hz must be > 0 (got {})",
+                "pager_demod: sample_rate_hz must be > 0 (got {})",
                 params.sample_rate_hz
             );
         }
         // Apply the vendor-global config once at construction. The
-        // `show_partial` knob is shared across every PocsagDemod
+        // `show_partial` knob is shared across every PagerDemod
         // instance in the process — last writer wins; a single block
         // is the common case so this is effectively per-block.
         pocsag_cfg::set_show_partial_decodes(params.show_partial);
@@ -116,10 +118,10 @@ impl PocsagDemod {
 }
 
 #[ferrite_blocks_macros::ferrite_block]
-impl Block for PocsagDemod {
+impl Block for PagerDemod {
     fn spec() -> BlockSpec {
         BlockSpec {
-            type_name: "PocsagDemod",
+            type_name: "PagerDemod",
             placement: Placement::NativeOnly,
             inputs: &[PortSpec {
                 name: "in",
@@ -222,19 +224,19 @@ impl Block for PocsagDemod {
     }
 }
 
-impl BlockFactory for PocsagDemod {
+impl BlockFactory for PagerDemod {
     fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
-        let p: PocsagDemodParams = crate::block::deserialize_params(params)?;
-        Ok(Box::new(PocsagDemod::new(p)?))
+        let p: PagerDemodParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(PagerDemod::new(p)?))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PocsagDemod, PocsagDemodParams};
+    use super::{PagerDemod, PagerDemodParams};
     use crate::block::{Block, BlockIo, InBuf, InputPort, PortMeta};
 
-    fn run(block: &mut PocsagDemod, samples: &[f32]) {
+    fn run(block: &mut PagerDemod, samples: &[f32]) {
         let mut inputs = [InputPort {
             name: "in",
             meta: PortMeta::default(),
@@ -250,7 +252,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_params() {
-        assert!(PocsagDemod::new(PocsagDemodParams {
+        assert!(PagerDemod::new(PagerDemodParams {
             sample_rate_hz: 0.0,
             ..Default::default()
         })
@@ -263,7 +265,7 @@ mod tests {
         // decoder, no decoded messages. The smoke-test that the
         // wrapper, BlockIo plumbing, and tracing emit path all hang
         // together.
-        let mut b = PocsagDemod::new(PocsagDemodParams::default()).unwrap();
+        let mut b = PagerDemod::new(PagerDemodParams::default()).unwrap();
         run(&mut b, &vec![0.0_f32; 22_050]);
     }
 }

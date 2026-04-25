@@ -32,7 +32,7 @@ pub mod fm_demod;
 pub mod frame;
 pub mod log_mag_u8;
 #[cfg(feature = "multimon")]
-pub mod pocsag;
+pub mod pager;
 pub mod rds_demod;
 pub mod real_resamp;
 pub mod registry;
@@ -73,7 +73,7 @@ pub use fm_demod::{FmDemod, FmDemodParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 #[cfg(feature = "multimon")]
-pub use pocsag::{PocsagDemod, PocsagDemodParams};
+pub use pager::{PagerDemod, PagerDemodParams};
 pub use rds_demod::{RdsDemod, RdsDemodParams};
 pub use real_resamp::{RealF32Resamp, RealF32ResampParams};
 pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hold, SpectrumStats};
@@ -178,8 +178,8 @@ mod tests {
         );
         #[cfg(feature = "multimon")]
         assert!(
-            names.contains("PocsagDemod"),
-            "PocsagDemod missing from registry under `multimon` feature (found: {names:?})",
+            names.contains("PagerDemod"),
+            "PagerDemod missing from registry under `multimon` feature (found: {names:?})",
         );
     }
 

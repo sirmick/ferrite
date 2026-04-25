@@ -1,8 +1,8 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
-  "name": "capture-pocsag",
-  "label": "POCSAG capture (headless)",
-  "description": "Headless capture for offline POCSAG diagnosis. Tunes 929.614206 MHz, channelises to 50 kHz, NBFM-demods, resamples to multimon's native 22050 Hz, writes mono 16-bit WAV to /tmp/ferrite-pocsag.wav. Run via `ferrited --flowgraph capture-pocsag.json --source-type SoapySource --source-args 'driver=sdrplay,serial=224001D748' --source-antenna 'Antenna A' --source-gain 65 --agc true --run-for-secs 600 --start`.",
+  "name": "capture-pager",
+  "label": "Pager capture (headless)",
+  "description": "Headless capture for offline POCSAG / FLEX diagnosis. Tunes 929.614206 MHz, channelises to 50 kHz, NBFM-demods, resamples to multimon's native 22050 Hz, writes mono 16-bit WAV to /tmp/ferrite-pager.wav. Run via `ferrited --flowgraph capture-pager.json --source-type SoapySource --source-args 'driver=sdrplay,serial=224001D748' --source-antenna 'Antenna A' --source-gain 65 --agc true --run-for-secs 600 --start`.",
   "environments": ["node"],
   "blocks": {
     "src": {
@@ -43,7 +43,7 @@
       "type": "FileAudioSink",
       "placement": "node",
       "params": {
-        "path": "/tmp/ferrite-pocsag.wav",
+        "path": "/tmp/ferrite-pager.wav",
         "rate_hz": 22050.0,
         "max_seconds": 600.0
       }

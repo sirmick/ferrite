@@ -187,7 +187,7 @@
     display: inline-flex;
     align-items: baseline;
     gap: 0.05em;
-    padding: 0.2rem 0.5rem;
+    padding: 0.12rem 0.4rem;
     border-radius: 4px;
     background: radial-gradient(
       ellipse at center,
@@ -196,10 +196,10 @@
     );
     border: 1px solid var(--nixie-border);
     box-shadow:
-      inset 0 0 12px rgba(0, 0, 0, 0.8),
+      inset 0 0 10px rgba(0, 0, 0, 0.8),
       0 0 1px rgba(var(--nixie-glow), 0.2);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 1.4rem;
+    font-size: 1.05rem;
     font-weight: 600;
     line-height: 1;
     letter-spacing: 0.02em;

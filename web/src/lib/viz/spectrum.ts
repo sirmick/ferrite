@@ -15,6 +15,7 @@ import {
   compute_spectrum_stats as wasmComputeStats,
   update_max_hold as wasmUpdateMaxHold,
 } from '../wasm/blocks/ferrite_blocks';
+import { bandsInRange, type Band } from '../presets/bandplan';
 
 export interface SpectrumAxes {
   /** Centre RF frequency in Hz — drives the X-axis labels. */
@@ -31,6 +32,9 @@ export interface SpectrumOptions {
   color?: string;
   baselineColor?: string;
   gridColor?: string;
+  /** Sub-grid lines drawn between the major ticks. Should be much
+   *  fainter than `gridColor` so the major grid still reads clearly. */
+  minorGridColor?: string;
   labelColor?: string;
   maxHoldColor?: string;
   /** Number of ghost traces drawn behind the live trace (fade). */
@@ -52,6 +56,16 @@ export interface SpectrumMarkers {
   sdrCenterHz?: number;
   vfoHz?: number;
   vfoWidthHz?: number;
+}
+
+/** Display-only horizontal view window. Crops the rendered FFT to a
+ *  sub-range of the full sample-rate span without touching the source
+ *  or the server. `centerHz` and `rateHz` are clamped at draw time so
+ *  the view never extends past the available span. Pass `undefined`
+ *  to render the full span (the default). */
+export interface SpectrumView {
+  centerHz: number;
+  rateHz: number;
 }
 
 /** Client-side display-range override for auto-scale. The server emits
@@ -92,6 +106,19 @@ const TOP_MARGIN = 4;
 /// room. Exported alongside [`LEFT_MARGIN`] so the waterfall mirrors
 /// it.
 export const RIGHT_MARGIN = 6;
+/// Vertical strip (CSS pixels) reserved above the trace for the band-
+/// plan ribbon when one is set. Sized for [`BAND_LABEL_ROWS`] stacked
+/// rows of ~10 px text — labels stagger across rows so adjacent bands
+/// never crowd each other, mirroring the NTIA chart layout. Eats trace
+/// headroom but the trade is worth it for the "what am I looking at"
+/// cue.
+const BAND_STRIP_CSS = 36;
+/// Number of stacked label rows in the band ribbon. Each band still
+/// paints the full strip height; only the *labels* are distributed
+/// across rows by a left-to-right greedy first-fit so neighbours don't
+/// collide. Three rows handles every realistic SDR span without
+/// dropping more than a handful of fully-buried bands.
+const BAND_LABEL_ROWS = 3;
 
 export class SpectrumRenderer {
   private readonly ctx: CanvasRenderingContext2D;
@@ -104,6 +131,7 @@ export class SpectrumRenderer {
   private color: string;
   private baselineColor: string;
   private gridColor: string;
+  private minorGridColor: string;
   private labelColor: string;
   private maxHoldColor: string;
   private fadeFrames: number;
@@ -116,6 +144,8 @@ export class SpectrumRenderer {
   private markers: SpectrumMarkers = {};
   private collapseBuf: Uint8Array | undefined;
   private displayRange: SpectrumDisplayRange | undefined;
+  private bandPlan: ReadonlyArray<Band> | undefined;
+  private view: SpectrumView | undefined;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -127,6 +157,7 @@ export class SpectrumRenderer {
     this.color = opts.color ?? '#7dd3fc';
     this.baselineColor = opts.baselineColor ?? 'rgba(125, 211, 252, 0.12)';
     this.gridColor = opts.gridColor ?? 'rgba(148, 163, 184, 0.18)';
+    this.minorGridColor = opts.minorGridColor ?? 'rgba(148, 163, 184, 0.06)';
     this.labelColor = opts.labelColor ?? 'rgba(148, 163, 184, 0.75)';
     this.maxHoldColor = opts.maxHoldColor ?? 'rgba(244, 114, 182, 0.75)';
     this.fadeFrames = opts.fadeFrames ?? 12;
@@ -167,6 +198,44 @@ export class SpectrumRenderer {
     if (this.disposed) return;
     this.markers = { ...next };
     this.scheduleDraw();
+  }
+
+  /** Set the frequency-allocation band plan rendered as a label strip
+   *  above the trace. Pass `undefined` to hide the strip and return the
+   *  full plot height to the trace. */
+  setBandPlan(bands: ReadonlyArray<Band> | undefined): void {
+    if (this.disposed) return;
+    this.bandPlan = bands;
+    this.scheduleDraw();
+  }
+
+  /** Crop the rendered FFT to a horizontal sub-range of the full span.
+   *  Pass `undefined` to revert to full-span. The view is clamped at
+   *  draw time so callers can hand in any plausible window without
+   *  pre-validating the edges. */
+  setView(view: SpectrumView | undefined): void {
+    if (this.disposed) return;
+    this.view = view ? { ...view } : undefined;
+    this.byteToYCache = undefined;
+    this.scheduleDraw();
+  }
+
+  /** The clamped (centerHz, rateHz) window currently being rendered.
+   *  Falls back to the full axes span when no view is set or the axes
+   *  haven't been received yet. Returns `undefined` only when there's
+   *  nothing to render. Used by every freq → x mapping in the file so
+   *  zoom/pan stays consistent across grid, trace, markers, band strip
+   *  and `pixelToFreq`. */
+  private renderWindow(): { centerHz: number; rateHz: number } | undefined {
+    if (!this.axes) return undefined;
+    const v = this.view;
+    if (!v) return { centerHz: this.axes.centerHz, rateHz: this.axes.rateHz };
+    const halfFull = this.axes.rateHz / 2;
+    const halfView = Math.min(halfFull, Math.max(1, v.rateHz) / 2);
+    const minC = this.axes.centerHz - (halfFull - halfView);
+    const maxC = this.axes.centerHz + (halfFull - halfView);
+    const c = Math.max(minC, Math.min(maxC, v.centerHz));
+    return { centerHz: c, rateHz: halfView * 2 };
   }
 
   /** Set a client-side display range. `undefined` clears the override
@@ -213,15 +282,15 @@ export class SpectrumRenderer {
   }
 
   pixelToFreq(cssX: number): number | undefined {
-    if (!this.axes) return undefined;
+    const w = this.renderWindow();
+    if (!w) return undefined;
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0) return undefined;
     const plotLeft = LEFT_MARGIN;
     const plotW = Math.max(1, rect.width - LEFT_MARGIN - RIGHT_MARGIN);
     const frac = (cssX - plotLeft) / plotW;
     if (!(frac >= 0 && frac <= 1)) return undefined;
-    const half = this.axes.rateHz / 2;
-    return this.axes.centerHz - half + frac * this.axes.rateHz;
+    return w.centerHz - w.rateHz / 2 + frac * w.rateHz;
   }
 
   private scheduleDraw(): void {
@@ -241,21 +310,25 @@ export class SpectrumRenderer {
     ctx.clearRect(0, 0, cw, ch);
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // The band strip eats from the top of the plot only when there's a
+    // plan to render and an axis to project against; absent either, the
+    // trace gets the full height back.
+    const stripH = this.bandPlan && this.axes ? BAND_STRIP_CSS * dpr : 0;
     const plot = {
       x: LEFT_MARGIN * dpr,
-      y: TOP_MARGIN * dpr,
+      y: TOP_MARGIN * dpr + stripH,
       w: Math.max(1, cw - (LEFT_MARGIN + RIGHT_MARGIN) * dpr),
-      h: Math.max(1, ch - (TOP_MARGIN + BOTTOM_MARGIN) * dpr),
+      h: Math.max(1, ch - (TOP_MARGIN + BOTTOM_MARGIN) * dpr - stripH),
     };
 
     this.drawGrid(plot, dpr);
     this.drawTraces(plot);
+    if (stripH > 0) this.drawBandStrip(plot, dpr, stripH);
   }
 
   private drawGrid(plot: { x: number; y: number; w: number; h: number }, dpr: number): void {
     const { ctx } = this;
     ctx.save();
-    ctx.strokeStyle = this.gridColor;
     ctx.lineWidth = 1;
     ctx.fillStyle = this.labelColor;
     ctx.font = `${10 * dpr}px ui-monospace, SFMono-Regular, Menlo, monospace`;
@@ -267,6 +340,30 @@ export class SpectrumRenderer {
     const floor = this.displayRange?.floorDbfs ?? this.axes?.floorDbfs ?? 0;
     const ceil = this.displayRange?.ceilDbfs ?? this.axes?.ceilDbfs ?? 255;
     const yTicks = niceTicks(floor, ceil, 6);
+
+    // Faint sub-grid drawn first so the major lines sit on top.
+    // `MINOR_PER_MAJOR` of 5 gives 4 minor ticks between every major;
+    // collisions with majors are skipped so the major intensity stays
+    // distinct.
+    const MINOR_PER_MAJOR = 5;
+    if (yTicks.length >= 2) {
+      const step = (yTicks[1] as number) - (yTicks[0] as number);
+      const minor = step / MINOR_PER_MAJOR;
+      ctx.strokeStyle = this.minorGridColor;
+      const start = Math.ceil(floor / minor) * minor;
+      for (let v = start; v <= ceil; v += minor) {
+        if (yTicks.some((mt) => Math.abs(v - mt) < minor / 2)) continue;
+        const frac = (v - floor) / (ceil - floor);
+        if (!(frac >= 0 && frac <= 1)) continue;
+        const y = plot.y + plot.h - frac * plot.h;
+        ctx.beginPath();
+        ctx.moveTo(plot.x, y + 0.5);
+        ctx.lineTo(plot.x + plot.w, y + 0.5);
+        ctx.stroke();
+      }
+    }
+
+    ctx.strokeStyle = this.gridColor;
     ctx.textAlign = 'right';
     for (const v of yTicks) {
       const frac = (v - floor) / (ceil - floor);
@@ -287,11 +384,31 @@ export class SpectrumRenderer {
       ctx.restore();
     }
 
-    if (this.axes) {
-      const half = this.axes.rateHz / 2;
-      const fMin = this.axes.centerHz - half;
-      const fMax = this.axes.centerHz + half;
+    const win = this.renderWindow();
+    if (win) {
+      const half = win.rateHz / 2;
+      const fMin = win.centerHz - half;
+      const fMax = win.centerHz + half;
       const xTicks = niceTicks(fMin, fMax, 6);
+
+      if (xTicks.length >= 2) {
+        const step = (xTicks[1] as number) - (xTicks[0] as number);
+        const minor = step / MINOR_PER_MAJOR;
+        ctx.strokeStyle = this.minorGridColor;
+        const start = Math.ceil(fMin / minor) * minor;
+        for (let f = start; f <= fMax; f += minor) {
+          if (xTicks.some((mt) => Math.abs(f - mt) < minor / 2)) continue;
+          const frac = (f - fMin) / (fMax - fMin);
+          if (!(frac >= 0 && frac <= 1)) continue;
+          const x = plot.x + frac * plot.w;
+          ctx.beginPath();
+          ctx.moveTo(x + 0.5, plot.y);
+          ctx.lineTo(x + 0.5, plot.y + plot.h);
+          ctx.stroke();
+        }
+      }
+
+      ctx.strokeStyle = this.gridColor;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       for (const f of xTicks) {
@@ -356,11 +473,12 @@ export class SpectrumRenderer {
   }
 
   private drawMarkers(plot: { x: number; y: number; w: number; h: number }): void {
-    if (!this.axes) return;
+    const win = this.renderWindow();
+    if (!win) return;
     const { ctx } = this;
-    const half = this.axes.rateHz / 2;
-    const fMin = this.axes.centerHz - half;
-    const fMax = this.axes.centerHz + half;
+    const half = win.rateHz / 2;
+    const fMin = win.centerHz - half;
+    const fMax = win.centerHz + half;
     const toX = (hz: number) => plot.x + ((hz - fMin) / (fMax - fMin)) * plot.w;
     const clamp = (hz: number) => hz >= fMin && hz <= fMax;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -422,6 +540,146 @@ export class SpectrumRenderer {
     }
   }
 
+  /** Coloured ribbon above the trace naming each visible band. Bands
+   *  come from the static USA plan (`presets/bandplan.ts`); we filter to
+   *  whatever overlaps the current axes window and lay them out using
+   *  the same linear `freq → x` projection as the grid, so labels line
+   *  up exactly with the FFT bins they describe.
+   *
+   *  Layout has two passes: the colour fills paint full-strip-height per
+   *  band so the ribbon is continuous; the labels are then placed by a
+   *  greedy left-to-right first-fit across [`BAND_LABEL_ROWS`] rows so
+   *  adjacent narrow bands stagger vertically instead of crowding into
+   *  one line. Bands whose label can't fit in any row at this zoom drop
+   *  the label and stay a clean colour tile. */
+  private drawBandStrip(
+    plot: { x: number; y: number; w: number; h: number },
+    dpr: number,
+    stripH: number,
+  ): void {
+    if (!this.bandPlan) return;
+    const win = this.renderWindow();
+    if (!win) return;
+    const { ctx } = this;
+    const half = win.rateHz / 2;
+    const fMin = win.centerHz - half;
+    const fMax = win.centerHz + half;
+    if (!(fMax > fMin)) return;
+    const stripY = plot.y - stripH;
+    const rowH = stripH / BAND_LABEL_ROWS;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plot.x, stripY, plot.w, stripH);
+    ctx.clip();
+
+    // Backing for unallocated gaps so the ribbon still reads as one
+    // continuous band even where the plan has holes (e.g. between
+    // adjacent VLF carriers).
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.6)';
+    ctx.fillRect(plot.x, stripY, plot.w, stripH);
+
+    // Pass 1 — colour fills, full strip height per band.
+    const visible = bandsInRange(fMin, fMax);
+    const slots: { x0: number; x1: number; w: number; band: Band }[] = [];
+    for (const band of visible) {
+      const lo = Math.max(fMin, band.startHz);
+      const hi = Math.min(fMax, band.endHz);
+      const x0 = plot.x + ((lo - fMin) / (fMax - fMin)) * plot.w;
+      const x1 = plot.x + ((hi - fMin) / (fMax - fMin)) * plot.w;
+      const w = x1 - x0;
+      if (w < 0.5) continue;
+      const [r, g, b] = band.rgb;
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.6)`;
+      ctx.fillRect(x0, stripY, w, stripH);
+      slots.push({ x0, x1, w, band });
+    }
+
+    // Faint horizontal separators between rows so the staggered layout
+    // reads as deliberate rows rather than scattered text.
+    ctx.strokeStyle = 'rgba(15, 23, 42, 0.25)';
+    ctx.lineWidth = 1;
+    for (let r = 1; r < BAND_LABEL_ROWS; r++) {
+      const y = Math.floor(stripY + rowH * r) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(plot.x, y);
+      ctx.lineTo(plot.x + plot.w, y);
+      ctx.stroke();
+    }
+
+    // Pass 2 — labels. Greedy first-fit across [`BAND_LABEL_ROWS`] rows:
+    // try the full band name first (it's allowed to overflow the band's
+    // own slot); each row tracks the right edge of its last label so a
+    // colliding label bumps to the next row. Only when *no* row has
+    // room do we fall back to a truncated tag that fits within the
+    // band's own width — that way wide labels stagger across rows
+    // (mirroring the NTIA chart) instead of all collapsing into row 0
+    // because pre-trimmed labels never overlap their neighbours' centres.
+    const fontPx = Math.round(10 * dpr);
+    ctx.font = `${fontPx}px ui-sans-serif, system-ui, -apple-system, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const padPx = 3 * dpr;
+    const gapPx = 6 * dpr;
+    const lastEndX: number[] = new Array(BAND_LABEL_ROWS).fill(-Infinity);
+    for (const slot of slots) {
+      const cx = slot.x0 + slot.w / 2;
+      const fullText = slot.band.name;
+      const fullW = ctx.measureText(fullText).width;
+
+      // First pass: try the full label, allowed to overflow the slot.
+      let chosenText = fullText;
+      let chosenW = fullW;
+      let row = -1;
+      for (let r = 0; r < BAND_LABEL_ROWS; r++) {
+        if (cx - chosenW / 2 >= lastEndX[r] + gapPx) {
+          row = r;
+          break;
+        }
+      }
+
+      // No row had room for the full label — try a slot-bounded truncation
+      // (still useful for narrow bands sandwiched between wider ones).
+      if (row < 0) {
+        const maxTextW = Math.max(0, slot.w - 2 * padPx);
+        if (maxTextW <= 0) continue;
+        const trunc = ellipsize(ctx, fullText, maxTextW);
+        if (!trunc) continue;
+        chosenText = trunc;
+        chosenW = ctx.measureText(trunc).width;
+        for (let r = 0; r < BAND_LABEL_ROWS; r++) {
+          if (cx - chosenW / 2 >= lastEndX[r] + gapPx) {
+            row = r;
+            break;
+          }
+        }
+        if (row < 0) continue;
+      }
+
+      lastEndX[row] = cx + chosenW / 2;
+      const cy = stripY + rowH * row + rowH / 2 + 0.5;
+      // White text with a soft dark drop-shadow reads cleanly against
+      // both the pastel and the saturated bands in the SDR++ palette,
+      // without per-label backplates that would break the ribbon look.
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
+      ctx.shadowBlur = 2 * dpr;
+      ctx.fillStyle = 'rgba(245, 245, 245, 0.95)';
+      ctx.fillText(chosenText, cx, cy);
+      ctx.shadowBlur = 0;
+    }
+
+    // Hairline beneath the strip — visually peels it away from the
+    // trace plot below.
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(plot.x, plot.y - 0.5);
+    ctx.lineTo(plot.x + plot.w, plot.y - 0.5);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
   /** Lookup table mapping byte `b` → pixel y, factoring in the display
    *  override. Cached across draws with the same plot height + axes +
    *  override. Avoids per-sample `log`/`mul` in the hot loop — the
@@ -453,23 +711,42 @@ export class SpectrumRenderer {
 
   private strokeRow(row: Uint8Array, plot: { x: number; y: number; w: number; h: number }): void {
     if (row.length === 0) return;
+    if (!this.axes) return;
+    const win = this.renderWindow();
+    if (!win) return;
     const { ctx } = this;
     const n = row.length;
     const lut = this.byteToYLut(plot);
-    ctx.beginPath();
 
-    // When the FFT has more bins than pixels (e.g. 16384 bins across a
-    // ~1200 px plot), drawing a lineTo per bin paints multiple bins into
-    // the same column — adjacent noisy bins jump in y and the canvas
-    // renders that as visible vertical strokes (the "comb"). Collapse
-    // each pixel column to its max bin so the trace is a clean envelope.
-    // The reduction runs in wasm (`ferrite-blocks::render`).
+    // Map the view window onto a half-open sub-range of FFT bins. At
+    // zoom 1 with no pan, this is the whole row; at higher zooms we
+    // slice the row down to just the bins inside the visible window
+    // and paint *those* across the full plot width. Bin → freq comes
+    // from the server's full-span axes; freq → x comes from the view.
+    const fullMin = this.axes.centerHz - this.axes.rateHz / 2;
+    const fullSpan = this.axes.rateHz;
+    const fMin = win.centerHz - win.rateHz / 2;
+    const fMax = win.centerHz + win.rateHz / 2;
+    const denom = n > 1 ? n - 1 : 1;
+    const i0 = Math.max(0, Math.floor(((fMin - fullMin) / fullSpan) * denom));
+    const i1 = Math.min(n - 1, Math.ceil(((fMax - fullMin) / fullSpan) * denom));
+    if (i1 <= i0) return;
+    const sub = row.subarray(i0, i1 + 1);
+    const visN = sub.length;
+
+    ctx.beginPath();
+    // When more visible bins than pixels (e.g. 16k bins zoomed out to
+    // ~1200 px), per-bin lineTo paints multiple bins into the same
+    // column and the noise jumps render as a vertical comb. Collapse
+    // to per-column max in wasm so the trace is a clean envelope. The
+    // reduction runs against `sub` so zooming amplifies bin density
+    // smoothly instead of dropping bins.
     const px = Math.max(1, Math.floor(plot.w));
-    if (n > px) {
+    if (visN > px) {
       if (!this.collapseBuf || this.collapseBuf.length !== px) {
         this.collapseBuf = new Uint8Array(px);
       }
-      wasmCollapseRow(row, this.collapseBuf);
+      wasmCollapseRow(sub, this.collapseBuf);
       const cols = this.collapseBuf;
       for (let i = 0; i < px; i++) {
         const x = plot.x + i;
@@ -478,11 +755,15 @@ export class SpectrumRenderer {
         else ctx.lineTo(x, y);
       }
     } else {
-      const xScale = plot.w / (n - 1);
-      for (let i = 0; i < n; i++) {
-        const x = plot.x + i * xScale;
-        const y = lut[row[i]!]!;
-        if (i === 0) ctx.moveTo(x, y);
+      // Direct draw: map each visible bin's centre frequency through
+      // the view window so a bin lands exactly under the grid tick at
+      // its own frequency, even when the view is panned off-centre.
+      const span = fMax - fMin;
+      for (let bi = 0; bi < visN; bi++) {
+        const fbin = fullMin + ((i0 + bi) / denom) * fullSpan;
+        const x = plot.x + ((fbin - fMin) / span) * plot.w;
+        const y = lut[sub[bi]!]!;
+        if (bi === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
     }
@@ -531,6 +812,24 @@ function niceNum(x: number, round: boolean): number {
     else nf = 10;
   }
   return Math.sign(x) * nf * Math.pow(10, exp);
+}
+
+/** Trim `text` from the right and append a single ellipsis until it
+ *  fits within `maxWidth`. Returns the empty string if even an
+ *  ellipsis alone won't fit, so callers can skip the draw entirely. */
+function ellipsize(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return '';
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  const ell = '…';
+  if (ctx.measureText(ell).width > maxWidth) return '';
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (ctx.measureText(text.slice(0, mid) + ell).width <= maxWidth) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo === 0 ? ell : text.slice(0, lo) + ell;
 }
 
 function fmtMHz(hz: number): string {

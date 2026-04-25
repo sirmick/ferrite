@@ -4,19 +4,16 @@
 // Each incoming FFT row is uploaded with `texSubImage2D` at the current
 // write index; no row-shifting, no re-upload of the history. The fragment
 // shader unwraps the ring with a single `fract()` using the normalised
-// head position, and indexes a 256×1 viridis LUT to get the final colour.
+// head position, and indexes a 256×1 sigidwiki-style LUT to get the
+// final colour.
 
-import { makeDigiLut, makeViridisLut } from './colormap';
-
-export type WaterfallPalette = 'digi' | 'viridis';
+import { makeSigidwikiLut } from './colormap';
 
 export interface WaterfallOptions {
   /** Number of history rows to keep. Default 512. */
   rows?: number;
   /** Smooth between texels (blurs bins/rows). Default true. */
   linearFilter?: boolean;
-  /** Colour palette. Default `'digi'`. */
-  palette?: WaterfallPalette;
 }
 
 const VERT_SRC = `#version 300 es
@@ -35,12 +32,16 @@ out vec4 outColor;
 uniform sampler2D u_data;
 uniform sampler2D u_palette;
 uniform float u_head;
+// Display-only horizontal zoom/pan: the X texcoord is remapped from
+// [0, 1] (screen edges) to [u_xOffset, u_xOffset + u_xScale] inside the
+// data texture. At 1× zoom the defaults are 0 and 1, which is a no-op.
+uniform float u_xOffset;
+uniform float u_xScale;
 void main() {
-  // Screen y=1 is the top of the panel; the newest row should land there.
-  // Ring head is the NEXT write slot, so newest sample sits just below it.
   float offset = 1.0 - v_uv.y;
   float v = fract(u_head - offset);
-  float lum = texture(u_data, vec2(v_uv.x, v)).r;
+  float u = u_xOffset + v_uv.x * u_xScale;
+  float lum = texture(u_data, vec2(u, v)).r;
   outColor = texture(u_palette, vec2(lum, 0.5));
 }
 `;
@@ -76,7 +77,9 @@ function link(gl: WebGL2RenderingContext, vs: WebGLShader, fs: WebGLShader): Web
  * Map a CSS pixel X-coordinate on the waterfall canvas back to an RF
  * frequency in Hz. The canvas is drawn edge-to-edge (no axis margins),
  * so the conversion is a straight linear blend across the sample-rate
- * span. Returns `null` if `cssX` lies outside `[0, widthCss]`.
+ * span. Pass the view-window centre/rate (when zoomed/panned) so a
+ * click lands on the frequency drawn under the cursor — not the full
+ * span's frequency. Returns `null` if `cssX` lies outside `[0, widthCss]`.
  */
 export function pixelToFreqLinear(
   cssX: number,
@@ -90,6 +93,19 @@ export function pixelToFreqLinear(
   return centerHz - rateHz / 2 + frac * rateHz;
 }
 
+/** Display-only horizontal view window for the waterfall. Maps to
+ *  fragment-shader texcoord remapping; no data is re-uploaded. */
+export interface WaterfallView {
+  /** Centre frequency of the visible slice in Hz. */
+  centerHz: number;
+  /** Width of the visible slice in Hz. */
+  rateHz: number;
+  /** Centre frequency of the full data span in Hz (axes.center_freq_hz). */
+  fullCenterHz: number;
+  /** Width of the full data span in Hz (axes.sample_rate_hz). */
+  fullRateHz: number;
+}
+
 export class WaterfallRenderer {
   private readonly gl: WebGL2RenderingContext;
   private readonly program: WebGLProgram;
@@ -97,12 +113,15 @@ export class WaterfallRenderer {
   private readonly dataTex: WebGLTexture;
   private readonly paletteTex: WebGLTexture;
   private readonly uHead: WebGLUniformLocation;
+  private readonly uXOffset: WebGLUniformLocation;
+  private readonly uXScale: WebGLUniformLocation;
   private readonly rows: number;
   private cols = 0;
   private head = 0;
   private rafPending = false;
   private disposed = false;
-  private palette: WaterfallPalette = 'digi';
+  private xOffset = 0;
+  private xScale = 1;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -150,21 +169,60 @@ export class WaterfallRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.palette = opts.palette ?? 'digi';
-    this.uploadPalette();
+    // Single-palette LUT — sigidwiki-flavoured rainbow ramp.
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      256,
+      1,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      makeSigidwikiLut(256),
+    );
 
     const uData = gl.getUniformLocation(this.program, 'u_data');
     const uPalette = gl.getUniformLocation(this.program, 'u_palette');
     const uHead = gl.getUniformLocation(this.program, 'u_head');
-    if (!uData || !uPalette || !uHead) throw new Error('uniform lookup failed');
+    const uXOffset = gl.getUniformLocation(this.program, 'u_xOffset');
+    const uXScale = gl.getUniformLocation(this.program, 'u_xScale');
+    if (!uData || !uPalette || !uHead || !uXOffset || !uXScale)
+      throw new Error('uniform lookup failed');
     this.uHead = uHead;
+    this.uXOffset = uXOffset;
+    this.uXScale = uXScale;
 
     gl.useProgram(this.program);
     gl.uniform1i(uData, 0);
     gl.uniform1i(uPalette, 1);
+    gl.uniform1f(uXOffset, 0);
+    gl.uniform1f(uXScale, 1);
     gl.useProgram(null);
 
     this.resize();
+  }
+
+  /** Crop the rendered waterfall to a horizontal sub-range of the full
+   *  span. Pass `undefined` to revert to full-span. The view is given
+   *  in absolute frequencies (centre + width) along with the full
+   *  span's centre + width — the renderer converts to texcoord offset
+   *  + scale and clamps both so the lookup never reads outside [0, 1]. */
+  setView(view: WaterfallView | undefined): void {
+    if (this.disposed) return;
+    let off = 0;
+    let scl = 1;
+    if (view && view.fullRateHz > 0) {
+      const fullMin = view.fullCenterHz - view.fullRateHz / 2;
+      const viewMin = view.centerHz - view.rateHz / 2;
+      scl = Math.max(0.0001, Math.min(1, view.rateHz / view.fullRateHz));
+      off = Math.max(0, Math.min(1 - scl, (viewMin - fullMin) / view.fullRateHz));
+    }
+    if (off === this.xOffset && scl === this.xScale) return;
+    this.xOffset = off;
+    this.xScale = scl;
+    this.scheduleDraw();
   }
 
   /** Upload one FFT row. `row.length` sets the column count on first call. */
@@ -177,22 +235,6 @@ export class WaterfallRenderer {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.head, this.cols, 1, gl.RED, gl.UNSIGNED_BYTE, row);
     this.head = (this.head + 1) % this.rows;
     this.scheduleDraw();
-  }
-
-  /** Swap the colour palette. Re-uploads the 256×1 LUT texture. */
-  setPalette(palette: WaterfallPalette): void {
-    if (this.disposed || this.palette === palette) return;
-    this.palette = palette;
-    this.uploadPalette();
-    this.scheduleDraw();
-  }
-
-  private uploadPalette(): void {
-    const gl = this.gl;
-    const lut = this.palette === 'viridis' ? makeViridisLut(256) : makeDigiLut(256);
-    gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, lut);
   }
 
   /** Resize the drawing buffer to the CSS size. Call on resize. */
@@ -250,6 +292,8 @@ export class WaterfallRenderer {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
     gl.uniform1f(this.uHead, this.head / this.rows);
+    gl.uniform1f(this.uXOffset, this.xOffset);
+    gl.uniform1f(this.uXScale, this.xScale);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(null);
     gl.useProgram(null);

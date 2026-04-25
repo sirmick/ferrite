@@ -21,7 +21,7 @@ wasm     = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_bytes", "de
 # blocks with this feature panic at monomorphization on wasm32.
 soapysdr = ["dep:soapysdr"]
 # Links vendored multimon-ng; enables digital-mode decoder blocks
-# (PocsagDemod et al). Native only — multimon-ng is a C library.
+# (PagerDemod et al). Native only — multimon-ng is a C library.
 multimon = ["dep:ferrite-multimon-ng"]
 
 [dependencies]

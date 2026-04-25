@@ -4,3 +4,9 @@ node_modules
 pnpm-lock.yaml
 src/lib/wasm/blocks
 src/lib/wasm/runtime
+# Vendored upstream band plan (Arrin-KN1E/SDR-Band-Plans, CC0) — keep
+# byte-for-byte so upstream re-syncs are a one-file copy with no
+# formatter drift.
+src/lib/presets/bandplan-usa.json
+# Local dev server log dropped by run.sh
+dev-server.log

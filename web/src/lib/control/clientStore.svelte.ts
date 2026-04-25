@@ -23,6 +23,16 @@ export const CLIENT_DEFAULTS = {
   'client.spectrum.fade': true,
   'client.spectrum.maxHold': false,
   'client.spectrum.autoScale': false,
+  'client.spectrum.bandPlan': true,
+  // Display-only horizontal zoom / pan applied to the FFT and waterfall
+  // panes. The server still streams full-span FFT rows; these knobs only
+  // control which slice the renderers paint. `viewZoom` is a linear
+  // magnification factor (1 = full span, 16 = 1/16th of the span shown
+  // edge-to-edge); `viewPan` is the fractional position of the view's
+  // *center* within the available pan range — 0 = view flush to the
+  // left edge of the full span, 1 = flush right, 0.5 = centred.
+  'client.spectrum.viewZoom': 1,
+  'client.spectrum.viewPan': 0.5,
   // Client-side display range for the FFT line + waterfall colormap.
   // Server quantises to a fixed [−160, 0] dBFS window; the display
   // range is a purely visual slice on top of those bytes — the

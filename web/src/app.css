@@ -23,3 +23,72 @@ body,
 :global(#svelte) {
   height: 100dvh;
 }
+
+/* Native range inputs are styled to match the bespoke DbRangeSlider so
+   every knob in the UI shares one look — slate-800 hairline track, soft
+   off-white circular thumb. The vendor-prefixed pseudo-elements can't be
+   combined into one selector (browsers drop the whole rule if any
+   selector is unrecognised), so the track and thumb rules are repeated
+   verbatim per engine. */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  height: 16px;
+  cursor: pointer;
+  outline: none;
+  padding: 0;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  background: rgb(30 41 59);
+  border-radius: 2px;
+}
+input[type='range']::-moz-range-track {
+  height: 4px;
+  background: rgb(30 41 59);
+  border-radius: 2px;
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgb(241 245 249);
+  border: 1px solid rgb(203 213 225);
+  margin-top: -4px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  cursor: ew-resize;
+}
+input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgb(241 245 249);
+  border: 1px solid rgb(203 213 225);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  cursor: ew-resize;
+}
+
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+input[type='range']:focus-visible::-moz-range-thumb {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+input[type='range']:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+input[type='range']:disabled::-webkit-slider-thumb {
+  cursor: not-allowed;
+}
+input[type='range']:disabled::-moz-range-thumb {
+  cursor: not-allowed;
+}

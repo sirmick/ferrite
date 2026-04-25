@@ -22,6 +22,12 @@ export class FrameClient {
   private readonly subscribers = new Map<number, Set<FrameHandler>>();
   private readonly onDecodeError?: (err: Error) => void;
 
+  /** Monotonically-increasing total of binary bytes pulled off the
+   *  socket since this client was opened — header + payload, every
+   *  stream summed together. Pollers compute KB/s by snapshotting on
+   *  a timer and diffing. Reset only when a new client is constructed. */
+  bytesReceived = 0;
+
   constructor(opts: FrameClientOptions) {
     this.onDecodeError = opts.onDecodeError;
     this.ws = new WebSocket(opts.url);
@@ -40,6 +46,7 @@ export class FrameClient {
       // Server pushes binary only; ignore stray text/control frames.
       return;
     }
+    this.bytesReceived += event.data.byteLength;
     let frame: ParsedFrame;
     try {
       frame = decodeFrame(event.data);

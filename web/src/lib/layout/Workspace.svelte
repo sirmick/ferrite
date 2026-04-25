@@ -6,7 +6,9 @@
   // across sessions via localStorage.
   import Spectrum from '$lib/viz/Spectrum.svelte';
   import Waterfall from '$lib/viz/Waterfall.svelte';
+  import DisplayControls from '$lib/viz/DisplayControls.svelte';
   import Split from '$lib/layout/Split.svelte';
+  import AppToolbar from '$lib/layout/AppToolbar.svelte';
   import type { FrameClient } from '$lib/ws/client';
 
   interface Props {
@@ -21,7 +23,8 @@
     {#snippet a()}
       <section class="flex h-full min-h-0 flex-col bg-[color:var(--color-bg)]">
         <header class="panel-head">
-          <span>Spectrum</span>
+          <span class="shrink-0">Spectrum</span>
+          <AppToolbar />
         </header>
         <div class="min-h-0 flex-1">
           <Spectrum {client} />
@@ -36,6 +39,7 @@
         <div class="min-h-0 flex-1">
           <Waterfall {client} />
         </div>
+        <DisplayControls />
       </section>
     {/snippet}
   </Split>
@@ -46,9 +50,10 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 2px 8px;
+    gap: 12px;
+    padding: 3px 8px;
     border-bottom: 1px solid rgb(30 41 59);
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
