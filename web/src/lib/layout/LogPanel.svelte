@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { logs, type LogLevel, type LogSource } from '$lib/logs/store.svelte';
+  import { logs, type LogLevel } from '$lib/logs/store.svelte';
   import { tick } from 'svelte';
 
   let scroller: HTMLDivElement | undefined = $state();
@@ -14,11 +14,36 @@
     trace: 'text-slate-500',
   };
 
-  const SOURCE_BADGE: Record<LogSource, string> = {
-    server: 'bg-indigo-900/60 text-indigo-200',
-    client: 'bg-slate-800 text-slate-300',
-    vite: 'bg-emerald-900/60 text-emerald-200',
-  };
+  // Stable colour palette for category badges. Hash the category
+  // string into an index so the same target always picks the same
+  // colour — quickly recognisable as "decoder::pocsag is teal" etc
+  // without needing a legend. Server / client / vite without a
+  // parsed category fall back to a fixed slate badge so untagged
+  // free-text from the browser still has a visible pill.
+  const CATEGORY_PALETTE = [
+    'bg-indigo-900/60 text-indigo-200',
+    'bg-emerald-900/60 text-emerald-200',
+    'bg-amber-900/60 text-amber-200',
+    'bg-rose-900/60 text-rose-200',
+    'bg-sky-900/60 text-sky-200',
+    'bg-purple-900/60 text-purple-200',
+    'bg-cyan-900/60 text-cyan-200',
+    'bg-pink-900/60 text-pink-200',
+    'bg-lime-900/60 text-lime-200',
+    'bg-orange-900/60 text-orange-200',
+  ];
+  const FALLBACK_BADGE = 'bg-slate-800 text-slate-400';
+
+  function hashStr(s: string): number {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    return h;
+  }
+
+  function badgeFor(category: string | null): string {
+    if (!category) return FALLBACK_BADGE;
+    return CATEGORY_PALETTE[Math.abs(hashStr(category)) % CATEGORY_PALETTE.length];
+  }
 
   function fmtTime(t: number): string {
     const d = new Date(t);
@@ -130,9 +155,14 @@
     {#each visibleEntries as entry (entry.id)}
       <div class="flex gap-1 border-b border-slate-900 px-2 py-0.5">
         <span class="shrink-0 text-[color:var(--color-muted)]">{fmtTime(entry.t)}</span>
-        <span class="shrink-0 rounded px-1 text-[10px] {SOURCE_BADGE[entry.source]}"
-          >{entry.source}</span
+        <span
+          class="shrink-0 rounded px-1 text-[10px] {badgeFor(entry.category)}"
+          title={entry.category
+            ? `category: ${entry.category} · source: ${entry.source}`
+            : `source: ${entry.source}`}
         >
+          {entry.category ?? entry.source}
+        </span>
         <span class="min-w-0 break-words {LEVEL_COLORS[entry.level]}">{entry.text}</span>
       </div>
     {/each}

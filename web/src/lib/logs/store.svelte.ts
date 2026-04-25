@@ -34,6 +34,7 @@ export function categoryOfText(text: string): string | null {
 }
 
 const MAX_ENTRIES = 500;
+const MUTED_STORAGE_KEY = 'ferrite.logs.mutedCategories';
 
 class LogStore {
   entries = $state<LogEntry[]>([]);
@@ -41,43 +42,64 @@ class LogStore {
    *  Drives the red dot on the sidebar's Logs tab so errors don't go
    *  unseen while the tab isn't active. Call `ackErrors()` on tab-open. */
   unreadErrors = $state<number>(0);
-  /** Categories the user has muted. Mute = drop from on-screen entries
-   *  display only; the line is still pushed (so unmuting later doesn't
-   *  reveal a hole) and still forwarded to the server. Session-only —
-   *  not persisted, since the set of categories the user cares about is
-   *  task-bound and not a long-lived preference. */
+  /** Categories the user has muted. Mute = drop from on-screen
+   *  entries display only; the line is still pushed (so unmuting
+   *  later doesn't reveal a hole) and still forwarded to the server.
+   *  Persisted to localStorage so a one-time mute (e.g. of
+   *  `flowdiag`) survives reloads — otherwise the chatty categories
+   *  would flood the panel on every fresh load. */
   mutedCategories = $state<Set<string>>(new Set());
-  /** Categories ever seen on this session. The filter dropdown enumerates
-   *  this set so the user can mute things they've actually observed
-   *  rather than a hard-coded list. */
+  /** Categories ever seen on this session. The filter dropdown
+   *  enumerates this set so the user can mute things they've actually
+   *  observed rather than a hard-coded list. */
   knownCategories = $state<Set<string>>(new Set());
   private nextId = 1;
+
+  constructor() {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(MUTED_STORAGE_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw) as unknown;
+        if (Array.isArray(arr)) {
+          this.mutedCategories = new Set(arr.filter((s): s is string => typeof s === 'string'));
+        }
+      }
+    } catch {
+      /* corrupt; fall back to empty */
+    }
+  }
 
   toggleMute(category: string): void {
     const next = new Set(this.mutedCategories);
     if (next.has(category)) next.delete(category);
     else next.add(category);
     this.mutedCategories = next;
+    this.persistMute();
   }
 
   unmuteAll(): void {
     if (this.mutedCategories.size === 0) return;
     this.mutedCategories = new Set();
+    this.persistMute();
+  }
+
+  private persistMute(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(MUTED_STORAGE_KEY, JSON.stringify([...this.mutedCategories]));
+    } catch {
+      /* quota / private mode — silent */
+    }
   }
 
   push(source: LogSource, level: LogLevel, text: string): void {
     // Peel off `flowdiag side=… {json}` lines and feed the Flow store.
-    // We don't add them to `entries` — at 1 Hz × two sides they'd
-    // dominate the on-screen Logs tab, and the Flow tab is the right
-    // place to look at flow data anyway. Client-origin lines still get
-    // forwarded to the server so ferrited's stdout has the full
-    // record (and routes them under target=flowdiag on landing).
+    // The line then continues into `entries` like any other log under
+    // the `flowdiag` category — the per-category mute dropdown is the
+    // way to hide them, and that mute persists across reloads.
     const flowdiag = parseFlowdiagLine(text);
-    if (flowdiag) {
-      flow.ingest(flowdiag.side, flowdiag.snap);
-      if (source === 'client') forwardToServer(level, text);
-      return;
-    }
+    if (flowdiag) flow.ingest(flowdiag.side, flowdiag.snap);
     const category = categoryOfText(text);
     if (category && !this.knownCategories.has(category)) {
       // Mutate via fresh Set so $state tracks the change.
