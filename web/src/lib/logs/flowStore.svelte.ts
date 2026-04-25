@@ -144,12 +144,14 @@ class FlowStore {
 export const flow = new FlowStore();
 
 // Parse the `flowdiag side=… {json}` line format emitted on both sides.
-// Server-side lines have a `module_path: ` prefix inserted by the
-// tracing broadcast layer; browser-side come straight from postDiag.
-// The regex finds the marker anywhere in the line, then pulls the
-// JSON off the end. Returns null when the text isn't a flowdiag line
-// or JSON parse fails (tolerated silently).
-const FLOWDIAG_RE = /flowdiag\s+side=(node|browser)\s+(\{.*\})\s*$/s;
+// Server-side lines have a `target: ` prefix inserted by the tracing
+// broadcast layer and may carry trailing structured fields (e.g.
+// `source="client"` when the browser-side line round-trips through
+// /api/debug/log). The regex finds the marker anywhere in the line
+// and grabs the JSON object greedily — `\{.*\}` extends to the LAST
+// `}` in the string, so any trailing tracing fields are tolerated as
+// long as they don't contain a `}` themselves (none of ours do).
+const FLOWDIAG_RE = /flowdiag\s+side=(node|browser)\s+(\{.*\})/s;
 
 export function parseFlowdiagLine(text: string): { side: Side; snap: DiagSnapshot } | null {
   const m = FLOWDIAG_RE.exec(text);
