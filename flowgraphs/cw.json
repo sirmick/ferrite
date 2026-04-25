@@ -1,10 +1,10 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
-  "name": "pager",
-  "label": "Pagers (POCSAG / FLEX)",
-  "description": "Pager messages on the 929-932 MHz US carrier band — runs POCSAG (512/1200/2400 bps) and FLEX (1600/3200/6400 bps 4-FSK) decoders in parallel on the same audio. Most US carriers migrated from POCSAG to FLEX in the 2000s; in many metros the busy carriers are now FLEX (hospital alerts, sensor monitoring, fleet pages). Default frequency 929.6125 MHz lands on a typical pager pool. Decoded messages stream into the Logs tab under the `decoder::pocsag` and `decoder::flex` categories — mute one independently from the categories dropdown.",
-  "signal_wiki_url": "https://www.sigidwiki.com/wiki/POCSAG",
-  "sample_path": "samples/sigidwiki/POCSAG_Sound.mp3",
+  "name": "cw",
+  "label": "CW / Morse decode (HF)",
+  "description": "Auto-decode Morse on HF CW bands. Default tuning is 14.030 MHz USB (20 m CW), but the band-plan ribbon makes it easy to retune anywhere CW lives — 7.030 (40 m), 10.115 (30 m), 21.030 (15 m), 28.030 (10 m). Tune so the CW tone sits around 600–800 Hz in the audio (use the VFO Nixie); multimon's Goertzel detector locks onto whatever clean tone it sees and emits decoded characters into the Logs tab under `decoder::cw`. Pair with the `usb` preset on the same frequency to listen while decoding.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Morse_Code_(CW)",
+  "sample_path": "samples/sigidwiki/Cw_morse.mp3",
   "environments": [
     "node",
     "browser"
@@ -14,7 +14,7 @@
       "type": "Source",
       "placement": "node",
       "params": {
-        "center_freq_hz": 929612500.0,
+        "center_freq_hz": 14030000.0,
         "sample_rate_hz": 2400000.0,
         "bandwidth_hz": 2000000.0
       }
@@ -25,7 +25,7 @@
       "params": {
         "input_rate_hz": 2400000.0,
         "freq_shift_hz": 0.0,
-        "output_rate_hz": 50000.0
+        "output_rate_hz": 48000.0
       }
     },
     "tee": {
@@ -50,11 +50,12 @@
       }
     },
     "demod": {
-      "type": "FmDemod",
+      "type": "SsbDemod",
       "placement": "node",
       "params": {
-        "sample_rate_hz": 50000,
-        "max_deviation_hz": 5000
+        "sample_rate_hz": 48000,
+        "sideband": "usb",
+        "audio_gain": 30.0
       }
     },
     "resamp": {
@@ -65,8 +66,8 @@
         "stopband_db": 60.0
       }
     },
-    "pager": {
-      "type": "PagerDemod",
+    "morse": {
+      "type": "MorseDemod",
       "placement": "node",
       "params": {
         "sample_rate_hz": 22050.0
@@ -104,7 +105,7 @@
     ],
     [
       "resamp.out",
-      "pager.in"
+      "morse.in"
     ]
   ]
 }

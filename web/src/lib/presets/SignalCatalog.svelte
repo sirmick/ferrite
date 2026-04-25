@@ -62,10 +62,25 @@
                   {entry.description}
                 </span>
               {/if}
-              <span class="flex gap-1 text-[9px] text-slate-600">
+              <span class="flex flex-wrap items-center gap-1 text-[9px] text-slate-600">
                 {#each entry.environments as env (env)}
                   <span class="rounded border border-slate-800 px-1">{env}</span>
                 {/each}
+                {#if entry.signalWikiUrl}
+                  <!-- Opens the matching sigidwiki page in a new tab.
+                       `stopPropagation` keeps the link click from also
+                       firing the parent button's preset-load handler. -->
+                  <a
+                    href={entry.signalWikiUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onclick={(e) => e.stopPropagation()}
+                    class="rounded border border-slate-700 px-1 text-slate-400 hover:border-slate-500 hover:text-slate-200"
+                    title="Signal Identification Guide"
+                  >
+                    wiki ↗
+                  </a>
+                {/if}
               </span>
             </button>
           </li>

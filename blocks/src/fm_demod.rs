@@ -193,7 +193,12 @@ impl Block for FmDemod {
         let n = src.len().min(dst.len());
         for i in 0..n {
             let x = src[i];
-            dst[i] = inner.demodulate(x.re, x.im);
+            // Clamp to ±1 — anything past max_deviation is noise (random
+            // phase ramps up to ±π → output ±fs/(2·max_dev) which can be
+            // many ×). Letting that through saturates downstream listeners
+            // (FileAudioSink → i16 clip) and obscures real bursts of
+            // narrowband signal that *do* sit inside ±max_dev.
+            dst[i] = inner.demodulate(x.re, x.im).clamp(-1.0, 1.0);
         }
 
         let mut w = Work::new();

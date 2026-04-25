@@ -20,6 +20,13 @@ crate-type = ["rlib"]
 name = "analyze-pocsag-wav"
 path = "src/bin/analyze_pocsag_wav.rs"
 
+# Sibling diagnostic for the packet/AX.25 family (AFSK1200 + variants
+# + FSK9600). Same usage pattern as analyze-pocsag-wav, points at a
+# 22050 Hz mono WAV.
+[[bin]]
+name = "analyze-packet-wav"
+path = "src/bin/analyze_packet_wav.rs"
+
 [build-dependencies]
 cc      = "1.0"
 bindgen = "0.70"

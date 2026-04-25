@@ -51,6 +51,26 @@ mod sys {
 
 use std::mem::MaybeUninit;
 
+/// Minimum sample count the wrapper hands to a multimon `demod` call.
+/// Multimon's correlator-based demods (AFSK1200/2400, FSK9600) read up
+/// to `CORRLEN` (≈18 at 22050 Hz) samples per inner-loop iteration but
+/// only check `length > 0` per iteration — small caller chunks cause
+/// the loop to over-read past the slice end and the bit detector
+/// silently fails. 4096 samples (~180 ms at 22050 Hz) sits comfortably
+/// above every shipped decoder's threshold (empirically ≥~2700) without
+/// adding visible latency for paging / packet bursts that are 200 ms+.
+const MIN_BATCH_SAMPLES: usize = 4096;
+
+/// Guard zeros appended after each batch so the C correlator's last-
+/// iteration over-read (up to `CORRLEN - SUBSAMP` ≈ 16 samples past
+/// `length`) lands on initialised zero memory instead of uninitialised
+/// `Vec` tail capacity. Without it, decode behaviour at small caller
+/// chunk sizes is non-deterministic — observed empirically at chunk=10
+/// where the over-read sometimes happened to read silence (decode OK)
+/// and sometimes garbage (decode missed). 32 covers every shipped
+/// multimon decoder's CORRLEN with comfortable margin.
+const BATCH_GUARD_SAMPLES: usize = 32;
+
 /// Which decoder this instance runs. Adding a decoder = vendor source
 /// in `build.rs::decoder_sources()` + bindgen `allowlist_var` + a
 /// variant here + a `pub fn from_kind` arm.
@@ -69,6 +89,30 @@ pub enum Decoder {
     /// different sync / error-recovery internals. Run alongside
     /// [`Self::Flex`] for best capture rate.
     FlexNext,
+    /// AFSK 1200 baud — APRS / AX.25 packet radio. The 144.39 MHz
+    /// (US) / 144.80 (EU) ham band is full of these. 22050 Hz audio.
+    Afsk1200,
+    /// AFSK 2400 baud — higher-rate ham packet, MFJ-2400 timing.
+    Afsk2400,
+    /// AFSK 2400 baud — alternate timing variant 2 (TCM3105).
+    Afsk2400_2,
+    /// AFSK 2400 baud — alternate timing variant 3 (PSKDET).
+    Afsk2400_3,
+    /// FSK 9600 baud — G3RUH packet, used on amateur satellites
+    /// (PSAT, AISAT-1) and high-rate terrestrial APRS.
+    Fsk9600,
+    /// Goertzel-based Morse / CW decoder. Audio in via SSB+BFO or
+    /// straight tone audio at 22050 Hz; emits decoded text.
+    MorseCw,
+    /// US Emergency Alert System / SAME headers — the data burst at
+    /// the head of a NOAA Weather Radio (162.4–162.55 MHz) alert or
+    /// a TV/radio EAS test. Decodes header + locator codes.
+    Eas,
+    /// Multimon-ng's DTMF decoder. Ferrite ships its own hand-rolled
+    /// `DtmfDecoder` block as the primary; this variant exists so a
+    /// future parity-test flowgraph can run both side-by-side on the
+    /// same audio fixture.
+    Dtmf,
 }
 
 impl Decoder {
@@ -84,6 +128,14 @@ impl Decoder {
                 Self::Pocsag2400 => sys::demod_poc24.samplerate,
                 Self::Flex => sys::demod_flex.samplerate,
                 Self::FlexNext => sys::demod_flex_next.samplerate,
+                Self::Afsk1200 => sys::demod_afsk1200.samplerate,
+                Self::Afsk2400 => sys::demod_afsk2400.samplerate,
+                Self::Afsk2400_2 => sys::demod_afsk2400_2.samplerate,
+                Self::Afsk2400_3 => sys::demod_afsk2400_3.samplerate,
+                Self::Fsk9600 => sys::demod_fsk9600.samplerate,
+                Self::MorseCw => sys::demod_morse.samplerate,
+                Self::Eas => sys::demod_eas.samplerate,
+                Self::Dtmf => sys::demod_dtmf.samplerate,
             }
         }
     }
@@ -100,6 +152,14 @@ impl Decoder {
                 Self::Pocsag2400 => sys::demod_poc24.name,
                 Self::Flex => sys::demod_flex.name,
                 Self::FlexNext => sys::demod_flex_next.name,
+                Self::Afsk1200 => sys::demod_afsk1200.name,
+                Self::Afsk2400 => sys::demod_afsk2400.name,
+                Self::Afsk2400_2 => sys::demod_afsk2400_2.name,
+                Self::Afsk2400_3 => sys::demod_afsk2400_3.name,
+                Self::Fsk9600 => sys::demod_fsk9600.name,
+                Self::MorseCw => sys::demod_morse.name,
+                Self::Eas => sys::demod_eas.name,
+                Self::Dtmf => sys::demod_dtmf.name,
             };
             let bytes = std::ffi::CStr::from_ptr(p).to_bytes();
             std::str::from_utf8_unchecked(bytes)
@@ -114,6 +174,14 @@ impl Decoder {
             Self::Pocsag2400 => &raw const sys::demod_poc24,
             Self::Flex => &raw const sys::demod_flex,
             Self::FlexNext => &raw const sys::demod_flex_next,
+            Self::Afsk1200 => &raw const sys::demod_afsk1200,
+            Self::Afsk2400 => &raw const sys::demod_afsk2400,
+            Self::Afsk2400_2 => &raw const sys::demod_afsk2400_2,
+            Self::Afsk2400_3 => &raw const sys::demod_afsk2400_3,
+            Self::Fsk9600 => &raw const sys::demod_fsk9600,
+            Self::MorseCw => &raw const sys::demod_morse,
+            Self::Eas => &raw const sys::demod_eas,
+            Self::Dtmf => &raw const sys::demod_dtmf,
         }
     }
 }
@@ -160,6 +228,16 @@ pub mod pocsag {
 pub struct MultimonDemod {
     kind: Decoder,
     state: Box<sys::demod_state>,
+    /// Reusable f32→i16 conversion buffer for the few multimon
+    /// decoders that still want int16 PCM (`MORSE_CW`, `X10`). Empty
+    /// for the float-input majority. Sized lazily on first push.
+    int_scratch: Vec<i16>,
+    /// Reusable scratch for the f32 path — multimon's float input is
+    /// calibrated against the ±i16::MAX amplitude scale (the float
+    /// path was added later as a convenience over the original int16
+    /// API and kept the same numerical range), so the wrapper scales
+    /// caller-friendly ±1.0 samples up before pushing.
+    float_scratch: Vec<f32>,
 }
 
 impl MultimonDemod {
@@ -189,7 +267,12 @@ impl MultimonDemod {
                 init_fn(state.as_mut() as *mut _);
             }
         }
-        Self { kind, state }
+        Self {
+            kind,
+            state,
+            int_scratch: Vec::new(),
+            float_scratch: Vec::new(),
+        }
     }
 
     /// Decoder kind this instance is running.
@@ -206,24 +289,93 @@ impl MultimonDemod {
 
     /// Push one block of f32 audio samples through the decoder. Pre-
     /// resample to [`Self::sample_rate_hz`] upstream — multimon's
-    /// per-decoder bit timing assumes the exact native rate.
+    /// per-decoder bit timing assumes the exact native rate. Caller's
+    /// chunk size is irrelevant: the wrapper accumulates internally
+    /// and forwards in [`MIN_BATCH_SAMPLES`]-sized batches (see below).
+    ///
+    /// Most multimon decoders read floats directly. A few legacy ones
+    /// (`MORSE_CW` is the only one we currently wrap, but the same
+    /// applies to X10) pre-date multimon's float path and still want
+    /// int16 PCM. For those we convert into a scratch buffer and pass
+    /// `sbuffer` instead — the wrapper hides the dispatch so callers
+    /// only ever see f32.
+    ///
+    /// Why a minimum batch size: multimon's AFSK1200/2400/9600 demods
+    /// over-read their input buffer by up to `CORRLEN` samples per
+    /// inner-loop iteration (correlator window > stride). With tiny
+    /// caller chunks (e.g. ~10 samples per scheduler tick) the
+    /// correlator reads garbage past the slice end and the bit
+    /// detector silently fails. Buffering to ≥4 k samples (~180 ms at
+    /// 22050 Hz) puts every correlator window safely inside valid
+    /// memory and matches the chunk size the offline analyzer uses.
     pub fn push(&mut self, samples: &[f32]) {
         if samples.is_empty() {
             return;
         }
-        let buf = sys::buffer {
-            sbuffer: std::ptr::null(),
-            fbuffer: samples.as_ptr(),
-        };
-        // SAFETY: `state` is initialised, `samples` lives for the
-        // duration of this call, and `length` matches the slice. The
-        // decoder reads exclusively through the `fbuffer` field
-        // because its `demod_param.float_samples` is `true`.
-        unsafe {
-            if let Some(demod_fn) = (*self.kind.dem_par()).demod {
-                let len = i32::try_from(samples.len()).unwrap_or(i32::MAX);
-                demod_fn(self.state.as_mut() as *mut _, buf, len);
+        // SAFETY: `dem_par` points at a const C static; `float_samples`
+        // is a plain bool field. No aliasing concerns.
+        let wants_float = unsafe { (*self.kind.dem_par()).float_samples };
+
+        if wants_float {
+            // multimon's float path expects samples in the same numeric
+            // range as its native int16 path (±32767-ish), not the ±1
+            // convention every other Ferrite block uses.
+            self.float_scratch
+                .extend(samples.iter().map(|&x| x * f32::from(i16::MAX)));
+            self.flush_float_batches();
+        } else {
+            self.int_scratch.extend(
+                samples
+                    .iter()
+                    .map(|&x| (x * 32_767.0).clamp(-32_768.0, 32_767.0) as i16),
+            );
+            self.flush_int_batches();
+        }
+    }
+
+    fn flush_float_batches(&mut self) {
+        let dem_par = self.kind.dem_par();
+        // SAFETY: const C static.
+        let demod_fn = unsafe { (*dem_par).demod };
+        let Some(demod_fn) = demod_fn else { return };
+        while self.float_scratch.len() >= MIN_BATCH_SAMPLES {
+            // Append the guard zeros so the C correlator's tail over-read
+            // is into known memory; truncate them right after the call so
+            // the next batch starts clean.
+            let pad_pos = self.float_scratch.len();
+            self.float_scratch
+                .resize(pad_pos + BATCH_GUARD_SAMPLES, 0.0);
+            let buf = sys::buffer {
+                sbuffer: std::ptr::null(),
+                fbuffer: self.float_scratch.as_ptr(),
+            };
+            // SAFETY: `fbuffer` points at scratch[0]; the C demod reads up
+            // to MIN_BATCH+BATCH_GUARD samples (all initialised) and
+            // advances state by MIN_BATCH/SUBSAMP iterations.
+            unsafe {
+                demod_fn(self.state.as_mut() as *mut _, buf, MIN_BATCH_SAMPLES as i32);
             }
+            self.float_scratch.truncate(pad_pos);
+            self.float_scratch.drain(..MIN_BATCH_SAMPLES);
+        }
+    }
+
+    fn flush_int_batches(&mut self) {
+        let dem_par = self.kind.dem_par();
+        let demod_fn = unsafe { (*dem_par).demod };
+        let Some(demod_fn) = demod_fn else { return };
+        while self.int_scratch.len() >= MIN_BATCH_SAMPLES {
+            let pad_pos = self.int_scratch.len();
+            self.int_scratch.resize(pad_pos + BATCH_GUARD_SAMPLES, 0);
+            let buf = sys::buffer {
+                sbuffer: self.int_scratch.as_ptr(),
+                fbuffer: std::ptr::null(),
+            };
+            unsafe {
+                demod_fn(self.state.as_mut() as *mut _, buf, MIN_BATCH_SAMPLES as i32);
+            }
+            self.int_scratch.truncate(pad_pos);
+            self.int_scratch.drain(..MIN_BATCH_SAMPLES);
         }
     }
 
@@ -285,25 +437,46 @@ mod tests {
     use super::{Decoder, MultimonDemod};
 
     #[test]
-    fn all_paging_decoders_use_22050_input() {
+    fn every_decoder_uses_22050_input() {
+        // multimon-ng pins 22050 Hz across every shipped decoder,
+        // which is *the* reason a single resampler upstream serves
+        // every Ferrite wrapper block. If a future port surfaces a
+        // decoder at a different rate, this assertion will catch it
+        // before a preset silently feeds garbage.
         for d in [
             Decoder::Pocsag512,
             Decoder::Pocsag1200,
             Decoder::Pocsag2400,
             Decoder::Flex,
             Decoder::FlexNext,
+            Decoder::Afsk1200,
+            Decoder::Afsk2400,
+            Decoder::Afsk2400_2,
+            Decoder::Afsk2400_3,
+            Decoder::Fsk9600,
+            Decoder::MorseCw,
+            Decoder::Eas,
+            Decoder::Dtmf,
         ] {
             assert_eq!(d.sample_rate_hz(), 22_050, "{:?}", d);
         }
     }
 
     #[test]
-    fn paging_names_round_trip() {
+    fn names_round_trip() {
         assert_eq!(Decoder::Pocsag512.name(), "POCSAG512");
         assert_eq!(Decoder::Pocsag1200.name(), "POCSAG1200");
         assert_eq!(Decoder::Pocsag2400.name(), "POCSAG2400");
         assert_eq!(Decoder::Flex.name(), "FLEX");
         assert_eq!(Decoder::FlexNext.name(), "FLEX_NEXT");
+        assert_eq!(Decoder::Afsk1200.name(), "AFSK1200");
+        assert_eq!(Decoder::Afsk2400.name(), "AFSK2400");
+        assert_eq!(Decoder::Afsk2400_2.name(), "AFSK2400_2");
+        assert_eq!(Decoder::Afsk2400_3.name(), "AFSK2400_3");
+        assert_eq!(Decoder::Fsk9600.name(), "FSK9600");
+        assert_eq!(Decoder::MorseCw.name(), "MORSE_CW");
+        assert_eq!(Decoder::Eas.name(), "EAS");
+        assert_eq!(Decoder::Dtmf.name(), "DTMF");
     }
 
     #[test]

@@ -17,6 +17,10 @@ export interface CatalogEntry {
   readonly label: string;
   readonly description?: string;
   readonly environments: ReadonlyArray<string>;
+  /** Mirror of FlowgraphDoc.signal_wiki_url — surfaced for the UI link. */
+  readonly signalWikiUrl?: string;
+  /** Mirror of FlowgraphDoc.sample_path. */
+  readonly samplePath?: string;
   readonly doc: FlowgraphDoc;
 }
 
@@ -60,6 +64,8 @@ export function buildCatalog(modules: Readonly<Record<string, unknown>>): {
         label: d.label ?? d.name ?? slug,
         description: d.description,
         environments: envs,
+        signalWikiUrl: d.signal_wiki_url,
+        samplePath: d.sample_path,
         doc: d,
       });
     } catch (err) {

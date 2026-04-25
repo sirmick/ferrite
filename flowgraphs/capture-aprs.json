@@ -1,0 +1,58 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "capture-aprs",
+  "label": "APRS capture (headless)",
+  "description": "Headless 22050 Hz mono WAV capture for offline APRS / packet diagnosis. Tunes 144.39 MHz, channelises to 50 kHz, NBFM-demods, resamples to multimon's native 22050 Hz, writes to /tmp/ferrite-aprs.wav. Run via `ferrited --flowgraph capture-aprs.json --source-type SoapySource --source-args 'driver=sdrplay' --source-antenna 'Antenna A' --source-gain 53 --agc true --run-for-secs 60 --start`, then feed the wav to `multimon-ng -t wav -a AFSK1200 /tmp/ferrite-aprs.wav` to compare.",
+  "environments": ["node"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 144390000.0,
+        "sample_rate_hz": 2000000.0,
+        "bandwidth_hz": 1536000.0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2000000.0,
+        "freq_shift_hz": 0.0,
+        "output_rate_hz": 25000.0
+      }
+    },
+    "demod": {
+      "type": "FmDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 25000,
+        "max_deviation_hz": 5000
+      }
+    },
+    "resamp": {
+      "type": "RealF32Resamp",
+      "placement": "node",
+      "params": {
+        "output_rate_hz": 22050.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio": {
+      "type": "FileAudioSink",
+      "placement": "node",
+      "params": {
+        "path": "/tmp/ferrite-aprs.wav",
+        "rate_hz": 22050.0,
+        "max_seconds": 1800.0
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "chan.in"],
+    ["chan.out", "demod.in"],
+    ["demod.out", "resamp.in"],
+    ["resamp.out", "audio.in"]
+  ]
+}

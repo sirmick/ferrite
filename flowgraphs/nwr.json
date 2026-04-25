@@ -1,10 +1,10 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
-  "name": "pager",
-  "label": "Pagers (POCSAG / FLEX)",
-  "description": "Pager messages on the 929-932 MHz US carrier band — runs POCSAG (512/1200/2400 bps) and FLEX (1600/3200/6400 bps 4-FSK) decoders in parallel on the same audio. Most US carriers migrated from POCSAG to FLEX in the 2000s; in many metros the busy carriers are now FLEX (hospital alerts, sensor monitoring, fleet pages). Default frequency 929.6125 MHz lands on a typical pager pool. Decoded messages stream into the Logs tab under the `decoder::pocsag` and `decoder::flex` categories — mute one independently from the categories dropdown.",
-  "signal_wiki_url": "https://www.sigidwiki.com/wiki/POCSAG",
-  "sample_path": "samples/sigidwiki/POCSAG_Sound.mp3",
+  "name": "nwr",
+  "label": "NOAA Weather Radio + EAS (162.55 MHz)",
+  "description": "Listen for SAME / EAS headers on a NOAA Weather Radio (NWR) channel. Default tuning is 162.550 MHz, the strongest of the seven NWR allocations in many US metros — try 162.400 / .425 / .450 / .475 / .500 / .525 / .550 if reception is weak. The NBFM audio is demodulated, resampled to multimon's native 22050 Hz, and fed to `EasDemod`; decoded headers (alert kind, FIPS county codes, duration) appear in the Logs tab under `decoder::eas`. To actually listen to the audio, swap to the `nbfm` preset on the same frequency.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Emergency_Alert_System_(EAS)",
+  "sample_path": "samples/sigidwiki/EAS_Alert_Tornado_Warning.mp3",
   "environments": [
     "node",
     "browser"
@@ -14,7 +14,7 @@
       "type": "Source",
       "placement": "node",
       "params": {
-        "center_freq_hz": 929612500.0,
+        "center_freq_hz": 162550000.0,
         "sample_rate_hz": 2400000.0,
         "bandwidth_hz": 2000000.0
       }
@@ -65,8 +65,8 @@
         "stopband_db": 60.0
       }
     },
-    "pager": {
-      "type": "PagerDemod",
+    "eas": {
+      "type": "EasDemod",
       "placement": "node",
       "params": {
         "sample_rate_hz": 22050.0
@@ -104,7 +104,7 @@
     ],
     [
       "resamp.out",
-      "pager.in"
+      "eas.in"
     ]
   ]
 }

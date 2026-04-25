@@ -215,6 +215,16 @@ impl Block for PagerDemod {
                         tracing::info!(target: "decoder::flex", "{line}");
                     }
                 }
+                // PagerDemod only ever constructs the paging variants above
+                // (see `Self::new`); this arm exists so the wrapper can grow
+                // new `Decoder` kinds (packet/EAS/morse/dtmf) without
+                // breaking pager.rs's match exhaustiveness.
+                other => {
+                    debug_assert!(false, "pager: unexpected decoder kind {other:?}");
+                    for line in lines {
+                        tracing::info!(target: "decoder::pocsag", "{line}");
+                    }
+                }
             }
         }
 

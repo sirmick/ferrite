@@ -1,0 +1,5 @@
+# Derived from the originals via convert.py. Multimon expects 22 050 Hz
+# mono 16-bit PCM and several originals are stereo / 24 kHz / 44.1 kHz,
+# so we resample once and cache here. ~11 MB of WAVs — easy to
+# regenerate, not worth committing.
+22050_mono/

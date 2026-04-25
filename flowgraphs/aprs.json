@@ -1,10 +1,10 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
-  "name": "pager",
-  "label": "Pagers (POCSAG / FLEX)",
-  "description": "Pager messages on the 929-932 MHz US carrier band — runs POCSAG (512/1200/2400 bps) and FLEX (1600/3200/6400 bps 4-FSK) decoders in parallel on the same audio. Most US carriers migrated from POCSAG to FLEX in the 2000s; in many metros the busy carriers are now FLEX (hospital alerts, sensor monitoring, fleet pages). Default frequency 929.6125 MHz lands on a typical pager pool. Decoded messages stream into the Logs tab under the `decoder::pocsag` and `decoder::flex` categories — mute one independently from the categories dropdown.",
-  "signal_wiki_url": "https://www.sigidwiki.com/wiki/POCSAG",
-  "sample_path": "samples/sigidwiki/POCSAG_Sound.mp3",
+  "name": "aprs",
+  "label": "APRS / packet (144.39 MHz)",
+  "description": "Decode APRS and amateur packet radio (AFSK1200, AFSK2400 ×3 timing variants, FSK9600 G3RUH) on the 144.39 MHz US APRS channel — runs all five multimon-ng demodulators in parallel on the same NBFM-demodulated audio. Decoded frames stream into the Logs tab under the `decoder::packet` category. Tune to 144.800 MHz for European APRS, or wherever your local digipeaters live; FSK9600 catches amateur-satellite passes (PSAT, AISAT-1).",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Packet_Reporting_System_(APRS)",
+  "sample_path": "samples/sigidwiki/AFSK1200_Sound.mp3",
   "environments": [
     "node",
     "browser"
@@ -14,7 +14,7 @@
       "type": "Source",
       "placement": "node",
       "params": {
-        "center_freq_hz": 929612500.0,
+        "center_freq_hz": 144390000.0,
         "sample_rate_hz": 2400000.0,
         "bandwidth_hz": 2000000.0
       }
@@ -65,8 +65,8 @@
         "stopband_db": 60.0
       }
     },
-    "pager": {
-      "type": "PagerDemod",
+    "packet": {
+      "type": "PacketDemod",
       "placement": "node",
       "params": {
         "sample_rate_hz": 22050.0
@@ -104,7 +104,7 @@
     ],
     [
       "resamp.out",
-      "pager.in"
+      "packet.in"
     ]
   ]
 }

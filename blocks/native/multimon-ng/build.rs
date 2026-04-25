@@ -54,6 +54,14 @@ fn main() {
         .allowlist_var("demod_poc24")
         .allowlist_var("demod_flex")
         .allowlist_var("demod_flex_next")
+        .allowlist_var("demod_afsk1200")
+        .allowlist_var("demod_afsk2400")
+        .allowlist_var("demod_afsk2400_2")
+        .allowlist_var("demod_afsk2400_3")
+        .allowlist_var("demod_fsk9600")
+        .allowlist_var("demod_morse")
+        .allowlist_var("demod_eas")
+        .allowlist_var("demod_dtmf")
         // POCSAG family runtime-tunable globals — wrapped via setter
         // functions in the shim because bindgen can't see globals
         // that are only defined in .c sources.
@@ -129,5 +137,24 @@ fn decoder_sources(vendor: &std::path::Path) -> Vec<PathBuf> {
     // parallel on the same audio stream.
     out.push(vendor.join("demod_flex.c"));
     out.push(vendor.join("demod_flex_next.c"));
+    // Packet family — AX.25 over AFSK1200 (the APRS workhorse) plus
+    // its 2400 baud variants and the G3RUH 9600 baud FSK used on
+    // amateur satellites. All produce HDLC frames decoded in the
+    // shared `hdlc.c`. Same 22050 Hz contract as the paging family.
+    out.push(vendor.join("demod_afsk12.c"));
+    out.push(vendor.join("demod_afsk24.c"));
+    out.push(vendor.join("demod_afsk24_2.c"));
+    out.push(vendor.join("demod_afsk24_3.c"));
+    out.push(vendor.join("demod_fsk96.c"));
+    out.push(vendor.join("hdlc.c"));
+    // Standalone audio-tone decoders, all 22050 Hz, no shared L2 layer.
+    out.push(vendor.join("demod_morse.c"));
+    out.push(vendor.join("demod_eas.c"));
+    out.push(vendor.join("demod_dtmf.c"));
+    // Pre-generated cosine LUT used via the `COS()` macro in
+    // multimon.h. demod_dtmf is the only currently-wrapped consumer
+    // (other future ones — CCIR/EEA/EIA/ZVEI selcall — would also
+    // need it). One small data file; cheap to link unconditionally.
+    out.push(vendor.join("costabf.c"));
     out
 }

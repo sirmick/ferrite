@@ -23,6 +23,15 @@ export interface FlowgraphDoc {
   readonly environments?: ReadonlyArray<Environment>;
   readonly blocks?: Readonly<Record<string, BlockInstanceDecl>>;
   readonly wires?: ReadonlyArray<Wire>;
+  /** Optional sigidwiki / Signal Identification Guide URL — drawn as a
+   *  ↗ link in the SignalCatalog tile so users can read up on the
+   *  protocol that the preset decodes. */
+  readonly signal_wiki_url?: string;
+  /** Optional path (repo-relative) to a representative audio sample of
+   *  the signal, kept under `samples/` so the wrapper's analyzer
+   *  binaries can replay against a known-good capture. Future UI may
+   *  surface a "play" affordance; today the field is informational. */
+  readonly sample_path?: string;
 }
 
 /** Canonical `Source` placeholder id + sentinel type. Must match the

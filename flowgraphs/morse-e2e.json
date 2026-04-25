@@ -1,0 +1,31 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "morse-e2e",
+  "label": "Morse / CW canary",
+  "description": "First-principles canary for the Morse decode chain — no SDR required. `MorseAudioSource` synthesises a 22050 Hz mono CW tone of the configured `text` at the configured `wpm` (default `PARIS PARIS PARIS` at 18 wpm, the WPM-calibration word) and feeds it directly to `MorseDemod`. Decoded characters stream into the Logs tab under `decoder::cw` — should match the input text after a few seconds of bit-timing lock. Useful for verifying the multimon-ng wrapper end-to-end without depending on band conditions.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Morse_Code_(CW)",
+  "sample_path": "samples/sigidwiki/Cw_morse.mp3",
+  "environments": ["node"],
+  "blocks": {
+    "src": {
+      "type": "MorseAudioSource",
+      "placement": "node",
+      "params": {
+        "rate_hz": 22050.0,
+        "text": "PARIS PARIS PARIS",
+        "wpm": 18,
+        "tone_hz": 800.0,
+        "amplitude": 0.7,
+        "loop_sequence": true
+      }
+    },
+    "morse": {
+      "type": "MorseDemod",
+      "placement": "node",
+      "params": { "sample_rate_hz": 22050.0 }
+    }
+  },
+  "wires": [
+    ["src.out", "morse.in"]
+  ]
+}

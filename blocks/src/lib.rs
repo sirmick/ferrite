@@ -23,6 +23,8 @@ pub mod channelizer;
 pub mod decimator;
 pub mod dtmf_audio_source;
 pub mod dtmf_decoder;
+#[cfg(feature = "multimon")]
+pub mod eas;
 pub mod events_sink;
 pub mod fft;
 pub mod file_audio_sink;
@@ -31,6 +33,11 @@ pub mod file_source;
 pub mod fm_demod;
 pub mod frame;
 pub mod log_mag_u8;
+#[cfg(feature = "multimon")]
+pub mod morse;
+pub mod morse_audio_source;
+#[cfg(feature = "multimon")]
+pub mod packet;
 #[cfg(feature = "multimon")]
 pub mod pager;
 pub mod rds_demod;
@@ -64,6 +71,8 @@ pub use channelizer::{Channelizer, ChannelizerParams};
 pub use decimator::{Decimator, DecimatorParams};
 pub use dtmf_audio_source::{DtmfAudioSource, DtmfAudioSourceParams};
 pub use dtmf_decoder::{DtmfDecoder, DtmfDecoderParams};
+#[cfg(feature = "multimon")]
+pub use eas::{EasDemod, EasDemodParams};
 pub use events_sink::{EventsSink, EventsSinkParams};
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
 pub use file_audio_sink::{FileAudioSink, FileAudioSinkParams};
@@ -72,6 +81,11 @@ pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
+#[cfg(feature = "multimon")]
+pub use morse::{MorseDemod, MorseDemodParams};
+pub use morse_audio_source::{MorseAudioSource, MorseAudioSourceParams};
+#[cfg(feature = "multimon")]
+pub use packet::{PacketDemod, PacketDemodParams};
 #[cfg(feature = "multimon")]
 pub use pager::{PagerDemod, PagerDemodParams};
 pub use rds_demod::{RdsDemod, RdsDemodParams};
@@ -157,6 +171,7 @@ mod tests {
             "AudioNrStereo",
             "DtmfAudioSource",
             "DtmfDecoder",
+            "MorseAudioSource",
             "EventsSink",
             "TeeIqF32",
             "TeeRealF32",
@@ -177,10 +192,12 @@ mod tests {
             "SoapySource missing from registry under `soapysdr` feature (found: {names:?})",
         );
         #[cfg(feature = "multimon")]
-        assert!(
-            names.contains("PagerDemod"),
-            "PagerDemod missing from registry under `multimon` feature (found: {names:?})",
-        );
+        for n in ["PagerDemod", "PacketDemod", "EasDemod", "MorseDemod"] {
+            assert!(
+                names.contains(n),
+                "{n} missing from registry under `multimon` feature (found: {names:?})",
+            );
+        }
     }
 
     #[test]
