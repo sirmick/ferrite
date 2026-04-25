@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { pixelToFreqLinear, WaterfallRenderer, type WaterfallPalette } from './waterfall';
+  import { LEFT_MARGIN, RIGHT_MARGIN } from './spectrum';
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
@@ -128,7 +129,11 @@
       </select>
     </label>
   </div>
-  <div class="relative min-h-0 flex-1">
+  <div
+    class="relative min-h-0 flex-1"
+    style:padding-left="{LEFT_MARGIN}px"
+    style:padding-right="{RIGHT_MARGIN}px"
+  >
     <canvas
       bind:this={canvas}
       class="block h-full w-full touch-none select-none"
@@ -145,7 +150,9 @@
         class="pointer-events-none absolute top-0 bottom-0 w-px"
         class:bg-sky-400={!dragging}
         class:bg-amber-400={dragging}
-        style:left={dragX != null ? `${dragX}px` : '50%'}
+        style:left={dragX != null
+          ? `${LEFT_MARGIN + dragX}px`
+          : `calc(${LEFT_MARGIN}px + (100% - ${LEFT_MARGIN + RIGHT_MARGIN}px) / 2)`}
         style:box-shadow={dragging
           ? '0 0 4px rgba(251, 191, 36, 0.8)'
           : '0 0 3px rgba(56, 189, 248, 0.6)'}

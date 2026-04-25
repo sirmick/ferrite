@@ -82,10 +82,16 @@ export interface SpectrumStats {
   p99: number;
 }
 
-const LEFT_MARGIN = 44;
+/// Inset (in CSS pixels) reserved on the canvas for the dBFS y-axis
+/// labels. Exported so the waterfall can match it and the two panes
+/// land pixel-aligned along their shared frequency axis.
+export const LEFT_MARGIN = 44;
 const BOTTOM_MARGIN = 18;
 const TOP_MARGIN = 4;
-const RIGHT_MARGIN = 6;
+/// Inset (in CSS pixels) reserved on the right for trace breathing
+/// room. Exported alongside [`LEFT_MARGIN`] so the waterfall mirrors
+/// it.
+export const RIGHT_MARGIN = 6;
 
 export class SpectrumRenderer {
   private readonly ctx: CanvasRenderingContext2D;
