@@ -25,11 +25,13 @@ export const CLIENT_DEFAULTS = {
   'client.spectrum.autoScale': false,
   // Client-side display range for the FFT line + waterfall colormap.
   // Server quantises to a fixed [−160, 0] dBFS window; the display
-  // range is a purely visual slice on top of those bytes. Default
-  // mirrors what the server used to ship so first-time users see a
-  // reasonable trace without touching anything.
-  'client.spectrum.displayFloorDbfs': -100,
-  'client.spectrum.displayCeilDbfs': 0,
+  // range is a purely visual slice on top of those bytes — the
+  // backend never sees these values. Default −140/−20 leaves
+  // headroom on both ends so a typical broadcast or HF signal
+  // sits comfortably mid-graph without immediately needing a
+  // manual or auto-scale adjustment.
+  'client.spectrum.displayFloorDbfs': -140,
+  'client.spectrum.displayCeilDbfs': -20,
 
   // Audio playback
   'client.audio.volume': 1.0,

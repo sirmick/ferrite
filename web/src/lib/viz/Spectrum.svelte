@@ -382,7 +382,7 @@
       {/if}
       <label
         class="flex items-center gap-1"
-        title="auto-track floor/ceil to the signal (writes logmag.floor_dbfs/ceil_dbfs)"
+        title="auto-track floor/ceil to the signal (overrides the manual values below)"
       >
         <input
           type="checkbox"
@@ -394,6 +394,42 @@
             )}
         />
         <span>auto</span>
+      </label>
+
+      <label
+        class="flex items-center gap-1"
+        title="display floor (dBFS) — purely visual, server quantises to [-160, 0]"
+      >
+        <span>floor</span>
+        <input
+          type="number"
+          step="1"
+          min="-160"
+          max="0"
+          value={manualFloorDbfs}
+          disabled={autoScale}
+          class="w-14 rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-right text-slate-200 disabled:opacity-50"
+          onchange={(e) => {
+            const v = Number((e.currentTarget as HTMLInputElement).value);
+            if (Number.isFinite(v)) void applyControl('client.spectrum.displayFloorDbfs', v);
+          }}
+        />
+      </label>
+      <label class="flex items-center gap-1" title="display ceiling (dBFS) — purely visual">
+        <span>ceil</span>
+        <input
+          type="number"
+          step="1"
+          min="-160"
+          max="0"
+          value={manualCeilDbfs}
+          disabled={autoScale}
+          class="w-14 rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-right text-slate-200 disabled:opacity-50"
+          onchange={(e) => {
+            const v = Number((e.currentTarget as HTMLInputElement).value);
+            if (Number.isFinite(v)) void applyControl('client.spectrum.displayCeilDbfs', v);
+          }}
+        />
       </label>
     </div>
     <FftControls />
