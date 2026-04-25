@@ -31,6 +31,7 @@ import { fetchPipelineBlocks, patchBlockParams, type PipelineBlock } from '$lib/
 import { fetchPresets, loadPreset, type PresetEntry } from '$lib/api/presets';
 import { fetchSourceCapabilities, type SourceCapabilitiesResponse } from '$lib/api/sourceCaps';
 import { defaultsFor, toSourceConfig } from '$lib/controls/optionsModel';
+import { catalog } from '$lib/presets/catalog';
 import { FrameClient, type ClientStatus } from '$lib/ws/client';
 import { initFrameDecoder } from '$lib/ws/frame';
 import { logs } from '$lib/logs/store.svelte';
@@ -157,16 +158,26 @@ class PipelineStore {
     const baseline = defaultsFor(caps);
     if (!baseline) return;
 
-    // Carry the user's current centre frequency, clamped to the advertised
-    // range. If they swapped devices and the old freq is out of band,
-    // fall back to the baseline midpoint rather than picking an
-    // unreachable value.
+    // Carry the user's current centre frequency through the source
+    // restart unchanged — *iff* it's in the device's advertised range.
+    // If it isn't (e.g. they swapped from an SDR that reaches 1 GHz
+    // to one that caps at 30 MHz), fall back to the active preset's
+    // src.center_freq_hz hint so they land inside that mode's band
+    // rather than at the device's edge. If the preset doesn't define
+    // a hint either, finally fall back to the caps' baseline midpoint.
     const current = this.source.params as Record<string, unknown>;
     const currentFreq = typeof current.center_freq_hz === 'number' ? current.center_freq_hz : null;
     const { min, max } = baseline.freq_range;
-    const keptFreq =
-      currentFreq !== null && Number.isFinite(currentFreq)
-        ? Math.min(max, Math.max(min, currentFreq))
+    const inRange =
+      currentFreq !== null &&
+      Number.isFinite(currentFreq) &&
+      currentFreq >= min &&
+      currentFreq <= max;
+    const presetHint = this.flowgraph?.name ? presetSrcFreqHint(this.flowgraph.name) : null;
+    const keptFreq = inRange
+      ? (currentFreq as number)
+      : presetHint !== null && presetHint >= min && presetHint <= max
+        ? presetHint
         : baseline.center_freq_hz;
 
     const reset = toSourceConfig(caps, { ...baseline, center_freq_hz: keptFreq });
@@ -252,14 +263,80 @@ class PipelineStore {
   /** Load preset `name` from the server-side presets dir and swap it
    *  in. The server returns the full reconfigure plan alongside the
    *  doc's canonical name; we re-fetch the flowgraph + composed state
-   *  so local mirrors match the server's merged view. */
+   *  so local mirrors match the server's merged view.
+   *
+   *  Tuning persistence: a preset is the demod chain ("what mode"),
+   *  separate from frequency ("where am I tuned"). Centre freq is
+   *  preserved on the server side automatically (`compose_source`
+   *  merges live source params over the preset's `src` hints).
+   *  VFO offset is *not* — the new preset's channelizer block
+   *  replaces the old one wholesale, defaulting `freq_shift_hz` to
+   *  whatever the new JSON says (typically 0). We capture the
+   *  current VFO before the swap and re-apply it after, clamping
+   *  to the new channelizer's range. If the old VFO would land
+   *  outside that range, we fall back to the new preset's chan
+   *  hint so the user lands at the preset's intended starting
+   *  position rather than at a clipped edge. */
   async loadPreset(name: string): Promise<ReconfigureResponse | null> {
     return this.withBusy(async () => {
+      const oldVfo = this.currentVfoOffset();
       const resp = await loadPreset(name);
       this.flowgraph = await fetchFlowgraph();
       await this.refreshComposed();
+      this.restoreVfo(name, oldVfo);
       return resp.reconfigure;
     }, `load preset ${name}`);
+  }
+
+  /** Read the channelizer-style VFO offset from the current `blocks`
+   *  mirror. Looks for any block exposing `freq_shift_hz` — today
+   *  that's the `Channelizer` block. Returns `null` when no such
+   *  block is present (e.g. headless / decoder-only presets). */
+  private currentVfoOffset(): number | null {
+    for (const block of Object.values(this.blocks)) {
+      const v = (block.values as Record<string, unknown> | null | undefined)?.freq_shift_hz;
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+    }
+    return null;
+  }
+
+  /** After a preset swap, write the captured VFO back to the new
+   *  channelizer block (if any). Clamped to the new channelizer's
+   *  ±sample_rate/2 advertised range; out-of-range falls through
+   *  to the new preset's `chan.freq_shift_hz` hint, then 0. */
+  private async restoreVfo(slug: string, oldVfo: number | null): Promise<void> {
+    if (oldVfo === null) return;
+    // Locate the new VFO block (anything advertising freq_shift_hz).
+    const target = Object.values(this.blocks).find((b) =>
+      b.spec.params.some((p) => p.key === 'freq_shift_hz'),
+    );
+    if (!target) return; // preset doesn't have a VFO; nothing to restore
+    const values = (target.values as Record<string, unknown> | null | undefined) ?? {};
+    const rate = numberOrNull(values.input_rate_hz) ?? numberOrNull(values.output_rate_hz);
+    const half = rate !== null && rate > 0 ? rate / 2 : Infinity;
+    let target_shift: number;
+    if (Math.abs(oldVfo) <= half) {
+      target_shift = oldVfo;
+    } else {
+      // Out of range — use the preset hint, then 0.
+      const hint = presetVfoHint(slug);
+      target_shift = hint ?? 0;
+    }
+    if (Math.abs(target_shift - (numberOrNull(values.freq_shift_hz) ?? 0)) < 0.5) {
+      return; // already there; skip the patch round-trip
+    }
+    try {
+      await patchBlockParams(target.id, { freq_shift_hz: target_shift });
+      await this.refreshComposed();
+    } catch (err) {
+      logs.push(
+        'client',
+        'warn',
+        `restoreVfo: patching ${target.id}.freq_shift_hz=${target_shift} failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /** Re-read derivatives of the composed preset (ui_sinks + blocks) in
@@ -327,6 +404,43 @@ function indexById(blocks: PipelineBlock[]): Record<string, PipelineBlock> {
   const out: Record<string, PipelineBlock> = {};
   for (const b of blocks) out[b.id] = b;
   return out;
+}
+
+/** `Number(x)`-with-finite-check, returning null on failure. Used by
+ *  the VFO restore path which reads block.values entries that come
+ *  back as `unknown` from the catch-all params blob. */
+function numberOrNull(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+  return v;
+}
+
+/** Read the active preset's `src.center_freq_hz` hint from the
+ *  build-time-bundled catalog (a record of every preset's raw
+ *  FlowgraphDoc). The hint is the value the preset author wrote in
+ *  the JSON — used for first-time landing and out-of-range fallback,
+ *  never overrides a live in-range tune. Returns null if the slug
+ *  isn't in the catalog or the preset doesn't declare a centre
+ *  frequency. */
+function presetSrcFreqHint(slug: string): number | null {
+  const entry = catalog.find((c) => c.slug === slug);
+  const params = entry?.doc.blocks?.src?.params as Record<string, unknown> | undefined;
+  return numberOrNull(params?.center_freq_hz);
+}
+
+/** Read the active preset's channelizer `freq_shift_hz` hint —
+ *  the VFO offset the preset's author intended as the starting
+ *  point. Same caveat as [`presetSrcFreqHint`]: hint, not state. */
+function presetVfoHint(slug: string): number | null {
+  const entry = catalog.find((c) => c.slug === slug);
+  if (!entry) return null;
+  // Find any block in the preset declaring freq_shift_hz — typically
+  // `chan` / Channelizer.
+  for (const block of Object.values(entry.doc.blocks ?? {})) {
+    const params = block.params as Record<string, unknown> | undefined;
+    const v = numberOrNull(params?.freq_shift_hz);
+    if (v !== null) return v;
+  }
+  return null;
 }
 
 export const pipeline = new PipelineStore();
