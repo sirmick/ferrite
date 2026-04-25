@@ -4,7 +4,8 @@
   "label": "POCSAG pagers",
   "description": "POCSAG pager messages — 929-932 MHz US pager band (also active in many other countries on local pager allocations). Default frequency 929.6125 MHz is a busy carrier in many US metros (hospitals, drive-thrus, on-call rotations). Decoded messages stream into the Logs tab under the `decoder::pocsag` category.",
   "environments": [
-    "node"
+    "node",
+    "browser"
   ],
   "blocks": {
     "src": {
