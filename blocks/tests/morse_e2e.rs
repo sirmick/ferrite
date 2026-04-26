@@ -50,7 +50,7 @@ fn decode_morse(audio: &[f32]) -> Vec<String> {
     .expect("morse demod");
     // Pump in 4096-sample chunks — matches the wrapper's batch size and
     // exercises the same code path the live runtime hits.
-    let mut lines = Vec::new();
+    let lines = Vec::new();
     let mut consumed = 0;
     while consumed < audio.len() {
         let take = (audio.len() - consumed).min(4096);
@@ -109,6 +109,10 @@ fn with_cw_capture<F: FnOnce()>(f: F) -> Vec<String> {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(writer)
         .with_target(true)
+        // ANSI off — captured bytes feed straight into the substring
+        // assertion below, so colour escapes between letters would
+        // shatter the `contains("PARIS")` check.
+        .with_ansi(false)
         .without_time()
         .with_max_level(tracing::Level::INFO)
         .finish();

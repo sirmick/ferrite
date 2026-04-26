@@ -35,8 +35,8 @@ use core::f32::consts::TAU;
 
 use ferrite_blocks::block::{BlockIo, InBuf, InputPort, OutBuf, OutputPort, PortMeta};
 use ferrite_blocks::{
-    AudioNrMono, AudioNrParams, AudioNrStereo, Block, FmDemod, FmDemodParams, Sideband, SsbDemod,
-    SsbDemodParams, StereoDecoder, StereoDecoderParams,
+    AudioNrMono, AudioNrParams, AudioNrStereo, Block, FmDemod, FmDemodParams, StereoDecoder,
+    StereoDecoderParams,
 };
 use num_complex::Complex;
 
@@ -60,11 +60,6 @@ fn goertzel(samples: &[f32], target_hz: f32, sample_rate_hz: f32) -> f32 {
     (q1 * q1 + q2 * q2 - coeff * q1 * q2).max(0.0).sqrt()
 }
 
-fn rms(xs: &[f32]) -> f32 {
-    let sum_sq: f32 = xs.iter().map(|x| x * x).sum();
-    (sum_sq / xs.len() as f32).sqrt()
-}
-
 /// Apply FM modulation: given a baseband message `m(t)`, emit
 /// `x(t) = exp(j · 2π · Δf · ∫m)`.
 fn fm_modulate(message: &[f32], fs: f32, deviation_hz: f32) -> Vec<Complex<f32>> {
@@ -81,27 +76,6 @@ fn fm_modulate(message: &[f32], fs: f32, deviation_hz: f32) -> Vec<Complex<f32>>
 
 /// Drive an FmDemod over an IQ slice, return the real audio output.
 fn run_fm_demod(demod: &mut FmDemod, iq: &[Complex<f32>]) -> Vec<f32> {
-    let mut out = vec![0.0_f32; iq.len()];
-    let mut inputs = [InputPort {
-        name: "in",
-        meta: PortMeta::default(),
-        buf: InBuf::IqF32(iq),
-    }];
-    let mut outputs = [OutputPort {
-        name: "out",
-        meta: PortMeta::default(),
-        buf: OutBuf::RealF32(&mut out),
-    }];
-    let mut io = BlockIo {
-        inputs: &mut inputs,
-        outputs: &mut outputs,
-    };
-    demod.process(&mut io).unwrap();
-    out
-}
-
-/// Drive an SsbDemod over an IQ slice, return the real audio output.
-fn run_ssb_demod(demod: &mut SsbDemod, iq: &[Complex<f32>]) -> Vec<f32> {
     let mut out = vec![0.0_f32; iq.len()];
     let mut inputs = [InputPort {
         name: "in",

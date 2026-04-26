@@ -654,6 +654,7 @@ pub enum BlockOffset {
 }
 
 impl BlockOffset {
+    #[cfg(test)]
     fn syndrome(self) -> u16 {
         match self {
             Self::A => offsets::A,

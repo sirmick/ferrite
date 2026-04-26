@@ -139,6 +139,7 @@ impl DeviceCache {
 
     /// Drop one cached entry — call when a probe-derived stat looks
     /// stale (e.g. a writeSetting changed available ranges).
+    #[allow(dead_code)]
     pub async fn invalidate(&self, key: &str) {
         self.inner.write().await.remove(key);
     }
