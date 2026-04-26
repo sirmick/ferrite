@@ -1,6 +1,8 @@
 # Phase 6 — Digital voice + native-helper protocol
 
-**Sketch.** The two-track answer to digital voice.
+**Status:** not started. Sketch only.
+
+The two-track answer to digital voice.
 
 ## Goal
 

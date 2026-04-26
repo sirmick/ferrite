@@ -195,17 +195,39 @@ explicit `placement` for clarity.
 
 ## Shipped presets
 
-| file                                                                                  | environments    | shape                                                                                  |
-|---------------------------------------------------------------------------------------|-----------------|----------------------------------------------------------------------------------------|
-| [`flowgraphs/wbfm.json`](../flowgraphs/wbfm.json)                                     | node, browser   | WBFM — wideband + spectrum tap + cross-env audio                                       |
-| [`flowgraphs/wbam.json`](../flowgraphs/wbam.json)                                     | node, browser   | AM equivalent of wbfm                                                                  |
-| [`flowgraphs/dtmf-e2e.json`](../flowgraphs/dtmf-e2e.json)                             | node, browser   | DTMF canary — `DtmfAudioSource → AmModulator → … → AmDemod → DtmfDecoder → EventsSink` |
-| [`flowgraphs/fm-audio-record.json`](../flowgraphs/fm-audio-record.json)               | node            | All-native FM mono → FileAudioSink                                                     |
-| [`flowgraphs/am-audio-record.json`](../flowgraphs/am-audio-record.json)               | node            | All-native AM mono → FileAudioSink                                                     |
-| [`flowgraphs/capture_fm.json`](../flowgraphs/capture_fm.json)                         | node            | Wideband IQ capture → FileIqSink (no demod)                                            |
+Catalog (browser-visible, picked from the Signal Catalog panel):
 
-The recording / capture presets are the ones to launch with
-`--run-for-secs N` for a headless capture.
+| file                                                                                  | shape                                                                                  |
+|---------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+| [`flowgraphs/wbfm.json`](../flowgraphs/wbfm.json)                                     | WBFM — wideband + spectrum tap + cross-env audio + RDS                                 |
+| [`flowgraphs/wbfm_stereo.json`](../flowgraphs/wbfm_stereo.json)                       | WBFM with stereo pilot decode                                                          |
+| [`flowgraphs/wbam.json`](../flowgraphs/wbam.json)                                     | AM broadcast                                                                           |
+| [`flowgraphs/nbfm.json`](../flowgraphs/nbfm.json)                                     | Narrowband FM (marine, FRS/GMRS, ham 2m FM)                                            |
+| [`flowgraphs/lsb.json`](../flowgraphs/lsb.json)                                       | SSB lower sideband                                                                     |
+| [`flowgraphs/usb.json`](../flowgraphs/usb.json)                                       | SSB upper sideband                                                                     |
+| [`flowgraphs/cw.json`](../flowgraphs/cw.json)                                         | CW with multimon-ng Morse decoder                                                      |
+| [`flowgraphs/aprs.json`](../flowgraphs/aprs.json)                                     | APRS / AX.25 packet — AFSK1200 + 2400 variants + FSK9600 in parallel                   |
+| [`flowgraphs/aprs-debug.json`](../flowgraphs/aprs-debug.json)                         | APRS with audio fan-out to WAV for offline A/B against `analyze-packet-wav`            |
+| [`flowgraphs/pager.json`](../flowgraphs/pager.json)                                   | POCSAG (3 baud) + FLEX + FLEX_NEXT in parallel                                         |
+| [`flowgraphs/nwr.json`](../flowgraphs/nwr.json)                                       | NOAA Weather Radio (NBFM + EAS)                                                        |
+| [`flowgraphs/adsb.json`](../flowgraphs/adsb.json)                                     | ADS-B / Mode S — vendored dump1090, 1090 MHz                                           |
+| [`flowgraphs/dtmf-e2e.json`](../flowgraphs/dtmf-e2e.json)                             | DTMF events-bridge canary across the server/browser split                              |
+
+Headless / capture (node-only, launched with `--run-for-secs N`):
+
+| file                                                                                  | shape                                                                                  |
+|---------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+| [`flowgraphs/fm-audio-record.json`](../flowgraphs/fm-audio-record.json)               | All-native FM mono → FileAudioSink                                                     |
+| [`flowgraphs/am-audio-record.json`](../flowgraphs/am-audio-record.json)               | All-native AM mono → FileAudioSink                                                     |
+| [`flowgraphs/capture_fm.json`](../flowgraphs/capture_fm.json)                         | Wideband IQ capture → FileIqSink (no demod)                                            |
+| [`flowgraphs/capture-aprs.json`](../flowgraphs/capture-aprs.json)                     | APRS audio capture for offline analyzer fixtures                                       |
+| [`flowgraphs/capture-pager.json`](../flowgraphs/capture-pager.json)                   | POCSAG / FLEX audio capture for offline analyzer fixtures                              |
+| [`flowgraphs/morse-e2e.json`](../flowgraphs/morse-e2e.json)                           | Morse round-trip canary (synthesise → decode)                                          |
+
+Catalog entries carry topology only (no `src.center_freq_hz` /
+`chan.freq_shift_hz`); per-band tuning lives in
+`web/src/lib/presets/bands.json` and is applied on top via the Bands
+panel. See [D27](09-decisions.md#d27--catalog--bands-separation-catalog-is-what-to-demod-bands-is-where-to-listen).
 
 ## Runtime params
 

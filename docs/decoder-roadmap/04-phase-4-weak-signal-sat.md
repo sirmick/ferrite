@@ -1,6 +1,7 @@
 # Phase 4 — Weak-signal + satellite imagery
 
-**Sketch.** Detail to follow as Phase 3 closes.
+**Status:** not started. Sketch only — detail to follow as Phase 3 closes
+(rtl_433 + AIS + Mode A/C still open).
 
 ## Goal
 

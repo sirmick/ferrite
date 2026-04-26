@@ -1,9 +1,12 @@
 # Decoder roadmap
 
-Forward-looking plan for growing Ferrite's decode/demod breadth from the
-current v0.1 baseline (WBFM + ADS-B planned) to a broad SDR/ham decoder
-suite. Organised **capability-first**: each phase ships a set of user-facing
-capabilities, not a set of project ports.
+Forward-looking plan for growing Ferrite's decode/demod breadth into a
+broad SDR/ham decoder suite. Organised **capability-first**: each phase
+ships a set of user-facing capabilities, not a set of project ports.
+
+**Where we are (April 2026):** Phases 1 and 2 are shipped. Phase 3 is
+half-shipped — ADS-B and APRS work end-to-end against live RF; rtl_433,
+AIS, and Mode A/C remain. Phases 4–6 are still sketches.
 
 ## Why a separate roadmap
 
@@ -45,14 +48,14 @@ once so subsequent C-vendor ports are cheap.
 
 ## Phases
 
-| Phase | Focus                                              | Depth      |
-|-------|----------------------------------------------------|------------|
-| 1     | [Analog listening](01-phase-1-analog-listening.md) | **Detailed**   |
-| 2     | [First C-vendor wave — multimon-ng umbrella](02-phase-2-multimon-vendor.md) | **Detailed** |
-| 3     | [Aviation, APRS, ISM bulk](03-phase-3-aviation-aprs-ism.md) | Sketch |
-| 4     | [Weak-signal + satellite imagery](04-phase-4-weak-signal-sat.md) | Sketch |
-| 5     | [Ham digital modes](05-phase-5-ham-digital.md)     | Sketch     |
-| 6     | [Digital voice + native-helper protocol](06-phase-6-digital-voice.md) | Sketch |
+| Phase | Focus                                              | Status      |
+|-------|----------------------------------------------------|-------------|
+| 1     | [Analog listening](01-phase-1-analog-listening.md) | ✓ shipped   |
+| 2     | [First C-vendor wave — multimon-ng umbrella](02-phase-2-multimon-vendor.md) | ✓ shipped (with scope creep) |
+| 3     | [Aviation, APRS, ISM bulk](03-phase-3-aviation-aprs-ism.md) | partial — ADS-B + APRS shipped; rtl_433, AIS, Mode A/C open |
+| 4     | [Weak-signal + satellite imagery](04-phase-4-weak-signal-sat.md) | sketch / not started |
+| 5     | [Ham digital modes](05-phase-5-ham-digital.md)     | sketch / not started (RDS shipped early in Phase 1) |
+| 6     | [Digital voice + native-helper protocol](06-phase-6-digital-voice.md) | sketch / not started |
 
 Plus the mechanics reference:
 

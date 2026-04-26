@@ -1,11 +1,42 @@
 # Phase 1 — Analog listening
 
-**Status:** not started.
-**Entry criterion:** M5 closed; runtime (native + WASM) + preset loading +
-`FmDemod` end-to-end working against live hardware.
-**Exit criterion:** a user can open Ferrite, pick a preset from a menu,
-tune, and hear WBFM, NBFM, AM, USB, LSB, or CW audio with proper de-emphasis
-/ squelch / AGC behaviour. No new C vendor work. All Rust.
+**Status:** shipped (April 2026), with two intentional deviations from the
+plan below.
+
+What landed:
+
+- All six listening modes ship as presets: `wbfm.json`, `wbam.json`,
+  `nbfm.json`, `lsb.json`, `usb.json`, `cw.json`. Bonus: `wbfm_stereo.json`
+  (stereo pilot decode) and `nwr.json` (NOAA weather, NBFM with EAS).
+- Demod blocks: `AmDemod`, `FmDemod`, `SsbDemod` (Weaver), `StereoDecoder`,
+  `RdsDemod` (Phase 5 territory but landed early — RDS is just a sidechannel
+  on the WBFM audio).
+- Helpers: `Squelch`, `RealF32Resamp`, `RssiProbe` + meter UI, `Decimator`,
+  `Channelizer` (FreqShift + LPF + decimate, the universal narrowband tuner).
+- Audio chain: `AudioNrMono` / `AudioNrStereo` bundles de-emphasis (the
+  planned standalone `Deemphasis` block) plus four noise-reduction
+  algorithms (spectral, neural, notch, blanker). One block instead of a
+  chain — better packaging once we saw how presets composed.
+- DTMF events-bridge canary: `DtmfAudioSource` → `AmModulator` →
+  `Channelizer` → `Decimator` → `WsBridge` → `AmDemod` → `DtmfDecoder` →
+  `EventsSink` (the `dtmf-e2e.json` preset). Proves the events bridge
+  end-to-end across the server/browser split.
+
+Deviations from this doc:
+
+- **No standalone `Agc` block.** The hardware AGC (SoapySource's
+  `agc: bool` param) covers the headline use case; audio-domain AGC didn't
+  pull its weight as a separate block when the demod chains already do
+  per-block normalisation. Revisit if a specific SSB workflow needs it.
+- **`Deemphasis` collapsed into `AudioNr`.** Same algorithm (one-pole IIR
+  with `tau_us`), different home. The audio chain is `Demod → Resamp →
+  AudioNr` and AudioNr's params include `deemph_enable` + `deemph_tau_us`.
+
+**Entry criterion (met):** M5 closed; runtime (native + WASM) + preset
+loading + `FmDemod` end-to-end working against live hardware.
+**Exit criterion (met):** a user can open Ferrite, pick a preset, tune,
+and hear WBFM / NBFM / AM / USB / LSB / CW audio with proper de-emphasis
+and squelch behaviour.
 
 ## Why this is the first phase after M5
 

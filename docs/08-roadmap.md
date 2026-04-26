@@ -30,25 +30,46 @@ Working today, end-to-end:
   `RuntimeHandle::reconfigure_block`. One `<BlockParams>` Svelte component
   renders every block's params from its `BlockSpec`.
 - Preset registry: `GET /api/presets` + `POST /api/preset` with hot reconfig.
-- Six shipped presets in [`flowgraphs/`](../flowgraphs/): `wbfm`, `wbam`,
-  `dtmf-e2e`, `fm-audio-record`, `am-audio-record`, `capture_fm`.
+- Nineteen shipped presets in [`flowgraphs/`](../flowgraphs/) covering
+  analog listening (wbfm / wbfm_stereo / wbam / nbfm / lsb / usb / cw),
+  data decoders (aprs / cw / nwr / pager / adsb), capture/record helpers
+  (capture_fm / capture-aprs / capture-pager / fm-audio-record /
+  am-audio-record), the dtmf-e2e canary, and an aprs-debug diagnostic.
+- Four native vendor crates under [`blocks/native/`](../../blocks/native/):
+  `liquid-dsp` (FIR / NCO / FEC primitives), `multimon-ng` (POCSAG / FLEX /
+  AFSK / FSK9600 / Morse / EAS / DTMF — eleven `Decoder::*` variants),
+  `dump1090` (Mode S / ADS-B), `libc-stubs` (WASM substrate).
+- Logs panel category badges (`decoder::pocsag`, `decoder::flex`,
+  `decoder::packet`, `decoder::adsb`, `decoder::cw`, `decoder::eas`,
+  `flowdiag::node`, `flowdiag::browser`, …) — every tracing target is
+  visible in stdout *and* the UI logs broadcast layer.
+- Catalog vs. bands separation: catalog entries (`flowgraphs/*.json`) carry
+  demod topology only; bands entries (`web/src/lib/presets/bands.json`)
+  carry frequency + optional VFO offset. Per the UX refactor that
+  superseded D26 — see D27.
+- Spectrum click-to-tune (D25) wired through `Spectrum.svelte`: left-click
+  retunes the source, double-click re-centres the SDR, right-click cancels.
+- HTTPS dev server (`run.sh` flips `FERRITE_HTTPS=1`) for LAN/mobile
+  testing where AudioWorklet + SharedArrayBuffer require a secure context.
 
 The full historical record of how we got here lives in
-[`09-decisions.md`](09-decisions.md) (D01–D26) and the milestone tally in
+[`09-decisions.md`](09-decisions.md) (D01–D27) and the milestone tally in
 [`10-commits.md`](10-commits.md).
 
 ## Forward work
 
-Two parallel tracks, both rooted in concrete decisions already in the log:
+Three concrete tracks:
 
-- **Decoders** — sequencing in [`docs/decoder-roadmap/`](decoder-roadmap/).
-  Phase 1 (analog listening: `AmDemod`, `SsbDemod`, `Deemphasis`, `Squelch`,
-  `Agc`, `Resample` — see D20) is the next post-M5 push and feeds every
-  later decoder chain.
-- **UX** — the UX-1 cluster in [`10-commits.md`](10-commits.md):
-  click-to-tune (D25), preset switching with retention (D26), sample-rate
-  dropdown from `/api/source/capabilities`, generic receiver pane built on
-  `<BlockParams>` (D24).
+- **Phase 3 close-out** — `rtl_433` (200+ ISM device decoders), `AisDecoder`
+  (marine), `mode_ac.c` follow-up to dump1090. See
+  [`docs/decoder-roadmap/03-phase-3-aviation-aprs-ism.md`](decoder-roadmap/03-phase-3-aviation-aprs-ism.md).
+- **Decoder UI** — structured outputs for ADS-B (aircraft table + map)
+  and APRS (station list + map). The block-side hook is in place
+  (`AdsbDemod` already maintains `Modes.aircrafts`); the UI side is
+  greenfield.
+- **UX-1 leftovers** — sample-rate dropdown driven by
+  `/api/source/capabilities` (the endpoint exists; the web side still
+  hard-codes choices). Tracked in [`10-commits.md`](10-commits.md).
 
 The decoder-roadmap directory is the authoritative source for decoder-side
 planning; this doc deliberately doesn't duplicate it.

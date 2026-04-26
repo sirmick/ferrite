@@ -1,14 +1,50 @@
 # Phase 2 — First C-vendor wave via multimon-ng
 
-**Status:** not started.
-**Entry criterion:** Phase 1 shipped — analog listening works across all
-six presets; the Rust helper blocks (`Deemphasis`, `Squelch`, `Agc`,
-`Resample`) are solid.
-**Exit criterion:** Ferrite has five data decoders running end-to-end from
-real RF: POCSAG (512/1200/2400), FLEX, DTMF, EAS (SAME), CTCSS. All
-vendored once from `multimon-ng` via the new `blocks/native/`
-infrastructure. `blocks/native/` is the reusable substrate for every
-subsequent C-vendor port.
+**Status:** shipped (April 2026), and grew larger than planned.
+
+What landed via the `ferrite-multimon-ng` crate at
+`blocks/native/multimon-ng/`:
+
+- POCSAG 512 / 1200 / 2400 — `PagerDemod` runs all three baud rates in
+  parallel on the same audio stream
+- FLEX + FLEX_NEXT (multimon's two FLEX variants) — same `PagerDemod`
+- DTMF (multimon variant; ferrite also ships a hand-rolled `DtmfDecoder`
+  for parity testing)
+- EAS / SAME — `EasDemod`
+- Morse — `MorseDemod` (originally a Phase 5 item; bundled in here because
+  it's just another multimon decoder)
+- AFSK1200 + three timing variants (MFJ, TCM3105, PSKDET) — `PacketDemod`,
+  this is Phase 3's APRS capability shipped via the same vendor
+- FSK9600 (G3RUH) — also via `PacketDemod`
+
+That's eleven `Decoder::*` variants from one vendor lift. Beyond the
+original five, the four packet variants and Morse came along free since
+their build-system requirements are identical to POCSAG's.
+
+Reusable infrastructure built in the process:
+
+- `blocks/native/` crate-per-vendor pattern (each vendor is its own
+  Cargo crate, statically linked into `ferrite-blocks` behind a feature
+  flag).
+- `liquid-dsp` vendor crate (`blocks/native/liquid-dsp/`) — reused by
+  every block needing FIR / NCO / FEC.
+- `libc-stubs` crate — minimal libc surface for vendored C built into
+  the runtime.
+- `_verbprintf` shim pattern — per-thread output ring captured into
+  `String` lines, surfaced as `decoder::pocsag` / `decoder::flex` /
+  `decoder::packet` / `decoder::eas` / `decoder::cw` tracing targets.
+  Reused verbatim in the dump1090 wrap (Phase 3).
+- 90-vendor-port-guide.md was *written by doing* — those notes back-fed
+  into the dump1090 wrap and will guide every future C lift.
+
+Deviation from plan: **no CTCSS**. The original list had CTCSS
+(continuous tone-coded squelch) as a Phase 2 item. Multimon-ng has it
+behind a build flag we never wired up; lower priority than the ham
+packet capability that took its slot. Tracked as a follow-up.
+
+**Entry criterion (met):** Phase 1 shipped.
+**Exit criterion (met):** five+ data decoders running end-to-end from
+real RF (verified live with K6RPT-0 APRS digi capture).
 
 ## Why multimon-ng is the right first vendor
 

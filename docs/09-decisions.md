@@ -320,6 +320,8 @@ confused.
 
 ## D26 — Preset-first UX: dir-based registry, `bands.json` `preset` field, fixed layout
 
+*Item 2 (`bands.json preset` field) superseded by D27. Items 1 and 3 stand.*
+
 **Decision.** Three coupled changes:
 
 1. **Dir-based preset registry.** `GET /api/presets` enumerates
@@ -335,6 +337,40 @@ confused.
 
 **Consequence.** The layout matches every SDR UI users are familiar with
 and simplifies hit-testing for D25's click-to-tune.
+
+## D27 — Catalog ↔ bands separation: catalog is *what to demod*, bands is *where to listen*
+
+Supersedes D26 item 2.
+
+**Decision.** Two coupled changes that pull apart the conflated role
+`bands.json` had under D26:
+
+1. **Catalog entries (`flowgraphs/*.json` shown in the Signal Catalog)
+   carry demod topology only.** `src.center_freq_hz` and
+   `chan.freq_shift_hz` hints stripped from every shipped catalog
+   preset. Picking a mode no longer retunes the SDR — only the demod
+   chain swaps.
+2. **Bands entries (`web/src/lib/presets/bands.json`) carry frequency +
+   optional VFO offset.** The `preset` field is gone; clicking a band
+   *only* writes `flow.src.center_freq_hz` (and
+   `flow.chan.freq_shift_hz` when the entry needs offset tuning to
+   dodge the SDR's DC spike, e.g. the APRS row). It does not swap the
+   catalog mode.
+
+**Why.** Under D26 a band click did both — swapped flowgraph *and*
+retuned. That coupled two independent user intents ("I want to listen
+to APRS" vs "tune to 144.39") and made it unclear which one a user was
+expressing on any given click. After the split, picking a mode and
+picking a frequency are clean independent gestures: the Signal Catalog
+chooses *what to demod*, the Bands panel chooses *where to listen*.
+APRS-style offset tuning is preserved via the new `vfo_offset_hz`
+field on band entries (the field is read; preset-coupled flowgraph
+swap is not).
+
+**Consequence.** Server-side `compose_source` and the pipeline-side
+hint readers (`presetSrcFreqHint`, `presetVfoHint`, `restoreVfo`) are
+left intact — a future preset can still bring frequency back if a use
+case appears. No machinery deleted; only the data carrying it.
 
 ## Revisiting decisions
 

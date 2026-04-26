@@ -1,7 +1,33 @@
 # Phase 3 — Aviation, APRS, ISM bulk
 
-**Sketch.** Detail to be filled in near Phase 2's close, when we have
-real numbers from the multimon-ng lift.
+**Status:** in progress (April 2026). Two of the planned capabilities
+already shipped, two outstanding.
+
+What landed:
+
+- **APRS / AFSK1200** — shipped in Phase 2 via multimon-ng (see Phase 2
+  doc), not direwolf. `PacketDemod` runs AFSK1200 + three AFSK2400 timing
+  variants + FSK9600 in parallel. `aprs.json` preset, validated live with
+  K6RPT-0 / W6TST-1 / BKELEY-0 captures.
+- **ADS-B / Mode S** — `AdsbDemod` block at `blocks/src/adsb.rs`,
+  vendored from antirez's classic dump1090 (`blocks/native/dump1090/`).
+  `adsb.json` preset, 1090 MHz, 2 MS/s. Validated against upstream's
+  test fixture (DF 17 / DF 4 / DF 11 frames decode cleanly).
+
+What's outstanding:
+
+- **Mode A/C** (secondary radar transponder) — same `dump1090` vendor,
+  separate `mode_ac.c` we didn't pull in. ~160 LOC follow-up.
+- **rtl_433** — 200+ ISM device decoders at 433/915 MHz. The big lift
+  in this phase; deferred.
+- **AIS** (marine) — separate vendor (rtl-ais or aisdecoder, not in
+  multimon-ng or dump1090). Deferred.
+
+The original plan called for direwolf as the APRS vendor. Multimon-ng's
+AFSK1200 turned out to be the same capability for ~10× less integration
+effort (it was already part of the Phase 2 lift), so direwolf isn't
+needed unless we discover a multimon-ng decoding gap that direwolf would
+close. None observed so far.
 
 ## Goal
 
@@ -12,14 +38,14 @@ whole APRS network, 200+ ISM sensors, marine AIS.
 
 ## Ship list
 
-| Block            | Vendor source     | IQ/audio            | Notes                                 |
-|------------------|-------------------|---------------------|---------------------------------------|
-| `AdsbDecoder`    | dump1090          | iq_f32 @ 2.4 MS/s   | Already sketched in `docs/03-blocks.md` |
-| `ModeAcDecoder`  | dump1090          | iq_f32 @ 2.4 MS/s   | `mode_ac.c` — same vendor, extra 160 LOC |
-| `Afsk1200Decoder` | direwolf         | real_f32 @ 48 kHz   | APRS — flagship ham feature          |
-| `Afsk9600Decoder` | direwolf         | real_f32 @ 48 kHz   | G3RUH, same vendor                    |
-| `Rtl433Decoder`  | rtl_433           | iq_f32 @ 1 MS/s     | ~200 device decoders in one block; params select subset |
-| `AisDecoder`     | rtl-ais / aisdec  | real_f32 @ 48 kHz (or iq) | Marine AIS; separate pure-C decoder |
+| Block            | Vendor source     | IQ/audio            | Status                                 |
+|------------------|-------------------|---------------------|----------------------------------------|
+| `AdsbDemod`      | antirez/dump1090  | iq_f32 @ 2 MS/s     | ✓ shipped (`blocks/native/dump1090/`)  |
+| `ModeAcDecoder`  | dump1090          | iq_f32 @ 2 MS/s     | ✗ not shipped — `mode_ac.c` follow-up  |
+| `PacketDemod` (AFSK1200/2400) | multimon-ng | real_f32 @ 22050 Hz | ✓ shipped via Phase 2 lift            |
+| `PacketDemod` (FSK9600)       | multimon-ng | real_f32 @ 22050 Hz | ✓ shipped via Phase 2 lift            |
+| `Rtl433Decoder`  | rtl_433           | iq_f32 @ 1 MS/s     | ✗ not shipped — biggest remaining lift |
+| `AisDecoder`     | rtl-ais / aisdec  | real_f32 @ 48 kHz (or iq) | ✗ not shipped                    |
 
 ## Flowgraph presets
 

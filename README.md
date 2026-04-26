@@ -13,15 +13,18 @@ Decoders (ADS-B, APRS, digital voice, FT8, …) are built as shared blocks
 ## Status
 
 Pre-alpha. Working: `ferrited` server, native + WASM builds of the runtime
-and DSP blocks, SvelteKit web client, RTL-SDR + SDRplay (RSPduo) over
-SoapySDR. See [docs/08-roadmap.md](docs/08-roadmap.md).
+and DSP blocks, SvelteKit web client, RTL-SDR + SDRplay (RSPduo / RSPdx)
+over SoapySDR. Listening modes (WBFM mono/stereo, NBFM, AM, USB/LSB, CW)
+plus data decoders (POCSAG, FLEX, APRS, ADS-B, NOAA EAS, Morse, DTMF,
+RDS) all decode end-to-end against live RF. See
+[docs/08-roadmap.md](docs/08-roadmap.md) for the rest.
 
 ## Target platform
 
 - **OS:** Ubuntu 24.04 LTS (Noble) or newer. Other Linux distros probably
   work; non-Linux hosts are out of scope.
-- **Hardware:** RTL-SDR (RTL2832U) and SDRplay RSPduo via SoapySDR. Anything
-  else SoapySDR supports should also work.
+- **Hardware:** RTL-SDR (RTL2832U) and SDRplay (RSPduo, RSPdx) via
+  SoapySDR. Anything else SoapySDR supports should also work.
 
 ## Build and run
 
@@ -161,12 +164,12 @@ source soapysdr/env.sh
   --source-args 'driver=rtlsdr' \
   --start
 
-# SDRplay RSPduo:
+# SDRplay (RSPduo: 'Tuner 1 50 ohm', RSPdx: 'Antenna A' / 'Antenna B'):
 ./target/release/ferrited \
   --flowgraph flowgraphs/wbfm.json \
   --source-type SoapySource \
   --source-args 'driver=sdrplay' \
-  --antenna 'Tuner 1 50 ohm' \
+  --antenna 'Antenna A' \
   --start
 
 # No hardware — synthetic SineSource (default if --source-type is omitted):

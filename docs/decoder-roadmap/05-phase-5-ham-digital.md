@@ -1,7 +1,12 @@
 # Phase 5 — Ham digital modes
 
-**Sketch.** Detail to follow — and a substantive *fork-in-the-road*
-decision point at the start of this phase.
+**Status:** not started, except for one early-landed item: **RDS** (the
+57 kHz subcarrier on broadcast FM) shipped during Phase 1 as `RdsDemod`
+— it's just a sidechannel on the WBFM audio chain, didn't need to wait
+for the rest of this phase. The other ~14 modes are still sketches.
+
+The fork-in-the-road bake-off (vendor fldigi vs Rust-from-scratch) still
+applies to the remaining modes.
 
 ## Goal
 
