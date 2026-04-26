@@ -42,9 +42,10 @@ prefix() {
   done
 }
 
-echo "[run] ferrited → http://0.0.0.0:10001/  (REST + WS)"
-echo "[run] vite     → http://0.0.0.0:10000/  (UI; proxies /api and /ws → ferrited)"
+echo "[run] ferrited → http://0.0.0.0:10001/   (REST + WS, plain HTTP on loopback)"
+echo "[run] vite     → https://0.0.0.0:10000/  (UI; self-signed cert, proxies /api and /ws → ferrited)"
 echo "[run] open the vite URL in a browser; pick preset + source from the UI"
+echo "[run] first visit will show a self-signed cert warning — bypass once per browser profile"
 echo
 
 # ferrited on 0.0.0.0:10001, logs prefixed via process substitution
@@ -55,8 +56,11 @@ RUST_LOG="${RUST_LOG:-info}" \
     > >(prefix '[ferrited]') 2> >(prefix '[ferrited]' >&2) &
 FERRITED_PID=$!
 
-# vite dev on 0.0.0.0:10000 (proxies /api and /ws to ferrited)
-( cd web && pnpm dev --host 0.0.0.0 --port 10000 ) \
+# vite dev on 0.0.0.0:10000 with self-signed TLS (proxies /api and /ws to ferrited).
+# FERRITE_HTTPS=1 toggles the basicSsl plugin in web/vite.config.ts — needed for
+# LAN / mobile browsers that gate AudioWorklet + SharedArrayBuffer behind a
+# secure context.
+( cd web && FERRITE_HTTPS=1 pnpm dev --host 0.0.0.0 --port 10000 ) \
     > >(prefix '[web     ]') 2> >(prefix '[web     ]' >&2) &
 VITE_PID=$!
 
