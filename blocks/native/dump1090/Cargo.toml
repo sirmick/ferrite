@@ -1,0 +1,31 @@
+[package]
+name        = "ferrite-dump1090"
+version     = "0.0.1"
+edition.workspace      = true
+rust-version.workspace = true
+# antirez's dump1090 is BSD-2-Clause; the shim + Rust wrapper here are
+# GPL-3.0-or-later under the project's overall license. BSD-2-Clause is
+# compatible (we add restrictions, do not remove them).
+license     = "GPL-3.0-or-later"
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+description = "Vendored dump1090 (Mode S / ADS-B at 1090 MHz) + safe Rust wrapper. Native-only — the demod runs on uint16 magnitude buffers at 2 MS/s, not in the wasm runtime."
+
+[lib]
+crate-type = ["rlib"]
+
+# Diagnostic CLI — feed a raw IQ file (cs8 from RTL-SDR or `cf32` from
+# Soapy capture) at 2 MHz and print decoded ADS-B frames. Mirrors
+# multimon-ng's `analyze-packet-wav`: useful for offline triage when
+# the live preset isn't surfacing aircraft.
+[[bin]]
+name = "analyze-adsb-iq"
+path = "src/bin/analyze_adsb_iq.rs"
+
+[dependencies]
+num-complex = "0.4"
+
+[build-dependencies]
+cc      = "1.0"
+bindgen = "0.70"

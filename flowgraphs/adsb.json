@@ -1,0 +1,53 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "adsb",
+  "label": "ADS-B / Mode S (1090 MHz)",
+  "description": "Decode aircraft transponder messages from the 1090 MHz ADS-B band — Mode S short and extended squitters, including DF17 ADS-B position / velocity / identification frames. Wraps a vendored dump1090 (antirez classic). Decoded frames stream into the Logs tab under the `decoder::adsb` category. Tune the SDR to 1090 MHz and feed 2 MS/s IQ; the decoder is hard-locked to that rate. A wide UHF antenna with line-of-sight to the sky is the biggest single factor in catch rate.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Dependent_Surveillance-Broadcast_(ADS-B)",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 2000000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "adsb": {
+      "type": "AdsbDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 2000000.0
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee.in"],
+    ["tee.out0", "adsb.in"],
+    ["tee.out1", "fft.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"]
+  ]
+}

@@ -416,6 +416,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "ferrite-blocks-macros",
+ "ferrite-dump1090",
  "ferrite-liquid-dsp",
  "ferrite-multimon-ng",
  "inventory",
@@ -441,6 +442,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "ferrite-dump1090"
+version = "0.0.1"
+dependencies = [
+ "bindgen",
+ "cc",
+ "num-complex",
 ]
 
 [[package]]

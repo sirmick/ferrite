@@ -14,6 +14,8 @@ extern crate self as ferrite_blocks;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(feature = "adsb")]
+pub mod adsb;
 pub mod am_demod;
 pub mod am_modulator;
 pub mod audio_nr;
@@ -58,6 +60,8 @@ pub mod tee_iq_f32;
 pub mod tee_real_f32;
 pub mod ws_bridge;
 
+#[cfg(feature = "adsb")]
+pub use adsb::{AdsbDemod, AdsbDemodParams};
 pub use am_demod::{AmDemod, AmDemodParams};
 pub use am_modulator::{AmModulator, AmModulatorParams};
 pub use audio_nr::{AudioNrMono, AudioNrParams, AudioNrStereo, SpectralMethod};
