@@ -6,13 +6,18 @@ import raw from './bands.json';
 
 export interface BandEntry {
   label: string;
+  /** Desired listen frequency in Hz — what the user thinks of as the
+   *  station's frequency. */
   hz: number;
-  /** Advisory demod mode — used by the panel display until demod lands. */
+  /** Optional offset to push the SDR centre off the signal of interest,
+   *  used to dodge the SDR's DC spike on weak NBFM signals (APRS being
+   *  the canonical case). When set, the panel patches
+   *  center_freq_hz = hz + vfo_offset_hz and freq_shift_hz = -vfo_offset_hz,
+   *  so the channelizer pulls the signal back to baseband. Default 0. */
+  vfo_offset_hz?: number;
+  /** Decorative chip text. Selecting a band does NOT swap the demod
+   *  chain — pick that from the Signal Catalog. */
   mode?: string;
-  /** Preset basename to load before tuning. Names here must match a
-   *  file the server exposes via `GET /api/presets`; the click handler
-   *  swaps the preset first, then patches center_freq_hz. */
-  preset?: string;
 }
 
 export interface BandGroup {

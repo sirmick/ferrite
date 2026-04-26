@@ -1,100 +1,90 @@
 {
-  "$comment": "Frequency presets surfaced in the Bands panel. Each group renders as a collapsible section. `hz` is centre; `mode` is advisory until demod lands; `preset` names a server-side preset (matches GET /api/presets) that the click handler loads before tuning. Labels are generic (channel numbers, service names) — no station call signs except truly national services. User-editable.",
+  "$comment": "Frequency presets surfaced in the Bands panel. Each group renders as a collapsible section. `hz` is the desired listen frequency; `vfo_offset_hz` (optional, default 0) shifts the SDR centre off the signal to avoid a DC-spike pollution — applied as center_freq_hz = hz + vfo_offset_hz and freq_shift_hz = -vfo_offset_hz, so the signal still lands at baseband. `mode` is decorative chip text — selecting a band does NOT swap the demod chain (pick that from the Signal Catalog). User-editable.",
   "groups": [
     {
       "name": "FM broadcast (87.9–107.9 MHz)",
       "entries": [
-        { "label": "87.9 (band low)", "hz": 87900000, "mode": "WFM", "preset": "wbfm" },
-        { "label": "93.3", "hz": 93300000, "mode": "WFM", "preset": "wbfm" },
-        { "label": "96.9", "hz": 96900000, "mode": "WFM", "preset": "wbfm" },
-        { "label": "100.1", "hz": 100100000, "mode": "WFM", "preset": "wbfm" },
-        { "label": "105.7", "hz": 105700000, "mode": "WFM", "preset": "wbfm" },
-        { "label": "107.9 (band high)", "hz": 107900000, "mode": "WFM", "preset": "wbfm" }
+        { "label": "87.9 (band low)", "hz": 87900000, "mode": "WFM" },
+        { "label": "93.3", "hz": 93300000, "mode": "WFM" },
+        { "label": "96.9", "hz": 96900000, "mode": "WFM" },
+        { "label": "100.1", "hz": 100100000, "mode": "WFM" },
+        { "label": "105.7", "hz": 105700000, "mode": "WFM" },
+        { "label": "107.9 (band high)", "hz": 107900000, "mode": "WFM" }
       ]
     },
     {
       "name": "AM broadcast (540–1700 kHz)",
       "entries": [
-        { "label": "540 (band low)", "hz": 540000, "mode": "AM", "preset": "wbam" },
-        { "label": "1040", "hz": 1040000, "mode": "AM", "preset": "wbam" },
-        { "label": "1610 (band high)", "hz": 1610000, "mode": "AM", "preset": "wbam" }
+        { "label": "540 (band low)", "hz": 540000, "mode": "AM" },
+        { "label": "1040", "hz": 1040000, "mode": "AM" },
+        { "label": "1610 (band high)", "hz": 1610000, "mode": "AM" }
       ]
     },
     {
       "name": "NOAA weather (162 MHz)",
       "entries": [
-        { "label": "WX1 (162.400)", "hz": 162400000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "WX2 (162.425)", "hz": 162425000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "WX3 (162.450)", "hz": 162450000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "WX4 (162.475)", "hz": 162475000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "WX5 (162.500)", "hz": 162500000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "WX6 (162.525)", "hz": 162525000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "WX7 (162.550)", "hz": 162550000, "mode": "NBFM", "preset": "nbfm" }
+        { "label": "WX1 (162.400)", "hz": 162400000, "mode": "NBFM" },
+        { "label": "WX2 (162.425)", "hz": 162425000, "mode": "NBFM" },
+        { "label": "WX3 (162.450)", "hz": 162450000, "mode": "NBFM" },
+        { "label": "WX4 (162.475)", "hz": 162475000, "mode": "NBFM" },
+        { "label": "WX5 (162.500)", "hz": 162500000, "mode": "NBFM" },
+        { "label": "WX6 (162.525)", "hz": 162525000, "mode": "NBFM" },
+        { "label": "WX7 (162.550)", "hz": 162550000, "mode": "NBFM" }
       ]
     },
     {
       "name": "Marine VHF (156–162 MHz)",
       "entries": [
-        { "label": "Ch 06 — safety", "hz": 156300000, "mode": "NBFM", "preset": "nbfm" },
-        {
-          "label": "Ch 09 — calling (recreational)",
-          "hz": 156450000,
-          "mode": "NBFM",
-          "preset": "nbfm"
-        },
-        { "label": "Ch 13 — bridge-to-bridge", "hz": 156650000, "mode": "NBFM", "preset": "nbfm" },
-        {
-          "label": "Ch 16 — distress / hailing",
-          "hz": 156800000,
-          "mode": "NBFM",
-          "preset": "nbfm"
-        },
-        { "label": "Ch 22A — USCG liaison", "hz": 157100000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "Ch 68 — non-commercial", "hz": 156425000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "Ch 70 — DSC (digital)", "hz": 156525000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "Ch 72 — non-commercial", "hz": 156625000, "mode": "NBFM", "preset": "nbfm" }
+        { "label": "Ch 06 — safety", "hz": 156300000, "mode": "NBFM" },
+        { "label": "Ch 09 — calling (recreational)", "hz": 156450000, "mode": "NBFM" },
+        { "label": "Ch 13 — bridge-to-bridge", "hz": 156650000, "mode": "NBFM" },
+        { "label": "Ch 16 — distress / hailing", "hz": 156800000, "mode": "NBFM" },
+        { "label": "Ch 22A — USCG liaison", "hz": 157100000, "mode": "NBFM" },
+        { "label": "Ch 68 — non-commercial", "hz": 156425000, "mode": "NBFM" },
+        { "label": "Ch 70 — DSC (digital)", "hz": 156525000, "mode": "NBFM" },
+        { "label": "Ch 72 — non-commercial", "hz": 156625000, "mode": "NBFM" }
       ]
     },
     {
       "name": "FRS / GMRS (462–467 MHz)",
       "entries": [
-        { "label": "Ch 1", "hz": 462562500, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "Ch 7", "hz": 462712500, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "Ch 14", "hz": 467712500, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "Ch 20 (GMRS repeater out)", "hz": 462675000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "Ch 22", "hz": 462725000, "mode": "NBFM", "preset": "nbfm" }
+        { "label": "Ch 1", "hz": 462562500, "mode": "NBFM" },
+        { "label": "Ch 7", "hz": 462712500, "mode": "NBFM" },
+        { "label": "Ch 14", "hz": 467712500, "mode": "NBFM" },
+        { "label": "Ch 20 (GMRS repeater out)", "hz": 462675000, "mode": "NBFM" },
+        { "label": "Ch 22", "hz": 462725000, "mode": "NBFM" }
       ]
     },
     {
       "name": "Citizens Band (26.965–27.405 MHz)",
       "entries": [
-        { "label": "Ch 01", "hz": 26965000, "mode": "AM", "preset": "wbam" },
-        { "label": "Ch 09 — emergency", "hz": 27065000, "mode": "AM", "preset": "wbam" },
-        { "label": "Ch 17 — westbound truckers", "hz": 27165000, "mode": "AM", "preset": "wbam" },
-        { "label": "Ch 19 — highway / truckers", "hz": 27185000, "mode": "AM", "preset": "wbam" },
+        { "label": "Ch 01", "hz": 26965000, "mode": "AM" },
+        { "label": "Ch 09 — emergency", "hz": 27065000, "mode": "AM" },
+        { "label": "Ch 17 — westbound truckers", "hz": 27165000, "mode": "AM" },
+        { "label": "Ch 19 — highway / truckers", "hz": 27185000, "mode": "AM" },
         { "label": "Ch 36 — SSB calling (LSB)", "hz": 27365000, "mode": "LSB" },
         { "label": "Ch 38 — SSB DX (LSB)", "hz": 27385000, "mode": "LSB" },
-        { "label": "Ch 40", "hz": 27405000, "mode": "AM", "preset": "wbam" }
+        { "label": "Ch 40", "hz": 27405000, "mode": "AM" }
       ]
     },
     {
       "name": "Aviation (118–137 MHz)",
       "entries": [
-        { "label": "Emergency (guard)", "hz": 121500000, "mode": "AM", "preset": "wbam" },
-        { "label": "UNICOM", "hz": 122800000, "mode": "AM", "preset": "wbam" },
-        { "label": "Air-to-air", "hz": 123450000, "mode": "AM", "preset": "wbam" },
-        { "label": "CTAF (general)", "hz": 122700000, "mode": "AM", "preset": "wbam" },
-        { "label": "Multicom", "hz": 122900000, "mode": "AM", "preset": "wbam" }
+        { "label": "Emergency (guard)", "hz": 121500000, "mode": "AM" },
+        { "label": "UNICOM", "hz": 122800000, "mode": "AM" },
+        { "label": "Air-to-air", "hz": 123450000, "mode": "AM" },
+        { "label": "CTAF (general)", "hz": 122700000, "mode": "AM" },
+        { "label": "Multicom", "hz": 122900000, "mode": "AM" }
       ]
     },
     {
       "name": "Time signals (WWV)",
       "entries": [
-        { "label": "WWV 2.5 MHz", "hz": 2500000, "mode": "AM", "preset": "wbam" },
-        { "label": "WWV 5 MHz", "hz": 5000000, "mode": "AM", "preset": "wbam" },
-        { "label": "WWV 10 MHz", "hz": 10000000, "mode": "AM", "preset": "wbam" },
-        { "label": "WWV 15 MHz", "hz": 15000000, "mode": "AM", "preset": "wbam" },
-        { "label": "WWV 20 MHz", "hz": 20000000, "mode": "AM", "preset": "wbam" }
+        { "label": "WWV 2.5 MHz", "hz": 2500000, "mode": "AM" },
+        { "label": "WWV 5 MHz", "hz": 5000000, "mode": "AM" },
+        { "label": "WWV 10 MHz", "hz": 10000000, "mode": "AM" },
+        { "label": "WWV 15 MHz", "hz": 15000000, "mode": "AM" },
+        { "label": "WWV 20 MHz", "hz": 20000000, "mode": "AM" }
       ]
     },
     {
@@ -140,7 +130,7 @@
       "entries": [
         { "label": "FT8", "hz": 28074000, "mode": "USB" },
         { "label": "SSB calling", "hz": 28400000, "mode": "USB" },
-        { "label": "FM simplex", "hz": 29600000, "mode": "NBFM", "preset": "nbfm" }
+        { "label": "FM simplex", "hz": 29600000, "mode": "NBFM" }
       ]
     },
     {
@@ -148,7 +138,7 @@
       "entries": [
         { "label": "SSB calling", "hz": 50125000, "mode": "USB" },
         { "label": "FT8", "hz": 50313000, "mode": "USB" },
-        { "label": "FM simplex calling", "hz": 52525000, "mode": "NBFM", "preset": "nbfm" }
+        { "label": "FM simplex calling", "hz": 52525000, "mode": "NBFM" }
       ]
     },
     {
@@ -156,28 +146,24 @@
       "entries": [
         { "label": "SSB calling", "hz": 144200000, "mode": "USB" },
         { "label": "FT8", "hz": 144174000, "mode": "USB" },
-        { "label": "FM simplex calling", "hz": 146520000, "mode": "NBFM", "preset": "nbfm" },
-        { "label": "APRS", "hz": 144390000, "mode": "NBFM", "preset": "nbfm" }
+        { "label": "FM simplex calling", "hz": 146520000, "mode": "NBFM" },
+        { "label": "APRS", "hz": 144390000, "vfo_offset_hz": 10000, "mode": "NBFM" }
       ]
     },
     {
       "name": "Ham 1.25m (222–225 MHz)",
-      "entries": [
-        { "label": "FM simplex calling", "hz": 223500000, "mode": "NBFM", "preset": "nbfm" }
-      ]
+      "entries": [{ "label": "FM simplex calling", "hz": 223500000, "mode": "NBFM" }]
     },
     {
       "name": "Ham 70cm (420–450 MHz)",
       "entries": [
         { "label": "SSB calling", "hz": 432100000, "mode": "USB" },
-        { "label": "FM simplex calling", "hz": 446000000, "mode": "NBFM", "preset": "nbfm" }
+        { "label": "FM simplex calling", "hz": 446000000, "mode": "NBFM" }
       ]
     },
     {
       "name": "Ham 33cm (902–928 MHz)",
-      "entries": [
-        { "label": "FM simplex calling", "hz": 927500000, "mode": "NBFM", "preset": "nbfm" }
-      ]
+      "entries": [{ "label": "FM simplex calling", "hz": 927500000, "mode": "NBFM" }]
     },
     {
       "name": "Aircraft data (1090 MHz ADS-B)",

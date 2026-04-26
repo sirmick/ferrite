@@ -21,22 +21,14 @@
   let tuning = $state(false);
   async function tune(e: BandEntry) {
     if (!pipeline.source) return;
-    // In-flight guard — preset swaps on SDR hardware can take multiple
-    // seconds (device teardown + reopen), and a second click during
-    // that window would stack another concurrent tune. Drop the new
-    // click on the floor; the button also goes `disabled` so the user
-    // gets visual feedback that the first click is still running.
+    // In-flight guard — back-to-back tune patches can race; drop the
+    // second click and let the button's `disabled` state cue the user.
     if (tuning) return;
     tuning = true;
     try {
-      // Swap presets first when the entry pins one and it differs from
-      // the currently-loaded doc. Tuning happens after so the new
-      // preset's source block gets the target center_freq.
-      if (e.preset && pipeline.flowgraph?.name !== e.preset) {
-        const resp = await pipeline.loadPreset(e.preset);
-        if (resp === null) return;
-      }
-      await applyControl('flow.src.center_freq_hz', e.hz);
+      const offset = e.vfo_offset_hz ?? 0;
+      await applyControl('flow.src.center_freq_hz', e.hz + offset);
+      await applyControl('flow.chan.freq_shift_hz', -offset);
     } finally {
       tuning = false;
     }
@@ -92,7 +84,7 @@
                 <button
                   type="button"
                   class="flex w-full items-center justify-between gap-2 px-3 py-0.5 text-left text-[11px] hover:bg-slate-800/70 disabled:cursor-wait disabled:opacity-60"
-                  class:active={active === entry.hz}
+                  class:active={active === entry.hz + (entry.vfo_offset_hz ?? 0)}
                   disabled={!pipeline.source || tuning}
                   onclick={() => void tune(entry)}
                 >
