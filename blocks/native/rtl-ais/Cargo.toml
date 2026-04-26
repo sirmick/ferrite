@@ -1,0 +1,30 @@
+[package]
+name        = "ferrite-rtl-ais"
+version     = "0.0.1"
+edition.workspace      = true
+rust-version.workspace = true
+# rtl-ais (and its vendored aisdecoder/ subdirectory, originally from the
+# AISHub aisdecoder project) is GPL-2-or-later; the shim + Rust wrapper
+# here are GPL-3-or-later under the project's overall license. GPL-2+ is
+# compatible (we add restrictions, do not remove them).
+license     = "GPL-3.0-or-later"
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+description = "Vendored aisdecoder (marine AIS, 161.975/162.025 MHz) + safe Rust wrapper. Native-only — the GMSK clock-recovery + AIVDM frame-builder run on real_f32 audio at 48 kHz, two channels."
+
+[lib]
+crate-type = ["rlib"]
+
+# Diagnostic CLI — feed a 48 kHz stereo s16 WAV (left = ch A, right = ch B,
+# the format aisdecoder expects after the FmDemod chain) and print decoded
+# AIVDM sentences. Mirrors `analyze-packet-wav` and `analyze-adsb-iq`.
+[[bin]]
+name = "analyze-ais-wav"
+path = "src/bin/analyze_ais_wav.rs"
+
+[dependencies]
+
+[build-dependencies]
+cc      = "1.0"
+bindgen = "0.70"

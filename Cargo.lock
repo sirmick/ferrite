@@ -419,6 +419,7 @@ dependencies = [
  "ferrite-dump1090",
  "ferrite-liquid-dsp",
  "ferrite-multimon-ng",
+ "ferrite-rtl-ais",
  "inventory",
  "js-sys",
  "nnnoiseless",
@@ -472,6 +473,14 @@ dependencies = [
 
 [[package]]
 name = "ferrite-multimon-ng"
+version = "0.0.1"
+dependencies = [
+ "bindgen",
+ "cc",
+]
+
+[[package]]
+name = "ferrite-rtl-ais"
 version = "0.0.1"
 dependencies = [
  "bindgen",

@@ -42,7 +42,8 @@
         { "label": "Ch 22A — USCG liaison", "hz": 157100000, "mode": "NBFM" },
         { "label": "Ch 68 — non-commercial", "hz": 156425000, "mode": "NBFM" },
         { "label": "Ch 70 — DSC (digital)", "hz": 156525000, "mode": "NBFM" },
-        { "label": "Ch 72 — non-commercial", "hz": 156625000, "mode": "NBFM" }
+        { "label": "Ch 72 — non-commercial", "hz": 156625000, "mode": "NBFM" },
+        { "label": "AIS-1/2 (162.000) — pair centre", "hz": 162000000, "mode": "GMSK" }
       ]
     },
     {

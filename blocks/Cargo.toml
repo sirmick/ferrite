@@ -26,6 +26,9 @@ multimon = ["dep:ferrite-multimon-ng"]
 # Links vendored dump1090; enables `AdsbDemod` (Mode S / ADS-B at
 # 1090 MHz). Native only — same constraint as multimon.
 adsb     = ["dep:ferrite-dump1090"]
+# Links vendored aisdecoder (from rtl-ais); enables `AisDemod` (marine
+# AIS at 161.975 + 162.025 MHz). Native only.
+ais      = ["dep:ferrite-rtl-ais"]
 
 [dependencies]
 anyhow                = "1"
@@ -33,6 +36,7 @@ ferrite-blocks-macros = { path = "../blocks-macros", version = "0.0.1" }
 ferrite-liquid-dsp    = { path = "native/liquid-dsp", version = "0.0.1" }
 ferrite-multimon-ng   = { path = "native/multimon-ng", version = "0.0.1", optional = true }
 ferrite-dump1090      = { path = "native/dump1090",    version = "0.0.1", optional = true }
+ferrite-rtl-ais       = { path = "native/rtl-ais",     version = "0.0.1", optional = true }
 inventory             = "0.3"
 # Pure-Rust port of Xiph RNNoise. No C deps, wasm32-clean, ~50 kB with
 # embedded GRU weights. Used by audio_nr::neural. DeepFilterNet3 via

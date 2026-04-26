@@ -1,0 +1,115 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "ais",
+  "label": "AIS / marine (161.975 + 162.025 MHz)",
+  "description": "Decode the marine AIS Class A/B vessel transponders broadcasting on AIS-1 (161.975 MHz, ITU channel 87B) and AIS-2 (162.025 MHz, ITU channel 88B). Wraps a vendored aisdecoder (from rtl-ais). Centre the SDR at 162.000 MHz with at least 100 kHz of bandwidth — the channelizer pulls each AIS leg to baseband (±25 kHz off DC), an FM discriminator recovers the GMSK as audio, and aisdecoder runs an independent clock-recovery PLL + AIVDM frame builder on each leg. Decoded NMEA `!AIVDM,...,*hh` sentences stream into the Logs tab under the `decoder::ais` category. International (AIS-1/2) frequencies — match what most vessels in EU and US coastal waters use; some regions add additional duplex channels not covered here.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Identification_System_(AIS)",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 2000000.0,
+        "bandwidth_hz": 200000.0
+      }
+    },
+    "tee_main": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "tee_chans": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "chan_a": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2000000.0,
+        "freq_shift_hz": -25000.0,
+        "output_rate_hz": 50000.0
+      }
+    },
+    "chan_b": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2000000.0,
+        "freq_shift_hz": 25000.0,
+        "output_rate_hz": 50000.0
+      }
+    },
+    "fm_a": {
+      "type": "FmDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 50000,
+        "max_deviation_hz": 5000
+      }
+    },
+    "fm_b": {
+      "type": "FmDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 50000,
+        "max_deviation_hz": 5000
+      }
+    },
+    "resamp_a": {
+      "type": "RealF32Resamp",
+      "placement": "node",
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "resamp_b": {
+      "type": "RealF32Resamp",
+      "placement": "node",
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "ais": {
+      "type": "AisDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 48000.0
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee_main.in"],
+    ["tee_main.out0", "tee_chans.in"],
+    ["tee_main.out1", "fft.in"],
+    ["tee_chans.out0", "chan_a.in"],
+    ["tee_chans.out1", "chan_b.in"],
+    ["chan_a.out", "fm_a.in"],
+    ["chan_b.out", "fm_b.in"],
+    ["fm_a.out", "resamp_a.in"],
+    ["fm_b.out", "resamp_b.in"],
+    ["resamp_a.out", "ais.ch_a"],
+    ["resamp_b.out", "ais.ch_b"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"]
+  ]
+}

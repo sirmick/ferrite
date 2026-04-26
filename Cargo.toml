@@ -8,6 +8,7 @@ members = [
     "blocks/native/liquid-dsp",
     "blocks/native/multimon-ng",
     "blocks/native/dump1090",
+    "blocks/native/rtl-ais",
     "runtime",
 ]
 

@@ -16,6 +16,8 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "adsb")]
 pub mod adsb;
+#[cfg(feature = "ais")]
+pub mod ais;
 pub mod am_demod;
 pub mod am_modulator;
 pub mod audio_nr;
@@ -62,6 +64,8 @@ pub mod ws_bridge;
 
 #[cfg(feature = "adsb")]
 pub use adsb::{AdsbDemod, AdsbDemodParams};
+#[cfg(feature = "ais")]
+pub use ais::{AisDemod, AisDemodParams};
 pub use am_demod::{AmDemod, AmDemodParams};
 pub use am_modulator::{AmModulator, AmModulatorParams};
 pub use audio_nr::{AudioNrMono, AudioNrParams, AudioNrStereo, SpectralMethod};
