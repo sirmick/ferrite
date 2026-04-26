@@ -317,10 +317,11 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
     // End-to-end smoke: load the shipped wbfm preset, feed it a
     // SineSource (no hardware required), connect to /ws/preset, and
     // confirm the crossings light up. env_split allocates stream_ids
-    // from 1000+ in doc-traversal order; for wbfm that is:
-    //   - stream 1000: IQ crossing on `rssi.out → demod.in`
-    //   - stream 1001: JsonEvent tap on `rssi.events → ui:rssi`
-    //   - stream 1002: FFT tap on `logmag.out → ui:fft`
+    // from 1000+ in doc-traversal (wire) order; for wbfm that is:
+    //   - stream 1000: JsonEvent tap on `rds.events → ui:rds`
+    //   - stream 1001: IQ crossing on `rssi.out → demod.in`
+    //   - stream 1002: JsonEvent tap on `rssi.events → ui:rssi`
+    //   - stream 1003: FFT tap on `logmag.out → ui:fft`
     // This exercises the full pipeline compose → env_split → runtime
     // → frame bus → WS path against the same preset the web UI ships.
     let preset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -378,7 +379,7 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
         match Frame::from_postcard(&bytes).expect("decode") {
             Frame::IqF32 { stream_id, .. } => {
                 *counts.entry((stream_id, "IqF32")).or_default() += 1;
-                if stream_id == 1000 {
+                if stream_id == 1001 {
                     saw_iq = true;
                 }
             }
@@ -386,7 +387,7 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
                 stream_id, payload, ..
             } => {
                 *counts.entry((stream_id, "FftU8")).or_default() += 1;
-                if stream_id == 1002 {
+                if stream_id == 1003 {
                     assert_eq!(payload.len(), 16384, "expected 16384 FFT bins");
                     saw_fft = true;
                 }
@@ -394,8 +395,8 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
             _ => {}
         }
     }
-    assert!(saw_iq, "no IqF32 on stream 1000 within 2s; saw {counts:?}");
-    assert!(saw_fft, "no FftU8 on stream 1002 within 2s; saw {counts:?}");
+    assert!(saw_iq, "no IqF32 on stream 1001 within 2s; saw {counts:?}");
+    assert!(saw_fft, "no FftU8 on stream 1003 within 2s; saw {counts:?}");
 }
 
 #[tokio::test]

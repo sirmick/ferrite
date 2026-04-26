@@ -233,7 +233,12 @@ async fn main() -> Result<()> {
     let log_broadcast = log_stream::LogBroadcast::new();
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(fmt::layer().with_target(false))
+        // Show the tracing target on stdout (e.g. `decoder::packet`,
+        // `decoder::flex`, `flowdiag`) so log files and run.sh tails
+        // are self-describing — same view the UI broadcast layer
+        // already gives. The broadcast layer formats targets too, so
+        // both surfaces stay in sync.
+        .with(fmt::layer().with_target(true))
         .with(log_broadcast.layer())
         .init();
 

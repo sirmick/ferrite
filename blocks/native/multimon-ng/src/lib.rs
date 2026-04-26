@@ -61,14 +61,15 @@ use std::mem::MaybeUninit;
 /// adding visible latency for paging / packet bursts that are 200 ms+.
 const MIN_BATCH_SAMPLES: usize = 4096;
 
-/// Guard zeros appended after each batch so the C correlator's last-
-/// iteration over-read (up to `CORRLEN - SUBSAMP` ≈ 16 samples past
-/// `length`) lands on initialised zero memory instead of uninitialised
-/// `Vec` tail capacity. Without it, decode behaviour at small caller
-/// chunk sizes is non-deterministic — observed empirically at chunk=10
-/// where the over-read sometimes happened to read silence (decode OK)
-/// and sometimes garbage (decode missed). 32 covers every shipped
-/// multimon decoder's CORRLEN with comfortable margin.
+/// Guard zeros inserted *at* the read boundary (offset
+/// `MIN_BATCH_SAMPLES`) before each `demod_fn` call so the C correlator's
+/// last-iteration over-read (up to `CORRLEN - SUBSAMP` ≈ 16 samples past
+/// `length`) lands on initialised zero memory instead of into the next
+/// batch's residual samples. Without this — or with the guard at the
+/// *end* of scratch when residual > 0 — the over-read re-processes the
+/// first ~18 samples of the next batch, scrambling bit-clock recovery at
+/// every batch edge. 32 covers every shipped multimon decoder's CORRLEN
+/// with comfortable margin.
 const BATCH_GUARD_SAMPLES: usize = 32;
 
 /// Which decoder this instance runs. Adding a decoder = vendor source
@@ -339,12 +340,18 @@ impl MultimonDemod {
         let demod_fn = unsafe { (*dem_par).demod };
         let Some(demod_fn) = demod_fn else { return };
         while self.float_scratch.len() >= MIN_BATCH_SAMPLES {
-            // Append the guard zeros so the C correlator's tail over-read
-            // is into known memory; truncate them right after the call so
-            // the next batch starts clean.
-            let pad_pos = self.float_scratch.len();
-            self.float_scratch
-                .resize(pad_pos + BATCH_GUARD_SAMPLES, 0.0);
+            // Insert guard zeros AT the read boundary (offset
+            // MIN_BATCH_SAMPLES) so the C correlator's tail over-read past
+            // the batch lands in zeros, not in residual real samples that
+            // will be processed in the next iteration. Appending guards at
+            // the END of scratch (the previous approach) only worked when
+            // residual was zero — with non-aligned chunk sizes the
+            // over-read silently re-processed samples and corrupted bit
+            // timing at every batch edge.
+            self.float_scratch.splice(
+                MIN_BATCH_SAMPLES..MIN_BATCH_SAMPLES,
+                std::iter::repeat(0.0_f32).take(BATCH_GUARD_SAMPLES),
+            );
             let buf = sys::buffer {
                 sbuffer: std::ptr::null(),
                 fbuffer: self.float_scratch.as_ptr(),
@@ -355,7 +362,10 @@ impl MultimonDemod {
             unsafe {
                 demod_fn(self.state.as_mut() as *mut _, buf, MIN_BATCH_SAMPLES as i32);
             }
-            self.float_scratch.truncate(pad_pos);
+            // Remove the inserted guard zeros, then drain the processed
+            // batch — leaves residual samples (if any) at scratch[0..].
+            self.float_scratch
+                .drain(MIN_BATCH_SAMPLES..MIN_BATCH_SAMPLES + BATCH_GUARD_SAMPLES);
             self.float_scratch.drain(..MIN_BATCH_SAMPLES);
         }
     }
@@ -365,8 +375,11 @@ impl MultimonDemod {
         let demod_fn = unsafe { (*dem_par).demod };
         let Some(demod_fn) = demod_fn else { return };
         while self.int_scratch.len() >= MIN_BATCH_SAMPLES {
-            let pad_pos = self.int_scratch.len();
-            self.int_scratch.resize(pad_pos + BATCH_GUARD_SAMPLES, 0);
+            // Same boundary-guard fix as `flush_float_batches`.
+            self.int_scratch.splice(
+                MIN_BATCH_SAMPLES..MIN_BATCH_SAMPLES,
+                std::iter::repeat(0_i16).take(BATCH_GUARD_SAMPLES),
+            );
             let buf = sys::buffer {
                 sbuffer: self.int_scratch.as_ptr(),
                 fbuffer: std::ptr::null(),
@@ -374,7 +387,8 @@ impl MultimonDemod {
             unsafe {
                 demod_fn(self.state.as_mut() as *mut _, buf, MIN_BATCH_SAMPLES as i32);
             }
-            self.int_scratch.truncate(pad_pos);
+            self.int_scratch
+                .drain(MIN_BATCH_SAMPLES..MIN_BATCH_SAMPLES + BATCH_GUARD_SAMPLES);
             self.int_scratch.drain(..MIN_BATCH_SAMPLES);
         }
     }
