@@ -4,6 +4,7 @@
   "label": "AIS / marine (161.975 + 162.025 MHz)",
   "description": "Decode the marine AIS Class A/B vessel transponders broadcasting on AIS-1 (161.975 MHz, ITU channel 87B) and AIS-2 (162.025 MHz, ITU channel 88B). Wraps a vendored aisdecoder (from rtl-ais). Centre the SDR at 162.000 MHz with at least 100 kHz of bandwidth — the channelizer pulls each AIS leg to baseband (±25 kHz off DC), an FM discriminator recovers the GMSK as audio, and aisdecoder runs an independent clock-recovery PLL + AIVDM frame builder on each leg. Decoded NMEA `!AIVDM,...,*hh` sentences stream into the Logs tab under the `decoder::ais` category. International (AIS-1/2) frequencies — match what most vessels in EU and US coastal waters use; some regions add additional duplex channels not covered here.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Identification_System_(AIS)",
+  "sample_path": "samples/sigidwiki/AIS_IQ_5s.wav",
   "environments": ["node", "browser"],
   "blocks": {
     "src": {

@@ -25,6 +25,7 @@ Run `convert.py` to (re-)generate `22050_mono/*.wav` — 22 050 Hz mono
 | `POCSAG_1200.mp3` | POCSAG @ 1200 baud (most common rate) |
 | `POCSAG_2400.mp3` | POCSAG @ 2400 baud |
 | `1200_variant.wav` | non-APRS 1200 baud AFSK variant — does not decode under standard AX.25 |
+| `AIS_IQ_5s.wav` | [AIS](https://www.sigidwiki.com/wiki/Automatic_Identification_System_(AIS)) — first 5 seconds of `AIS IQ.zip` (sigidwiki/Cartoonman, 2016-01-04). 48 kHz stereo s16; despite the upstream filename, this is I/Q (left = I, right = Q) of a single AIS channel, *not* post-FmDemod audio. The `ais_e2e` test FmDemods it before feeding `AisDemod.ch_a`. Trimmed to 5 s (≈940 KB) so the repo doesn't carry the full 8 MB original; the window contains one decodable AIVDM frame. |
 
 ## License
 
