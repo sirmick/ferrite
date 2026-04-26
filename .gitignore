@@ -24,6 +24,28 @@ dist/
 
 # Vendored SoapySDR sources/builds (cloned via scripts/build-soapysdr.sh)
 /soapysdr/
+# Upstream Soapy source tree unpacked locally during development
+/soapysdr-src/
 
 # Upstream decoder codebases cloned for WASM-port feasibility research
 /research/
+
+# Per-developer Claude Code state
+/.claude/
+
+# Scratch material that isn't part of the curated `samples/sigidwiki/`
+# corpus — audio captures, screenshots, notes, vendor installers.
+/samples/audio1/
+/samples/uhf/
+/notes
+/notes/
+/Screenshot*.png
+/SDRplay_RSP_API-*.run
+
+# Dev-server logs from `./run.sh` — regenerated on every start.
+/dev-server.log
+/web/dev-server.log
+
+# Ad-hoc debug presets that hard-code dev-machine paths (e.g. /tmp/...)
+# — kept locally for reproduction, not part of the shipped catalog.
+/flowgraphs/aprs-debug.json
