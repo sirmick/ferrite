@@ -1,5 +1,5 @@
 Name:           ferrite
-Version:        0.0.1
+Version:        0.9.0
 Release:        1%{?dist}
 Summary:        Web-based SDR daemon with bundled SoapySDR
 
@@ -61,5 +61,10 @@ cp -a flowgraphs/.  %{buildroot}/usr/share/ferrite/flowgraphs/
 /usr/share/ferrite/
 
 %changelog
+* Tue Apr 28 2026 Mick <sirmick@gmail.com> - 0.9.0-1
+- Pre-release version bump. Multi-arch package matrix + expanded SoapySDR
+  driver bundle (Airspy R2/HF+, BladeRF, PlutoSDR added on top of the
+  prior RTL-SDR + HackRF + SDRplay set).
+
 * Mon Apr 27 2026 Mick <sirmick@gmail.com> - 0.0.1-1
 - Initial Fedora package.

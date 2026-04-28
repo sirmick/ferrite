@@ -12,12 +12,17 @@ Decoders (ADS-B, APRS, digital voice, FT8, …) are built as shared blocks
 
 ## Status
 
-Pre-alpha. Working: `ferrited` server, native + WASM builds of the runtime
-and DSP blocks, SvelteKit web client, RTL-SDR + SDRplay (RSPduo / RSPdx)
-over SoapySDR. Listening modes (WBFM mono/stereo, NBFM, AM, USB/LSB, CW)
-plus data decoders (POCSAG, FLEX, APRS, ADS-B, NOAA EAS, Morse, DTMF,
-RDS) all decode end-to-end against live RF. See
-[docs/08-roadmap.md](docs/08-roadmap.md) for the rest.
+**0.9.0 — pre-release.** Working: `ferrited` server, native + WASM builds of
+the runtime and DSP blocks, SvelteKit web client, RTL-SDR + HackRF +
+SDRplay (RSPduo / RSPdx) + Airspy R2 / HF+ + BladeRF + PlutoSDR over
+SoapySDR. Listening modes (WBFM mono/stereo, NBFM, AM, USB/LSB, CW) plus
+data decoders (POCSAG, FLEX, APRS, ADS-B, NOAA EAS, Morse, DTMF, RDS)
+all decode end-to-end against live RF.
+
+Native packages built and smoke-tested against `linux/{amd64, arm64,
+riscv64}` on Ubuntu 24.04, Debian 12, Debian 13 (riscv64), and
+Fedora 40 — see [Packaging](#packaging). [docs/08-roadmap.md](docs/08-roadmap.md)
+covers everything still pending for 1.0.
 
 ## Target platform
 
@@ -248,6 +253,48 @@ ferrited --probe-device 'driver=rtlsdr'       # one device's full capability sch
 ferrited --probe-all                          # probe every attached device
 ferrited --flowgraph ... --run-for-secs 30    # headless capture, no HTTP server
 ```
+
+## Packaging
+
+`packaging/run_matrix.sh` builds native `.deb` / `.rpm` packages for a matrix
+of (distro, arch) combos using Docker. Each row spins up a clean container,
+runs the same install steps documented above, and produces a self-contained
+package with `ferrited`, the bundled SoapySDR + driver plugins, the static
+web bundle, and the flowgraph presets.
+
+```bash
+# One-time host setup for cross-arch (arm64 / riscv64) rows:
+sudo apt install -y qemu-user-static binfmt-support docker-buildx
+docker run --privileged --rm tonistiigi/binfmt --install all
+
+bash packaging/run_matrix.sh
+```
+
+Output lands in `dist/`:
+- `dist/<tag>.log` — full build log per row, streamed live
+- `dist/packages/<tag>/*.deb` or `*.rpm` — extracted artifact
+
+The current matrix targets Ubuntu 24.04, Debian 12, Debian 13 (riscv64
+only — bookworm has no official riscv64 image), and Fedora 40 across
+amd64 + arm64 + riscv64 where the base image manifest supports it. Edit
+`TARGETS=( … )` in `run_matrix.sh` to add or drop rows. Per-row failures
+don't halt the matrix; the script prints a PASS/FAIL summary at the end.
+
+The web bundle is built once on the host (arch-independent) and copied
+into each container's source tarball — sidesteps the lightningcss /
+@tailwindcss/oxide native-binding gap on non-x86 archs.
+
+Install the produced package the usual way:
+
+```bash
+sudo apt install ./dist/packages/ubuntu-24.04-amd64/ferrite_0.9.0_amd64.deb
+sudo dnf install ./dist/packages/fedora-40-amd64/ferrite-0.9.0-1.fc40.x86_64.rpm
+```
+
+The `/usr/bin/ferrited` wrapper installed by the package sets
+`LD_LIBRARY_PATH`, `SOAPY_SDR_PLUGIN_PATH`, and `FERRITE_STATIC_ROOT`
+so the daemon finds its bundled libs and the web bundle without any
+manual env setup.
 
 ## Tests
 
