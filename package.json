@@ -14,7 +14,7 @@
     "check": "pnpm -r check",
     "test": "pnpm -r test",
     "build": "pnpm -r build",
-    "prepare": "lefthook install"
+    "prepare": "lefthook install || echo 'lefthook install skipped (likely no prebuilt for this arch — pre-commit hooks unavailable, build/run still works)'"
   },
   "devDependencies": {
     "lefthook": "^1.8.0"

@@ -21,10 +21,15 @@ RDS) all decode end-to-end against live RF. See
 
 ## Target platform
 
-- **OS:** Ubuntu 24.04 LTS (Noble) or newer. Other Linux distros probably
-  work; non-Linux hosts are out of scope.
+- **OS:** Ubuntu 24.04 LTS (Noble), Debian 12 (Bookworm), or newer. Other
+  Linux distros probably work; non-Linux hosts are out of scope.
+- **Architecture:** x86_64 and aarch64 are first-class — full local build of
+  daemon + web bundle. RISC-V (`riscv64gc-unknown-linux-gnu`) builds the
+  daemon natively but the web bundle has to be cross-built on x86/aarch64
+  and copied over (see [RISC-V notes](#risc-v-notes) below).
 - **Hardware:** RTL-SDR (RTL2832U) and SDRplay (RSPduo, RSPdx) via
-  SoapySDR. Anything else SoapySDR supports should also work.
+  SoapySDR. Anything else SoapySDR supports should also work. SDRplay's
+  closed-source API is x86_64 / aarch64 only — no riscv64 release.
 
 ## Build and run
 
@@ -47,12 +52,19 @@ sudo apt update
 sudo apt install -y \
   build-essential pkg-config curl git cmake clang lld \
   librtlsdr-dev libhackrf-dev \
-  nodejs npm
+  wasi-libc
 ```
+
+`wasi-libc` provides the `wasm32-wasi` headers + `libc.a`/`libm.a` that the
+liquid-dsp wasm build links against (see `blocks/native/liquid-dsp/build.rs`).
+Both Debian and Ubuntu ship it as `wasi-libc`.
 
 `libsoapysdr-dev` from apt works, but the project ships a script that builds
 SoapySDR + driver modules into a local prefix (no sudo, no version skew with
 distro packages) — see step 4.
+
+Node is installed via NodeSource in step 3 (the `nodejs` package in
+Debian 12 / Ubuntu 24.04 default repos is too old).
 
 ### 2. Rust toolchain
 
@@ -66,12 +78,38 @@ Stable Rust ≥ 1.89 (set in `Cargo.toml`).
 
 ### 3. Node + pnpm
 
+Node ≥ 20.10 is required (pinned by `engines` in `package.json`). Debian 12
+and Ubuntu 24.04 default repos ship Node 18; install Node 20 from
+NodeSource:
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+```
+
+Then enable pnpm 10.x (pinned by `packageManager` in `package.json`) via
+the corepack shim that ships with Node 20:
+
 ```bash
 sudo corepack enable
 corepack prepare pnpm@10.33.0 --activate
 ```
 
-Node ≥ 20.10, pnpm 10.x (pinned by `packageManager` in `package.json`).
+> **RISC-V:** NodeSource doesn't publish riscv64 builds. Use the official
+> unofficial-builds tarball + npm-installed pnpm instead:
+>
+> ```bash
+> mkdir -p ~/.local/opt ~/.local/bin
+> curl -fsSL https://unofficial-builds.nodejs.org/download/release/v20.18.1/node-v20.18.1-linux-riscv64.tar.xz \
+>   | tar -xJ -C ~/.local/opt
+> ln -sfn ~/.local/opt/node-v20.18.1-linux-riscv64 ~/.local/opt/node
+> for b in node npm npx; do ln -sfn ~/.local/opt/node/bin/$b ~/.local/bin/$b; done
+> export PATH="$HOME/.local/bin:$PATH"
+> npm install -g --prefix ~/.local pnpm@10.33.0
+> ```
+>
+> Skip corepack: shipped versions in Node 20 LTS hit a stale signing key on
+> `pnpm` activation and the new keys aren't backported.
 
 ### 4. SoapySDR (local prefix)
 
@@ -85,6 +123,11 @@ Clones and builds SoapySDR + SoapySDRPlay3 + SoapyHackRF + SoapyRTLSDR into
 `PKG_CONFIG_PATH`, `LD_LIBRARY_PATH`, and `SOAPY_SDR_PLUGIN_PATH` so cargo
 finds `libSoapySDR` and `ferrited` finds the driver modules at runtime.
 **Source it in every shell that runs cargo or `ferrited`.**
+
+The script detects each driver's userland lib (`libsdrplay_api`, `libhackrf`,
+`librtlsdr`) and skips drivers whose dependency is missing rather than
+aborting the whole build. After installing a missing dep (e.g. SDRplay API),
+re-run the script to pick it up.
 
 Sanity check: `SoapySDRUtil --info && SoapySDRUtil --find`.
 
@@ -152,10 +195,14 @@ pnpm --filter @ferrite/web wasm:build:runtime
 
 ### 7. Run
 
-`ferrited` requires `--flowgraph PATH`. Presets live in `flowgraphs/`.
+`ferrited` requires `--flowgraph PATH`. Presets live in `flowgraphs/`. To
+serve the web UI built in step 6, point `FERRITE_STATIC_ROOT` at
+`web/build/` (otherwise only `/api` and `/ws` respond — handy if you're
+running `vite dev` separately).
 
 ```bash
 source soapysdr/env.sh
+export FERRITE_STATIC_ROOT=web/build
 
 # RTL-SDR, FM broadcast, auto-start the pipeline:
 ./target/release/ferrited \
@@ -229,7 +276,49 @@ Notable integration tests:
   fixture.
 
 Pre-commit (lefthook, installed by `pnpm install`) runs `cargo fmt --check`,
-`pnpm -r lint`, and `pnpm -r check` on staged files.
+`pnpm -r lint`, and `pnpm -r check` on staged files. The `prepare` hook
+tolerates `lefthook install` failure on architectures with no upstream
+prebuilt (riscv64, etc.) — the rest of the install still completes; you
+just don't get the git hooks.
+
+## RISC-V notes
+
+Tested on Ubuntu 24.04 / `riscv64gc-unknown-linux-gnu` (Ky X1 SBC).
+
+**The daemon (`ferrited`) builds and runs natively.** Apply the alternate
+Node 20 install in step 3 above, then steps 4–7 work as documented.
+Allow ~16 minutes for `cargo build --release` on an 8-core RISC-V SBC.
+
+**The web bundle does not currently build natively on riscv64.** Two of
+its native dependencies — `lightningcss` (used by Tailwind v4 + Vite for
+CSS) and `@tailwindcss/oxide`'s native binding — only ship prebuilts for
+x86_64 / aarch64. `oxide` falls back to its `wasm32-wasi` build
+automatically; `lightningcss` does not.
+
+Recommended workflow: build the static `web/build/` bundle on an
+x86_64 / aarch64 host (CI or laptop), copy it to the riscv64 host, and
+point `ferrited` at it:
+
+```bash
+# on the build host
+pnpm --filter @ferrite/web build
+rsync -a web/build/ riscv-host:~/ferrite/web/build/
+
+# on the riscv64 host
+FERRITE_STATIC_ROOT=web/build ./target/release/ferrited \
+  --flowgraph flowgraphs/wbfm.json --start
+```
+
+The bundle contains HTML, JS, and `wasm32-unknown-unknown` modules — all
+arch-independent at runtime.
+
+A few smaller riscv-specific issues are already handled in the project:
+the SoapySDR build script skips drivers whose userland lib is missing
+(SDRplay's closed-source API has no riscv64 release); `wasm-pack` would
+otherwise fail trying to download a nonexistent `wasm-opt` binary
+(disabled via `[package.metadata.wasm-pack.profile.release]` in
+`runtime/Cargo.toml` and `blocks/Cargo.toml`); and bindgen's libclang
+target is derived from cargo's `HOST` rather than hardcoded to x86_64.
 
 ## Documentation
 

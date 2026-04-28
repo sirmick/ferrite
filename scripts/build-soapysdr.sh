@@ -48,14 +48,36 @@ clone_or_update https://github.com/pothosware/SoapyRTLSDR.git     "$SRC_DIR/Soap
 echo ">>> Building SoapySDR"
 build_cmake "$SRC_DIR/SoapySDR"
 
-echo ">>> Building SoapySDRPlay3 (requires SDRplay API installed system-wide)"
-build_cmake "$SRC_DIR/SoapySDRPlay3"
+# Each driver requires its userland lib system-wide. If a lib is missing we
+# skip that driver with a warning rather than aborting the whole build, so
+# you can install just the radios you have. SKIPPED is shown at the end.
+SKIPPED=()
 
-echo ">>> Building SoapyHackRF (requires libhackrf-dev)"
-build_cmake "$SRC_DIR/SoapyHackRF"
+# SDRplay API (closed-source, .run installer from sdrplay.com) drops libsdrplay_api
+# in /usr/local/lib by default.
+if [ -f /usr/local/lib/libsdrplay_api.so ] || ldconfig -p | grep -q libsdrplay_api; then
+  echo ">>> Building SoapySDRPlay3"
+  build_cmake "$SRC_DIR/SoapySDRPlay3"
+else
+  echo ">>> Skipping SoapySDRPlay3 — SDRplay API not installed (libsdrplay_api missing)"
+  SKIPPED+=("SoapySDRPlay3 (install SDRplay .run installer to enable)")
+fi
 
-echo ">>> Building SoapyRTLSDR (requires librtlsdr-dev)"
-build_cmake "$SRC_DIR/SoapyRTLSDR"
+if pkg-config --exists libhackrf 2>/dev/null; then
+  echo ">>> Building SoapyHackRF"
+  build_cmake "$SRC_DIR/SoapyHackRF"
+else
+  echo ">>> Skipping SoapyHackRF — libhackrf-dev not installed"
+  SKIPPED+=("SoapyHackRF (apt install libhackrf-dev to enable)")
+fi
+
+if pkg-config --exists librtlsdr 2>/dev/null; then
+  echo ">>> Building SoapyRTLSDR"
+  build_cmake "$SRC_DIR/SoapyRTLSDR"
+else
+  echo ">>> Skipping SoapyRTLSDR — librtlsdr-dev not installed"
+  SKIPPED+=("SoapyRTLSDR (apt install librtlsdr-dev to enable)")
+fi
 
 cat > "$PREFIX/env.sh" <<EOF
 # source this from repo root to use the local SoapySDR build:
@@ -70,3 +92,8 @@ EOF
 echo
 echo ">>> Done. Sanity check:"
 echo "    source $PREFIX/env.sh && SoapySDRUtil --info && SoapySDRUtil --find"
+if [ ${#SKIPPED[@]} -gt 0 ]; then
+  echo
+  echo ">>> Skipped drivers (re-run this script after installing the missing dep):"
+  for s in "${SKIPPED[@]}"; do echo "      - $s"; done
+fi

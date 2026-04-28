@@ -102,13 +102,22 @@ fn main() {
     // Allowlist what we actually wrap so we don't pull every type in
     // liquid.h into the bindings (~10k LOC). Each module that grows a
     // safe wrapper appends its types/functions here.
+    // Force the host triple — see comment above. Keeps bindgen's libclang
+    // from picking up the wasm32 target wrt cargo's TARGET env var, which
+    // would steer it at headers (or a lack of them) inappropriate for what
+    // we're parsing. We use cargo's HOST (not a hardcoded triple) so the
+    // build works on non-x86 hosts (riscv64, aarch64) where the x86_64
+    // multiarch headers aren't installed.
+    //
+    // Rust's RISC-V triple `riscv64gc-*` includes the ISA-feature suffix
+    // `gc`; clang only knows the bare arch (`riscv64-*`). Strip it so
+    // libclang accepts the triple.
+    let host = std::env::var("HOST")
+        .expect("HOST set by cargo")
+        .replace("riscv64gc-", "riscv64-");
     let bindings = bindgen::Builder::default()
         .header(vendor.join("include/liquid.h").to_string_lossy())
-        // Force the host triple — see comment above. Keeps bindgen's
-        // libclang from picking up the wasm32 target wrt cargo's
-        // TARGET env var, which would steer it at headers (or a lack
-        // of them) inappropriate for what we're parsing.
-        .clang_arg("--target=x86_64-unknown-linux-gnu")
+        .clang_arg(format!("--target={host}"))
         .clang_arg(format!("-I{}", vendor.join("include").display()))
         // M2 surface — keep this list tight. New wrappers append.
         .allowlist_function("firdecim_(?:rrrf|crcf)_.*")

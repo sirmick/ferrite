@@ -32,4 +32,12 @@ wasm-bindgen   = { version = "0.2", optional = true }
 # wasm32-unknown-unknown.
 web-time       = "1"
 
+# wasm-pack downloads a prebuilt `wasm-opt` (binaryen) to optimize the
+# emitted .wasm. Upstream binaries only exist for x86_64 / aarch64 hosts;
+# riscv64 (and other less-common Rust targets) need this disabled or the
+# build fails with "Unrecognized target!". Skipping wasm-opt makes the
+# bundle ~30% larger but otherwise has no functional effect.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [dev-dependencies]
