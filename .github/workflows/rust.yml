@@ -31,7 +31,11 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # Workspace sets `pedantic = warn` in Cargo.toml as guidance for
+        # devs; CI denies the default lint set but keeps pedantic
+        # informational (avoids new pedantic lints in stable Rust
+        # breaking CI overnight).
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::pedantic
 
       - name: cargo test
         run: cargo test --workspace --all-targets

@@ -187,7 +187,7 @@ impl AppState {
         let node_half = split_for_environment(&composed, Environment::Node, &InventorySpecRegistry)
             .map_err(|e| anyhow!("env_split: {e}"))?;
         let mut out = Vec::new();
-        for (_, decl) in &node_half.blocks {
+        for decl in node_half.blocks.values() {
             let payload_type = match decl.type_name.as_str() {
                 "WsBridgeTx" => "IqF32",
                 "WsBridgeTxFftU8" => "FftU8",

@@ -119,8 +119,8 @@ pub fn compute_spectrum_stats(row: &[u8]) -> SpectrumStats {
     let mut p10 = 0u8;
     let mut p99 = 255u8;
     let mut seen10 = false;
-    for v in 0..256 {
-        cum += hist[v] as u64;
+    for (v, &h) in hist.iter().enumerate() {
+        cum += h as u64;
         if !seen10 && cum >= t10 {
             p10 = v as u8;
             seen10 = true;

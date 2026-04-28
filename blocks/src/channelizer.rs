@@ -120,10 +120,10 @@ pub struct Channelizer {
 
 impl Channelizer {
     /// Constructs a channelizer with the supplied params. Fails on
-    /// non-positive input rate or non-positive output rate. The FIR
-    /// + decim are sized for `factor = round(input / output)` here as
-    /// a construction-time hint; `init()` rebuilds at the scheduler-
-    /// reported input rate if it differs.
+    /// non-positive input rate or non-positive output rate. The FIR and
+    /// decim are sized for `factor = round(input / output)` here as a
+    /// construction-time hint; `init()` rebuilds at the scheduler-reported
+    /// input rate if it differs.
     pub fn new(params: ChannelizerParams) -> Result<Self> {
         if !(params.input_rate_hz.is_finite() && params.input_rate_hz > 0.0) {
             bail!(

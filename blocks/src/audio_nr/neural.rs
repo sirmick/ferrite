@@ -139,10 +139,10 @@ impl NeuralStage {
                     self.out_ring.fill(0.0);
                     self.warmup_frames -= 1;
                 } else {
-                    for i in 0..NEURAL_FRAME_SIZE {
+                    for (i, slot) in self.out_ring.iter_mut().take(NEURAL_FRAME_SIZE).enumerate() {
                         let dry = self.frame_dry[i];
                         let denoised = out[i] * inv_scale;
-                        self.out_ring[i] = dry * (1.0 - wet) + denoised * wet;
+                        *slot = dry * (1.0 - wet) + denoised * wet;
                     }
                 }
                 self.out_read = 0;

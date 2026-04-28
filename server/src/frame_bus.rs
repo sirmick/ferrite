@@ -107,7 +107,7 @@ impl FrameBus {
                 let now = Instant::now();
                 let due = sub
                     .last_drop_log_at
-                    .map_or(true, |t| now.duration_since(t) >= DROP_LOG_INTERVAL);
+                    .is_none_or(|t| now.duration_since(t) >= DROP_LOG_INTERVAL);
                 if due {
                     tracing::warn!(
                         id = sub.id,

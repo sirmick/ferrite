@@ -193,8 +193,7 @@ impl Block for RssiProbe {
         // Smooth power + schedule emissions in a single pass so the
         // emitted RSSI lines up with the samples they summarise.
         let n = src.len();
-        for i in 0..n {
-            let z = src[i];
+        for &z in src {
             let inst = z.re * z.re + z.im * z.im;
             self.power += self.alpha * (inst - self.power);
             self.samples_until_emit = self.samples_until_emit.saturating_sub(1);
@@ -202,7 +201,6 @@ impl Block for RssiProbe {
                 self.emit();
                 self.samples_until_emit = self.emit_stride;
             }
-            let _ = i; // used only for iteration
         }
 
         // Copy input IQ → pass-through IQ output. The two output ports

@@ -3,12 +3,11 @@
 //! Builds on [`validate_doc`](crate::validate::validate_doc) with the
 //! phases that need to see a `BlockSpec`:
 //!
-//!   * `env_match`      — the declared block type is registered and its
-//!                        placement lets it run in the chosen environment
+//!   * `env_match` — the declared block type is registered and its
+//!     placement lets it run in the chosen environment
 //!   * `wire_endpoints` — port existence on each wire end (block
-//!                        existence was caught earlier, without the
-//!                        registry)
-//!   * `wire_type_match`— `PortType` on both ends of a wire agrees
+//!     existence was caught earlier, without the registry)
+//!   * `wire_type_match` — `PortType` on both ends of a wire agrees
 //!
 //! Block **construction** (producing `Box<dyn Block>` instances from
 //! declared params) lives in [`crate::block_registry::instantiate_blocks`]
@@ -89,8 +88,8 @@ pub fn instantiate_flowgraph<R: SpecRegistry>(
         }
     }
 
-    let schedule = build_schedule_with_types(doc, &specs)
-        .map_err(|e| FlowgraphValidationError::from_single(e))?;
+    let schedule =
+        build_schedule_with_types(doc, &specs).map_err(FlowgraphValidationError::from_single)?;
     Ok((specs, schedule))
 }
 
@@ -132,12 +131,12 @@ fn check_env_match<R: SpecRegistry>(
 }
 
 fn placement_fits(placement: Placement, env: Environment) -> bool {
-    match (placement, env) {
-        (Placement::Either, _) => true,
-        (Placement::NativeOnly, Environment::Node) => true,
-        (Placement::WasmOnly, Environment::Browser) => true,
-        _ => false,
-    }
+    matches!(
+        (placement, env),
+        (Placement::Either, _)
+            | (Placement::NativeOnly, Environment::Node)
+            | (Placement::WasmOnly, Environment::Browser)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +241,10 @@ fn lookup_port_type<R: SpecRegistry>(
 // Scheduler with port types.
 // ---------------------------------------------------------------------------
 
+// ValidationError is intentionally large (carries phase/error/wire/block/port);
+// boxing it would propagate `Box<ValidationError>` through every caller for
+// no measurable benefit on the cold validation path.
+#[allow(clippy::result_large_err)]
 fn build_schedule_with_types(
     doc: &FlowgraphDoc,
     specs: &SpecMap,

@@ -32,22 +32,17 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use serde::Deserialize;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 pub enum SpectralMethod {
     /// 1979 Boll spectral subtraction — cheap, audible musical-noise
     /// artefacts at aggressive β.
+    #[default]
     #[serde(rename = "boll")]
     Boll,
     /// Log-spectral-amplitude MMSE estimator (Ephraim-Malah 1985)
     /// with decision-directed a-priori-SNR tracking.
     #[serde(rename = "mmse_lsa")]
     MmseLsa,
-}
-
-impl Default for SpectralMethod {
-    fn default() -> Self {
-        Self::Boll
-    }
 }
 
 pub struct SpectralStage {
@@ -205,9 +200,7 @@ impl SpectralStage {
             // Leaky-min noise tracker: instant when mag² dips below
             // the estimate, slow creep upward otherwise. Keeps the
             // floor from running away on loud voice frames.
-            if !self.noise_initialised {
-                self.noise_mag2[k] = mag2;
-            } else if mag2 < self.noise_mag2[k] {
+            if !self.noise_initialised || mag2 < self.noise_mag2[k] {
                 self.noise_mag2[k] = mag2;
             } else {
                 self.noise_mag2[k] += alpha_noise * (mag2 - self.noise_mag2[k]);
@@ -252,7 +245,7 @@ impl SpectralStage {
             self.scratch[k] = c * gain;
             if k != 0 && k != n / 2 {
                 let mirror = n - k;
-                self.scratch[mirror] = self.scratch[mirror] * gain;
+                self.scratch[mirror] *= gain;
             }
         }
         self.noise_initialised = true;
@@ -285,7 +278,9 @@ impl SpectralStage {
 fn expint_e1(x: f32) -> f32 {
     debug_assert!(x > 0.0);
     if x <= 1.0 {
-        // -ln(x) + polynomial in x.
+        // -ln(x) + polynomial in x. Coefficients trimmed to f32 precision
+        // (~7 sig figs); literature gives more digits but they round away.
+        #[allow(clippy::excessive_precision)]
         const A: [f32; 6] = [
             -0.577_215_66,
             0.999_991_93,

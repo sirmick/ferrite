@@ -260,7 +260,7 @@ async fn patch_source_invalid_type_returns_error_and_preserves_state() {
     )
     .await;
     assert!(
-        status >= 400 && status < 500,
+        (400..500).contains(&status),
         "status: {status}, body: {body}"
     );
     assert!(body.contains("RECONFIGURE_FAILED"), "body: {body}");
@@ -298,7 +298,7 @@ async fn patch_flowgraph_invalid_returns_error_and_preserves_state() {
     )
     .await;
     assert!(
-        status >= 400 && status < 500,
+        (400..500).contains(&status),
         "status: {status}, body: {body}"
     );
     assert!(body.contains("RECONFIGURE_FAILED"), "body: {body}");

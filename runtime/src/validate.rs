@@ -7,15 +7,14 @@
 //!
 //! Phases producing `ValidationError` here:
 //!
-//!   * `shape`           — JSON matched the `FlowgraphDoc` schema (but we
-//!                         re-assert non-emptiness and endpoint syntax
-//!                         that `serde` alone won't catch)
-//!   * `fan`             — every port has at most one wire
-//!   * `dag`             — the graph has no cycles
-//!   * `connectivity`    — warn (non-fatal) on isolated blocks
-//!   * `wire_endpoints`  — wire endpoints reference blocks that exist
-//!                         (port existence + type match remain for the
-//!                         registry-dependent pass in a later commit)
+//!   * `shape` — JSON matched the `FlowgraphDoc` schema (but we re-assert
+//!     non-emptiness and endpoint syntax that `serde` alone won't catch)
+//!   * `fan` — every port has at most one wire
+//!   * `dag` — the graph has no cycles
+//!   * `connectivity` — warn (non-fatal) on isolated blocks
+//!   * `wire_endpoints` — wire endpoints reference blocks that exist
+//!     (port existence + type match remain for the registry-dependent
+//!     pass in a later commit)
 //!
 //! Errors accumulate inside a phase so a flowgraph author sees every
 //! problem at once, but we bail before the DAG pass if earlier phases
@@ -131,7 +130,7 @@ fn check_shape(doc: &FlowgraphDoc) -> Vec<ValidationError> {
             port: None,
         });
     }
-    for (id, _decl) in &doc.blocks {
+    for id in doc.blocks.keys() {
         if id.is_empty() {
             errors.push(ValidationError {
                 phase: Phase::Shape,

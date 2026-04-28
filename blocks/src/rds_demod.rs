@@ -681,6 +681,10 @@ impl BlockOffset {
 /// `word` must fit in the low 26 bits. Shift-register reduction over
 /// the generator `g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1`.
 fn rds_syndrome(word: u32) -> u16 {
+    // Bit grouping mirrors the polynomial coefficients (x^10 + x^8 + x^7
+    // + x^5 + x^4 + x^3 + 1), not the standard 4-bit grouping clippy
+    // expects.
+    #[allow(clippy::unusual_byte_groupings)]
     const G: u32 = 0b1_0110_1110_01; // 11-bit, bit 10 is the reducing term
     let mut reg = word & 0x3FF_FFFF;
     // Reduce from bit 25 down to bit 10.
@@ -1018,11 +1022,9 @@ impl GroupParser {
             // Only emit PS snapshots once all 4 segments have been
             // seen at least once — avoids broadcasting half-filled
             // names on first-seek. After that, emit on any change.
-            if self.ps_seen_segments == 0b1111 {
-                if self.last_emitted_ps != Some(self.ps_buf) {
-                    self.last_emitted_ps = Some(self.ps_buf);
-                    update.ps_changed = Some(self.ps_buf);
-                }
+            if self.ps_seen_segments == 0b1111 && self.last_emitted_ps != Some(self.ps_buf) {
+                self.last_emitted_ps = Some(self.ps_buf);
+                update.ps_changed = Some(self.ps_buf);
             }
         }
 
@@ -1084,7 +1086,7 @@ mod tests {
         // output should track the square wave at DC (post-decim), and
         // the I power should far exceed the Q power after lock.
         let fs = 240_000.0_f32;
-        let n = (fs as usize) * 1; // 1 s
+        let n = fs as usize; // 1 s
         let carrier_hz = RDS_SUBCARRIER_HZ;
         let data_hz = 1_000.0_f32;
 

@@ -25,7 +25,7 @@
 use std::env;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ferrite_dump1090::Dump1090;
 use num_complex::Complex;
@@ -46,7 +46,7 @@ fn parse_format(s: &str) -> Option<Format> {
     }
 }
 
-fn detect_format(path: &PathBuf) -> Format {
+fn detect_format(path: &Path) -> Format {
     match path.extension().and_then(|e| e.to_str()) {
         Some("cs8") | Some("s8") => Format::Cs8,
         Some("cf32") | Some("f32") | Some("iq") => Format::Cf32,

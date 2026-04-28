@@ -155,8 +155,8 @@ impl DtmfDecoder {
     /// that this block represents.
     fn flush_block(&mut self) -> Option<char> {
         let mut powers = [0.0_f32; 8];
-        for i in 0..8 {
-            powers[i] = self.s1[i] * self.s1[i] + self.s2[i] * self.s2[i]
+        for (i, p) in powers.iter_mut().enumerate() {
+            *p = self.s1[i] * self.s1[i] + self.s2[i] * self.s2[i]
                 - self.coeff[i] * self.s1[i] * self.s2[i];
             self.s1[i] = 0.0;
             self.s2[i] = 0.0;
@@ -411,8 +411,8 @@ impl Block for DtmfDecoder {
         };
 
         let n = src.len();
-        for i in 0..n {
-            self.feed_sample(src[i]);
+        for &sample in src {
+            self.feed_sample(sample);
             self.block_samples_in += 1;
             self.total_samples += 1;
             if self.block_samples_in == self.params.block_size {

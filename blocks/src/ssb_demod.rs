@@ -46,19 +46,14 @@ use crate::block::{
 };
 
 /// Sideband to demodulate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Sideband {
     /// Upper sideband.
+    #[default]
     Usb,
     /// Lower sideband.
     Lsb,
-}
-
-impl Default for Sideband {
-    fn default() -> Self {
-        Self::Usb
-    }
 }
 
 /// Construction-time params.
@@ -252,8 +247,8 @@ mod tests {
         out
     }
 
-    /// Generous transient skip. liquid's `ampmodem` chains a Hilbert
-    /// + DC blocker + LPF, each with its own delay. Skipping ~512
+    /// Generous transient skip. liquid's `ampmodem` chains a Hilbert,
+    /// DC blocker, and LPF, each with its own delay. Skipping ~512
     /// samples ahead of the steady-state lands us comfortably past
     /// all of them at 48 kHz.
     const SKIP: usize = 512;

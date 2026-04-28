@@ -815,6 +815,10 @@ impl Runtime {
 
         for _ in 0..MAX_TICK_PASSES {
             let mut progress = false;
+            // Indexed loop — body needs `&mut self` and indexes both
+            // `self.entries` and `source_ran`; iterator rewrite would
+            // need a split-borrow dance.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..self.entries.len() {
                 let is_source = self.entries[i].spec.inputs.is_empty();
                 if is_source && source_ran[i] {
@@ -862,6 +866,7 @@ impl Runtime {
         let is_source = spec.inputs.is_empty();
         let mut output_budget = usize::MAX;
         let saw_output = !spec.outputs.is_empty();
+        #[allow(clippy::needless_range_loop)]
         for j in 0..spec.outputs.len() {
             let per_port_cap = if is_source {
                 usize::MAX
@@ -898,8 +903,8 @@ impl Runtime {
             if let Some(custom) = block.forecast(output_budget) {
                 input_needs = custom;
             } else {
-                for ip in 0..spec.inputs.len() {
-                    input_needs[ip] = 1;
+                for slot in input_needs.iter_mut().take(spec.inputs.len()) {
+                    *slot = 1;
                 }
             }
         }

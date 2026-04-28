@@ -350,7 +350,7 @@ impl MultimonDemod {
             // timing at every batch edge.
             self.float_scratch.splice(
                 MIN_BATCH_SAMPLES..MIN_BATCH_SAMPLES,
-                std::iter::repeat(0.0_f32).take(BATCH_GUARD_SAMPLES),
+                std::iter::repeat_n(0.0_f32, BATCH_GUARD_SAMPLES),
             );
             let buf = sys::buffer {
                 sbuffer: std::ptr::null(),
@@ -378,7 +378,7 @@ impl MultimonDemod {
             // Same boundary-guard fix as `flush_float_batches`.
             self.int_scratch.splice(
                 MIN_BATCH_SAMPLES..MIN_BATCH_SAMPLES,
-                std::iter::repeat(0_i16).take(BATCH_GUARD_SAMPLES),
+                std::iter::repeat_n(0_i16, BATCH_GUARD_SAMPLES),
             );
             let buf = sys::buffer {
                 sbuffer: self.int_scratch.as_ptr(),

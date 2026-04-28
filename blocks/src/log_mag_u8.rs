@@ -251,7 +251,6 @@ mod tests {
         let params = LogMagU8Params {
             size: n,
             alpha: 1.0,
-            ..LogMagU8Params::default()
         };
         let mut block = LogMagU8::new(params);
         let input = vec![Complex::new(0.0_f32, 0.0); n];

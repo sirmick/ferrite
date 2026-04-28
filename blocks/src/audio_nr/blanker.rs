@@ -170,11 +170,10 @@ mod tests {
             .collect();
         s.run(&mut buf);
         // Spike and next ~24 samples (0.5 ms @ 48 k) should be zero.
-        for i in 2000..2024 {
+        for (i, sample) in buf.iter().enumerate().take(2024).skip(2000) {
             assert!(
-                buf[i].abs() < 1e-6,
-                "sample {i} should be blanked, got {}",
-                buf[i]
+                sample.abs() < 1e-6,
+                "sample {i} should be blanked, got {sample}"
             );
         }
     }

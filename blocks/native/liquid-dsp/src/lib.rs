@@ -891,17 +891,17 @@ mod tests {
 
         // USB-only tone — exp(+jωt).
         let mut out_match = vec![0.0_f32; n];
-        for i in 0..n {
+        for (i, slot) in out_match.iter_mut().enumerate() {
             let t = i as f32 / fs;
-            out_match[i] = usb.demodulate((TAU * f * t).cos(), (TAU * f * t).sin());
+            *slot = usb.demodulate((TAU * f * t).cos(), (TAU * f * t).sin());
         }
         usb.reset();
         // Same frequency, negative rotation — LSB tone, USB demod
         // should reject it.
         let mut out_image = vec![0.0_f32; n];
-        for i in 0..n {
+        for (i, slot) in out_image.iter_mut().enumerate() {
             let t = i as f32 / fs;
-            out_image[i] = usb.demodulate((TAU * f * t).cos(), -(TAU * f * t).sin());
+            *slot = usb.demodulate((TAU * f * t).cos(), -(TAU * f * t).sin());
         }
         // Skip filter transient (group delay + a generous margin).
         let skip = (usb.delay() as usize) + 256;

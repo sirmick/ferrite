@@ -83,7 +83,7 @@ impl DeviceCache {
     #[must_use]
     pub fn new() -> Self {
         Self::with_probe(
-            Arc::new(|args, t| device::probe_with_timeout(args, t)),
+            Arc::new(device::probe_with_timeout),
             device::DEFAULT_PROBE_TIMEOUT,
         )
     }
