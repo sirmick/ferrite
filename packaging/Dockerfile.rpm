@@ -1,0 +1,70 @@
+# Builds an .rpm from the source tarball + spec staged by run_matrix.sh,
+# then verifies the resulting layout in a clean stage. Mirror of
+# Dockerfile.deb adapted for dnf / rpmbuild.
+#
+# Usage (driven by packaging/run_matrix.sh):
+#   docker build -f packaging/Dockerfile.rpm \
+#     --build-arg BASE=fedora:40 \
+#     -t ferrite-pkg:fedora-40-amd64 \
+#     packaging/build-ctx
+#
+# Build context (set up by run_matrix.sh):
+#   ./ferrite_<ver>.tar.xz
+#   ./ferrite.spec
+
+ARG BASE=fedora:40
+
+# ---------- build stage --------------------------------------------------
+FROM ${BASE} AS build
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        rpm-build \
+        gcc gcc-c++ make pkgconf-pkg-config cmake clang lld \
+        git-core ca-certificates curl xz tar \
+        rtl-sdr-devel hackrf-devel \
+        airspyone_host-devel \
+        libiio-devel \
+    && dnf clean all
+# Drivers covered on Fedora main repos: RTL-SDR, HackRF, Airspy R2,
+# PlutoSDR (libiio side; libad9361 not in Fedora main, only RPM Fusion).
+# AirspyHF, BladeRF, LimeSDR also live in RPM Fusion — to add them,
+# enable rpmfusion-free and install airspyhf-devel / bladerf-devel /
+# libad9361-devel / LimeSuite-devel, then re-run build-soapysdr.sh.
+# UHD/USRP same story (large; in main repo as uhd-devel).
+
+# ferrite's Cargo.toml pins rust-version = 1.89; older than Fedora 40's
+# apt rustc (1.78). Always go via rustup for now.
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+ && rustc --version
+
+WORKDIR /root/rpmbuild
+RUN mkdir -p BUILD RPMS SOURCES SPECS SRPMS
+COPY ferrite_*.tar.xz SOURCES/
+COPY ferrite.spec     SPECS/
+
+RUN rpmbuild -bb SPECS/ferrite.spec \
+ && mkdir -p /pkg && cp RPMS/*/*.rpm /pkg/
+
+# ---------- test stage (clean image, no build deps) ----------------------
+FROM ${BASE} AS test
+
+COPY --from=build /pkg/*.rpm /pkg/
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        /pkg/*.rpm \
+        ca-certificates \
+    && dnf clean all
+
+RUN set -eux; \
+    test -x /usr/bin/ferrited; \
+    test -f /usr/lib/ferrite/ferrited; \
+    test -f /usr/lib/ferrite/soapysdr/lib/libSoapySDR.so; \
+    test -d /usr/share/ferrite/web; \
+    test -f /usr/share/ferrite/flowgraphs/wbfm.json; \
+    ferrited --flowgraph /usr/share/ferrite/flowgraphs/wbfm.json --run-for-secs 2
+
+CMD ["ferrited", "--flowgraph", "/usr/share/ferrite/flowgraphs/wbfm.json", "--start"]

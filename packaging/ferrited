@@ -1,0 +1,9 @@
+#!/bin/sh
+# Wrapper installed at /usr/bin/ferrited. Sets the env vars the daemon
+# needs to find its bundled SoapySDR libs/plugins and the static web
+# bundle, then execs the real binary at /usr/lib/ferrite/ferrited.
+PREFIX=/usr/lib/ferrite
+export LD_LIBRARY_PATH="$PREFIX/soapysdr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export SOAPY_SDR_PLUGIN_PATH="$PREFIX/soapysdr/lib/SoapySDR/modules0.8-3"
+export FERRITE_STATIC_ROOT="${FERRITE_STATIC_ROOT:-/usr/share/ferrite/web}"
+exec "$PREFIX/ferrited" "$@"

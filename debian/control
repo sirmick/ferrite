@@ -1,0 +1,34 @@
+Source: ferrite
+Section: hamradio
+Priority: optional
+Maintainer: Mick <sirmick@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+ build-essential,
+ pkg-config,
+ cmake,
+ clang,
+ lld,
+ git,
+ ca-certificates,
+ librtlsdr-dev,
+ libhackrf-dev,
+ libairspy-dev,
+ libairspyhf-dev,
+ libbladerf-dev,
+ libiio-dev,
+ libad9361-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/sirmick/ferrite
+Rules-Requires-Root: no
+
+Package: ferrite
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Web-based SDR daemon with bundled SoapySDR
+ Spectrum-centric SDR with a thin Rust daemon (ferrited) and a browser
+ front end that does demod and decoding in WASM. Includes RTL-SDR and
+ HackRF driver modules; SDRplay support requires the closed-source
+ SDRplay API installed separately.
+ .
+ Bundles SoapySDR + driver plugins under /usr/lib/ferrite/soapysdr to
+ avoid version skew with distro packages.

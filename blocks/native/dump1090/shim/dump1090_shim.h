@@ -25,6 +25,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
+/* dump1090.c calls time() but only includes <sys/time.h> (gettimeofday).
+ * Older GCCs let this slide as an implicit declaration; GCC 14
+ * (Fedora 40+) promotes -Wimplicit-function-declaration to a hard
+ * error. Pull <time.h> in here so the vendor source compiles unmodified. */
+#include <time.h>
 
 /* --- Type stubs for excised headers ----------------------------------
  *

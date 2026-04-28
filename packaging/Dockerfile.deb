@@ -1,0 +1,71 @@
+# Builds a .deb from the source tarball staged by run_matrix.sh, then
+# verifies the resulting layout in a clean stage. Mirrors the two-stage
+# pattern used by mac-phoenix: build deps stay in stage 1, only the
+# package itself crosses into stage 2.
+#
+# Usage (driven by packaging/run_matrix.sh):
+#   docker build -f packaging/Dockerfile.deb \
+#     --build-arg BASE=ubuntu:24.04 \
+#     -t ferrite-pkg:ubuntu-24.04-amd64 \
+#     packaging/build-ctx
+#
+# Build context (set up by run_matrix.sh):
+#   ./ferrite_<ver>.tar.xz   — source incl. prebuilt web/build/
+
+ARG BASE=ubuntu:24.04
+
+# ---------- build stage --------------------------------------------------
+FROM ${BASE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config cmake clang lld git ca-certificates curl \
+        debhelper devscripts dh-make \
+        xz-utils tar \
+        librtlsdr-dev libhackrf-dev \
+        libairspy-dev libairspyhf-dev libbladerf-dev \
+        libiio-dev libad9361-dev \
+    && rm -rf /var/lib/apt/lists/*
+# Drivers covered: RTL-SDR, HackRF, Airspy R2, Airspy HF+, BladeRF,
+# PlutoSDR. UHD/USRP omitted (large dep tree). LimeSDR omitted (its
+# Soapy plugin lives inside the LimeSuite repo, not pothosware) —
+# install soapysdr-module-lms7 from the distro if you need it.
+
+# ferrite's Cargo.toml pins rust-version = 1.89, newer than every
+# supported base distro's apt rustc. Always go via rustup for now;
+# revisit when distro toolchains catch up.
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+ && rustc --version
+
+WORKDIR /src
+COPY ferrite_*.tar.xz /tmp/source.tar.xz
+RUN tar -xJf /tmp/source.tar.xz --strip-components=1 -C /src \
+ && dpkg-buildpackage -us -uc -b \
+ && mkdir -p /pkg && cp /*.deb /pkg/
+
+# ---------- test stage (clean image, no build deps) ----------------------
+FROM ${BASE} AS test
+ARG DEBIAN_FRONTEND=noninteractive
+
+COPY --from=build /pkg/*.deb /pkg/
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        /pkg/*.deb \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Layout + boot smoke. Synthetic SineSource means we don't need real RF
+# hardware in the container.
+RUN set -eux; \
+    test -x /usr/bin/ferrited; \
+    test -f /usr/lib/ferrite/ferrited; \
+    test -f /usr/lib/ferrite/soapysdr/lib/libSoapySDR.so; \
+    test -d /usr/share/ferrite/web; \
+    test -f /usr/share/ferrite/flowgraphs/wbfm.json; \
+    ferrited --flowgraph /usr/share/ferrite/flowgraphs/wbfm.json --run-for-secs 2
+
+CMD ["ferrited", "--flowgraph", "/usr/share/ferrite/flowgraphs/wbfm.json", "--start"]

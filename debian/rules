@@ -1,0 +1,42 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+# Keep cargo's home inside the build tree so it doesn't pollute /root or
+# leak between successive container builds.
+export CARGO_HOME = $(CURDIR)/.cargo
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	mkdir -p $(CARGO_HOME)
+
+override_dh_auto_build:
+	./scripts/build-soapysdr.sh
+	. soapysdr/env.sh && cargo build --release
+
+override_dh_auto_install:
+	install -d debian/ferrite/usr/bin
+	install -d debian/ferrite/usr/lib/ferrite
+	install -d debian/ferrite/usr/lib/ferrite/soapysdr/lib/SoapySDR/modules0.8-3
+	install -d debian/ferrite/usr/share/ferrite/web
+	install -d debian/ferrite/usr/share/ferrite/flowgraphs
+	install -m 755 target/release/ferrited debian/ferrite/usr/lib/ferrite/
+	install -m 755 packaging/ferrited     debian/ferrite/usr/bin/
+	cp -a soapysdr/lib/libSoapySDR.so* \
+	    debian/ferrite/usr/lib/ferrite/soapysdr/lib/
+	cp -a soapysdr/lib/SoapySDR/modules0.8-3/*.so \
+	    debian/ferrite/usr/lib/ferrite/soapysdr/lib/SoapySDR/modules0.8-3/
+	cp -a web/build/.   debian/ferrite/usr/share/ferrite/web/
+	cp -a flowgraphs/.  debian/ferrite/usr/share/ferrite/flowgraphs/
+
+override_dh_auto_test:
+	# tests need RF hardware (or fixtures we'd rather not ship in the .deb)
+
+override_dh_shlibdeps:
+	# Bundled libSoapySDR + driver modules aren't in any distro package;
+	# point dpkg-shlibdeps at them and tell it to warn (not fail) on libs
+	# it still can't resolve.
+	dh_shlibdeps -- \
+	    --ignore-missing-info \
+	    -l$(CURDIR)/debian/ferrite/usr/lib/ferrite/soapysdr/lib

@@ -1,0 +1,8 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: ferrite
+Source: https://github.com/sirmick/ferrite
+
+Files: *
+Copyright: 2026 Mick <sirmick@gmail.com>
+License: MIT or Apache-2.0
+ See LICENSE in the source tree.
