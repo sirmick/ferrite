@@ -7,6 +7,8 @@
 # Usage: ./stop.sh [--no-sdr]
 #   --no-sdr   don't restart sdrplay_apiService (skip if you're not on SDRplay)
 
+# `-e` left off so a missing ferrited / ferrite-ai (or a sudo-needed
+# sdrplay path) doesn't abort the rest of the cleanup.
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -40,14 +42,14 @@ else
   echo "[stop] no ferrited running"
 fi
 
-# ferrite-ai runs as `node ... index.ts` under an `npm start` wrapper —
-# easier to identify by the port it owns than by argv.
+# ferrite-ai runs as `node ... index.ts` under an `npm start` wrapper.
+# Identify by the port it owns rather than by argv — `pgrep -f
+# tools/ferrite-ai` would also match an editor or shell pwd'd in that
+# directory. Requires lsof; if it's not installed, the user gets a
+# "not running" report and can kill manually.
 ai_pids=""
 if command -v lsof >/dev/null 2>&1; then
   ai_pids=$(lsof -t -i :"$FERRITE_AI_PORT" 2>/dev/null || true)
-fi
-if [ -z "$ai_pids" ]; then
-  ai_pids=$(pgrep -f "tools/ferrite-ai" || true)
 fi
 if [ -n "$ai_pids" ]; then
   echo "[stop] terminating ferrite-ai (pids: $ai_pids)"

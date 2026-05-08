@@ -10,6 +10,10 @@
 #   3. configure the source via the Source dialog
 #   4. click Start
 
+# `-e` is intentionally off: each background launch's exit propagates
+# via `wait -n` into the cleanup trap, where one failed child triggers
+# orderly teardown of the others. With `-e` a transient setup error
+# would abort before the trap installed.
 set -uo pipefail
 cd "$(dirname "$0")"
 
