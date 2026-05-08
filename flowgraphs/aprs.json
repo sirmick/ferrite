@@ -2,9 +2,10 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "aprs",
   "label": "APRS / packet (144.39 MHz)",
-  "description": "Decode APRS and amateur packet radio (AFSK1200, AFSK2400 ×3 timing variants, FSK9600 G3RUH) on the 144.39 MHz US APRS channel — runs all five multimon-ng demodulators in parallel on the same NBFM-demodulated audio. Decoded frames stream into the Logs tab under the `decoder::packet` category. Tune to 144.800 MHz for European APRS, or wherever your local digipeaters live; FSK9600 catches amateur-satellite passes (PSAT, AISAT-1).",
+  "description": "APRS / amateur packet radio on 144.39 MHz US (144.800 EU). Five multimon decoders in parallel: AFSK1200, AFSK2400 ×3, FSK9600 G3RUH.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Packet_Reporting_System_(APRS)",
   "sample_path": "samples/sigidwiki/AFSK1200_Sound.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/AFSK1200_Waterfall.png",
   "environments": [
     "node",
     "browser"
@@ -23,7 +24,7 @@
       "placement": "node",
       "params": {
         "input_rate_hz": 2400000.0,
-        "output_rate_hz": 50000.0
+        "output_rate_hz": 25000.0
       }
     },
     "tee": {
@@ -47,11 +48,15 @@
         "alpha": 0.3
       }
     },
+    "chan_tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
     "demod": {
       "type": "FmDemod",
       "placement": "node",
       "params": {
-        "sample_rate_hz": 50000,
+        "sample_rate_hz": 25000,
         "max_deviation_hz": 5000
       }
     },
@@ -68,6 +73,28 @@
       "placement": "node",
       "params": {
         "sample_rate_hz": 22050.0
+      }
+    },
+    "demod_browser": {
+      "type": "FmDemod",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 25000,
+        "max_deviation_hz": 5000
+      }
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "params": {
+        "buffer_samples": 8192
       }
     }
   },
@@ -86,7 +113,7 @@
     ],
     [
       "chan.out",
-      "demod.in"
+      "chan_tee.in"
     ],
     [
       "fft.out",
@@ -97,12 +124,28 @@
       "ui:fft"
     ],
     [
+      "chan_tee.out0",
+      "demod.in"
+    ],
+    [
       "demod.out",
       "resamp.in"
     ],
     [
       "resamp.out",
       "packet.in"
+    ],
+    [
+      "chan_tee.out1",
+      "demod_browser.in"
+    ],
+    [
+      "demod_browser.out",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio.in"
     ]
   ]
 }

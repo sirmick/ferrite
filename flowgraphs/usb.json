@@ -2,7 +2,10 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "usb",
   "label": "Upper sideband (voice)",
-  "description": "Upper-sideband SSB voice — amateur 20 m / 17 m / 15 m DX, 6 m and 10 m calling. Use the VFO to tune precisely so voices sound natural; a few hundred Hz off and they go squeaky or growly.",
+  "description": "Upper-sideband SSB voice — amateur 20 / 17 / 15 m DX, 6 / 10 m calling. Tune the VFO precisely so voices sound natural, not squeaky.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Single_Sideband_Voice",
+  "sample_path": "samples/sigidwiki/USB_Sound.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/USB_Waterfall.png",
   "environments": [
     "node",
     "browser"
@@ -21,7 +24,7 @@
       "placement": "node",
       "params": {
         "input_rate_hz": 2400000.0,
-        "output_rate_hz": 48000.0
+        "output_rate_hz": 8000.0
       }
     },
     "tee": {
@@ -49,7 +52,7 @@
       "type": "SsbDemod",
       "placement": "browser",
       "params": {
-        "sample_rate_hz": 48000,
+        "sample_rate_hz": 8000,
         "sideband": "usb",
         "audio_gain": 30.0
       }

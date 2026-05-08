@@ -2,9 +2,10 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "pager",
   "label": "Pagers (POCSAG / FLEX)",
-  "description": "Pager messages on the 929-932 MHz US carrier band — runs POCSAG (512/1200/2400 bps) and FLEX (1600/3200/6400 bps 4-FSK) decoders in parallel on the same audio. Most US carriers migrated from POCSAG to FLEX in the 2000s; in many metros the busy carriers are now FLEX (hospital alerts, sensor monitoring, fleet pages). Default frequency 929.6125 MHz lands on a typical pager pool. Decoded messages stream into the Logs tab under the `decoder::pocsag` and `decoder::flex` categories — mute one independently from the categories dropdown.",
+  "description": "Pager messages on the 929–932 MHz US carrier band — POCSAG (512/1200/2400 bps) and FLEX (1600/3200/6400 bps 4-FSK) in parallel.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/POCSAG",
   "sample_path": "samples/sigidwiki/POCSAG_Sound.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/POCSAG_Waterfallthmb.png",
   "environments": [
     "node",
     "browser"
@@ -23,7 +24,7 @@
       "placement": "node",
       "params": {
         "input_rate_hz": 2400000.0,
-        "output_rate_hz": 50000.0
+        "output_rate_hz": 25000.0
       }
     },
     "tee": {
@@ -51,7 +52,7 @@
       "type": "FmDemod",
       "placement": "node",
       "params": {
-        "sample_rate_hz": 50000,
+        "sample_rate_hz": 25000,
         "max_deviation_hz": 5000
       }
     },

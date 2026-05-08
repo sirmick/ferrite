@@ -2,7 +2,9 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "lsb",
   "label": "Lower sideband (voice)",
-  "description": "Lower-sideband SSB voice — amateur 80 m, 40 m, 160 m phone bands by convention. Same signal chain as USB; pick the matching mode for the band you're tuned to or audio sounds inverted.",
+  "description": "Lower-sideband SSB voice — amateur 160 / 80 / 40 m phone bands by convention. Spectrum is the same band-limited speech wedge as USB but mirrored: the speech tail extends below the (suppressed) carrier instead of above. Pick the right mode for the band.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Single_Sideband_Voice",
+  "signal_wiki_image": "samples/sigidwiki/images/USB_Waterfall.png",
   "environments": [
     "node",
     "browser"
@@ -21,7 +23,7 @@
       "placement": "node",
       "params": {
         "input_rate_hz": 2400000.0,
-        "output_rate_hz": 48000.0
+        "output_rate_hz": 8000.0
       }
     },
     "tee": {
@@ -49,7 +51,7 @@
       "type": "SsbDemod",
       "placement": "browser",
       "params": {
-        "sample_rate_hz": 48000,
+        "sample_rate_hz": 8000,
         "sideband": "lsb",
         "audio_gain": 30.0
       }

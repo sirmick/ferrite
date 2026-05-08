@@ -2,7 +2,10 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "wbam",
   "label": "AM broadcast",
-  "description": "AM broadcast — medium wave (540–1700 kHz), shortwave, and aviation (118–137 MHz, AM mode). Envelope demodulation with carrier-derived gain. Tune to a strong station first to verify your antenna is in the right band.",
+  "description": "AM broadcast — medium wave (540–1700 kHz), shortwave, and aviation (118–137 MHz). Coherent demod via liquid-dsp ampmodem.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Amplitude_Modulation_(AM)",
+  "sample_path": "samples/sigidwiki/AM_Sound.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/AM_Waterfall.jpg",
   "environments": [
     "node",
     "browser"
@@ -21,7 +24,7 @@
       "placement": "node",
       "params": {
         "input_rate_hz": 2400000.0,
-        "output_rate_hz": 96000.0
+        "output_rate_hz": 12000.0
       }
     },
     "tee": {
@@ -51,8 +54,8 @@
       "type": "AmDemod",
       "placement": "browser",
       "params": {
-        "sample_rate_hz": 96000,
-        "audio_gain": 20.0
+        "sample_rate_hz": 12000,
+        "audio_gain": 80.0
       }
     },
     "audio": {

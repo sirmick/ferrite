@@ -2,9 +2,10 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "nwr",
   "label": "NOAA Weather Radio + EAS (162.55 MHz)",
-  "description": "Listen for SAME / EAS headers on a NOAA Weather Radio (NWR) channel. Default tuning is 162.550 MHz, the strongest of the seven NWR allocations in many US metros — try 162.400 / .425 / .450 / .475 / .500 / .525 / .550 if reception is weak. The NBFM audio is demodulated, resampled to multimon's native 22050 Hz, and fed to `EasDemod`; decoded headers (alert kind, FIPS county codes, duration) appear in the Logs tab under `decoder::eas`. To actually listen to the audio, swap to the `nbfm` preset on the same frequency.",
+  "description": "NOAA Weather Radio with SAME / EAS header decoding. 162.400–162.550 MHz NBFM (7 channels, 25 kHz spaced); default 162.550.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Emergency_Alert_System_(EAS)",
   "sample_path": "samples/sigidwiki/EAS_Alert_Tornado_Warning.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/EAS.jpg",
   "environments": [
     "node",
     "browser"
@@ -23,7 +24,7 @@
       "placement": "node",
       "params": {
         "input_rate_hz": 2400000.0,
-        "output_rate_hz": 50000.0
+        "output_rate_hz": 25000.0
       }
     },
     "tee": {
@@ -51,7 +52,7 @@
       "type": "FmDemod",
       "placement": "node",
       "params": {
-        "sample_rate_hz": 50000,
+        "sample_rate_hz": 25000,
         "max_deviation_hz": 5000
       }
     },

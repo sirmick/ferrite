@@ -2,7 +2,10 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "nbfm",
   "label": "Narrowband FM (voice)",
-  "description": "Narrowband FM voice — 25 kHz channels: NOAA weather radio, marine VHF, public safety, FRS/GMRS, 2 m and 70 cm amateur. ±5 kHz deviation. Pick a frequency from the Bands tab to land on a known channel.",
+  "description": "Narrowband FM voice — 25 kHz channels: NOAA weather, marine VHF, public-safety, FRS/GMRS, 2 m / 70 cm amateur. ±5 kHz deviation.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/NFM_Voice",
+  "sample_path": "samples/sigidwiki/Nfm_voice.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/Nfm.jpg",
   "environments": [
     "node",
     "browser"
@@ -21,7 +24,7 @@
       "placement": "node",
       "params": {
         "input_rate_hz": 2400000.0,
-        "output_rate_hz": 50000.0
+        "output_rate_hz": 25000.0
       }
     },
     "tee": {
@@ -49,7 +52,7 @@
       "type": "FmDemod",
       "placement": "browser",
       "params": {
-        "sample_rate_hz": 48000,
+        "sample_rate_hz": 25000,
         "max_deviation_hz": 5000
       }
     },

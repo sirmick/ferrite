@@ -2,9 +2,10 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "cw",
   "label": "CW / Morse decode (HF)",
-  "description": "Auto-decode Morse on HF CW bands. Default tuning is 14.030 MHz USB (20 m CW), but the band-plan ribbon makes it easy to retune anywhere CW lives — 7.030 (40 m), 10.115 (30 m), 21.030 (15 m), 28.030 (10 m). Tune so the CW tone sits around 600–800 Hz in the audio (use the VFO Nixie); multimon's Goertzel detector locks onto whatever clean tone it sees and emits decoded characters into the Logs tab under `decoder::cw`. Pair with the `usb` preset on the same frequency to listen while decoding.",
+  "description": "Auto-decode Morse on HF CW bands (14.030 / 7.030 / 10.115 / 21.030 / 28.030 MHz). Tune so the CW tone sits at 600–800 Hz in audio.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Morse_Code_(CW)",
   "sample_path": "samples/sigidwiki/Cw_morse.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/CW.jpg",
   "environments": [
     "node",
     "browser"
@@ -23,7 +24,7 @@
       "placement": "node",
       "params": {
         "input_rate_hz": 2400000.0,
-        "output_rate_hz": 48000.0
+        "output_rate_hz": 6000.0
       }
     },
     "tee": {
@@ -51,7 +52,7 @@
       "type": "SsbDemod",
       "placement": "node",
       "params": {
-        "sample_rate_hz": 48000,
+        "sample_rate_hz": 6000,
         "sideband": "usb",
         "audio_gain": 30.0
       }
