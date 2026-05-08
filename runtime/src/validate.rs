@@ -1,9 +1,9 @@
 //! Registry-independent graph validation.
 //!
-//! The TS counterpart splits validation across `validate.ts` (this module)
-//! and `instantiate.ts` (the registry-dependent phases). This file owns
-//! the shape/fan/dag/connectivity/wire_endpoints passes — everything that
+//! Validation runs in two phases: this module owns the
+//! shape/fan/dag/connectivity/wire_endpoints passes — everything that
 //! can be checked with the JSON doc alone, no `BlockSpec` lookups.
+//! `instantiate.rs` owns the registry-dependent phases on top.
 //!
 //! Phases producing `ValidationError` here:
 //!

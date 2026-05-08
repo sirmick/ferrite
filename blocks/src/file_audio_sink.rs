@@ -173,7 +173,7 @@ impl FileAudioSink {
 impl Drop for FileAudioSink {
     fn drop(&mut self) {
         if let Err(e) = self.finalise() {
-            eprintln!("FileAudioSink: finalise on drop failed: {e:#}");
+            tracing::warn!(error = ?e, "FileAudioSink: finalise on drop failed");
         }
     }
 }

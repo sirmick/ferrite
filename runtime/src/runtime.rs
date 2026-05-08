@@ -23,9 +23,6 @@
 //! in lock-step without flipping to `Running`. `Stopped` is terminal
 //! — no re-use. `Reconfigure` is handled by rebuilding a replacement
 //! runtime and swapping state in place.
-//!
-//! The TS counterpart used to live in `packages/flowgraph-runtime/src/runtime.ts`
-//! and will be deleted at M4 once the browser loads this crate as WASM.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -1205,6 +1202,8 @@ impl Runtime {
         let mut blocks = match Self::construct_blocks_excluding(new_doc, &reusable) {
             Ok(blocks) => blocks,
             Err(err) if is_exclusive_resource_conflict(&err) => {
+                // Runtime crate doesn't depend on tracing (kept lean for the
+                // wasm bundle); this rare recovery path stays on stderr.
                 eprintln!(
                     "reconfigure: replacement build hit exclusive-resource conflict ({err}); \
                      stopping old graph and retrying"

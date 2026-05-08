@@ -214,7 +214,7 @@ export FERRITE_STATIC_ROOT=web/build
 ./target/release/ferrited --flowgraph flowgraphs/wbfm.json --start
 ```
 
-Then open <http://localhost:8088>.
+Then open <http://localhost:10001>.
 
 #### Dev loop
 
@@ -227,8 +227,8 @@ cargo run -p ferrited -- --flowgraph flowgraphs/wbfm.json --source-args 'driver=
 pnpm --filter @ferrite/web dev
 ```
 
-Vite serves on <http://localhost:5173> and proxies `/api` and `/ws` to
-`http://127.0.0.1:8088` (override with `FERRITED_URL`). The page reloads on
+Vite serves on <http://localhost:10000> and proxies `/api` and `/ws` to
+`http://127.0.0.1:10001` (override with `FERRITED_URL`). The page reloads on
 frontend changes; restart `cargo run` for backend changes.
 
 #### Diagnostic flags

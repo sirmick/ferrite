@@ -1,12 +1,11 @@
 //! Spectrum-render helpers — pure functions, native + WASM.
 //!
 //! These are *not* [`Block`]s. They're the last-mile CPU math the
-//! browser's `SpectrumRenderer` used to do in TypeScript:
+//! browser's `SpectrumRenderer` calls before drawing into the canvas:
 //!
 //!   * [`collapse_row_to_columns`] — max-per-pixel-column reduction when
 //!     the FFT has more bins than the plot is wide. Draws a clean
-//!     envelope instead of the lineTo-per-bin "comb" the old TS code
-//!     flagged.
+//!     envelope instead of a lineTo-per-bin "comb".
 //!   * [`update_max_hold`] — elementwise max into an accumulator, used
 //!     by the spectrum's max-hold overlay.
 //!   * [`compute_spectrum_stats`] — p10 / p99 of a row's byte values,

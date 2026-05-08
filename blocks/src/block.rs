@@ -6,10 +6,10 @@
 //! filesystems, UI, or the network.
 //!
 //! This module is the **contract** between block authors and the
-//! scheduler. The scheduler (Rust-side in `ferrited`, TS-side in the
-//! browser/Node runtime) hands each block its negotiated rates and buffers
-//! and drives its `process` method; the block only touches what arrives
-//! through [`BlockIo`].
+//! scheduler. The scheduler — `ferrite-runtime`, used both in
+//! `ferrited` and (via wasm-pack) in the browser — hands each block
+//! its negotiated rates and buffers and drives its `process` method;
+//! the block only touches what arrives through [`BlockIo`].
 //!
 //! See `docs/03-blocks.md` for the design rationale and
 //! `docs/02-protocol.md` for how port types map to wire payload types

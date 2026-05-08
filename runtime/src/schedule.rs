@@ -12,11 +12,6 @@
 //! Both functions assume validation passed — dangling endpoints or
 //! cycles would be caller bugs and produce [`anyhow::Error`]s rather
 //! than [`ValidationError`]s.
-//!
-//! The TS counterpart carries `portType` on each `InputSource` so the
-//! tick pump can allocate the right buffer. We can't do that here until
-//! `BlockSpec` is reachable from the runtime — the registry-dependent
-//! commit that adds it will extend [`InputSource`].
 
 use std::collections::BTreeMap;
 

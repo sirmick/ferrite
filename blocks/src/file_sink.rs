@@ -140,11 +140,12 @@ impl FileIqSink {
             if let Err(e) =
                 write_sidecar(&params.path, format, params.rate_hz, params.center_freq_hz)
             {
-                // Sidecar is a convenience, not load-bearing. Surface the
-                // error as a warning by prefixing but continue.
-                eprintln!(
-                    "FileIqSink: sidecar write for {} failed: {e:#}",
-                    params.path.display()
+                // Sidecar is a convenience, not load-bearing — log and
+                // continue.
+                tracing::warn!(
+                    path = %params.path.display(),
+                    error = ?e,
+                    "FileIqSink: sidecar write failed"
                 );
             }
         }
@@ -294,7 +295,7 @@ impl FileIqSink {
 impl Drop for FileIqSink {
     fn drop(&mut self) {
         if let Err(e) = self.finalise() {
-            eprintln!("FileIqSink: finalise on drop failed: {e:#}");
+            tracing::warn!(error = ?e, "FileIqSink: finalise on drop failed");
         }
     }
 }

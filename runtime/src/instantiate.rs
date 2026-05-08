@@ -25,12 +25,11 @@ use crate::validate::{
 };
 
 /// The runtime's structural view of a block registry. Implementors resolve
-/// a type name to its static [`BlockSpec`]. The TS counterpart is the
-/// `BlockRegistryLike` interface — same idea, same contract.
+/// a type name to its static [`BlockSpec`].
 ///
-/// A real registry (e.g. `ferrite_blocks::registry`) supplies this via a
-/// thin adapter in a later commit; tests supply a hand-rolled stub so the
-/// runtime crate can be tested without depending on concrete blocks.
+/// `ferrite_blocks::registry` supplies this via a thin adapter; tests
+/// supply a hand-rolled stub so the runtime crate can be tested without
+/// depending on concrete blocks.
 pub trait SpecRegistry {
     fn get(&self, type_name: &str) -> Option<BlockSpec>;
     fn has(&self, type_name: &str) -> bool {
