@@ -27,8 +27,33 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Install Rust toolchain (wasm32 target for wasm-pack)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm cross-compile deps
+        # vendored multimon-ng + ft8_lib cross-compile to wasm32 via
+        # clang against wasi-libc — same recipe as a local build.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld wasi-libc
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
       - name: pnpm install
         run: pnpm install --frozen-lockfile
+
+      - name: Build wasm artifacts
+        # `pnpm -r check` (svelte-check) imports from
+        # web/src/lib/wasm/{blocks,runtime}; both are produced by
+        # wasm-pack. Build them before lint / check / test.
+        run: pnpm --filter @ferrite/web wasm:build
 
       - name: pnpm -r lint
         run: pnpm -r lint
