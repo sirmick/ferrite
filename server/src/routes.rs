@@ -532,6 +532,9 @@ async fn handle_preset(mut socket: WebSocket, state: AppState) {
     loop {
         tokio::select! {
             client = socket.recv() => {
+                // collapsible_match wants the inner if turned into a match
+                // guard with an `await` side-effect — uglier than the if.
+                #[allow(clippy::collapsible_match)]
                 match client {
                     None | Some(Ok(Message::Close(_))) => return,
                     Some(Err(err)) => {

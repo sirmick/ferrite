@@ -20,7 +20,7 @@ import {
 } from '../wasm/runtime/runtime.js';
 
 const WASM_PATH = resolve(__dirname, '../wasm/runtime/runtime_bg.wasm');
-const EXPECTED_VERSION = '0.0.1';
+const EXPECTED_VERSION = '0.9.0';
 
 describe('rust runtime wasm shim', () => {
   beforeAll(() => {
