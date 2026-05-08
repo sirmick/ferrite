@@ -80,6 +80,10 @@ interface LoadedState {
 export class RunnerCore {
   private loaded: LoadedState | null = null;
   private lastState: RuntimeState = 'created';
+  // Most recent tick-error message that's been surfaced via postDiag.
+  // Persistent failures get logged once per distinct message instead of
+  // silently spinning at tick rate.
+  private lastTickErrorMsg: string | null = null;
 
   constructor(private readonly env: RunnerEnv) {}
 
@@ -190,10 +194,16 @@ export class RunnerCore {
           if (n > 0) a.writer.write(a.scratch.subarray(0, n));
           a.drained += n;
         }
-      } catch {
-        // Tick errors are isolated to this iteration — an explicit stop
-        // will clear the loop. A noisier policy (surface via a Worker
-        // message) lands with the diagnostics pane in M5.
+      } catch (err) {
+        // Tick errors are isolated to this iteration so the loop keeps
+        // running, but persistent failures need to be visible — a
+        // silent loop running forever is the wrong default. Dedup by
+        // message so a stuck-block doesn't spam at tick rate.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg !== this.lastTickErrorMsg) {
+          this.lastTickErrorMsg = msg;
+          postDiag(`runner: tick error: ${msg}`);
+        }
       }
       this.scheduleTick(state);
     }, interval);

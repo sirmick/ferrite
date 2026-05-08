@@ -17,12 +17,9 @@
   type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs' | 'flow';
   let leftTab = $state<LeftTab>('bands');
 
-  // Opening the Logs tab acks the error badge. Errors that arrive
-  // while the tab is already open also clear (see effect below), since
-  // the user is looking at them in real time.
-  $effect(() => {
-    if (leftTab === 'logs') logs.ackErrors();
-  });
+  // Opening the Logs tab acks the error badge. While the tab is open,
+  // unreadErrors changes also re-fire this effect (it reads both reactive
+  // sources), so live arrivals clear too — one effect covers both cases.
   $effect(() => {
     if (leftTab === 'logs' && logs.unreadErrors > 0) logs.ackErrors();
   });

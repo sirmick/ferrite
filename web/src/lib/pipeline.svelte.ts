@@ -138,22 +138,12 @@ class PipelineStore {
    *  button can reuse it. */
   private async applySensibleSourceDefaults(): Promise<void> {
     const caps = this.sourceCaps?.kind === 'hardware' ? this.sourceCaps.capabilities : null;
-    // Extra noisy so you can see it in devtools Console without the
-    // in-page log filter.
-    console.warn(
-      '[reset-on-start]',
-      'caps-kind=' + (this.sourceCaps?.kind ?? 'undefined'),
-      'source-type=' + (this.source?.type ?? 'undefined'),
-    );
     logs.push(
       'client',
       'info',
       `applySensibleSourceDefaults: caps=${caps ? 'hardware' : 'none'} type=${this.source?.type ?? 'none'}`,
     );
-    if (!caps || this.source?.type !== 'SoapySource') {
-      console.warn('[reset-on-start] bailing — guard not satisfied');
-      return;
-    }
+    if (!caps || this.source?.type !== 'SoapySource') return;
 
     const baseline = defaultsFor(caps);
     if (!baseline) return;
@@ -181,7 +171,6 @@ class PipelineStore {
         : baseline.center_freq_hz;
 
     const reset = toSourceConfig(caps, { ...baseline, center_freq_hz: keptFreq });
-    console.warn('[reset-on-start] sending PATCH', reset.params);
     logs.push(
       'client',
       'info',
