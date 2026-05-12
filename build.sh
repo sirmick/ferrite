@@ -10,6 +10,13 @@ if [ -f soapysdr/env.sh ]; then
   . soapysdr/env.sh
 fi
 
+if [ "${BUILD_FORCE:-0}" != "1" ] && pgrep -x ferrited >/dev/null 2>&1; then
+  echo "ferrited is still running — it's probably holding your SDR." >&2
+  echo "Stop it first:  ./stop.sh" >&2
+  echo "Or override:    BUILD_FORCE=1 ./build.sh" >&2
+  exit 1
+fi
+
 echo "==> cargo build --release (workspace)"
 cargo build --release
 

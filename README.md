@@ -133,6 +133,18 @@ sudo systemctl enable --now sdrplay
 
 Re-run `./scripts/build-soapysdr.sh` afterward so SoapySDRPlay3 picks it up.
 
+If `SoapySDRUtil --find` later returns "No devices found" while the
+RSPdx is still plugged in, try in order:
+
+1. `./stop.sh` — kills any leftover `ferrited` holding the device.
+2. `./scripts/reset-sdr.sh` — soft USB reset (sysfs `authorized` toggle).
+3. `./scripts/reset-bus.sh` — full xHCI controller rebind (drops VBUS
+   for ~2 s; equivalent to a physical unplug). The script prints the
+   list of buses that will momentarily drop before acting — make sure
+   none of them carry your keyboard/mouse before pressing on, since on
+   single-controller systems (typical Intel laptops) this can briefly
+   black out input devices.
+
 #### RTL-SDR
 
 Blacklist the kernel DVB driver and add a udev rule for non-root access:
