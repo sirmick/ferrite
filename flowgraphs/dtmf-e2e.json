@@ -3,6 +3,7 @@
   "name": "dtmf-e2e",
   "label": "DTMF events-bridge canary",
   "description": "Pre-Phase-1 end-to-end canary. Node half generates DTMF tones at 8 kS/s, upmixes to IQ@2.4 MS/s with a +50 kHz AM carrier, channelizes the +50 kHz VFO to baseband at 240 kS/s, decimates 30× to 8 kS/s, and hands the low-rate IQ to the browser via env_split's auto-inserted WsBridge. Browser half AM-demods, runs a DTMF Goertzel decoder, and terminates at EventsSink whose buffer the vitest harness drains. A sibling TeeIqF32 → FFT → LogMagU8 → ui:fft tap keeps the waterfall populated so the canary exercises the same transports as a real preset. Cross-env wire is `decim.out → demod.in`; stream_ids allocate from CROSS_ENV_STREAM_BASE (1000).",
+  "catalog_visible": false,
   "environments": [
     "node",
     "browser"

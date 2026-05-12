@@ -17,10 +17,15 @@ export interface CatalogEntry {
   readonly label: string;
   readonly description?: string;
   readonly environments: ReadonlyArray<string>;
-  /** Mirror of FlowgraphDoc.signal_wiki_url — surfaced for the UI link. */
+  /** sigidwiki page URL, drawn as a link in the catalog row. */
   readonly signalWikiUrl?: string;
-  /** Mirror of FlowgraphDoc.sample_path. */
-  readonly samplePath?: string;
+  /** Resolved (hashed, bundler-emitted) URL of the audio sample, when
+   *  the preset declares `sample_path`. The path is looked up against
+   *  `samples/sigidwiki/*.{mp3,wav,ogg}` at build time. */
+  readonly sampleUrl?: string;
+  /** Resolved URL of the spectrum / waterfall image, when the preset
+   *  declares `signal_wiki_image`. */
+  readonly signalWikiImageUrl?: string;
   readonly doc: FlowgraphDoc;
 }
 
@@ -59,13 +64,18 @@ export function buildCatalog(modules: Readonly<Record<string, unknown>>): {
       // silence with no error.
       const envs = d.environments ?? [];
       if (!envs.includes('browser')) continue;
+      // Test canaries / diagnostics opt out of the catalog with
+      // `catalog_visible: false` so they stay loadable by name from
+      // the CLI / `/api/preset` without cluttering the UI list.
+      if (d.catalog_visible === false) continue;
       entries.push({
         slug: d.name ?? slug,
         label: d.label ?? d.name ?? slug,
         description: d.description,
         environments: envs,
         signalWikiUrl: d.signal_wiki_url,
-        samplePath: d.sample_path,
+        sampleUrl: resolveAsset(AUDIO_URL_BY_REPO_PATH, d.sample_path),
+        signalWikiImageUrl: resolveAsset(IMAGE_URL_BY_REPO_PATH, d.signal_wiki_image),
         doc: d,
       });
     } catch (err) {
@@ -102,5 +112,44 @@ function extractDefault(mod: unknown): unknown {
 const modules = import.meta.glob('../../../../flowgraphs/*.json', {
   eager: true,
 });
+
+// Asset URL maps. At build time Vite emits each referenced file under
+// `_app/immutable/assets/<hash>.<ext>` and these globs hand us the
+// resulting hashed URLs. The maps are keyed by repo-relative path
+// (e.g. `samples/sigidwiki/images/Broadcast_FM.jpg`) so a preset's
+// `signal_wiki_image` / `sample_path` field can look up directly.
+const IMAGE_URL_BY_REPO_PATH = bundleAssetMap(
+  import.meta.glob('../../../../samples/sigidwiki/images/*.{jpg,jpeg,png,gif,webp}', {
+    eager: true,
+    query: '?url',
+    import: 'default',
+  }),
+);
+const AUDIO_URL_BY_REPO_PATH = bundleAssetMap(
+  import.meta.glob('../../../../samples/sigidwiki/*.{mp3,wav,ogg}', {
+    eager: true,
+    query: '?url',
+    import: 'default',
+  }),
+);
+
+function bundleAssetMap(mods: Readonly<Record<string, unknown>>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(mods)) {
+    // Glob keys look like `../../../../samples/sigidwiki/...` — strip
+    // the leading `../` segments so we can key by the same repo-relative
+    // path the preset JSON uses.
+    out[k.replace(/^(?:\.\.\/)+/, '')] = v as string;
+  }
+  return out;
+}
+
+function resolveAsset(
+  map: Readonly<Record<string, string>>,
+  repoPath: string | undefined,
+): string | undefined {
+  if (!repoPath) return undefined;
+  return map[repoPath];
+}
 
 export const catalog: ReadonlyArray<CatalogEntry> = buildCatalog(modules).entries;

@@ -2,9 +2,13 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "adsb",
   "label": "ADS-B / Mode S (1090 MHz)",
-  "description": "Decode aircraft transponder messages from the 1090 MHz ADS-B band — Mode S short and extended squitters, including DF17 ADS-B position / velocity / identification frames. Wraps a vendored dump1090 (antirez classic). Decoded frames stream into the Logs tab under the `decoder::adsb` category. Tune the SDR to 1090 MHz; the decoder is hard-locked to 2 MS/s. The channelizer integer-decimates higher source rates (2/4/6/8/10 MS/s) down to 2 MS/s — set the source to one of those rates and the orange channel band on the waterfall will mark the 2 MHz ADS-B chunk being decoded. A wide UHF antenna with line-of-sight to the sky is the biggest single factor in catch rate.",
+  "description": "Decode aircraft transponder messages on 1090 MHz — Mode S short + DF17 ADS-B extended squitters. Vendored dump1090; locked to a 2 MS/s channel.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Dependent_Surveillance-Broadcast_(ADS-B)",
-  "environments": ["node", "browser"],
+  "signal_wiki_image": "samples/sigidwiki/images/ADS-BTHMB.jpg",
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -52,11 +56,29 @@
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "adsb.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "adsb.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ]
   ]
 }

@@ -29,9 +29,19 @@ export interface FlowgraphDoc {
   readonly signal_wiki_url?: string;
   /** Optional path (repo-relative) to a representative audio sample of
    *  the signal, kept under `samples/` so the wrapper's analyzer
-   *  binaries can replay against a known-good capture. Future UI may
-   *  surface a "play" affordance; today the field is informational. */
+   *  binaries can replay against a known-good capture. The
+   *  SignalCatalog UI surfaces a "play sample" button when set. */
   readonly sample_path?: string;
+  /** Optional path (repo-relative) to a representative spectrum /
+   *  waterfall image (typically pulled from the matching sigidwiki
+   *  page). The SignalCatalog UI shows it as a thumbnail in the
+   *  preset's info pane. */
+  readonly signal_wiki_image?: string;
+  /** Whether this preset should appear in the user-facing
+   *  SignalCatalog. Defaults to `true`. Set `false` on test canaries,
+   *  diagnostic flowgraphs, and other internal-only presets so they
+   *  stay loadable from the CLI / API without cluttering the UI. */
+  readonly catalog_visible?: boolean;
 }
 
 /** Canonical `Source` placeholder id + sentinel type. Must match the
