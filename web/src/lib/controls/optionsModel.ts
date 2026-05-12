@@ -266,6 +266,13 @@ export function autoSettingsForDriver(driverKey: string): AutoSetting[] {
   return lookupPreset(driverKey)?.auto_settings ?? [];
 }
 
+/** Free-form markdown notes the AI sidecar should attach to its
+ *  system prompt for this driver. Empty string when no notes are
+ *  declared. */
+export function aiOperatorNotesForDriver(driverKey: string): string {
+  return lookupPreset(driverKey)?.ai_operator_notes ?? '';
+}
+
 /** Compute the desired settings dict for a given centre frequency. The
  *  return value is the *delta* — only entries whose value differs from
  *  `currentSettings` are included. An empty result means no patch is
@@ -464,6 +471,16 @@ interface SdrPreset {
    * Listing those bands here lets the UI auto-toggle on tune.
    */
   auto_settings?: AutoSetting[];
+  /**
+   * Free-form operator notes for the AI sidecar — antenna mapping,
+   * gain / AGC semantics, hardware-notch behaviour, sample-rate
+   * quirks. The frontend looks this up by the active source's
+   * `driver_key` and forwards it to ferrite-ai on each turn, where it
+   * gets appended to the mode's system prompt under a "driver-specific
+   * operator notes" heading. Markdown; same source of truth the UI
+   * tooltips use, so we don't have parallel docs that drift apart.
+   */
+  ai_operator_notes?: string;
   notes?: string;
 }
 

@@ -14,6 +14,20 @@
 // stored id in the WS hello so the next user turn picks up where the
 // previous browser session left off.
 
+import DOMPurify from 'dompurify';
+import { marked } from 'marked';
+
+import { pipeline } from '$lib/pipeline.svelte';
+import { aiOperatorNotesForDriver } from '$lib/controls/optionsModel';
+
+// Markdown configuration. `gfm: true` enables GitHub-Flavoured Markdown
+// (tables, strikethrough, autolinks, code fences with language).
+// `breaks: false` keeps a single newline as plain whitespace rather
+// than `<br>` — Claude emits real `\n\n` between paragraphs, so the
+// stricter rule produces cleaner output. Synchronous mode so we can
+// render inline in a $derived.
+marked.setOptions({ gfm: true, breaks: false, async: false });
+
 export type AiMode = 'explorer' | 'decoder' | 'diagnose' | 'chat';
 export const AI_MODES: AiMode[] = ['explorer', 'decoder', 'diagnose', 'chat'];
 
@@ -24,8 +38,18 @@ export type Chunk =
   /** A tool call the AI made. `input` is the JSON the SDK streams for
    *  the tool's arguments — accumulated across `input_json_delta`
    *  events. `result` is filled in when the matching `tool_result`
-   *  arrives in a later message. */
-  | { kind: 'tool'; id: string; name: string; input: string; result?: string; error?: boolean }
+   *  arrives in a later message; `resultImages` is the list of base64
+   *  `data:` URLs extracted from any image content blocks in that
+   *  result (e.g. Read on a PNG produces one). */
+  | {
+      kind: 'tool';
+      id: string;
+      name: string;
+      input: string;
+      result?: string;
+      resultImages?: string[];
+      error?: boolean;
+    }
   /** Out-of-band envelope signals — `done`, `error`, debug. Rendered
    *  in muted text in the transcript. */
   | { kind: 'meta'; label: string };
@@ -54,6 +78,7 @@ const LS_TURNS = 'ferrite-ai.turns';
 const LS_MODE = 'ferrite-ai.mode';
 const LS_SESSION = 'ferrite-ai.session_id';
 const LS_NEXT_ID = 'ferrite-ai.next_id';
+const LS_SETUP = 'ferrite-ai.setup_description';
 /** Cap persisted history at 200 turns (~50–100 KB worst-case) so the
  *  ~5 MB localStorage budget stays comfortable even for marathon
  *  sessions. The Claude Agent SDK's actual conversation context is
@@ -75,6 +100,13 @@ class AiStore {
    *  on subsequent turns so the Agent SDK can `resume:` instead of
    *  starting fresh. Null when no conversation has happened yet. */
   sessionId = $state<string | null>(null);
+  /** User-supplied description of the physical radio setup — antennas,
+   *  noise environment, station notes. Sent on every turn so the
+   *  sidecar appends it to the mode's system prompt. Set via
+   *  `setSetupDescription`, which resets the SDK session because the
+   *  system prompt changed and a resume would re-prime under the old
+   *  description. Persisted across reloads. */
+  setupDescription = $state<string>('');
 
   private nextId = 1;
   private ws: WebSocket | null = null;
@@ -115,6 +147,8 @@ class AiStore {
       const rawNext = localStorage.getItem(LS_NEXT_ID);
       const n = rawNext ? parseInt(rawNext, 10) : NaN;
       if (Number.isFinite(n) && n > 0) this.nextId = n;
+      const rawSetup = localStorage.getItem(LS_SETUP);
+      if (typeof rawSetup === 'string') this.setupDescription = rawSetup;
     } catch {
       /* corrupt storage; start fresh */
     }
@@ -134,6 +168,8 @@ class AiStore {
         localStorage.setItem(LS_NEXT_ID, String(this.nextId));
         if (this.sessionId) localStorage.setItem(LS_SESSION, this.sessionId);
         else localStorage.removeItem(LS_SESSION);
+        if (this.setupDescription) localStorage.setItem(LS_SETUP, this.setupDescription);
+        else localStorage.removeItem(LS_SETUP);
       } catch {
         /* quota / private mode / etc — silently degrade to non-persistent */
       }
@@ -177,6 +213,32 @@ class AiStore {
     this.persist();
   }
 
+  /** Edit the operator-supplied radio setup description. Same
+   *  reasoning as `setMode`: the system prompt changes so resuming
+   *  the SDK session would re-prime under stale facts. Drops the
+   *  sessionId; the next turn starts a fresh conversation with the
+   *  updated setup in the system prompt. */
+  setSetupDescription(text: string): void {
+    if (text === this.setupDescription) return;
+    this.setupDescription = text;
+    this.sessionId = null;
+    this.pushTurn({
+      id: this.nextId++,
+      role: 'assistant',
+      t: Date.now(),
+      chunks: [
+        {
+          kind: 'meta',
+          label: text.trim()
+            ? 'radio setup updated (conversation reset)'
+            : 'radio setup cleared (conversation reset)',
+        },
+      ],
+      status: 'complete',
+    });
+    this.persist();
+  }
+
   send(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
@@ -205,6 +267,37 @@ class AiStore {
     // reloads and WS reconnects.
     const payload: Record<string, unknown> = { text: trimmed, mode: this.mode };
     if (this.sessionId) payload.resume_session_id = this.sessionId;
+    if (this.setupDescription.trim()) payload.setup_description = this.setupDescription;
+    // Hand the AI the operator's local clock + IANA timezone on each
+    // turn. The TZ identifier (e.g. `America/Los_Angeles`) gives
+    // continent + region — good enough for propagation / band-plan
+    // reasoning ("PST → US west coast → trans-Pacific HF in the
+    // evening"). The ISO timestamp carries an explicit UTC offset so
+    // the AI can compute relative times without re-resolving the TZ.
+    const now = new Date();
+    payload.local_time_iso = now.toISOString();
+    payload.local_time_human = now.toLocaleString(undefined, {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZoneName: 'short',
+    });
+    payload.time_zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // Pull driver-specific operator notes from the active source's
+    // SDR preset (sdr-presets/<driver>.json `ai_operator_notes`). The
+    // sidecar appends these to the mode prompt under a "driver-specific
+    // operator notes" heading so the AI knows antenna mapping, gain
+    // semantics, AGC interaction, etc. without us duplicating those
+    // facts in the prompt files. Skipped for non-hardware sources
+    // (file, sine) — they don't have a SoapySDR driver_key.
+    const caps = pipeline.sourceCaps;
+    if (caps && caps.kind === 'hardware') {
+      const notes = aiOperatorNotesForDriver(caps.capabilities.driver_key);
+      if (notes.trim()) payload.driver_notes = notes;
+    }
     this.ws.send(JSON.stringify(payload));
   }
 
@@ -402,7 +495,7 @@ class AiStore {
       const id = String(block['tool_use_id'] ?? '');
       const content = block['content'];
       const errored = Boolean(block['is_error']);
-      const text = renderToolResult(content);
+      const { text, images } = splitToolResult(content);
       this.updateLatestAssistant((a) => {
         // Find matching tool chunk by id, otherwise append a synthetic
         // "orphan result" so the user sees it.
@@ -410,6 +503,7 @@ class AiStore {
           const c = a.chunks[i];
           if (c.kind === 'tool' && c.id === id) {
             c.result = text;
+            if (images.length) c.resultImages = images;
             c.error = errored;
             return;
           }
@@ -420,6 +514,7 @@ class AiStore {
           name: '(orphan result)',
           input: '',
           result: text,
+          resultImages: images.length ? images : undefined,
           error: errored,
         });
       });
@@ -456,21 +551,61 @@ class AiStore {
   }
 }
 
-function renderToolResult(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part: unknown) => {
-        if (typeof part === 'string') return part;
-        if (typeof part === 'object' && part !== null) {
-          const text = (part as Record<string, unknown>)['text'];
-          if (typeof text === 'string') return text;
-        }
-        return JSON.stringify(part);
-      })
-      .join('');
+/** Split a tool_result `content` payload into a textual summary + the
+ *  list of `data:` URLs for any embedded image blocks. The Anthropic
+ *  Read tool returns `{type: 'image', source: {type: 'base64',
+ *  media_type, data}}` for PNG/JPEG reads; we lift those out so the
+ *  UI can render them inline next to the text. Text parts are joined
+ *  and `image` parts are dropped from the textual side. */
+function splitToolResult(content: unknown): { text: string; images: string[] } {
+  if (typeof content === 'string') return { text: content, images: [] };
+  if (!Array.isArray(content)) return { text: JSON.stringify(content), images: [] };
+  const texts: string[] = [];
+  const images: string[] = [];
+  for (const part of content) {
+    if (typeof part === 'string') {
+      texts.push(part);
+      continue;
+    }
+    if (typeof part !== 'object' || part === null) {
+      texts.push(JSON.stringify(part));
+      continue;
+    }
+    const p = part as Record<string, unknown>;
+    if (p['type'] === 'image') {
+      const src = p['source'];
+      if (typeof src === 'object' && src !== null) {
+        const s = src as Record<string, unknown>;
+        const media = typeof s['media_type'] === 'string' ? s['media_type'] : 'image/png';
+        const data = typeof s['data'] === 'string' ? s['data'] : '';
+        if (data) images.push(`data:${media};base64,${data}`);
+      }
+      continue;
+    }
+    const t = p['text'];
+    if (typeof t === 'string') {
+      texts.push(t);
+      continue;
+    }
+    texts.push(JSON.stringify(part));
   }
-  return JSON.stringify(content);
+  return { text: texts.join(''), images };
 }
 
 export const ai = new AiStore();
+
+/** Markdown → sanitized HTML for the AI's text chunks. The AI's
+ *  output may contain Markdown (headings, lists, code blocks, bold);
+ *  rendering it as plain `<div class="whitespace-pre-wrap">` produces
+ *  a `**bold**` / `# heading` literal soup. Pipe through `marked`
+ *  for HTML, then DOMPurify to scrub script tags / event handlers
+ *  (defensive — AI output is mostly trusted but tool_result content
+ *  can contain anything the AI happens to be reading).
+ *
+ *  Synchronous so callers can use it in derived state without
+ *  flickering through "still rendering…" placeholders. */
+export function renderMarkdown(text: string): string {
+  if (!text) return '';
+  const html = marked.parse(text) as string;
+  return DOMPurify.sanitize(html);
+}

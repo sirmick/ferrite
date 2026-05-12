@@ -30,6 +30,7 @@ const FERRITE_HOME = process.env.FERRITE_HOME
 const FERRITE_CTL =
   process.env.FERRITE_CTL ?? resolve(FERRITE_HOME, "target/release/ferrite-ctl");
 const FFT_TO_PNG = resolve(FERRITE_HOME, "tools/fft_to_png.py");
+const FFT_PEAKS = resolve(FERRITE_HOME, "tools/fft_peaks.py");
 
 // Capture `ferrite-ctl --help` once at startup so the AI sees the full
 // CLI surface in its system prompt — saves a tool call per turn and
@@ -223,6 +224,7 @@ function loadPrompt(name: string): string {
     .replaceAll("{{FERRITE_HOME}}", FERRITE_HOME)
     .replaceAll("{{FERRITE_CTL}}", FERRITE_CTL)
     .replaceAll("{{FFT_TO_PNG}}", FFT_TO_PNG)
+    .replaceAll("{{FFT_PEAKS}}", FFT_PEAKS)
     .replaceAll("{{CTL_HELP}}", CTL_HELP);
 }
 
@@ -242,7 +244,67 @@ type IncomingMessage = {
    *  reloads (the connection is brand new but the SDK session is
    *  still on disk under that id). */
   resume_session_id?: string;
+  /** User-supplied description of the physical radio setup (which
+   *  antenna is hooked to what, where it's located, known interferers,
+   *  etc.). Appended to the mode's system prompt so the AI doesn't
+   *  have to guess what Antenna A is or why Antenna C "has nothing
+   *  useful." Empty / absent = use the bare mode prompt. */
+  setup_description?: string;
+  /** Driver-specific operator notes pulled from the active SDR
+   *  preset's `ai_operator_notes` field (e.g. SDRplay RSPdx antenna
+   *  mapping + gain semantics + AGC interaction). The frontend reads
+   *  this from `sdr-presets/<driver>.json` so it stays the same
+   *  source of truth the UI tooltips use. Appended ahead of the
+   *  operator-supplied setup so the AI sees device capabilities
+   *  before reading what the operator did with them. */
+  driver_notes?: string;
+  /** Operator's wall-clock time and IANA timezone, captured on each
+   *  turn from the browser. Gives the AI a sense of local time (for
+   *  band/propagation reasoning) and rough geographic region (via
+   *  the TZ string, e.g. `America/Los_Angeles`). */
+  local_time_iso?: string;
+  local_time_human?: string;
+  time_zone?: string;
 };
+
+/** Glue caller-supplied prompt extensions onto the mode's system
+ *  prompt. Order is: base mode prompt → driver-specific operator notes
+ *  (capabilities) → operator-supplied setup (this rig's physical
+ *  reality) → local clock / TZ. Each is wrapped in a heading so the
+ *  AI can tell them apart from the base prompt. */
+function appendPromptExtras(
+  systemPrompt: string,
+  driverNotes: string | undefined,
+  setup: string | undefined,
+  localTimeHuman: string | undefined,
+  localTimeIso: string | undefined,
+  timeZone: string | undefined,
+): string {
+  let out = systemPrompt;
+  const driver = (driverNotes ?? "").trim();
+  if (driver) {
+    out = `${out}\n\n## Active SDR — driver-specific operator notes\n\n${driver}\n`;
+  }
+  const op = (setup ?? "").trim();
+  if (op) {
+    out = `${out}\n\n## Operator-supplied radio setup\n\n${op}\n`;
+  }
+  const tz = (timeZone ?? "").trim();
+  const human = (localTimeHuman ?? "").trim();
+  const iso = (localTimeIso ?? "").trim();
+  if (tz || human || iso) {
+    out =
+      `${out}\n\n## Local clock + region\n\n` +
+      (human ? `- Operator's local time: ${human}\n` : "") +
+      (iso ? `- ISO (UTC): ${iso}\n` : "") +
+      (tz
+        ? `- IANA timezone: ${tz} (gives approximate region — e.g. ` +
+          `\`America/Los_Angeles\` → US west coast → use for propagation, ` +
+          `MUF, broadcast-band makeup, and band-condition reasoning)\n`
+        : "");
+  }
+  return out;
+}
 
 const httpServer = createServer((_req, res) => {
   res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
@@ -293,7 +355,14 @@ wss.on("connection", (ws) => {
     const transcript = new TurnTranscript(mode, parsed.text);
 
     const opts: Options = {
-      systemPrompt: SYSTEM_PROMPTS[mode],
+      systemPrompt: appendPromptExtras(
+        SYSTEM_PROMPTS[mode],
+        parsed.driver_notes,
+        parsed.setup_description,
+        parsed.local_time_human,
+        parsed.local_time_iso,
+        parsed.time_zone,
+      ),
       allowedTools: allowedToolsFor(mode),
       // User opted into autonomy; bypassPermissions skips the SDK's
       // confirmation prompts entirely. The activity-log middleware on
