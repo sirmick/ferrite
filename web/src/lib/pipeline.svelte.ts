@@ -337,6 +337,38 @@ class PipelineStore {
     this.blocks = indexById(blocks);
   }
 
+  /** Pull every server mirror (source + flowgraph + status + composed +
+   *  caps) in parallel. Used when an out-of-band mutator (ferrite-ctl,
+   *  the AI sidecar) changed state via REST without going through this
+   *  store, so the local mirror is stale. The page-level `$effect`
+   *  fires this on every fresh `ai::activity` log entry — the same
+   *  channel the activity panel reads, so we get refresh-on-CLI for
+   *  free without inventing a new broadcast. Self-initiated UI patches
+   *  set no `X-Ferrite-Command` header, so the middleware skips them
+   *  and we don't double-refresh on our own writes. */
+  async refreshFromServer(): Promise<void> {
+    if (this.phase !== 'ready') return;
+    try {
+      const [fg, src, st, sinks, blocks, caps] = await Promise.all([
+        fetchFlowgraph(),
+        fetchSource(),
+        fetchPipelineStatus(),
+        fetchUiSinks(),
+        fetchPipelineBlocks(),
+        fetchSourceCapabilities(),
+      ]);
+      this.flowgraph = fg;
+      this.source = src;
+      this.status = st;
+      this.uiSinks = indexByName(sinks);
+      this.blocks = indexById(blocks);
+      this.sourceCaps = caps;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logs.push('client', 'warn', `pipeline refresh failed: ${msg}`);
+    }
+  }
+
   /** Close the WebSocket. Call on unmount; does NOT stop the server
    *  pipeline (the server-side lifecycle is the user's to drive). */
   teardown(): void {

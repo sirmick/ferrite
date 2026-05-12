@@ -2,6 +2,7 @@
   import Workspace from '$lib/layout/Workspace.svelte';
   import LogPanel from '$lib/layout/LogPanel.svelte';
   import FlowPanel from '$lib/layout/FlowPanel.svelte';
+  import AiPanel from '$lib/layout/AiPanel.svelte';
   import Split from '$lib/layout/Split.svelte';
   import BandsPanel from '$lib/presets/BandsPanel.svelte';
   import SettingsPanel from '$lib/presets/SettingsPanel.svelte';
@@ -9,12 +10,13 @@
   import { pipeline } from '$lib/pipeline.svelte';
   import { logs, patchConsole } from '$lib/logs/store.svelte';
   import { connectServerLogs } from '$lib/logs/client';
+  import { connectAi } from '$lib/ai/client';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
   import { wsUrlFor } from '$lib/api/errors';
   import { composeSource } from '$lib/flowgraph';
   import { onMount } from 'svelte';
 
-  type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs' | 'flow';
+  type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs' | 'flow' | 'ai';
   let leftTab = $state<LeftTab>('bands');
 
   // Opening the Logs tab acks the error badge. While the tab is open,
@@ -27,6 +29,7 @@
   onMount(() => {
     patchConsole();
     const disconnectLogs = connectServerLogs();
+    const disconnectAi = connectAi();
     void pipeline.init();
     browserRuntime.init();
     // Gesture-unlock: `AudioContext.resume()` is a no-op until the
@@ -43,6 +46,7 @@
       document.removeEventListener('keydown', unlock);
       void browserRuntime.teardown();
       disconnectLogs();
+      disconnectAi();
       pipeline.teardown();
     };
   });
@@ -66,6 +70,20 @@
   });
   $effect(() => {
     browserRuntime.syncStatus(pipeline.status === 'running');
+  });
+
+  // Out-of-band state sync. `ferrite-ctl` (and the AI sidecar driving
+  // it) mutates ferrited via REST without going through `pipeline`'s
+  // setters, so the source/flowgraph/preset mirror would otherwise
+  // stay stale until the user clicked something. The activity-log
+  // middleware emits one `ai::activity` line per CLI-driven mutation;
+  // tail that and refresh the mirror — single trigger, no new WS.
+  let lastAiActivityId = $state(0);
+  $effect(() => {
+    const latest = logs.entries.findLast((e) => e.category === 'ai::activity');
+    if (!latest || latest.id <= lastAiActivityId) return;
+    lastAiActivityId = latest.id;
+    void pipeline.refreshFromServer();
   });
 </script>
 
@@ -160,6 +178,12 @@
               class:tab-active={leftTab === 'flow'}
               onclick={() => (leftTab = 'flow')}>Flow</button
             >
+            <button
+              type="button"
+              class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
+              class:tab-active={leftTab === 'ai'}
+              onclick={() => (leftTab = 'ai')}>AI</button
+            >
           </div>
           <div class="min-h-0 flex-1">
             {#if leftTab === 'bands'}
@@ -173,6 +197,8 @@
               <SettingsPanel />
             {:else if leftTab === 'flow'}
               <FlowPanel />
+            {:else if leftTab === 'ai'}
+              <AiPanel />
             {:else}
               <LogPanel />
             {/if}
