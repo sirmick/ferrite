@@ -9,15 +9,17 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
     response::IntoResponse,
     Json,
 };
 use ferrite_runtime::{FlowgraphDoc, SourceConfig};
+use futures_util::{SinkExt, StreamExt};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use tokio_tungstenite::tungstenite::protocol::Message as TungMessage;
 
 use crate::app_state::{AppState, PipelineBlock, PipelineStatus, PresetEntry, UiSink};
 
@@ -85,6 +87,156 @@ async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroa
                     .await;
             }
             Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+/// Default location of the ferrite-ai sidecar — TCP on localhost. The
+/// sidecar holds an Anthropic Claude Agent SDK session per browser
+/// connection; ferrited reverse-proxies its WS so the browser only
+/// ever talks to a single port. Override with the `FERRITE_AI_URL`
+/// env var (e.g. point at a unix-socket-fronting proxy or a different
+/// machine on a trusted LAN).
+const DEFAULT_FERRITE_AI_URL: &str = "ws://127.0.0.1:10002/ws/chat";
+
+/// `GET /ws/chat` — reverse-proxy to the ferrite-ai sidecar. The
+/// browser opens this WS to ferrited; we open a second WS upstream to
+/// the sidecar and pump frames bidirectionally until either side
+/// closes. If the sidecar isn't reachable, we surface a structured
+/// error event the UI's chat panel renders, then close the client
+/// socket so the front end can show "ferrite-ai offline" cleanly.
+pub async fn ws_chat(ws: WebSocketUpgrade) -> impl IntoResponse {
+    let upstream_url =
+        std::env::var("FERRITE_AI_URL").unwrap_or_else(|_| DEFAULT_FERRITE_AI_URL.to_string());
+    ws.on_upgrade(move |socket| ws_chat_proxy(socket, upstream_url))
+}
+
+async fn ws_chat_proxy(mut client_ws: WebSocket, upstream_url: String) {
+    let upstream = match tokio_tungstenite::connect_async(&upstream_url).await {
+        Ok((s, _resp)) => s,
+        Err(e) => {
+            // Mirror the sidecar's `ferrite_ai_error` envelope shape so
+            // the UI's chat store renders this in the same red-banner
+            // path it'd use for an upstream-side error.
+            let body = serde_json::json!({
+                "type": "ferrite_ai_error",
+                "message": format!("ferrite-ai unreachable at {upstream_url}: {e}"),
+            });
+            let _ = client_ws.send(Message::Text(body.to_string())).await;
+            let _ = client_ws.close().await;
+            return;
+        }
+    };
+
+    let (mut up_tx, mut up_rx) = upstream.split();
+    let (mut cli_tx, mut cli_rx) = client_ws.split();
+
+    // Browser → sidecar: text/binary forward, close on Close. We don't
+    // attempt to translate ping/pong — both sides exchange them via
+    // their own keepalives.
+    let c2u = async move {
+        while let Some(msg) = cli_rx.next().await {
+            let Ok(msg) = msg else { break };
+            let upstream_msg = match msg {
+                Message::Text(t) => TungMessage::Text(t),
+                Message::Binary(b) => TungMessage::Binary(b),
+                Message::Close(_) => break,
+                Message::Ping(_) | Message::Pong(_) => continue,
+            };
+            if up_tx.send(upstream_msg).await.is_err() {
+                break;
+            }
+        }
+        // Politely close the upstream when the browser hangs up so the
+        // sidecar's per-connection session state can be freed.
+        let _ = up_tx.close().await;
+    };
+
+    // Sidecar → browser: same shape in reverse.
+    let u2c = async move {
+        while let Some(msg) = up_rx.next().await {
+            let Ok(msg) = msg else { break };
+            let client_msg = match msg {
+                TungMessage::Text(t) => Message::Text(t),
+                TungMessage::Binary(b) => Message::Binary(b),
+                TungMessage::Close(_) => break,
+                TungMessage::Ping(_) | TungMessage::Pong(_) | TungMessage::Frame(_) => continue,
+            };
+            if cli_tx.send(client_msg).await.is_err() {
+                break;
+            }
+        }
+        let _ = cli_tx.close().await;
+    };
+
+    // First side to finish closes the bridge — `select!` cancels the
+    // other branch when one resolves. Avoids leaking a pump task on
+    // an asymmetric disconnect.
+    tokio::select! {
+        _ = c2u => {},
+        _ = u2c => {},
+    }
+}
+
+/// `GET /api/decoder/recent?since=<unix_ms>&category=<prefix>` — pull
+/// every log line matching `target.starts_with(category)` (e.g.
+/// `decoder::pocsag`, or just `decoder` for everything decoder-side)
+/// emitted *strictly after* `since`. Returns a flat array of
+/// structured `LogEntry { target, level, message, at_ms }`.
+///
+/// Polling pattern for ferrite-ctl / AI agents: pass the largest
+/// `at_ms` seen on the previous poll as the next `since`. The
+/// underlying ring is capped at ~4096 entries; a polling interval
+/// faster than the carrier emits is the right shape (1–2 s).
+#[derive(Deserialize)]
+pub struct RecentQuery {
+    pub since: Option<u64>,
+    pub category: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RecentResponse {
+    pub entries: Vec<crate::log_stream::LogEntry>,
+    /// Server's current `Date.now()`-shaped timestamp, so a polling
+    /// client can use it as the next `since` watermark when the buffer
+    /// returned no entries (otherwise their watermark would never
+    /// advance through quiet stretches).
+    pub now: u64,
+}
+
+pub async fn recent_decoder(
+    State(state): State<AppState>,
+    Query(q): Query<RecentQuery>,
+) -> Result<Json<RecentResponse>, (StatusCode, Json<ApiError>)> {
+    let logs = state.logs().ok_or_else(|| {
+        bad_request(
+            "LOGS_DISABLED",
+            "log broadcast not configured on this server",
+        )
+    })?;
+    let since = q.since.unwrap_or(0);
+    let entries = logs.recent(since, q.category.as_deref());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    Ok(Json(RecentResponse { entries, now }))
+}
+
+// Make `LogEntry` serialize-friendly. Defined here rather than in
+// log_stream.rs so log_stream stays serde-free; the API layer is the
+// right place to gate JSON shape.
+mod log_entry_serde {
+    use super::*;
+    impl Serialize for crate::log_stream::LogEntry {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut st = s.serialize_struct("LogEntry", 4)?;
+            st.serialize_field("target", &self.target)?;
+            st.serialize_field("level", &self.level)?;
+            st.serialize_field("message", &self.message)?;
+            st.serialize_field("at_ms", &self.at_ms)?;
+            st.end()
         }
     }
 }

@@ -349,9 +349,11 @@ async fn main() -> Result<()> {
         .route("/api/blocks", get(routes::list_block_schemas))
         .route("/api/presets", get(routes::list_presets))
         .route("/api/preset", post(routes::load_preset))
+        .route("/api/decoder/recent", get(routes::recent_decoder))
         .route("/api/debug/log", post(routes::browser_log))
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
+        .route("/ws/chat", get(routes::ws_chat))
         .with_state(state);
 
     if static_root.is_dir() {
@@ -367,6 +369,7 @@ async fn main() -> Result<()> {
     }
 
     let app = app
+        .layer(axum::middleware::from_fn(ai_activity_layer))
         .layer(header_layer("cross-origin-opener-policy", "same-origin"))
         .layer(header_layer("cross-origin-embedder-policy", "require-corp"))
         .layer(TraceLayer::new_for_http());
@@ -381,6 +384,58 @@ async fn main() -> Result<()> {
     println!("ferrited listening addr={local}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Surface CLI / AI activity onto the live log stream. ferrite-ctl
+/// (and an Agent SDK driver) annotate every API call with
+/// `X-Ferrite-Command` (the subcommand kebab-id, e.g. `capture-fft`)
+/// and optional `X-Ferrite-Note` (free-form why-text). When either is
+/// present and the request is mutating, we emit a tracing event under
+/// target `ai::activity` so the existing LogBroadcast pumps it onto
+/// `/ws/logs` for the UI's command-transcript panel.
+///
+/// We gate on method != GET so polling commands (`status`, `tail`,
+/// `device list`) don't drown the panel — only writes show up.
+async fn ai_activity_layer(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let note = request
+        .headers()
+        .get("x-ferrite-note")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let command = request
+        .headers()
+        .get("x-ferrite-command")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let should_log = (note.is_some() || command.is_some()) && method != axum::http::Method::GET;
+
+    if should_log {
+        // Pick the cleanest summary the headers gave us. The structured
+        // `command` / `note` fields ride along so a UI can render them
+        // separately if it wants.
+        let summary = match (command.as_deref(), note.as_deref()) {
+            (Some(c), Some(n)) if !c.is_empty() && !n.is_empty() => format!("{c}: {n}"),
+            (Some(c), _) if !c.is_empty() => c.to_string(),
+            (_, Some(n)) if !n.is_empty() => n.to_string(),
+            _ => format!("{method} {path}"),
+        };
+        tracing::info!(
+            target: "ai::activity",
+            method = %method,
+            path = %path,
+            command = command.as_deref().unwrap_or(""),
+            note = note.as_deref().unwrap_or(""),
+            "{summary}",
+        );
+    }
+
+    next.run(request).await
 }
 
 /// Headless recording mode: start the pipeline, sleep `secs` (or until
