@@ -29,6 +29,14 @@ struct tm {
     int tm_wday, tm_yday, tm_isdst;
 };
 
+/* multimon-ng's FLEX decoder calls `gmtime` to format timestamps in
+ * decoded message metadata. The path runs only when the FLEX decoder
+ * has a frame to log — in which case it's executed inside the Rust
+ * shim's drain phase, so wasi-libc's real implementation is fine.
+ * Declared so demod_flex.c compiles; resolves via libc.a at link. */
+struct tm *gmtime(const time_t *timer);
+struct tm *localtime(const time_t *timer);
+
 #ifdef __cplusplus
 }
 #endif

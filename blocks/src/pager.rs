@@ -122,7 +122,7 @@ impl Block for PagerDemod {
     fn spec() -> BlockSpec {
         BlockSpec {
             type_name: "PagerDemod",
-            placement: Placement::NativeOnly,
+            placement: Placement::Either,
             inputs: &[PortSpec {
                 name: "in",
                 port_type: PortType::RealF32,

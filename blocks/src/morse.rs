@@ -89,7 +89,7 @@ impl Block for MorseDemod {
     fn spec() -> BlockSpec {
         BlockSpec {
             type_name: "MorseDemod",
-            placement: Placement::NativeOnly,
+            placement: Placement::Either,
             inputs: &[PortSpec {
                 name: "in",
                 port_type: PortType::RealF32,

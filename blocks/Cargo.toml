@@ -16,12 +16,18 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default  = []
-wasm     = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_bytes", "dep:js-sys"]
+# `wasm` enables the wasm-bindgen surface AND multimon. Pulling
+# multimon through here lets wasm-pack on this crate compile the
+# decoder blocks into the browser bundle the same way the runtime
+# crate does.
+wasm     = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_bytes", "dep:js-sys", "multimon"]
 # Links libSoapySDR; enables the `SoapySource` block. Native only —
 # blocks with this feature panic at monomorphization on wasm32.
 soapysdr = ["dep:soapysdr"]
 # Links vendored multimon-ng; enables digital-mode decoder blocks
-# (PagerDemod et al). Native only — multimon-ng is a C library.
+# (PagerDemod et al). Builds for both native and wasm32 — the C
+# vendor compiles cleanly through libc-stubs + wasi-libc on wasm32,
+# letting the multimon decoder blocks run on the browser side.
 multimon = ["dep:ferrite-multimon-ng"]
 # Links vendored dump1090; enables `AdsbDemod` (Mode S / ADS-B at
 # 1090 MHz). Native only — same constraint as multimon.

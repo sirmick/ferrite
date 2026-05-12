@@ -62,6 +62,15 @@ size_t fread(void *buf, size_t size, size_t n, FILE *stream);
 size_t fwrite(const void *buf, size_t size, size_t n, FILE *stream);
 int    fflush(FILE *stream);
 
+/* sscanf / perror / remove — multimon-ng's vendored C touches these on
+ * paths the shim disables (cJSON parsing, error-print sites). Declared
+ * here so the C compiles; resolved at link time from wasi-libc's
+ * libc.a (we don't link libc-stubs/stubs.c on wasm — wasi-libc owns
+ * the stdio symbols). */
+int    sscanf(const char *str, const char *fmt, ...);
+void   perror(const char *s);
+int    remove(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

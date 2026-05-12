@@ -17,13 +17,35 @@
 use std::path::PathBuf;
 
 fn main() {
+    let target = std::env::var("TARGET").expect("TARGET set by cargo");
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let vendor = manifest_dir.join("vendor");
     let shim = manifest_dir.join("shim");
+    let stubs_dir = manifest_dir.join("../libc-stubs");
 
     // --- 1. Compile the C library (decoder sources + shim) -----------------
     let mut build = cc::Build::new();
     build.include(&vendor).include(&shim).warnings(false);
+
+    if target.starts_with("wasm32") {
+        // Same recipe as liquid-dsp's wasm path: clang targeting bare
+        // wasm32, our libc-stubs/ headers ahead of wasi-libc on the
+        // include path so things that #include <stdio.h>/<time.h> see
+        // the minimal stubs, and wasi-libc's full headers behind for
+        // <string.h>, <stdlib.h>, <math.h>, etc. Linking against
+        // wasi-libc's libc.a / libm.a happens via cargo:rustc-link-lib
+        // below — a transitive consumer (the wasm-pack runtime crate)
+        // picks it up.
+        build
+            .compiler("clang")
+            .flag("--target=wasm32-unknown-unknown")
+            .flag("-nostdlibinc")
+            .flag("-fno-builtin")
+            .flag("-isystem")
+            .flag(stubs_dir.join("include").to_str().unwrap())
+            .flag("-isystem")
+            .flag("/usr/include/wasm32-wasi");
+    }
 
     for src in decoder_sources(&vendor) {
         assert!(
@@ -36,6 +58,19 @@ fn main() {
     build.file(shim.join("multimon_shim.c"));
     build.compile("multimon_vendor");
 
+    if target.starts_with("wasm32") {
+        // wasi-libc for memcpy/memset/strchr/printf/snprintf, plus
+        // libm for sqrtf/cosf/sinf/expf/logf that the demods pull in
+        // (DTMF Goertzel, EAS bit-timing math, BCH FEC). Static link
+        // — wasm-ld only emits referenced symbols, so the syscall
+        // side of libc stays out of the bundle as long as the demod
+        // sources don't reach for it (and they don't, after our
+        // shim neutralises printf / file I/O).
+        println!("cargo:rustc-link-search=native=/usr/lib/wasm32-wasi");
+        println!("cargo:rustc-link-lib=static=m");
+        println!("cargo:rustc-link-lib=static=c");
+    }
+
     // --- 2. Generate Rust bindings via bindgen -----------------------------
     //
     // Allowlist is intentionally tight: we only need the per-decoder
@@ -43,9 +78,22 @@ fn main() {
     // structs, the `buffer_t` union, and our shim's drain helper.
     // Pulling everything from multimon.h would surface internal types
     // (cJSON, gen_*, the various l2_state_*) we don't bind to.
+    //
+    // Force bindgen's libclang to parse with the host triple even when
+    // cargo is building for wasm32 — same workaround liquid-dsp uses,
+    // and necessary for the same reason: under `--target=wasm32-…`
+    // libclang silently drops most of the function declarations from
+    // multimon's headers (a quirk of how it parses with no
+    // platform-default headers available). The generated Rust bindings
+    // are pure ABI shapes that match either compiled archive at link
+    // time, so generating against the host is safe.
+    let host = std::env::var("HOST")
+        .expect("HOST set by cargo")
+        .replace("riscv64gc-", "riscv64-");
     let bindings = bindgen::Builder::default()
         .header(vendor.join("multimon.h").to_string_lossy())
         .header(shim.join("multimon_shim.h").to_string_lossy())
+        .clang_arg(format!("--target={host}"))
         .clang_arg(format!("-I{}", vendor.display()))
         .clang_arg(format!("-I{}", shim.display()))
         // Per-decoder externs we currently wrap:

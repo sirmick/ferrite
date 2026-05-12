@@ -16,7 +16,12 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = []
-wasm    = ["dep:wasm-bindgen"]
+# `wasm` includes `multimon` so the browser-side runtime carries the
+# multimon-ng-backed decoders (Pager / Packet / Eas / Morse / DTMF
+# multimon variant). Lets presets place those blocks on the browser
+# side, which removes the need for a node↔browser audio bridge in
+# decoder presets that don't otherwise need anything node-only.
+wasm    = ["dep:wasm-bindgen", "ferrite-blocks/multimon"]
 
 [dependencies]
 anyhow         = "1"

@@ -90,7 +90,7 @@ impl Block for EasDemod {
     fn spec() -> BlockSpec {
         BlockSpec {
             type_name: "EasDemod",
-            placement: Placement::NativeOnly,
+            placement: Placement::Either,
             inputs: &[PortSpec {
                 name: "in",
                 port_type: PortType::RealF32,
