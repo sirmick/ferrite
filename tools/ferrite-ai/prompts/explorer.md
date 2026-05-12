@@ -139,13 +139,41 @@ signals more than wrong tuning does.
   {{FERRITE_CTL}} --note "AGC for survey" param src agc_enable=true
   ```
 
-- **Saturation** (gain too high): waterfall ceiling pinned at byte=255
-  across most of the window — ADC is clipping. Drop gain 6–10 dB and
-  recapture. On SDRplay, also try raising `rfgain_sel` (LNA
-  attenuator) to drop pre-IF signal level.
-- **Buried in noise** (gain too low): waterfall mostly black, peaks
-  barely above byte=20–30. Raise gain 6 dB. On SDRplay also set
-  `rfgain_sel=0` for weak HF.
+### Gain calibration is a LOOP, not a guess
+
+**The single biggest reason an AI session fails to find signals is
+that the AI sets gain once at a guessed value and moves on.** Don't.
+Iterate. After every tune-then-capture, check whether the gain is
+right *before* concluding "nothing here" or before doing finer work:
+
+1. `tune <freq> --rate <r> --gain <g>` — start at 30 dB for HF, 25
+   for VHF/UHF.
+2. `capture fft --duration 2` then `python3 {{FFT_PEAKS}} <bin>` (or
+   render the PNG and read it).
+3. Look at the **peak byte values** in the capture, or the
+   `threshold_byte` and strongest peak strengths from fft_peaks.
+   The interesting band is **byte ≈ 60 – 200**:
+   - **Peaks below byte ≈ 50**, no carriers above noise → **gain
+     too low.** Bump `--gain` by 10 dB. Re-capture. Repeat until
+     either you see peaks above 60 *or* you hit max gain.
+   - **Ceiling pinned at byte ≈ 255** across most of the window →
+     **gain too high (ADC clipping).** Drop `--gain` by 10 dB.
+     Repeat downward until the ceiling sits closer to 200.
+   - **Peaks in [60, 220], noise in [30, 80]** → good. Proceed.
+4. If you've gone from 0 dB to 50 dB and *still* no peaks, escalate:
+   - On SDRplay: also set `rfgain_sel=0` (LNA attenuator
+     minimum — see driver notes). The `--gain` flag drives IFGR
+     only; LNAstate is a separate stage that defaults to ~37 dB of
+     attenuation at HF.
+   - Then re-try the gain sweep with `rfgain_sel=0` in place.
+   - Only after that loop also fails is it fair to conclude "band
+     is quiet right now" or "wrong antenna."
+
+A typical weak-HF setup: `agc_enable=false`, `rfgain_sel=0`,
+`--gain 50–60`. Default `--gain 30` with default `rfgain_sel=4`
+gives you ~7 dB *less* than what you'd get from a clean RTL-SDR at
+the same setting on the same antenna — easy to mistake for "band
+dead" when it's actually "operator left gain on defaults."
 
 Driver-specific gain rules (LNA stages, AGC quirks, ranges per band)
 live in the **driver-specific operator notes** block that gets
@@ -398,6 +426,40 @@ the labels.
 
 (If you ever see `center_freq_hz: 0` or `sample_rate_hz: 0` in the
 sidecar, that's a real regression — flag it with `[REVIEW]`.)
+
+### Capture duration — read the sidecar, never compute it
+
+**Do not compute duration as `frames × frame_size / sample_rate_hz`.**
+That formula is *acquisition time* for raw IQ at the source — not the
+wall-clock duration of the recording. The FFT block applies a
+`max_frames_per_second` throttle (typically 30 fps from the preset),
+so a 10 MS/s × 16384-bin × 770-frame capture is **~25 seconds** of
+wall-clock, not the ~1.3 s the naive formula returns.
+
+The right value is sitting in the sidecar JSON next to the bin file:
+
+```
+jq -r '.capture_duration_s' /tmp/ferrite-captures/fft-…-….json
+```
+
+It's the wall-clock elapsed from the first written frame to
+finalisation, written by the recording block itself. `fft_to_png.py`
+and `fft_peaks.py` both pick it up automatically; inline Python should
+read it too, never re-derive from rate × bin count.
+
+Common chain to inspect a capture's basics without re-running it:
+
+```
+ls -t /tmp/ferrite-captures/*.bin | head -1 | xargs -I{} sh -c \
+  'echo "--- $(basename {}) ---"; jq . "${0%.bin}.json"' {}
+```
+
+If you do see `capture_duration_s` come out shorter than `--duration`
+you requested — *and* the requested duration was longer than 5–10 s,
+where stream re-init can plausibly eat that much — that's a real
+truncation. Below that it's almost always the formula mistake.
+
+### Peak / carrier detection — use the tool
 
 For numerical analysis (peak / carrier detection across a captured
 band) there's a dedicated tool — **don't reinvent it inline**:
