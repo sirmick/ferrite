@@ -50,8 +50,18 @@ def main() -> int:
             print(f"warning: sidecar parse failed ({e}), using defaults", file=sys.stderr)
 
     frame_size = int(sidecar.get("frame_size", 16384))
-    sample_rate_hz = float(sidecar.get("sample_rate_hz", 0.0)) or 1.0
+    sample_rate_hz = float(sidecar.get("sample_rate_hz", 0.0))
     center_hz = float(sidecar.get("center_freq_hz", 0.0))
+    if sample_rate_hz <= 0:
+        # PortMeta propagation should always fill this in; if it didn't,
+        # the axis would be nonsense. Bail loudly so the AI / operator
+        # sees the regression instead of a misleading plot.
+        print(
+            f"sidecar missing / invalid sample_rate_hz: {sample_rate_hz}\n"
+            "If this is 0, the runtime's PortMeta propagation regressed.",
+            file=sys.stderr,
+        )
+        return 1
 
     raw = np.frombuffer(bin_path.read_bytes(), dtype=np.uint8)
     n_frames = len(raw) // frame_size
@@ -65,11 +75,17 @@ def main() -> int:
     # frame_size-1 to (centre + rate/2 - 1 bin).
     fmin_mhz = (center_hz - sample_rate_hz / 2) / 1e6
     fmax_mhz = (center_hz + sample_rate_hz / 2) / 1e6
-    # Y axis: time in seconds. Frame rate ≈ sample_rate / frame_size
-    # for an unthrottled FFT; if the FFT block has max_frames_per_second
-    # set, this is an upper bound. Good enough for a label.
-    nominal_fps = sample_rate_hz / frame_size if frame_size > 0 else 1.0
-    duration_s = n_frames / max(nominal_fps, 1.0)
+    # Y axis: time in seconds.
+    # Prefer explicit capture_duration_s from sidecar (written by ferrite-ctl).
+    # Fall back to estimating from sample_rate / frame_size, but this is only
+    # correct for unthrottled FFT streams — real captures are often throttled,
+    # making the estimate wrong (typically too short).
+    if "capture_duration_s" in sidecar:
+        duration_s = float(sidecar["capture_duration_s"])
+    else:
+        # Legacy fallback: assume unthrottled frame rate (usually wrong)
+        nominal_fps = sample_rate_hz / frame_size if frame_size > 0 else 1.0
+        duration_s = n_frames / max(nominal_fps, 1.0)
 
     # Strip height grows with frames; cap so a long capture doesn't
     # produce a 10000-pixel-tall PNG.
@@ -85,9 +101,14 @@ def main() -> int:
     )
     ax.set_xlabel("Frequency (MHz)" if center_hz > 0 else "Bin (FFT-shifted, DC at centre)")
     ax.set_ylabel("Time (s)")
+    centre_label = (
+        f"centred at {center_hz/1e6:.4f} MHz"
+        if center_hz > 0
+        else "(centre unknown — sidecar center_freq_hz=0)"
+    )
     ax.set_title(
         f"{bin_path.name}  —  {n_frames} frames × {frame_size} bins  "
-        f"@ {sample_rate_hz/1e6:.3f} MS/s"
+        f"@ {sample_rate_hz/1e6:.3f} MS/s  {centre_label}"
     )
     fig.tight_layout()
     fig.savefig(png_path, dpi=100)
