@@ -29,6 +29,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Dark theme — same vibe as the live UI's waterfall (#0b0f19 panel
+# background, slate axis labels). The viridis colormap reads well on
+# a dark background; light theme made the colour ramp visually
+# inconsistent with the waterfall the operator is comparing against.
+plt.style.use("dark_background")
+_PANEL_BG = "#0b1020"  # Slightly bluer than slate-950 so PNGs feel
+# tied to the Ferrite UI rather than a generic mpl style.
+
 
 def main() -> int:
     if len(sys.argv) < 2:
@@ -91,6 +99,8 @@ def main() -> int:
     # produce a 10000-pixel-tall PNG.
     height_in = min(12.0, max(2.0, n_frames / 30.0))
     fig, ax = plt.subplots(figsize=(10, height_in))
+    fig.patch.set_facecolor(_PANEL_BG)
+    ax.set_facecolor(_PANEL_BG)
     ax.imshow(
         img,
         aspect="auto",
@@ -111,7 +121,10 @@ def main() -> int:
         f"@ {sample_rate_hz/1e6:.3f} MS/s  {centre_label}"
     )
     fig.tight_layout()
-    fig.savefig(png_path, dpi=100)
+    # Pass facecolor explicitly to savefig — matplotlib's default
+    # discards the figure-level patch colour on save when the file
+    # extension is `.png` with transparency enabled.
+    fig.savefig(png_path, dpi=100, facecolor=_PANEL_BG)
     plt.close(fig)
     print(str(png_path))
     return 0
