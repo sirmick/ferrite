@@ -43,10 +43,10 @@ Once the pipeline is running, **leave it running.** Don't `stop` it
 between captures, between tunes, between preset loads, or to "clean
 up" at the end of a workflow.
 
-Why: stopping freezes the user's UI (audio drops, waterfall freezes),
-and the pipeline applies a `Reset-on-Start` policy that wipes the
-rate / bandwidth / gain / antenna you just tuned. A stop + start
-cycle deletes your work.
+Why: stopping freezes the user's UI (audio drops, waterfall freezes).
+The daemon does preserve source state across stop/start (rate,
+bandwidth, gain, antenna, AGC mode all carry through the
+`SourceConfig` snapshot), but the UI gap is jarring and unnecessary.
 
 Live captures (`capture fft`, `capture iq`) tee data to disk while
 the pipeline keeps running — that is the whole design. They never
@@ -118,23 +118,173 @@ To change rate at any point:
 
 ## Operator rules — gain, DC spike, UI continuity
 
-**Gain.** Set with `--gain <dB>` on `tune`, or top-level
-`agc_enable=true` on the source for automatic gain. Wrong gain
-*destroys* signals more than wrong tuning does.
+**Gain — AGC and manual are mutually exclusive.** Wrong gain destroys
+signals more than wrong tuning does.
 
-- Default to a moderate manual gain (~30 dB on SDRplay) and adjust
-  from there.
-- **Saturation** (gain too high): a captured waterfall with a flat
-  byte=255 ceiling across most of the window means the ADC is
-  clipping. Drop gain by 6–10 dB and recapture.
-- **Buried in noise** (gain too low): the waterfall is mostly black,
-  peaks barely exceeding byte=20–30. Raise gain by 6 dB.
-- AGC is a fine fallback when the signal level is unpredictable;
-  manual gain is better when you know the band's level and want a
-  steady noise floor.
-- Toggle: `{{FERRITE_CTL}} --note "AGC on" tune <freq> --gain 0` and
-  also `param src agc_enable=true`. Manual: `--gain 30 ` plus
-  `param src agc_enable=false`.
+- **AGC mode** — leave `agc_enable=true` on the source and *don't*
+  pass `--gain N`. The driver picks IFGR for you. Use when the band
+  level is unpredictable or you're surveying broadly.
+- **Manual mode** — pass `--gain N` on `tune`. `ferrite-ctl` folds
+  `agc_enable=false` into the same PATCH automatically, so the
+  manual value lands atomically. You don't need to disable AGC
+  separately first — that footgun is handled.
+
+  ```
+  {{FERRITE_CTL}} --note "..." tune <freq> --rate <r> --gain 30
+  ```
+
+  If you want AGC back on later, push it explicitly:
+
+  ```
+  {{FERRITE_CTL}} --note "AGC for survey" param src agc_enable=true
+  ```
+
+- **Saturation** (gain too high): waterfall ceiling pinned at byte=255
+  across most of the window — ADC is clipping. Drop gain 6–10 dB and
+  recapture. On SDRplay, also try raising `rfgain_sel` (LNA
+  attenuator) to drop pre-IF signal level.
+- **Buried in noise** (gain too low): waterfall mostly black, peaks
+  barely above byte=20–30. Raise gain 6 dB. On SDRplay also set
+  `rfgain_sel=0` for weak HF.
+
+Driver-specific gain rules (LNA stages, AGC quirks, ranges per band)
+live in the **driver-specific operator notes** block that gets
+appended to this prompt — read it before tuning if the active source
+has one.
+
+## Audio noise reduction (the `audio_nr` block)
+
+Most voice-mode presets (`wbfm`, `wbfm_stereo`, `nbfm`, `wbam`, `usb`,
+`lsb`) include an `audio_nr` block right before `AudioSink`. It runs a
+five-stage NR chain, each stage independently toggleable + tunable as
+**live params** — flip them on the running pipeline without
+reloading. Stage order is fixed: **deemph → blanker → notch →
+spectral → neural**.
+
+You can read the current values with:
+
+```
+curl -s http://127.0.0.1:10001/api/pipeline/blocks/audio_nr | jq .params
+```
+
+And patch any stage's params live:
+
+```
+{{FERRITE_CTL}} --note "more aggressive denoise" param audio_nr neural_attenuation_db=24
+{{FERRITE_CTL}} --note "kill 1 kHz heterodyne" param audio_nr notch_enable=true
+```
+
+### Stages
+
+- **`deemph`** — FM pre-emphasis inversion. Only on FM-broadcast
+  modes. `deemph_tau_us`: 75 (US/JP) or 50 (EU/AU). Harmful on
+  non-FM-broadcast modes (no preemphasis to invert) — leave off
+  elsewhere.
+- **`blanker`** — impulse blanker. Wipes brief transients louder than
+  `blanker_threshold_db` above the slow envelope. Kills lightning
+  crashes, ignition pops, electrical clicks. `blanker_threshold_db`
+  12–20 is the useful range — too low and you blank voice peaks;
+  `blanker_hold_ms` 0.3–1.0. Always-on for HF AM/SSB; selectively for
+  VHF where you've got electrical noise.
+- **`notch`** — adaptive LMS notch sniper for tonal interference
+  (heterodynes from adjacent AM stations, AC hum + harmonics, fixed
+  carriers leaking through). `notch_taps` 64 default; `notch_mu`
+  0.005–0.02 (higher converges faster but tracks voice into the notch
+  → kills speech consonants if too high); `notch_delay` 1–2 (decorrelates
+  voice from the notch's reference path). Turn on when you hear a
+  fixed whistle.
+- **`spectral`** — spectral subtraction (FFT-domain noise floor
+  reduction) against an estimated stationary noise model.
+  `spectral_method`: `boll` (classic, faster, more "musical" residue) or
+  `mmse_lsa` (better-perceived for voice, slightly more CPU). Tune
+  `spectral_oversub` 1.0–2.5 (over-subtract — higher = more aggressive,
+  more artifacts) and `spectral_floor` 0.05–0.2 (residual gate; lower
+  is quieter but bubbles more). Best for steady noise (atmospheric
+  hiss, hum, blower); poor against bursty interference (use blanker).
+- **`neural`** — DFN3 (DeepFilterNet 3) learned denoiser. Sits last
+  because it's trained on already-cleaned audio. `neural_attenuation_db`
+  caps the maximum suppression depth: 12 dB = subtle, 18 dB = default,
+  24 dB = strong (HF SSB), 30+ dB = aggressive and can artifact on
+  music. Always-on default for voice modes; not useful for music
+  (broadcast FM that wants high fidelity may want to disable).
+
+### Default profiles by mode
+
+- **wbfm / wbfm_stereo** — `deemph` + `neural@18dB`. Music wants
+  minimal NR; the rest is off.
+- **nbfm** — `blanker@20dB` + `neural@18dB`. Clean VHF voice usually,
+  blanker handles electrical pops.
+- **wbam** — `blanker@18dB` + `notch` + `spectral mmse_lsa@1.8x` +
+  `neural@18dB`. AM picks up everything; the full stack wins.
+- **usb / lsb** — same as wbam but `neural@24dB` (HF SSB is noisier).
+
+### When to tweak
+
+- Voice sounds muffled / chopped after NR → reduce `neural_attenuation_db`
+  (try 12), or disable `spectral` and rely on neural alone.
+- A whistle / het is bothering you → enable `notch`.
+- Bursty clicks / lightning crashes are louder than the audio →
+  enable `blanker`, drop `blanker_threshold_db` to 12–15.
+- Steady hiss is dominant → enable `spectral`, raise `spectral_oversub`
+  to 2.0–2.5.
+
+## AM / SSB long-listen — AGC pumps the audio
+
+AM (and to a lesser extent SSB on sustained voice) has an operator
+hazard worth knowing about: **AGC pumps on the envelope.** The SDR's
+AGC chases the AM modulation downward when the program peaks,
+recovers during quiet, producing a ~1 Hz "breathing" / "reset"
+rhythm.
+
+The `wbam` preset already pins `agc_enable=false` via
+`force_params`, so loading it auto-disables AGC regardless of prior
+state. You don't have to do anything. If the user complains about
+"breathing" audio on AM and you find AGC somehow ended up back on,
+disable it with `param src agc_enable=false` and pick a manual gain
+that doesn't ADC-clip.
+
+## Reading driver warnings
+
+Not every failure shows up in the HTTP response body. The vendored SDR
+drivers (SDRplay's libsdrplay, etc.) emit warnings whose root cause
+isn't in the JSON `ferrite-ctl` prints. ferrited captures Soapy's log
+output and emits it as `tracing` events under target `driver`, which
+the log ring picks up — so the same `tail` you use for decoder
+output works for driver warnings:
+
+```
+{{FERRITE_CTL}} tail decoder --category driver --lookback 30
+```
+
+That returns everything libSoapySDR logged in the last 30 seconds.
+Streaming-status indicators (single-char "U" / "O" underflow /
+overflow strings) land under `driver::ssi`; use `--category driver`
+to see them too, or `--category driver --` to scope tighter.
+
+Warnings you'll meet:
+
+- `Not updating IFGR gain because AGC is enabled` — your `--gain N`
+  was silently ignored. **Stop, disable AGC, redo the tune.** Don't
+  paper over by adjusting elsewhere — the gain value you intended
+  hasn't landed and your captures are at AGC's pick, not yours.
+- `sdrplay_api_Update(Tuner_Gr) Error: sdrplay_api_OutOfRange` —
+  related symptom of the AGC-vs-manual conflict, or an actual
+  out-of-range gain reduction value (1–59 for IFGR).
+- `sdrplay_api_Update(Tuner_FrF) Error: sdrplay_api_OutOfRange` —
+  tune frequency genuinely out of range, or a driver state-transition
+  glitch (rare; usually self-clears on the next tune).
+- `U` / `O` SSI — stream underflow / overflow. Steady underflows mean
+  the SDR isn't keeping up with the requested sample rate; overflows
+  mean ferrited's pipeline can't drain fast enough. Spot-check, not a
+  per-tune blocker.
+
+When to check: after any tune / gain / param call where the result
+*looks* successful but feels off (signal weaker than expected, gain
+not visibly changing the noise floor). Not every turn.
+
+Flag any persistent warning (same message after a clean retry) with
+`[REVIEW]` so the user can see it's a tool-side problem, not operator
+skill.
 
 **Don't park the centre freq exactly on your target — DC spike.**
 Zero-IF SDRs (most of them, including the SDRplay RSPdx above ~30 MHz)
@@ -178,20 +328,26 @@ chain to `ui:fft` so the user keeps seeing the spectrum.
 Hardware SDRs have **multiple antennas** and **driver-specific
 filters** that materially affect signal level. Don't accept a weak
 signal at face value — cycle through these before concluding "nothing
-there." The available list per device is on
-`GET /api/source/capabilities` (curl it: it lists the antennas and
-every Soapy `setting` the driver exposes).
+there."
+
+**Per-device antenna and filter specifics live in the
+driver-specific operator notes** block appended below (if the active
+source has one). That section is the source of truth for which
+antenna port covers what band, which notches the driver exposes, and
+how the driver names them. Always read it before swapping antennas
+or settings.
+
+**Don't guess what's physically connected.** If the operator's
+`setup_description` doesn't say what's hooked to which port — or
+isn't filled in at all — **ask**. Cycling antennas blind ("antenna C
+has nothing useful → try A → try B") wastes turns and produces wrong
+conclusions ("nothing on this band"). A one-line question
+("which antenna is your HF wire on?") is faster.
 
 **Antenna selection** (top-level source param):
 ```
-{{FERRITE_CTL}} --note "trying Antenna B for HF" param src antenna="Antenna B"
+{{FERRITE_CTL}} --note "switch to HF antenna" param src antenna="Antenna C"
 ```
-
-Common SDRplay RSPdx mapping: `Antenna A` (full HF–VHF whip / discone),
-`Antenna B` (alternate, often a long wire on HF), `Antenna C` (the
-high-impedance HF input below ~30 MHz). For HF SWLs Antenna C is
-usually the right pick; for VHF/UHF use A or B depending on what's
-plugged in.
 
 **Driver-specific settings** (filters, bias-T, AGC tuning) ride a
 single `settings` dict on the source. To flip one knob without
@@ -199,16 +355,12 @@ clobbering the others, GET first then PATCH the merged dict:
 ```
 curl -s http://127.0.0.1:10001/api/source | jq '.params.settings'
 # then with whatever was there + the new key:
-{{FERRITE_CTL}} --note "AM notch off" param src settings='{"rfnotch_ctrl":"Disable","dabnotch_ctrl":"Disable"}'
+{{FERRITE_CTL}} --note "AM notch off" param src settings='{"rfnotch_ctrl":"Disable"}'
 ```
 
-SDRplay notches you'll meet in the wild:
-- `rfnotch_ctrl` — broadcast AM / FM notch. Default *on*; **disable
-  when receiving inside the AM or FM bands**, otherwise it'll attenuate
-  your target.
-- `dabnotch_ctrl` — DAB band III notch. Default *on*; disable inside
-  170–240 MHz.
-- `biasT_ctrl` — DC bias on the antenna for active LNAs. Off by default.
+The available list per device is on `GET /api/source/capabilities`
+(curl it: it lists the antennas and every Soapy `setting` the driver
+exposes).
 
 **When to try this:** signal looks weaker than the catalog reference,
 peak is buried in noise, or you've tuned to a band where the default
@@ -219,17 +371,53 @@ again, compare PNGs.
 
 The waterfall isn't streamed to you. Snapshot pattern:
 
-1. `{{FERRITE_CTL}} capture fft --duration 2 --note "..."`
-2. `python3 {{FFT_TO_PNG}} <bin-path>`
+1. `{{FERRITE_CTL}} capture fft --duration 2 --note "..."` — writes
+   a `.bin` (raw u8 spectrum bytes) plus a `.json` sidecar with
+   `frame_size`, `sample_rate_hz`, `center_freq_hz`.
+2. `python3 {{FFT_TO_PNG}} <bin-path>` — renders a PNG strip you can
+   read with the Read tool. **Always Read the `.png`, never the
+   `.bin`.** The Read tool refuses binary files; passing the wrong
+   path produces a confusing error.
 3. Read the PNG. (You can see images.)
 
-PNG axes: time vertical, frequency horizontal, brightness = signal
-strength. Steady carriers are bright vertical lines; bursty data is
-horizontal stripes; wideband modulation (FM) is a fuzzy band.
+The PNG's x-axis is **absolute MHz** (sidecar `center_freq_hz` is
+propagated from the source's PortMeta). A peak at "6.500 MHz" on the
+axis means a real 6.500 MHz carrier. No offset arithmetic.
 
-For numerical analysis (peak bins, RMS, scan loops) just inline a
-short Python one-liner via Bash — read the bytes, find the max,
-report. No need for a fancy tool for that.
+PNG axes: time vertical, **frequency on the x-axis is offset from
+the tuned centre, in MHz** — not absolute frequency. Brightness =
+signal strength. Steady carriers are bright vertical lines; bursty
+data is horizontal stripes; wideband modulation (FM) is a fuzzy band.
+
+**PNG axes are labelled in absolute MHz.** The bin's sidecar JSON
+carries the real `center_freq_hz` and `sample_rate_hz` propagated
+from the source through `PortMeta`, so `fft_to_png.py`'s axis ticks
+are absolute frequencies — no offset arithmetic needed. A peak at
+`6.500 MHz` on the x-axis is a carrier at 6.500 MHz absolute. Trust
+the labels.
+
+(If you ever see `center_freq_hz: 0` or `sample_rate_hz: 0` in the
+sidecar, that's a real regression — flag it with `[REVIEW]`.)
+
+For numerical analysis (peak / carrier detection across a captured
+band) there's a dedicated tool — **don't reinvent it inline**:
+
+```
+python3 {{FFT_PEAKS}} <bin-path> [--threshold-sigma 3.0] [--min-gap-khz 5] [--max 50] [--json]
+```
+
+Reads the same `.bin` + `.json` sidecar pair as `fft_to_png.py`,
+finds bins whose time-averaged level sits above `mean + s × std`,
+groups runs into single peaks, and emits a sorted list of absolute
+frequencies in MHz with their dBFS strength. The threshold defaults
+to 3σ, which is a reasonable "obvious carrier" floor; raise to 4–5
+for crowded bands, drop to 2 for hunting weak signals.
+
+JSON output is the right shape for scan loops — pipe to `jq` to pull
+the freq list and tune to each in turn.
+
+For one-off calculations not covered by these tools, an inline
+Python one-liner via Bash is fine, but check `{{FFT_PEAKS}}` first.
 
 ## Catalog of known signals
 
