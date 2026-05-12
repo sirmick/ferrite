@@ -76,13 +76,20 @@
   let wfCeil = $derived(clientControls.get('client.waterfall.contrastCeilDbfs'));
 </script>
 
+<!-- Layout reads l → r as DSP shaping → display flags → spectrum
+     range → waterfall range → zoom → pause. The exact-value dBFS
+     readouts that used to flank each range slider are gone — the
+     dual-thumb DbRangeSlider visualises the window directly, and a
+     hover title gives the numbers for callers who really need them.
+     Saved ~140 px per slider and the strip now fits on a 1366-wide
+     viewport without flex-wrapping. -->
 <div
-  class="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-slate-800 bg-[color:var(--color-bg)] px-2 py-1 text-[11px] text-[color:var(--color-muted)]"
+  class="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-slate-800 bg-[color:var(--color-bg)] px-2 py-1 text-[11px] text-[color:var(--color-muted)]"
 >
   {#if fftBlock || logmagBlock}
     {#if fftBlock}
       <label class="flex items-center gap-1" title="FFT bin count — higher = finer bins, slower">
-        <span>fft</span>
+        <span>bins</span>
         <select
           class="rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
           value={fftSize}
@@ -112,7 +119,7 @@
         <span>smooth</span>
         <input
           type="range"
-          class="w-20"
+          class="w-16"
           min={0.01}
           max={1}
           step={0.01}
@@ -149,27 +156,31 @@
     />
     <span>fade</span>
   </label>
-  <label class="flex items-center gap-1" title="running max-hold trace">
+  <label class="flex items-center gap-1" title="running peak-hold trace">
     <input
       type="checkbox"
       checked={maxHold}
       onchange={(e) =>
         void applyControl('client.spectrum.maxHold', (e.currentTarget as HTMLInputElement).checked)}
     />
-    <span>max hold</span>
+    <span>peak</span>
   </label>
   {#if maxHold}
     <button
       type="button"
       class="rounded border border-slate-700 px-1.5 py-0 text-[10px] leading-none hover:border-slate-500"
+      title="reset peak-hold trace"
       onclick={() => waterfallStore.resetMaxHold()}
     >
-      reset
+      ⟲
     </button>
   {/if}
 
   <div class="mx-1 h-4 border-l border-slate-800"></div>
 
+  <!-- Spectrum-trace dB range (the line plot). Auto-track follows
+       signal envelope; manual is the dual-thumb slider. -->
+  <span class="text-slate-400">spec</span>
   <label
     class="flex items-center gap-1"
     title="auto-track floor/ceil to the signal (overrides the manual values)"
@@ -185,8 +196,10 @@
     />
     <span>auto</span>
   </label>
-  <span class="flex items-center gap-2 font-mono text-[10px]">
-    <span class="w-8 text-right text-slate-400">{manualCeilDbfs}</span>
+  <span
+    class="flex items-center font-mono text-[10px]"
+    title="spectrum trace range: {manualFloorDbfs} … {manualCeilDbfs} dBFS"
+  >
     <DbRangeSlider
       floor={manualFloorDbfs}
       ceil={manualCeilDbfs}
@@ -200,16 +213,15 @@
         }
       }}
     />
-    <span class="w-10 text-slate-400">{manualFloorDbfs}</span>
   </span>
 
   <div class="mx-1 h-4 border-l border-slate-800"></div>
 
-  <!-- Waterfall contrast: separate from the spectrum trace's floor/ceil
-       above. The waterfall renderer can auto-stretch its palette
-       window to P5/P98 of recent FFT rows (so the noise floor sits in
-       dark blue and strong carriers reach bright white regardless of
-       band-by-band noise differences), or use a fixed dBFS window. -->
+  <!-- Waterfall colormap window. Default auto-stretches to P5/P98
+       of recent FFT rows so the noise floor sits in dark blue and
+       strong carriers reach bright white regardless of the band's
+       absolute level. Manual mode uses the fixed dBFS window. -->
+  <span class="text-slate-400">wf</span>
   <label
     class="flex items-center gap-1"
     title="auto-stretch the waterfall colormap to recent P5/P98 of the byte stream"
@@ -223,13 +235,12 @@
           (e.currentTarget as HTMLInputElement).checked,
         )}
     />
-    <span>wf auto</span>
+    <span>auto</span>
   </label>
   <span
-    class="flex items-center gap-2 font-mono text-[10px]"
-    title="manual waterfall contrast window (dBFS)"
+    class="flex items-center font-mono text-[10px]"
+    title="waterfall contrast window: {wfFloor} … {wfCeil} dBFS"
   >
-    <span class="w-8 text-right text-slate-400">{wfCeil}</span>
     <DbRangeSlider
       floor={wfFloor}
       ceil={wfCeil}
@@ -243,7 +254,6 @@
         }
       }}
     />
-    <span class="w-10 text-slate-400">{wfFloor}</span>
   </span>
 
   <div class="mx-1 h-4 border-l border-slate-800"></div>
@@ -255,7 +265,7 @@
     <span>zoom</span>
     <input
       type="range"
-      class="w-20"
+      class="w-16"
       min={1}
       max={16}
       step={0.5}
