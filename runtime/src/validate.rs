@@ -407,6 +407,7 @@ mod tests {
             crate::doc::BlockInstanceDecl {
                 type_name: "Z".into(),
                 params: None,
+                force_params: None,
                 placement: None,
             },
         );
@@ -431,6 +432,7 @@ mod tests {
             crate::doc::BlockInstanceDecl {
                 type_name: "Z".into(),
                 params: None,
+                force_params: None,
                 placement: None,
             },
         );

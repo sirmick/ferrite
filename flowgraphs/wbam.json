@@ -17,6 +17,9 @@
       "params": {
         "sample_rate_hz": 2400000.0,
         "bandwidth_hz": 2000000.0
+      },
+      "force_params": {
+        "agc_enable": false
       }
     },
     "chan": {
@@ -71,6 +74,27 @@
         "output_rate_hz": 48000.0,
         "stopband_db": 60.0
       }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "blanker_enable": true,
+        "blanker_threshold_db": 18.0,
+        "blanker_hold_ms": 0.5,
+        "notch_enable": true,
+        "notch_taps": 64,
+        "notch_mu": 0.01,
+        "notch_delay": 2,
+        "spectral_enable": true,
+        "spectral_method": "mmse_lsa",
+        "spectral_block_size": 512,
+        "spectral_oversub": 1.8,
+        "spectral_floor": 0.1,
+        "neural_enable": true,
+        "neural_attenuation_db": 18.0
+      }
     }
   },
   "wires": [
@@ -104,6 +128,10 @@
     ],
     [
       "resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
       "audio.in"
     ]
   ]

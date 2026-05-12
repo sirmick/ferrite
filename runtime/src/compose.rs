@@ -61,11 +61,16 @@ pub enum ComposeError {
 /// Compose a runnable flowgraph by replacing the preset's source
 /// placeholder with the picked source.
 ///
-/// Merge rule for the composed block's `params`: preset hints form the
-/// base object; `source.params` is overlaid key-by-key. Overlapping
-/// keys take the source value (user intent wins over preset default).
-/// Hint-only keys carry through so `center_freq_hz`, `sample_rate_hz`,
-/// and `bandwidth_hz` apply when the device opens.
+/// Merge rule for the composed block's `params` (three layers, low →
+/// high precedence):
+///
+/// 1. Placeholder `params` — **hints**. Carried through for keys not
+///    set elsewhere (e.g. `sample_rate_hz`, `bandwidth_hz` defaults).
+/// 2. Live `source.params` — **user intent**. Overlays the hints.
+/// 3. Placeholder `force_params` — **preset-imposed overrides**. Wins
+///    over both above so a preset can pin a setting it genuinely
+///    requires (e.g. `wbam` setting `agc_enable=false` to avoid the
+///    AM-AGC pumping pathology). Use sparingly.
 ///
 /// The placeholder's `placement` pins the composed block to the same
 /// environment; the caller doesn't have to thread that through.
@@ -82,17 +87,35 @@ pub fn compose_source(
             type_name: placeholder.type_name.clone(),
         });
     }
-    let merged_params = merge_params(placeholder.params.as_ref(), &source.params);
+    let hinted = merge_params(placeholder.params.as_ref(), &source.params);
+    let merged_params = apply_force_params(hinted, placeholder.force_params.as_ref());
     let mut composed = preset.clone();
     composed.blocks.insert(
         SOURCE_ID.to_string(),
         BlockInstanceDecl {
             type_name: source.type_name.clone(),
             params: Some(merged_params),
+            force_params: None,
             placement: placeholder.placement,
         },
     );
     Ok(composed)
+}
+
+/// Lay `force_params` on top of an already-merged params object. Used
+/// by `compose_source` so a preset can pin source-side settings even
+/// against the live `SourceConfig`. No-op when `force` is `None` or a
+/// non-object.
+fn apply_force_params(mut params: Value, force: Option<&Value>) -> Value {
+    let Some(Value::Object(forced)) = force else {
+        return params;
+    };
+    if let Value::Object(p) = &mut params {
+        for (k, v) in forced {
+            p.insert(k.clone(), v.clone());
+        }
+    }
+    params
 }
 
 /// Overlay `source` on top of `hints`. Both are expected to be JSON

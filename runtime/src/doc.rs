@@ -43,6 +43,16 @@ pub struct BlockInstanceDecl {
     /// Raw params blob — deserialised per-block at instantiation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+    /// Hard-override params for the source placeholder. Unlike
+    /// `params` (which act as **hints** that *lose* to the live
+    /// `SourceConfig` during `compose_source`), `force_params` *win*
+    /// over the live state. Use sparingly — only when the preset
+    /// genuinely demands a specific source setting (e.g. `wbam`
+    /// needs `agc_enable=false` to dodge the AGC-pumping pathology
+    /// on AM envelopes regardless of what the operator had set
+    /// before). Ignored on non-source blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_params: Option<serde_json::Value>,
     /// Per-instance environment override. Pins a block with
     /// [`Placement::Either`](ferrite_blocks::Placement::Either) to one
     /// side of a cross-env split; required for such blocks in any doc
@@ -230,13 +240,18 @@ mod tests {
         );
         assert_eq!(
             doc.blocks.keys().cloned().collect::<Vec<_>>(),
-            vec!["audio", "chan", "demod", "fft", "logmag", "resamp", "src", "tee"],
+            vec!["audio", "audio_nr", "chan", "demod", "fft", "logmag", "resamp", "src", "tee",],
         );
         let demod = doc.blocks.get("demod").expect("demod block present");
         assert_eq!(demod.type_name, "AmDemod");
         let params = demod.params.as_ref().expect("demod has params");
         assert_eq!(params["sample_rate_hz"].as_f64(), Some(12_000.0));
         assert_eq!(params["audio_gain"].as_f64(), Some(80.0));
+        // `audio_nr` is the full HF-AM stack (blanker + notch + spectral
+        // + neural) — added to fix the audible AGC-pumping that the
+        // bare AmDemod can't hide. See flowgraphs/wbam.json.
+        let nr = doc.blocks.get("audio_nr").expect("audio_nr block present");
+        assert_eq!(nr.type_name, "AudioNrMono");
     }
 
     #[test]
