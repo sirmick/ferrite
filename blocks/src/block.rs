@@ -534,6 +534,28 @@ pub trait Block: Send + AsAny {
         None
     }
 
+    /// Per-output RF centre frequency (Hz). Propagated through the
+    /// pipeline alongside [`output_rate_hz`](Self::output_rate_hz)
+    /// so downstream blocks (and sidecars like `LogMagU8.record` /
+    /// `Channelizer.record`) can stamp the metadata onto recorded
+    /// files. Default `None` makes the runtime fall back to the
+    /// input[0] producer's value — that's the right answer for any
+    /// block that doesn't change the centre frequency (`FmDemod`,
+    /// `Tee*`, `RealF32Resamp`, `AudioNr*`, etc.).
+    ///
+    /// Override on:
+    /// - **pure sources** (no input ports) to return their tuned
+    ///   centre — `SoapySource` returns its `center_freq_hz` param;
+    ///   `SineSource` returns the synth centre.
+    /// - **frequency translators** like `Channelizer`, which returns
+    ///   `input_centre + freq_shift_hz` (the VFO moves the spectrum).
+    ///
+    /// Returning `None` from a non-source block is fine and means
+    /// "I leave the centre frequency alone."
+    fn output_center_freq_hz(&self, _port: usize) -> Option<f64> {
+        None
+    }
+
     /// React to an updated input-rate negotiation without going through
     /// the full `init()` path. The runtime calls this during
     /// reconfigure for carried-over blocks (instances preserved across

@@ -216,6 +216,10 @@ impl Block for SineSource {
         Some(self.params.rate_hz)
     }
 
+    fn output_center_freq_hz(&self, _port: usize) -> Option<f64> {
+        Some(self.params.center_freq_hz)
+    }
+
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
         let Some(out) = io
             .outputs

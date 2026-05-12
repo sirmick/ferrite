@@ -557,6 +557,10 @@ impl Block for SoapySource {
         Some(self.sample_rate_hz)
     }
 
+    fn output_center_freq_hz(&self, _port: usize) -> Option<f64> {
+        Some(self.center_freq_hz)
+    }
+
     fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
         if self.reader.is_some() {
             return Err(anyhow!("SoapySource::init called more than once"));

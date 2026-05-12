@@ -638,34 +638,36 @@ impl Runtime {
             }
         }
 
-        // Cache each block's resolved output rate as we iterate topo.
-        // Accounts for blocks whose `output_rate_hz()` returns None
+        // Cache each block's resolved output rate AND centre frequency
+        // as we iterate topo. Accounts for blocks whose
+        // `output_rate_hz()` / `output_center_freq_hz()` return None
         // (default impl) by falling back to a 1:1 pass-through: rate
-        // equals input[0]'s rate. This lets pipelines like `src →
-        // chan → demod → resamp` propagate rates across intermediate
-        // blocks (e.g. FmDemod) without every one needing to override
-        // `output_rate_hz`.
+        // and centre equal input[0]'s. This lets pipelines like `src →
+        // chan → demod → resamp` propagate both across intermediate
+        // blocks (e.g. FmDemod) without every one needing to override.
         let mut block_out_rate: Vec<f64> = vec![0.0; self.entries.len()];
+        let mut block_out_center: Vec<f64> = vec![0.0; self.entries.len()];
         for i in 0..self.entries.len() {
-            // Build per-input-port (name, PortMeta) with rate resolved
-            // from the producing block. Producer ran earlier in topo
-            // order (entries are topo-sorted at construction), so
-            // `block_out_rate[producer]` is valid by now.
+            // Build per-input-port (name, PortMeta) with rate + centre
+            // resolved from the producing block. Producer ran earlier
+            // in topo order (entries are topo-sorted at construction),
+            // so `block_out_rate[producer]` / `block_out_center[producer]`
+            // are valid by now.
             let input_meta: Vec<(&str, PortMeta)> = self.entries[i]
                 .spec
                 .inputs
                 .iter()
                 .enumerate()
                 .map(|(port_idx, port_spec)| {
-                    let rate = self.entries[i].input_wires[port_idx]
-                        .and_then(|widx| wire_producer[widx])
-                        .map(|(pb, _)| block_out_rate[pb])
-                        .unwrap_or(0.0);
+                    let producer =
+                        self.entries[i].input_wires[port_idx].and_then(|widx| wire_producer[widx]);
+                    let rate = producer.map(|(pb, _)| block_out_rate[pb]).unwrap_or(0.0);
+                    let centre = producer.map(|(pb, _)| block_out_center[pb]).unwrap_or(0.0);
                     (
                         port_spec.name,
                         PortMeta {
                             sample_rate_hz: rate,
-                            center_freq_hz: 0.0,
+                            center_freq_hz: centre,
                         },
                     )
                 })
@@ -673,6 +675,10 @@ impl Runtime {
             let in0_rate = input_meta
                 .first()
                 .map(|(_, m)| m.sample_rate_hz)
+                .unwrap_or(0.0);
+            let in0_center = input_meta
+                .first()
+                .map(|(_, m)| m.center_freq_hz)
                 .unwrap_or(0.0);
             let mut ctx = InitCtx {
                 input_meta: &input_meta,
@@ -699,12 +705,16 @@ impl Runtime {
                     .init(&mut ctx)
                     .with_context(|| format!("init block {id:?}"))?;
             }
-            // Cache this block's output rate for downstream InitCtx.
-            // Prefer the block's own `output_rate_hz(0)` (sources +
-            // rate-changers); fall back to input[0]'s rate as a 1:1
-            // pass-through for sync blocks (FmDemod, Tee, RssiProbe,
-            // Squelch, …) that don't override the trait method.
+            // Cache this block's output rate + centre for downstream
+            // InitCtx. Prefer the block's own overrides (sources +
+            // rate-changers + frequency translators); fall back to
+            // input[0]'s value as a 1:1 pass-through for sync blocks
+            // (FmDemod, Tee, RssiProbe, Squelch, …) that don't override.
             block_out_rate[i] = self.entries[i].block.output_rate_hz(0).unwrap_or(in0_rate);
+            block_out_center[i] = self.entries[i]
+                .block
+                .output_center_freq_hz(0)
+                .unwrap_or(in0_center);
         }
         self.state = RuntimeState::Initialized;
         Ok(())
@@ -743,6 +753,7 @@ impl Runtime {
             }
         }
         let mut block_out_rate: Vec<f64> = vec![0.0; self.entries.len()];
+        let mut block_out_center: Vec<f64> = vec![0.0; self.entries.len()];
         for i in 0..self.entries.len() {
             let input_meta: Vec<(&str, PortMeta)> = self.entries[i]
                 .spec
@@ -750,15 +761,15 @@ impl Runtime {
                 .iter()
                 .enumerate()
                 .map(|(port_idx, port_spec)| {
-                    let rate = self.entries[i].input_wires[port_idx]
-                        .and_then(|widx| wire_producer[widx])
-                        .map(|(pb, _)| block_out_rate[pb])
-                        .unwrap_or(0.0);
+                    let producer =
+                        self.entries[i].input_wires[port_idx].and_then(|widx| wire_producer[widx]);
+                    let rate = producer.map(|(pb, _)| block_out_rate[pb]).unwrap_or(0.0);
+                    let centre = producer.map(|(pb, _)| block_out_center[pb]).unwrap_or(0.0);
                     (
                         port_spec.name,
                         PortMeta {
                             sample_rate_hz: rate,
-                            center_freq_hz: 0.0,
+                            center_freq_hz: centre,
                         },
                     )
                 })
@@ -766,6 +777,10 @@ impl Runtime {
             let in0_rate = input_meta
                 .first()
                 .map(|(_, m)| m.sample_rate_hz)
+                .unwrap_or(0.0);
+            let in0_center = input_meta
+                .first()
+                .map(|(_, m)| m.center_freq_hz)
                 .unwrap_or(0.0);
             let ctx = InitCtx {
                 input_meta: &input_meta,
@@ -778,6 +793,10 @@ impl Runtime {
                 .update_rates(&ctx)
                 .with_context(|| format!("refresh_rates block {id:?}"))?;
             block_out_rate[i] = self.entries[i].block.output_rate_hz(0).unwrap_or(in0_rate);
+            block_out_center[i] = self.entries[i]
+                .block
+                .output_center_freq_hz(0)
+                .unwrap_or(in0_center);
         }
         Ok(())
     }

@@ -143,11 +143,11 @@ impl LogMagU8 {
     fn start_recording(&mut self, path: PathBuf) -> Result<()> {
         self.finish_recording()?;
         let recorder = Recorder::open(&path, None)?;
-        // Initial sidecar with `bytes_written: 0` — gives an offline
-        // tool the format/frame-size/freq context immediately, even if
-        // the runtime is killed before finish_recording rewrites the
-        // final count.
-        write_sidecar(&path, &self.sidecar_value(0))?;
+        // Initial sidecar with `bytes_written: 0` and no duration —
+        // gives an offline tool the format/frame-size/freq context
+        // immediately, even if the runtime is killed before
+        // finish_recording rewrites the final count.
+        write_sidecar(&path, &self.sidecar_value(0, 0.0))?;
         self.recording = Some(Recording {
             recorder,
             bin_path: path,
@@ -156,17 +156,31 @@ impl LogMagU8 {
         Ok(())
     }
 
-    /// Flush + rewrite the sidecar with the final frame count. Idempotent
-    /// — safe from `stop()`, `Drop`, and apply_live_params(record_path="").
+    /// Flush + rewrite the sidecar with the final frame count *and*
+    /// wall-clock duration. Idempotent — safe from `stop()`, `Drop`,
+    /// and `apply_live_params(record_path="")`.
     #[cfg(not(target_arch = "wasm32"))]
     fn finish_recording(&mut self) -> Result<()> {
         let Some(mut rec) = self.recording.take() else {
             return Ok(());
         };
         let bytes_written = rec.recorder.bytes_written();
+        // Wall-clock elapsed since the first frame landed (set in
+        // tap_recording). 0.0 when no frame ever flowed (recording
+        // opened but never tapped). Offline tools use this to label
+        // the PNG time axis correctly — the unthrottled "rate / frame_size"
+        // estimate is wildly wrong because the FFT block applies a
+        // `max_frames_per_second` throttle (typically 30 fps).
+        let duration_s = rec
+            .started_at
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
         rec.recorder.finalise()?;
-        write_sidecar(&rec.bin_path, &self.sidecar_value(bytes_written))
-            .with_context(|| format!("update sidecar for {}", rec.bin_path.display()))?;
+        write_sidecar(
+            &rec.bin_path,
+            &self.sidecar_value(bytes_written, duration_s),
+        )
+        .with_context(|| format!("update sidecar for {}", rec.bin_path.display()))?;
         Ok(())
     }
 
@@ -204,11 +218,13 @@ impl LogMagU8 {
         Ok(())
     }
 
-    /// Sidecar JSON shape — used both at open (with `bytes_written: 0`)
-    /// and at finalise (with the real count). Frames-written is derived
-    /// for offline tools that prefer that unit.
+    /// Sidecar JSON shape — used both at open (`bytes_written: 0`,
+    /// `capture_duration_s: 0.0`) and at finalise (real values).
+    /// Frames-written is derived; `capture_duration_s` is wall-clock
+    /// elapsed since the first frame so offline tools can label the
+    /// time axis without re-deriving it from the throttled frame rate.
     #[cfg(not(target_arch = "wasm32"))]
-    fn sidecar_value(&self, bytes_written: u64) -> serde_json::Value {
+    fn sidecar_value(&self, bytes_written: u64, duration_s: f64) -> serde_json::Value {
         let frame_size = self.params.size as u64;
         let frames_written = bytes_written.checked_div(frame_size).unwrap_or(0);
         serde_json::json!({
@@ -221,6 +237,7 @@ impl LogMagU8 {
             "fft_ceil_dbfs": SERVER_CEIL_DBFS,
             "bytes_written": bytes_written,
             "frames_written": frames_written,
+            "capture_duration_s": duration_s,
             "source": { "origin": "ferrite-record" },
         })
     }
@@ -328,11 +345,10 @@ impl Block for LogMagU8 {
         // offline tool reading the byte stream knows the time + freq
         // axes without round-tripping through the daemon.
         self.input_sample_rate_hz = ctx.input_rate("in").unwrap_or(0.0);
-        // TODO: today the runtime hardcodes PortMeta.center_freq_hz to
-        // 0.0 (see runtime/src/runtime.rs ~L671/764) — this read is
-        // future-correct for when center-freq propagation lands. Until
-        // then, the sidecar's `center_freq_hz` is 0; offline tools have
-        // to combine with `/api/source` to get the actual RF centre.
+        // PortMeta.center_freq_hz is filled in by the runtime's
+        // centre-freq propagation pass (parallel to block_out_rate);
+        // sources publish via `output_center_freq_hz`, downstream
+        // blocks inherit from input[0] producer.
         self.input_center_freq_hz = ctx
             .input_meta
             .iter()
@@ -348,6 +364,21 @@ impl Block for LogMagU8 {
             let path = self.params.record_path.clone();
             self.start_recording(path)?;
         }
+        Ok(())
+    }
+
+    fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
+        // Re-read upstream metadata so sidecars written *after* a live
+        // retune carry the new RF centre + sample rate. Without this
+        // override we'd keep the init-time snapshot forever — wrong
+        // for the second and subsequent captures on the same pipeline.
+        self.input_sample_rate_hz = ctx.input_rate("in").unwrap_or(self.input_sample_rate_hz);
+        self.input_center_freq_hz = ctx
+            .input_meta
+            .iter()
+            .find(|(n, _)| *n == "in")
+            .map(|(_, m)| m.center_freq_hz)
+            .unwrap_or(self.input_center_freq_hz);
         Ok(())
     }
 

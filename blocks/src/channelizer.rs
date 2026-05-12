@@ -463,10 +463,10 @@ impl Block for Channelizer {
     }
 
     fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
-        // Future-correct read — runtime currently hardcodes
-        // PortMeta.center_freq_hz to 0.0 (runtime/src/runtime.rs
-        // ~L671/764), so the recorded sidecar's `center_freq_hz` will
-        // sit at `freq_shift_hz` until centre-freq propagation lands.
+        // PortMeta.center_freq_hz is filled in by the runtime's
+        // centre-freq propagation pass (parallel to block_out_rate);
+        // sources publish via `output_center_freq_hz`, downstream
+        // blocks inherit from input[0] producer.
         self.input_center_freq_hz = ctx
             .input_meta
             .iter()
@@ -492,11 +492,30 @@ impl Block for Channelizer {
         Some(self.input_rate_hz / self.factor as f64)
     }
 
+    fn output_center_freq_hz(&self, _port: usize) -> Option<f64> {
+        // The channelizer translates the input spectrum by
+        // `freq_shift_hz`: an RF tone at `input_centre + freq_shift_hz`
+        // lands at baseband. Net effect on the output centre is
+        // `input_centre + freq_shift_hz`. The runtime fills in
+        // `input_center_freq_hz` for us at init-time.
+        Some(self.input_center_freq_hz + self.freq_shift_hz)
+    }
+
     fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
         // Same job as the rate path inside `init()`, but safe for a
         // carried-over instance whose one-time external setup already
         // ran. Different log phase so an operator can tell whether a
         // rebuild was first-construct or live rate adaptation.
+        //
+        // Also re-read the upstream centre frequency so sidecars
+        // written *after* a live retune carry the new RF centre — see
+        // `output_center_freq_hz` above for the propagation contract.
+        self.input_center_freq_hz = ctx
+            .input_meta
+            .iter()
+            .find(|(n, _)| *n == "in")
+            .map(|(_, m)| m.center_freq_hz)
+            .unwrap_or(self.input_center_freq_hz);
         self.sync_to_ctx_rate(ctx, "channelizer rate update")
     }
 
