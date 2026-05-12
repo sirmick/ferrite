@@ -1,4 +1,4 @@
-//! Build script for the vendored ft8_lib.
+//! Build script for the vendored `ft8_lib`.
 //!
 //! Compiles a focused subset of `kgoba/ft8_lib` (FT8 + FT4 streaming
 //! decode) for the host's native target *and* `wasm32-unknown-unknown`.
@@ -8,8 +8,8 @@
 //! / `libm.a` at consumer-bundling time.
 //!
 //! New file mapped: add it to `c_sources()` and ensure all upstream
-//! includes resolve through the directories declared on the cc::Build
-//! include path (vendor/ft8, vendor/common, vendor/fft, shim).
+//! includes resolve through the directories declared on the `cc::Build`
+//! include path (`vendor/ft8`, `vendor/common`, `vendor/fft`, `shim`).
 
 use std::path::PathBuf;
 
@@ -92,7 +92,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", shim.join("glue.c").display());
     for dir in ["ft8", "common", "fft"] {
         for entry in walk(&vendor.join(dir)) {
-            if entry.extension().map(|e| e == "h").unwrap_or(false) {
+            if entry.extension().is_some_and(|e| e == "h") {
                 println!("cargo:rerun-if-changed={}", entry.display());
             }
         }

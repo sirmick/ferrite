@@ -1,4 +1,4 @@
-//! Safe Rust wrappers for vendored ft8_lib.
+//! Safe Rust wrappers for vendored `ft8_lib`.
 //!
 //! Two layers:
 //! - `ffi` — `extern "C"` declarations matching the upstream API + the
@@ -132,19 +132,10 @@ pub struct ftx_decode_status_t {
 /// payload buffer + a 16-bit hash for dedup; the human-readable text
 /// is produced separately via `ftx_message_decode`.
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct ftx_message_t {
     pub payload: [u8; 10],
     pub hash: u16,
-}
-
-impl Default for ftx_message_t {
-    fn default() -> Self {
-        Self {
-            payload: [0; 10],
-            hash: 0,
-        }
-    }
 }
 
 /// Per-message return code from `ftx_message_decode`. We only check
@@ -205,8 +196,8 @@ extern "C" {
     ) -> FtxMessageRc;
 }
 
-/// Safe owner of an ft8_lib `monitor_t`. RAII'd via
-/// [`ferrite_monitor_destroy`].
+/// Safe owner of an `ft8_lib` `monitor_t`. RAII'd via
+/// `ferrite_monitor_destroy`.
 pub struct Monitor {
     inner: NonNull<c_void>,
     block_size: usize,
@@ -241,9 +232,13 @@ impl Monitor {
     pub fn new(cfg: &MonitorConfig) -> Option<Self> {
         // SAFETY: `cfg` is a valid `repr(C)` mirror of upstream's struct;
         // the glue function never reads past the layout we declared.
-        let raw = unsafe { ferrite_monitor_create(cfg as *const _) };
+        let raw = unsafe { ferrite_monitor_create(std::ptr::from_ref(cfg)) };
         let inner = NonNull::new(raw)?;
-        let block_size = unsafe { ferrite_monitor_block_size(raw as *const _) } as usize;
+        // block_size is a C `int` that always reports a small positive
+        // FFT block size (a few hundred samples) — the sign-loss cast
+        // is bounded and harmless.
+        #[allow(clippy::cast_sign_loss)]
+        let block_size = unsafe { ferrite_monitor_block_size(raw.cast_const()) } as usize;
         Some(Self { inner, block_size })
     }
 
@@ -259,15 +254,17 @@ impl Monitor {
     /// ingested — that's when [`Self::decode_slot`] will yield
     /// candidates.
     #[must_use]
+    #[allow(clippy::cast_sign_loss)] // C int, always >= 0 in this API.
     pub fn blocks_filled(&self) -> usize {
-        unsafe { ferrite_monitor_blocks_filled(self.inner.as_ptr() as *const _) as usize }
+        unsafe { ferrite_monitor_blocks_filled(self.inner.as_ptr().cast_const()) as usize }
     }
 
     /// Maximum slot size the monitor was sized for, in FFT blocks.
     /// FT8 = 92 blocks (15 s @ 6.25 Hz tone spacing).
     #[must_use]
+    #[allow(clippy::cast_sign_loss)] // C int, always >= 0 in this API.
     pub fn blocks_max(&self) -> usize {
-        unsafe { ferrite_monitor_blocks_max(self.inner.as_ptr() as *const _) as usize }
+        unsafe { ferrite_monitor_blocks_max(self.inner.as_ptr().cast_const()) as usize }
     }
 
     /// Reset the rolling waterfall — call between slot boundaries so
@@ -278,7 +275,7 @@ impl Monitor {
 
     /// Feed one block of `block_size` samples. The monitor pushes the
     /// resulting STFT row into its waterfall. Out-of-range chunks
-    /// (length != block_size) are rejected so a caller bug doesn't
+    /// (length != `block_size`) are rejected so a caller bug doesn't
     /// scribble past the C-side stack frame.
     ///
     /// # Errors
@@ -296,8 +293,9 @@ impl Monitor {
     /// caps the candidate heap (40 is what upstream's demo uses; lower
     /// is faster, higher catches more weak signals).
     #[must_use]
+    #[allow(clippy::cast_sign_loss)] // n_found >= 0 verified before use.
     pub fn decode_slot(&self, max_candidates: usize) -> Vec<Decoded> {
-        let wf = unsafe { ferrite_monitor_waterfall(self.inner.as_ptr() as *const _) };
+        let wf = unsafe { ferrite_monitor_waterfall(self.inner.as_ptr().cast_const()) };
         if wf.is_null() {
             return Vec::new();
         }
@@ -312,10 +310,14 @@ impl Monitor {
             };
             max_candidates.max(1)
         ];
+        // `heap.len()` is bounded by `max_candidates` (caller-supplied
+        // small int); the i32 cast can't truncate in practice.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let heap_len_c = heap.len() as c_int;
         let n_found = unsafe {
             ftx_find_candidates(
                 wf,
-                heap.len() as c_int,
+                heap_len_c,
                 heap.as_mut_ptr(),
                 10, // min_score: upstream's demo uses 10 as the prune threshold.
             )
@@ -331,8 +333,15 @@ impl Monitor {
             // 20 LDPC iters: the demo's default. Higher rescues weaker
             // signals at quadratic cost — over ~50 iters yields stop
             // mattering.
-            let ok =
-                unsafe { ftx_decode_candidate(wf, cand as *const _, 20, &mut msg, &mut status) };
+            let ok = unsafe {
+                ftx_decode_candidate(
+                    wf,
+                    std::ptr::from_ref(cand),
+                    20,
+                    std::ptr::from_mut(&mut msg),
+                    std::ptr::from_mut(&mut status),
+                )
+            };
             if !ok {
                 continue;
             }
@@ -342,16 +351,16 @@ impl Monitor {
             let mut offsets = ftx_message_offsets_t::default();
             let rc = unsafe {
                 ftx_message_decode(
-                    &msg as *const _,
+                    std::ptr::from_ref(&msg),
                     std::ptr::null_mut(),
-                    buf.as_mut_ptr() as *mut c_char,
-                    &mut offsets,
+                    buf.as_mut_ptr().cast::<c_char>(),
+                    std::ptr::from_mut(&mut offsets),
                 )
             };
             if rc != FtxMessageRc::Ok {
                 continue;
             }
-            let text = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr() as *const c_char) }
+            let text = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr().cast::<c_char>()) }
                 .to_string_lossy()
                 .trim()
                 .to_string();
@@ -375,8 +384,7 @@ impl Monitor {
                 time_offset_s: status.time,
                 // Convert candidate score into an SNR estimate the way
                 // upstream's printf path does (score / 2 - 24 dB).
-                #[allow(clippy::cast_precision_loss)]
-                snr_db: (cand.score as f32) * 0.5 - 24.0,
+                snr_db: f32::from(cand.score) * 0.5 - 24.0,
                 text,
                 ldpc_errors: status.ldpc_errors,
             });

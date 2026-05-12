@@ -143,7 +143,7 @@ enum CaptureCmd {
     /// `chan.record_path` on the running pipeline so the post-channelizer
     /// cf32 stream side-tees to disk while the user's UI session keeps
     /// running. `--wideband` swaps in the `capture_fm` preset for a
-    /// full-rate Source → FileIqSink slice (clobbers the live preset,
+    /// full-rate `Source → FileIqSink` slice (clobbers the live preset,
     /// useful for explicit headless captures). The narrowband path
     /// requires the running preset to have a `chan` block.
     Iq {
@@ -568,7 +568,7 @@ impl Driver {
         } else {
             println!(
                 "patched {block}: {} key(s)",
-                v.as_object().map(|o| o.len()).unwrap_or(0)
+                v.as_object().map_or(0, serde_json::Map::len)
             );
         }
         Ok(())
@@ -663,6 +663,7 @@ impl Driver {
     /// `Source → FileIqSink` chain. Freq is required because this path
     /// boots a fresh preset and the source needs a tune target. Stomps
     /// whatever was running — useful for explicit headless captures.
+    #[allow(clippy::too_many_arguments)] // CLI flag fan-out; refactoring into a struct would add ceremony without clarifying anything.
     async fn capture_iq_wideband(
         &self,
         freq: Option<String>,
@@ -764,7 +765,9 @@ impl Driver {
         // start it ourselves and log the auto-start so they know what
         // happened. Avoids the "AI forgot to start the SDR" footgun.
         let initial_status = self.pipeline_status().await;
-        let auto_started = if initial_status != "running" {
+        let auto_started = if initial_status == "running" {
+            false
+        } else {
             if !self.json {
                 eprintln!(
                     "ferrite-ctl: pipeline was {} — auto-starting before {} capture",
@@ -779,8 +782,6 @@ impl Driver {
             // recorded frame isn't mid-init garbage.
             tokio::time::sleep(Duration::from_millis(300)).await;
             true
-        } else {
-            false
         };
 
         let start = json!({
@@ -936,7 +937,10 @@ impl Driver {
             .get(&format!("/api/decoder/recent?since=0&category={category}"))
             .await?;
         let server_now = initial.get("now").and_then(Value::as_u64).unwrap_or(0);
-        let lookback_ms = (lookback * 1000.0) as u64;
+        // CLI-supplied lookback in seconds; the * 1000 fits easily in u64
+        // for any sane window. Negative inputs are clamped to 0 by max().
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let lookback_ms = (lookback.max(0.0) * 1000.0) as u64;
         let mut since = server_now.saturating_sub(lookback_ms);
 
         // If lookback was nonzero, seed the output with the entries we
@@ -958,7 +962,7 @@ impl Driver {
         loop {
             tokio::select! {
                 _ = &mut interrupt => return Ok(()),
-                _ = tokio::time::sleep(dur) => {}
+                () = tokio::time::sleep(dur) => {}
             }
             let path = format!("/api/decoder/recent?since={since}&category={category}");
             let v = self.get(&path).await?;
