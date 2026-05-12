@@ -25,9 +25,21 @@ jobs:
         # clang / lld / wasi-libc: vendored multimon-ng + ft8_lib
         # cross-compile to wasm32 via clang, link against wasi-libc's
         # libc.a — needed for the `cargo check (wasm32)` step below.
+        # python3-{soundfile,scipy,numpy}: feed samples/sigidwiki/
+        # convert.py for the e2e fixtures step below.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsoapysdr-dev clang lld wasi-libc
+          sudo apt-get install -y libsoapysdr-dev clang lld wasi-libc \
+            python3-soundfile python3-scipy python3-numpy
+
+      - name: Convert sigidwiki fixtures to 22050 Hz mono WAV
+        # eas / packet / pager e2e tests load files from
+        # samples/sigidwiki/22050_mono/, which is .gitignore'd
+        # (the WAVs are regenerated from the upstream MP3s). Run the
+        # convert script before cargo test so the tests find their
+        # inputs.
+        run: python3 convert.py
+        working-directory: samples/sigidwiki
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
