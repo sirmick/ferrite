@@ -40,6 +40,7 @@ mod frame_bus;
 mod log_stream;
 mod preset_pipeline;
 mod routes;
+mod soapy_log;
 
 /// Ferrite SDR daemon.
 #[derive(Parser, Debug)]
@@ -241,6 +242,14 @@ async fn main() -> Result<()> {
         .with(fmt::layer().with_target(true))
         .with(log_broadcast.layer())
         .init();
+
+    // Hook libSoapySDR's logger into `tracing` so vendored-driver
+    // warnings (`Not updating IFGR gain because AGC is enabled`,
+    // `sdrplay_api_OutOfRange`, …) flow into `/ws/logs` + the history
+    // ring instead of bypassing the API on stderr. Has to be after
+    // tracing init so the callback's first events have a subscriber
+    // to attach to.
+    soapy_log::install();
 
     let args = Args::parse();
 
