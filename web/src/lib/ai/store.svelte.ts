@@ -312,6 +312,66 @@ class AiStore {
     }
   }
 
+  /** Drop the SDK session id but keep the transcript intact (visible
+   *  history of the prior conversation). The next user message starts
+   *  a fresh session — the sidecar rebuilds the system prompt from
+   *  scratch and re-feeds the operator context (driver_notes,
+   *  setup_description, local_time / time_zone, active mode), which
+   *  the chat store ships on every turn payload. A meta line in the
+   *  transcript marks the reset boundary so the user can see where
+   *  the AI's memory ends. */
+  resetSession(opts: { reason?: string } = {}): void {
+    this.sessionId = null;
+    const tag = opts.reason ? `reset: ${opts.reason}` : 'reset';
+    this.pushTurn({
+      id: this.nextId++,
+      role: 'assistant',
+      t: Date.now(),
+      chunks: [{ kind: 'meta', label: `── ${tag} — context will reload on next turn` }],
+      status: 'complete',
+    });
+    this.persist();
+  }
+
+  /** Send a control envelope asking the sidecar to abort the
+   *  in-flight turn. Optimistically mark the current streaming
+   *  assistant turn so the UI updates immediately — the sidecar
+   *  will follow up with a `ferrite_ai_stopped` envelope when the
+   *  abort actually lands.
+   *
+   *  No-op when no turn is streaming. */
+  stop(): void {
+    if (!this.isStreaming()) return;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'stop' }));
+    }
+  }
+
+  /** True when the most-recent assistant turn is still streaming.
+   *  Used by the panel to gate the Stop button on the actual
+   *  in-flight state, not just connection state. */
+  isStreaming(): boolean {
+    for (let i = this.turns.length - 1; i >= 0; i--) {
+      const t = this.turns[i];
+      if (t.role === 'assistant') return t.status === 'streaming';
+    }
+    return false;
+  }
+
+  /** Append a synthetic assistant turn carrying a single meta chunk.
+   *  Used by the slash-command handler to surface UI-side messages
+   *  (errors, help hints) without a round-trip to the AI. */
+  pushMeta(label: string): void {
+    this.pushTurn({
+      id: this.nextId++,
+      role: 'assistant',
+      t: Date.now(),
+      chunks: [{ kind: 'meta', label }],
+      status: 'complete',
+    });
+    this.persist();
+  }
+
   private openSocket(): void {
     if (!this.url) return;
     this.connection = 'connecting';
@@ -427,6 +487,19 @@ class AiStore {
       this.updateLatestAssistant((a) => {
         a.status = 'error';
         a.errorMessage = msg;
+      });
+      return;
+    }
+    if (t === 'ferrite_ai_stopped') {
+      // Sidecar acknowledged a stop. Mark the streaming turn complete
+      // and add a meta line so the boundary is visible in the
+      // transcript. Reason rides on the envelope (`user` vs `idle`).
+      const reason = typeof event['reason'] === 'string' ? event['reason'] : 'user';
+      this.updateLatestAssistant((a) => {
+        if (a.status === 'streaming') {
+          a.status = 'complete';
+          a.chunks.push({ kind: 'meta', label: `── stopped (${reason})` });
+        }
       });
       return;
     }

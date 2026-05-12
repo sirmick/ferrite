@@ -31,8 +31,44 @@
   function submit() {
     const text = input.trim();
     if (!text) return;
+    // Slash-command escape: anything starting with `/` is intercepted
+    // locally and not sent to the AI. Keeps the chat input the single
+    // entry point for both AI conversation and panel control without
+    // adding a separate command bar.
+    if (text.startsWith('/')) {
+      handleSlashCommand(text);
+      input = '';
+      return;
+    }
     ai.send(text);
     input = '';
+  }
+
+  /** Recognise built-in slash commands the user types into the chat
+   *  input. Unknown commands are surfaced as a hint rather than sent
+   *  to the AI so a typo (`/rseet`) doesn't blow a turn.
+   *
+   *  `/reset` (alias `/clear`, `/new`) drops the SDK session and the
+   *  transcript. The next user message starts a fresh session whose
+   *  system prompt the sidecar rebuilds from scratch — including the
+   *  current driver_notes / setup_description / local_time / mode —
+   *  so the AI sees an up-to-date snapshot of the operator's rig
+   *  rather than a stale resumed view. */
+  function handleSlashCommand(text: string) {
+    const [cmd, ...rest] = text.slice(1).trim().split(/\s+/);
+    switch (cmd.toLowerCase()) {
+      case 'reset':
+      case 'clear':
+      case 'new':
+        ai.resetSession({ reason: rest.join(' ').trim() || undefined });
+        return;
+      case 'help':
+        ai.pushMeta('slash commands: /reset — drop session + reload context on next turn');
+        return;
+      default:
+        ai.pushMeta(`unknown slash command: /${cmd} (try /help)`);
+        return;
+    }
   }
 
   function onKeydown(e: KeyboardEvent) {
@@ -359,18 +395,34 @@
 
   <!-- Input -->
   <div class="border-t border-slate-800 px-2 py-1">
-    <textarea
-      class="min-h-[2.5rem] w-full resize-none rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[12px] focus:border-slate-500 focus:outline-none disabled:opacity-50"
-      placeholder={ai.connection === 'connected'
-        ? 'Ask the AI… (Enter to send, Shift+Enter for newline)'
-        : ai.connection === 'connecting'
-          ? 'connecting to ferrite-ai…'
-          : 'ferrite-ai is offline — start `npm run dev` in tools/ferrite-ai/'}
-      rows="2"
-      bind:value={input}
-      onkeydown={onKeydown}
-      disabled={ai.connection !== 'connected'}
-    ></textarea>
+    <div class="flex items-stretch gap-1">
+      <textarea
+        class="min-h-[2.5rem] flex-1 resize-none rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[12px] focus:border-slate-500 focus:outline-none disabled:opacity-50"
+        placeholder={ai.connection === 'connected'
+          ? 'Ask the AI… (Enter to send, Shift+Enter for newline)'
+          : ai.connection === 'connecting'
+            ? 'connecting to ferrite-ai…'
+            : 'ferrite-ai is offline — start `npm run dev` in tools/ferrite-ai/'}
+        rows="2"
+        bind:value={input}
+        onkeydown={onKeydown}
+        disabled={ai.connection !== 'connected'}
+      ></textarea>
+      <!-- Stop button: enabled while the AI is mid-turn. Sends
+           {type: "stop"} to the sidecar; the SDK's per-turn
+           AbortController cancels the in-flight query, and the
+           sidecar replies with `ferrite_ai_stopped` which the
+           store renders as a `── stopped (user)` meta line. -->
+      <button
+        type="button"
+        class="rounded border border-rose-700 bg-rose-900/30 px-2 text-[11px] font-medium text-rose-200 hover:border-rose-500 hover:bg-rose-900/50 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-600"
+        onclick={() => ai.stop()}
+        disabled={!ai.isStreaming()}
+        title="stop the AI mid-turn"
+      >
+        ◼ stop
+      </button>
+    </div>
   </div>
 
   <!-- Activity transcript: filtered ai::activity log -->

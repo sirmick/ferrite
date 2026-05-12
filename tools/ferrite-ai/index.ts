@@ -236,6 +236,9 @@ function allowedToolsFor(mode: Mode): string[] {
 }
 
 type IncomingMessage = {
+  /** Control envelope shape — `{type: "stop"}` aborts the current
+   *  turn. Plain text messages have no `type` and use `text`. */
+  type?: "stop" | string;
   text?: string;
   mode?: Mode | string;
   /** Caller-supplied resume id — when present, takes precedence over
@@ -323,6 +326,12 @@ wss.on("connection", (ws) => {
   // message but the default for the connection is the first mode seen
   // (or DEFAULT_MODE).
   let currentMode: Mode = DEFAULT_MODE;
+  // AbortController for the currently-running turn (null when idle).
+  // The client can send `{type: "stop"}` to abort the in-flight
+  // query; we call `.abort()` on this and the SDK terminates the
+  // event stream. The for-await loop sees the rejection and falls
+  // through into a `ferrite_ai_stopped` envelope.
+  let activeAbort: AbortController | null = null;
 
   console.log(`[ferrite-ai] client connected (mode default=${currentMode})`);
   ws.send(
@@ -335,10 +344,20 @@ wss.on("connection", (ws) => {
 
   ws.on("message", async (raw) => {
     const parsed = parseIncoming(raw);
+    // Control envelopes don't carry `text`. `{type: "stop"}` aborts
+    // the in-flight turn; anything else with no text is an error.
     if (!parsed.text) {
+      if (parsed.type === "stop") {
+        if (activeAbort) {
+          activeAbort.abort();
+        } else {
+          send(ws, { type: "ferrite_ai_stopped", reason: "idle" });
+        }
+        return;
+      }
       send(ws, {
         type: "ferrite_ai_error",
-        message: "expected JSON {text, mode?}",
+        message: "expected JSON {text, mode?} or {type: 'stop'}",
       });
       return;
     }
@@ -354,7 +373,15 @@ wss.on("connection", (ws) => {
 
     const transcript = new TurnTranscript(mode, parsed.text);
 
+    // Per-turn AbortController. The SDK's `abortController` option
+    // is the supported way to cancel mid-query for non-streaming
+    // input (the streaming-input `.interrupt()` method requires a
+    // bigger refactor — async-iterable prompts).
+    const turnAbort = new AbortController();
+    activeAbort = turnAbort;
+
     const opts: Options = {
+      abortController: turnAbort,
       systemPrompt: appendPromptExtras(
         SYSTEM_PROMPTS[mode],
         parsed.driver_notes,
@@ -399,21 +426,42 @@ wss.on("connection", (ws) => {
         transcript.ingest(e);
         send(ws, event);
       }
-      transcript.finish("done");
-      send(ws, { type: "ferrite_ai_done", mode });
+      if (turnAbort.signal.aborted) {
+        transcript.finish("error", "stopped by user");
+        send(ws, { type: "ferrite_ai_stopped", reason: "user" });
+      } else {
+        transcript.finish("done");
+        send(ws, { type: "ferrite_ai_done", mode });
+      }
     } catch (err) {
-      const msg = String(err);
-      transcript.finish("error", msg);
-      console.error("[ferrite-ai] turn failed:", err);
-      send(ws, {
-        type: "ferrite_ai_error",
-        message: msg,
-      });
+      if (turnAbort.signal.aborted) {
+        // The SDK surfaces aborts as thrown errors. Treat as a clean
+        // stop, not a fatal error.
+        transcript.finish("error", "stopped by user");
+        send(ws, { type: "ferrite_ai_stopped", reason: "user" });
+      } else {
+        const msg = String(err);
+        transcript.finish("error", msg);
+        console.error("[ferrite-ai] turn failed:", err);
+        send(ws, {
+          type: "ferrite_ai_error",
+          message: msg,
+        });
+      }
+    } finally {
+      if (activeAbort === turnAbort) activeAbort = null;
     }
   });
 
   ws.on("close", () => {
     console.log("[ferrite-ai] client disconnected");
+    // Cancel any in-flight turn so it doesn't hang forever on a
+    // disconnected client. The SDK won't have anywhere to send
+    // events anyway.
+    if (activeAbort) {
+      activeAbort.abort();
+      activeAbort = null;
+    }
     sessionId = null;
   });
 });
