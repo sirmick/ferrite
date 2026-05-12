@@ -68,6 +68,12 @@
   let manualFloorDbfs = $derived(clientControls.get('client.spectrum.displayFloorDbfs'));
   let manualCeilDbfs = $derived(clientControls.get('client.spectrum.displayCeilDbfs'));
   let viewZoom = $derived(clientControls.get('client.spectrum.viewZoom'));
+  // Waterfall contrast (separate from the spectrum trace's display
+  // range — the waterfall is byte-quantised and uses its own
+  // percentile-based auto-track by default).
+  let wfAuto = $derived(clientControls.get('client.waterfall.autoContrast'));
+  let wfFloor = $derived(clientControls.get('client.waterfall.contrastFloorDbfs'));
+  let wfCeil = $derived(clientControls.get('client.waterfall.contrastCeilDbfs'));
 </script>
 
 <div
@@ -195,6 +201,49 @@
       }}
     />
     <span class="w-10 text-slate-400">{manualFloorDbfs}</span>
+  </span>
+
+  <div class="mx-1 h-4 border-l border-slate-800"></div>
+
+  <!-- Waterfall contrast: separate from the spectrum trace's floor/ceil
+       above. The waterfall renderer can auto-stretch its palette
+       window to P5/P98 of recent FFT rows (so the noise floor sits in
+       dark blue and strong carriers reach bright white regardless of
+       band-by-band noise differences), or use a fixed dBFS window. -->
+  <label
+    class="flex items-center gap-1"
+    title="auto-stretch the waterfall colormap to recent P5/P98 of the byte stream"
+  >
+    <input
+      type="checkbox"
+      checked={wfAuto}
+      onchange={(e) =>
+        void applyControl(
+          'client.waterfall.autoContrast',
+          (e.currentTarget as HTMLInputElement).checked,
+        )}
+    />
+    <span>wf auto</span>
+  </label>
+  <span
+    class="flex items-center gap-2 font-mono text-[10px]"
+    title="manual waterfall contrast window (dBFS)"
+  >
+    <span class="w-8 text-right text-slate-400">{wfCeil}</span>
+    <DbRangeSlider
+      floor={wfFloor}
+      ceil={wfCeil}
+      disabled={wfAuto}
+      onChange={(next) => {
+        if (next.floor !== wfFloor) {
+          void applyControl('client.waterfall.contrastFloorDbfs', next.floor);
+        }
+        if (next.ceil !== wfCeil) {
+          void applyControl('client.waterfall.contrastCeilDbfs', next.ceil);
+        }
+      }}
+    />
+    <span class="w-10 text-slate-400">{wfFloor}</span>
   </span>
 
   <div class="mx-1 h-4 border-l border-slate-800"></div>

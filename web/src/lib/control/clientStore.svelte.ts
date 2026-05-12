@@ -43,6 +43,18 @@ export const CLIENT_DEFAULTS = {
   'client.spectrum.displayFloorDbfs': -140,
   'client.spectrum.displayCeilDbfs': -20,
 
+  // Waterfall contrast knobs. When `autoContrast` is on, the renderer
+  // computes P5/P98 of recent FFT rows and stretches that to the full
+  // palette (noise floor in dark blue, strong carriers in bright
+  // white — self-adjusts as you tune across bands). When off, the
+  // manual `contrastFloorDbfs` / `contrastCeilDbfs` window is used
+  // directly. Same dBFS units as the spectrum range, on the same
+  // [−160, 0] server quantisation surface — so a slider feels
+  // familiar.
+  'client.waterfall.autoContrast': true,
+  'client.waterfall.contrastFloorDbfs': -110,
+  'client.waterfall.contrastCeilDbfs': -30,
+
   // Audio playback
   'client.audio.volume': 1.0,
   'client.audio.muted': false,

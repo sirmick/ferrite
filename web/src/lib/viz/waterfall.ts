@@ -37,12 +37,22 @@ uniform float u_head;
 // data texture. At 1× zoom the defaults are 0 and 1, which is a no-op.
 uniform float u_xOffset;
 uniform float u_xScale;
+// Auto-contrast remap: stretch raw byte luminance from
+// [u_displayFloor, u_displayCeil] (both in [0, 1] texel space) to
+// [0, 1] palette space. Values outside the window clamp to the
+// floor/ceil ends so noise-side outliers don't drag the colour ramp.
+// Defaults to (0, 1) — a no-op — so the renderer is identical to the
+// previous version when auto-contrast is disabled.
+uniform float u_displayFloor;
+uniform float u_displayCeil;
 void main() {
   float offset = 1.0 - v_uv.y;
   float v = fract(u_head - offset);
   float u = u_xOffset + v_uv.x * u_xScale;
   float lum = texture(u_data, vec2(u, v)).r;
-  outColor = texture(u_palette, vec2(lum, 0.5));
+  float range = max(u_displayCeil - u_displayFloor, 1.0 / 256.0);
+  float stretched = clamp((lum - u_displayFloor) / range, 0.0, 1.0);
+  outColor = texture(u_palette, vec2(stretched, 0.5));
 }
 `;
 
@@ -115,6 +125,8 @@ export class WaterfallRenderer {
   private readonly uHead: WebGLUniformLocation;
   private readonly uXOffset: WebGLUniformLocation;
   private readonly uXScale: WebGLUniformLocation;
+  private readonly uDisplayFloor: WebGLUniformLocation;
+  private readonly uDisplayCeil: WebGLUniformLocation;
   private readonly rows: number;
   private cols = 0;
   private head = 0;
@@ -122,6 +134,25 @@ export class WaterfallRenderer {
   private disposed = false;
   private xOffset = 0;
   private xScale = 1;
+  // Smoothed display-range floor + ceil in normalised byte units
+  // (0 = byte 0, 1 = byte 255). Recomputed from row percentiles in
+  // `pushRow` when `autoContrast` is on; EMA-smoothed so it doesn't
+  // flicker on noisy ticks. When `autoContrast` is off, these get
+  // overwritten by `setManualContrast`.
+  private displayFloor = 0;
+  private displayCeil = 1;
+  // Histogram scratch (256 buckets, one per byte value). Reused
+  // across rows to avoid per-frame allocation.
+  private readonly hist = new Uint32Array(256);
+  // How often (in rows) to recompute the percentile window.
+  // 1 = every row; higher = smoother but lags fast band changes.
+  private autoContrastEvery = 4;
+  private rowCount = 0;
+  // Auto-contrast on/off. When off, `manualFloor`/`manualCeil` drive
+  // the uniforms directly and the percentile pass is skipped.
+  private autoContrast = true;
+  private manualFloor = 0;
+  private manualCeil = 1;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -188,17 +219,23 @@ export class WaterfallRenderer {
     const uHead = gl.getUniformLocation(this.program, 'u_head');
     const uXOffset = gl.getUniformLocation(this.program, 'u_xOffset');
     const uXScale = gl.getUniformLocation(this.program, 'u_xScale');
-    if (!uData || !uPalette || !uHead || !uXOffset || !uXScale)
+    const uDisplayFloor = gl.getUniformLocation(this.program, 'u_displayFloor');
+    const uDisplayCeil = gl.getUniformLocation(this.program, 'u_displayCeil');
+    if (!uData || !uPalette || !uHead || !uXOffset || !uXScale || !uDisplayFloor || !uDisplayCeil)
       throw new Error('uniform lookup failed');
     this.uHead = uHead;
     this.uXOffset = uXOffset;
     this.uXScale = uXScale;
+    this.uDisplayFloor = uDisplayFloor;
+    this.uDisplayCeil = uDisplayCeil;
 
     gl.useProgram(this.program);
     gl.uniform1i(uData, 0);
     gl.uniform1i(uPalette, 1);
     gl.uniform1f(uXOffset, 0);
     gl.uniform1f(uXScale, 1);
+    gl.uniform1f(uDisplayFloor, 0);
+    gl.uniform1f(uDisplayCeil, 1);
     gl.useProgram(null);
 
     this.resize();
@@ -234,7 +271,85 @@ export class WaterfallRenderer {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.head, this.cols, 1, gl.RED, gl.UNSIGNED_BYTE, row);
     this.head = (this.head + 1) % this.rows;
+    this.rowCount += 1;
+    if (this.autoContrast && this.rowCount % this.autoContrastEvery === 0) {
+      this.updateAutoContrast(row);
+    } else if (!this.autoContrast) {
+      // Manual mode: uniforms snap to the user-set window every row
+      // (cheap; just two float writes on the JS side, the draw
+      // already runs on rAF). Keeps the renderer's display state in
+      // sync if the user toggled away from auto recently.
+      this.displayFloor = this.manualFloor;
+      this.displayCeil = this.manualCeil;
+    }
     this.scheduleDraw();
+  }
+
+  /** Switch between auto-contrast (percentile-stretched) and manual
+   *  (fixed floor/ceil). When `auto` is true, the renderer recomputes
+   *  the window from each row's percentiles; when false, it uses the
+   *  values most recently passed to `setManualContrast`. */
+  setAutoContrast(auto: boolean): void {
+    this.autoContrast = auto;
+    this.scheduleDraw();
+  }
+
+  /** Set the manual contrast window in normalised byte units
+   *  (0 = byte 0, 1 = byte 255). Only takes effect when auto-contrast
+   *  is off. */
+  setManualContrast(floor: number, ceil: number): void {
+    this.manualFloor = Math.max(0, Math.min(1, floor));
+    this.manualCeil = Math.max(this.manualFloor + 1 / 256, Math.min(1, ceil));
+    if (!this.autoContrast) this.scheduleDraw();
+  }
+
+  /** Compute P5 / P98 of the row's byte values via histogram and
+   *  EMA-smooth them into the display floor/ceil uniforms. The shader
+   *  stretches that window to fill the palette — noise floor walks
+   *  with the band (HF picks up more atmospheric hash than VHF), and
+   *  strong carriers don't compress the noise band into one indistinct
+   *  blue smear. */
+  private updateAutoContrast(row: Uint8Array): void {
+    // O(N) histogram build (one pass through the row).
+    this.hist.fill(0);
+    for (let i = 0; i < row.length; i++) {
+      this.hist[row[i]] += 1;
+    }
+    // P5 / P95 via cumulative count. Asymmetric window keeps the noise
+    // floor visible (low percentile near noise edge) and saturates only
+    // the brightest few percent of bins (strong carrier whites).
+    const total = row.length;
+    const loCount = Math.floor(total * 0.05);
+    const hiCount = Math.floor(total * 0.98);
+    let cum = 0;
+    let pLo = 0;
+    let pHi = 255;
+    for (let b = 0; b < 256; b++) {
+      cum += this.hist[b];
+      if (pLo === 0 && cum >= loCount) pLo = b;
+      if (cum >= hiCount) {
+        pHi = b;
+        break;
+      }
+    }
+    // Floor a tiny bit below P5 so the noise floor sits in the
+    // dark-blue band, not pure black. Ceil a hair above P95 so strong
+    // carriers actually reach the bright end of the palette.
+    let floor = Math.max(0, pLo - 4) / 255;
+    let ceil = Math.min(255, pHi + 6) / 255;
+    // Guard against a degenerate flat row (all-zero / all-same byte)
+    // which would collapse the window to a point — fall back to no
+    // stretch in that case.
+    if (ceil - floor < 0.05) {
+      floor = 0;
+      ceil = 1;
+    }
+    // EMA against the previous window. 0.3 is fast enough to follow a
+    // tune across a band edge in ~5 row updates but slow enough that
+    // a single bursty signal doesn't shove the floor up.
+    const alpha = 0.3;
+    this.displayFloor = this.displayFloor * (1 - alpha) + floor * alpha;
+    this.displayCeil = this.displayCeil * (1 - alpha) + ceil * alpha;
   }
 
   /** Resize the drawing buffer to the CSS size. Call on resize. */
@@ -294,6 +409,8 @@ export class WaterfallRenderer {
     gl.uniform1f(this.uHead, this.head / this.rows);
     gl.uniform1f(this.uXOffset, this.xOffset);
     gl.uniform1f(this.uXScale, this.xScale);
+    gl.uniform1f(this.uDisplayFloor, this.displayFloor);
+    gl.uniform1f(this.uDisplayCeil, this.displayCeil);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(null);
     gl.useProgram(null);

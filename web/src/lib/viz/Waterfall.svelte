@@ -137,9 +137,29 @@
 
   let renderer: WaterfallRenderer | undefined;
 
+  // Waterfall contrast knobs — auto-track P5/P98 of the byte stream by
+  // default; manual override expressed in dBFS to match the spectrum
+  // pane's slider. SERVER_FLOOR_DBFS / SERVER_CEIL_DBFS are the same
+  // -160..0 window LogMagU8 quantises to (see blocks/src/log_mag_u8.rs),
+  // so a dBFS value maps to a normalised byte by (dBFS + 160) / 160.
+  const WF_FLOOR_DBFS = -160;
+  const WF_CEIL_DBFS = 0;
+  function dbfsToByte01(d: number): number {
+    return (d - WF_FLOOR_DBFS) / (WF_CEIL_DBFS - WF_FLOOR_DBFS);
+  }
+  let autoContrast = $derived(clientControls.get('client.waterfall.autoContrast'));
+  let floorDbfs = $derived(clientControls.get('client.waterfall.contrastFloorDbfs'));
+  let ceilDbfs = $derived(clientControls.get('client.waterfall.contrastCeilDbfs'));
+
   onMount(() => {
     if (!canvas) return;
     renderer = new WaterfallRenderer(canvas, { rows });
+    // Push the persisted contrast state into the renderer on mount
+    // — derived effects run later, but mount-time state needs to be
+    // applied before the first row uploads so the first paint isn't
+    // a flash of unstyled palette.
+    renderer.setAutoContrast(autoContrast);
+    renderer.setManualContrast(dbfsToByte01(floorDbfs), dbfsToByte01(ceilDbfs));
     const ro = new ResizeObserver(() => renderer?.resize());
     ro.observe(canvas);
     return () => {
@@ -147,6 +167,13 @@
       renderer?.destroy();
       renderer = undefined;
     };
+  });
+
+  // Sync contrast settings into the renderer reactively.
+  $effect(() => {
+    if (!renderer) return;
+    renderer.setAutoContrast(autoContrast);
+    renderer.setManualContrast(dbfsToByte01(floorDbfs), dbfsToByte01(ceilDbfs));
   });
 
   $effect(() => {
