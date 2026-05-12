@@ -5,6 +5,53 @@
   "sample_rate_choices_hz": [500000, 1000000, 2000000, 4000000, 6000000, 8000000, 10000000],
   "max_sample_rate_hz": 10000000,
   "if_filter_ladder_hz": [200000, 300000, 600000, 1536000, 5000000, 6000000, 7000000, 8000000],
-  "hidden_settings": ["rfgain_sel"],
-  "notes": "IF filter picked as the largest ladder entry ≤ Fs. SDRplay's own default of 200 kHz brick-walls the spectrum at ±100 kHz, and any filter wider than Fs makes the driver silently upclock Fs — so we pick from the ladder explicitly rather than leaving it to the driver. Advertised max of 10.66 MS/s fails activateStream in practice; clamped to 10 MS/s. `rfgain_sel` hidden from the advanced panel because it duplicates the `RFGR` gain element (same LNA state, two Soapy surfaces)."
+  "gain_inverted": true,
+  "gain_label": "gain (dB)",
+  "gain_description": "Inverted client-side: higher slider position = more received signal. SoapySDRPlay3 reports element ranges as gain *reduction* (gRdB / LNAstate), so the raw param `gain_db` is in attenuation terms — the slider applies `displayed = max - raw` to match the universal SDR-app convention. The driver's master setGain distributes across IFGR (range 20–59) first then RFGR (0–27); peak total signal is at displayed=66 (raw=0).",
+  "setting_overrides": {
+    "rfgain_sel": {
+      "label": "LNA attenuation",
+      "description": "Front-end LNA-state index. 0 = no attenuation (maximum gain); higher values insert attenuator stages whose dB amount depends on the frequency band — see appendix 5 of the SDRplay API spec for the exact ladder. Default 4 ≈ 37 dB attenuation at HF, which buries weak HF signals (FT8 / WSPR / SSB DX); set to 0 for HF reception. Despite the upstream SoapySDRPlay3 label of 'RF Gain Select', this is an attenuator index, not a gain knob — lower is louder.",
+      "option_labels": {
+        "0": "0 · no atten (max gain)",
+        "27": "27 · max atten"
+      }
+    },
+    "rfnotch_ctrl": {
+      "label": "AM/FM broadcast notch",
+      "description": "RSPdx hardware notch covering AM (540–1.7 MHz) + FM (88–108 MHz) broadcast bands. Default ON to keep strong locals out when receiving away from those bands; auto-disabled when the centre is inside AM or FM."
+    },
+    "dabnotch_ctrl": {
+      "label": "DAB Band III notch",
+      "description": "RSPdx hardware notch over DAB Band III (170–240 MHz). Default ON; auto-disabled when the centre is inside Band III."
+    },
+    "hdr_ctrl": {
+      "label": "HDR mode (≤ 2 MHz only)",
+      "description": "RSPdx high-dynamic-range mode for the LF/MW bands below 2 MHz. Has no effect above 2 MHz; safe to leave default-ON."
+    },
+    "biasT_ctrl": {
+      "label": "Bias-T (DC on antenna)",
+      "description": "Applies +4.7 V DC on the antenna port for active LNAs / preamps. Default OFF — turn ON only when the connected antenna explicitly needs it."
+    }
+  },
+  "auto_settings": [
+    {
+      "key": "rfnotch_ctrl",
+      "freq_bands_hz": [
+        [540000, 1700000],
+        [88000000, 108000000]
+      ],
+      "value_in_band": "false",
+      "value_out_of_band": "true",
+      "rationale": "AM/FM broadcast notch: disable when receiving inside the AM or FM band, leave ON otherwise."
+    },
+    {
+      "key": "dabnotch_ctrl",
+      "freq_bands_hz": [[170000000, 240000000]],
+      "value_in_band": "false",
+      "value_out_of_band": "true",
+      "rationale": "DAB Band III notch: disable inside 170–240 MHz."
+    }
+  ],
+  "notes": "IF filter picked as the largest ladder entry ≤ Fs. SDRplay's own default of 200 kHz brick-walls the spectrum at ±100 kHz, and any filter wider than Fs makes the driver silently upclock Fs — so we pick from the ladder explicitly rather than leaving it to the driver. Advertised max of 10.66 MS/s fails activateStream in practice; clamped to 10 MS/s. `rfgain_sel` is exposed (with a clarifying label override) since the upstream SoapySDR label calls it a gain knob but it's actually an LNA attenuator index — leaving it default-4 caused a 37 dB drop on HF that hid weak signals."
 }

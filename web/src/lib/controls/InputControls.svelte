@@ -12,7 +12,18 @@
 
   import { pipeline } from '$lib/pipeline.svelte';
   import type { RangeSpec, SettingInfo, SettingType } from '$lib/api/devices';
-  import { fullBandwidthChoices, fullRateChoices, hiddenSettingsFor } from './optionsModel';
+  import {
+    fullBandwidthChoices,
+    fullRateChoices,
+    gainDescriptionFor,
+    gainDisplayValue,
+    gainInvertedFor,
+    gainLabelFor,
+    gainRawValue,
+    hiddenSettingsFor,
+    settingOverridesFor,
+    type SettingOverride,
+  } from './optionsModel';
   import { applyControl } from '$lib/control/dispatch';
 
   let caps = $derived(
@@ -28,19 +39,50 @@
   let rateChoices = $derived(caps ? fullRateChoices(caps) : []);
   let bwChoices = $derived(caps ? fullBandwidthChoices(caps) : []);
   let hiddenSettings = $derived(new Set(caps ? hiddenSettingsFor(caps) : []));
-  // Drop preset-hidden keys. Used today for SDRplay's `rfgain_sel`, which
-  // duplicates the `RFGR` gain element — rendering both would fight.
+  // Driver-specific UI overrides for misleading upstream labels — see
+  // `SettingOverride` in optionsModel.ts. The lookup happens per-render
+  // through `effectiveLabel` / `effectiveDescription` so the override
+  // JSON is the single source of truth without per-key Svelte plumbing.
+  let settingOverrides = $derived<Record<string, SettingOverride>>(
+    caps ? settingOverridesFor(caps) : {},
+  );
+  // Drop preset-hidden keys.
   let visibleSettings = $derived((caps?.settings ?? []).filter((s) => !hiddenSettings.has(s.key)));
+
+  function effectiveLabel(s: SettingInfo): string {
+    return settingOverrides[s.key]?.label ?? s.label;
+  }
+  function effectiveDescription(s: SettingInfo): string | undefined {
+    return settingOverrides[s.key]?.description ?? s.description ?? undefined;
+  }
+  function effectiveOptionLabel(s: SettingInfo, optValue: string, optLabel: string | null): string {
+    return settingOverrides[s.key]?.option_labels?.[optValue] ?? optLabel ?? optValue;
+  }
 
   let freqRange = $derived(channel?.frequency_ranges_hz[0] ?? null);
   let overallGainRange = $derived(channel?.overall_gain_range_db ?? null);
   let antennas = $derived(channel?.antennas ?? []);
   let hasAgc = $derived(channel?.has_agc ?? false);
+  // Driver-specific master-gain label/tooltip — see gainLabelFor /
+  // gainDescriptionFor in optionsModel.ts. SDRplay's "overall" gain
+  // only spans IFGR; we relabel to "IF gain (dB)" so users don't expect
+  // it to drive the LNA stage too.
+  let gainLabel = $derived(caps ? gainLabelFor(caps) : 'gain (dB)');
+  let gainDescription = $derived(caps ? gainDescriptionFor(caps) : undefined);
+  // Per-driver inversion of the master gain slider — see optionsModel.ts.
+  let gainInverted = $derived(caps ? gainInvertedFor(caps) : false);
 
   let currentRate = $derived(numberOr(params.sample_rate_hz, rateChoices[0] ?? NaN));
   let currentBw = $derived(numberOr(params.bandwidth_hz, NaN));
   let currentFreqMHz = $derived(numberOr(params.center_freq_hz, NaN) / 1e6);
   let currentGain = $derived(numberOr(params.gain_db, overallGainRange?.min ?? 0));
+  // Inverted-aware displayed value (see optionsModel.ts). The slider
+  // binds to `gainDisplay` so the user-visible knob matches the
+  // universal "higher = more amplification" convention regardless of
+  // whether the driver reports gain or gain-reduction.
+  let gainDisplay = $derived(
+    overallGainRange ? gainDisplayValue(currentGain, overallGainRange, gainInverted) : currentGain,
+  );
   let currentAntenna = $derived(
     typeof params.antenna === 'string' ? (params.antenna as string) : (antennas[0] ?? ''),
   );
@@ -97,7 +139,8 @@
 
   function settingTooltip(s: SettingInfo): string {
     const parts: string[] = [];
-    if (s.description) parts.push(s.description);
+    const desc = effectiveDescription(s);
+    if (desc) parts.push(desc);
     parts.push(`key: ${s.key}`);
     parts.push(`type: ${s.data_type}`);
     if (s.range) parts.push(rangeTooltip(s.range, s.units ?? ''));
@@ -184,28 +227,32 @@
         </label>
       {/if}
       {#if overallGainRange}
-        <label class="row" title={rangeTooltip(overallGainRange, 'dB')}>
-          <span class="label">gain (dB)</span>
+        <label class="row" title={gainDescription ?? rangeTooltip(overallGainRange, 'dB')}>
+          <span class="label">{gainLabel}</span>
           <div class="range">
             <input
               type="range"
               min={overallGainRange.min}
               max={overallGainRange.max}
               step={overallGainRange.step ?? 1}
-              value={currentGain}
+              value={gainDisplay}
               disabled={busy || pending !== null || currentAgc}
-              oninput={(e) =>
-                commit('gain_db', Number((e.currentTarget as HTMLInputElement).value))}
+              oninput={(e) => {
+                const displayed = Number((e.currentTarget as HTMLInputElement).value);
+                commit('gain_db', gainRawValue(displayed, overallGainRange, gainInverted));
+              }}
             />
             <input
               type="number"
               min={overallGainRange.min}
               max={overallGainRange.max}
               step={overallGainRange.step ?? 1}
-              value={currentGain}
+              value={gainDisplay}
               disabled={busy || pending !== null || currentAgc}
-              onchange={(e) =>
-                commit('gain_db', Number((e.currentTarget as HTMLInputElement).value))}
+              onchange={(e) => {
+                const displayed = Number((e.currentTarget as HTMLInputElement).value);
+                commit('gain_db', gainRawValue(displayed, overallGainRange, gainInverted));
+              }}
             />
           </div>
         </label>
@@ -246,7 +293,7 @@
       {#each visibleSettings as s (s.key)}
         {@const value = settingValue(s)}
         <label class="row" title={settingTooltip(s)}>
-          <span class="label">{s.label}{s.units ? ` (${s.units})` : ''}</span>
+          <span class="label">{effectiveLabel(s)}{s.units ? ` (${s.units})` : ''}</span>
 
           {#if s.data_type === 'bool'}
             <input
@@ -263,7 +310,7 @@
               onchange={(e) => commitSetting(s, (e.currentTarget as HTMLSelectElement).value)}
             >
               {#each s.options as opt (opt.value)}
-                <option value={opt.value}>{opt.label ?? opt.value}</option>
+                <option value={opt.value}>{effectiveOptionLabel(s, opt.value, opt.label)}</option>
               {/each}
             </select>
           {:else if s.range && (s.data_type === 'int' || s.data_type === 'float')}

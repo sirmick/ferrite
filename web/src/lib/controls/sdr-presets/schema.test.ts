@@ -5,6 +5,21 @@
 
 import { describe, expect, it } from 'vitest';
 
+interface SettingOverride {
+  label?: string;
+  description?: string;
+  hidden?: boolean;
+  option_labels?: Record<string, string>;
+}
+
+interface AutoSetting {
+  key: string;
+  freq_bands_hz: Array<[number, number]>;
+  value_in_band: string;
+  value_out_of_band: string;
+  rationale?: string;
+}
+
 interface Preset {
   driver_key: string;
   label?: string;
@@ -13,6 +28,11 @@ interface Preset {
   max_sample_rate_hz?: number;
   if_filter_ladder_hz?: number[];
   hidden_settings?: string[];
+  setting_overrides?: Record<string, SettingOverride>;
+  auto_settings?: AutoSetting[];
+  gain_label?: string;
+  gain_description?: string;
+  gain_inverted?: boolean;
   notes?: string;
 }
 
@@ -24,7 +44,21 @@ const KNOWN_FIELDS = new Set([
   'max_sample_rate_hz',
   'if_filter_ladder_hz',
   'hidden_settings',
+  'setting_overrides',
+  'auto_settings',
+  'gain_label',
+  'gain_description',
+  'gain_inverted',
   'notes',
+]);
+
+const SETTING_OVERRIDE_FIELDS = new Set(['label', 'description', 'hidden', 'option_labels']);
+const AUTO_SETTING_FIELDS = new Set([
+  'key',
+  'freq_bands_hz',
+  'value_in_band',
+  'value_out_of_band',
+  'rationale',
 ]);
 
 // Eager glob — same pattern optionsModel.ts uses so the test stays in
@@ -99,6 +133,54 @@ describe('sdr-presets schema', () => {
           expect(p.if_filter_ladder_hz[i]).toBeGreaterThan(0);
           if (i > 0) {
             expect(p.if_filter_ladder_hz[i]).toBeGreaterThan(p.if_filter_ladder_hz[i - 1]);
+          }
+        }
+      });
+
+      it('setting_overrides (if present) has only known per-key fields', () => {
+        if (p.setting_overrides === undefined) return;
+        expect(typeof p.setting_overrides).toBe('object');
+        for (const [key, ov] of Object.entries(p.setting_overrides)) {
+          expect(typeof key).toBe('string');
+          expect(key.length, `${name}/setting_overrides: empty key`).toBeGreaterThan(0);
+          for (const f of Object.keys(ov)) {
+            expect(
+              SETTING_OVERRIDE_FIELDS,
+              `unexpected field '${f}' in ${name}.setting_overrides.${key}`,
+            ).toContain(f);
+          }
+          if (ov.hidden !== undefined) expect(typeof ov.hidden).toBe('boolean');
+          if (ov.option_labels !== undefined) {
+            expect(typeof ov.option_labels).toBe('object');
+            for (const [v, l] of Object.entries(ov.option_labels)) {
+              expect(typeof v).toBe('string');
+              expect(typeof l).toBe('string');
+            }
+          }
+        }
+      });
+
+      it('auto_settings (if present) entries are well-formed', () => {
+        if (p.auto_settings === undefined) return;
+        expect(Array.isArray(p.auto_settings)).toBe(true);
+        for (const rule of p.auto_settings) {
+          for (const f of Object.keys(rule)) {
+            expect(
+              AUTO_SETTING_FIELDS,
+              `unexpected field '${f}' in ${name}.auto_settings`,
+            ).toContain(f);
+          }
+          expect(typeof rule.key).toBe('string');
+          expect(rule.key.length).toBeGreaterThan(0);
+          expect(typeof rule.value_in_band).toBe('string');
+          expect(typeof rule.value_out_of_band).toBe('string');
+          expect(Array.isArray(rule.freq_bands_hz)).toBe(true);
+          expect(rule.freq_bands_hz.length).toBeGreaterThan(0);
+          for (const band of rule.freq_bands_hz) {
+            expect(Array.isArray(band)).toBe(true);
+            expect(band.length).toBe(2);
+            expect(band[0]).toBeGreaterThan(0);
+            expect(band[1]).toBeGreaterThan(band[0]);
           }
         }
       });

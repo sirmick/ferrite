@@ -8,6 +8,13 @@
 
   import { pipeline } from '$lib/pipeline.svelte';
   import { applyControl } from '$lib/control/dispatch';
+  import {
+    gainDescriptionFor,
+    gainDisplayValue,
+    gainInvertedFor,
+    gainLabelFor,
+    gainRawValue,
+  } from './optionsModel';
 
   let caps = $derived(
     pipeline.sourceCaps?.kind === 'hardware' ? pipeline.sourceCaps.capabilities : null,
@@ -18,10 +25,25 @@
   let overallRange = $derived(channel?.overall_gain_range_db ?? null);
   let antennas = $derived(channel?.antennas ?? []);
   let hasAgc = $derived(channel?.has_agc ?? false);
+  // Driver-specific master-gain label/tooltip — see optionsModel.ts.
+  // The toolbar label is short ("IF gain" minus the unit suffix) so it
+  // doesn't crowd the row; the tooltip carries the full description.
+  let gainLabel = $derived(caps ? gainLabelFor(caps).replace(/\s*\(dB\)\s*$/, '') : 'gain');
+  let gainTooltip = $derived(
+    caps ? (gainDescriptionFor(caps) ?? 'receiver gain (dB)') : 'receiver gain (dB)',
+  );
 
   let gainDb = $derived(numberOr(params.gain_db, overallRange?.min ?? 0));
   let antenna = $derived(typeof params.antenna === 'string' ? (params.antenna as string) : '');
   let agc = $derived(params.agc === true);
+
+  // Master-slider semantics — see optionsModel.ts. SDRplay-style
+  // drivers report gain reduction; we invert the displayed value so
+  // the slider's "higher = more amplification" intuition holds.
+  let gainInverted = $derived(caps ? gainInvertedFor(caps) : false);
+  let gainDisplay = $derived(
+    overallRange ? gainDisplayValue(gainDb, overallRange, gainInverted) : gainDb,
+  );
 
   let visible = $derived(!!channel && (overallRange !== null || antennas.length > 1 || hasAgc));
 
@@ -45,9 +67,16 @@
   let gainDebounce: ReturnType<typeof setTimeout> | undefined;
   let pendingGain: number | undefined;
 
-  function commitGain(v: number) {
-    if (v === gainDb) return;
-    pendingGain = v;
+  /// Slider's onInput sends the **displayed** value; we map it back to
+  /// the raw `gain_db` here before dispatching. With `gain_inverted=
+  /// false` this is identity, so non-SDRplay drivers see no behaviour
+  /// change.
+  function commitGainDisplay(displayed: number) {
+    const range = overallRange;
+    if (!range) return;
+    const raw = gainRawValue(displayed, range, gainInverted);
+    if (raw === gainDb) return;
+    pendingGain = raw;
     if (gainDebounce !== undefined) clearTimeout(gainDebounce);
     gainDebounce = setTimeout(() => {
       gainDebounce = undefined;
@@ -72,18 +101,18 @@
   <div class="mx-1 h-4 border-l border-slate-800"></div>
 
   {#if overallRange}
-    <label class="flex items-center gap-1" title="receiver gain (dB)">
-      <span>gain</span>
+    <label class="flex items-center gap-1" title={gainTooltip}>
+      <span>{gainLabel}</span>
       <input
         type="range"
         class="w-24"
         min={overallRange.min}
         max={overallRange.max}
         step={overallRange.step ?? 1}
-        value={gainDb}
-        oninput={(e) => commitGain(Number((e.currentTarget as HTMLInputElement).value))}
+        value={gainDisplay}
+        oninput={(e) => commitGainDisplay(Number((e.currentTarget as HTMLInputElement).value))}
       />
-      <span class="w-10 text-right font-mono text-slate-300">{gainDb.toFixed(1)}</span>
+      <span class="w-10 text-right font-mono text-slate-300">{gainDisplay.toFixed(1)}</span>
       <span>dB</span>
     </label>
   {/if}

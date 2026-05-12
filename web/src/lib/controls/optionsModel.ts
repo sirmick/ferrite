@@ -195,7 +195,98 @@ export function quickRateChoices(caps: DeviceCapabilities): number[] {
  * preset exists). See `SdrPreset.hidden_settings`.
  */
 export function hiddenSettingsFor(caps: DeviceCapabilities): string[] {
-  return lookupPreset(caps.driver_key)?.hidden_settings ?? [];
+  const preset = lookupPreset(caps.driver_key);
+  if (!preset) return [];
+  // Merge legacy `hidden_settings` list with explicit `setting_overrides[k].hidden=true`.
+  // An override with `hidden: false` removes the key from the hidden set
+  // even if it appeared in `hidden_settings` (the legacy field takes a
+  // back seat to the per-key override so we can unhide a previously-
+  // suppressed knob without editing two fields).
+  const out = new Set(preset.hidden_settings ?? []);
+  for (const [key, ov] of Object.entries(preset.setting_overrides ?? {})) {
+    if (ov.hidden === true) out.add(key);
+    else if (ov.hidden === false) out.delete(key);
+  }
+  return [...out];
+}
+
+/** UI label/description overrides for `getSettingInfo` entries the driver
+ *  returns with misleading shipping-defaults — see `SettingOverride`.
+ *  Returns an empty object when no preset exists for the device. */
+export function settingOverridesFor(caps: DeviceCapabilities): Record<string, SettingOverride> {
+  return lookupPreset(caps.driver_key)?.setting_overrides ?? {};
+}
+
+/** Frequency-band-conditioned setting toggles for the device — see
+ *  `AutoSetting`. Returns an empty array when none are declared. */
+export function autoSettingsFor(caps: DeviceCapabilities): AutoSetting[] {
+  return lookupPreset(caps.driver_key)?.auto_settings ?? [];
+}
+
+/** Per-driver master-gain label override (e.g. "IF gain (dB)" for
+ *  SDRplay where the overall gain element doesn't include the LNA
+ *  stage). Returns the canonical default when no override is set. */
+export function gainLabelFor(caps: DeviceCapabilities): string {
+  return lookupPreset(caps.driver_key)?.gain_label ?? 'gain (dB)';
+}
+
+/** Per-driver master-gain tooltip override — use when the slider's
+ *  semantics are surprising relative to other drivers. Returns
+ *  `undefined` to fall back to the caller's default tooltip. */
+export function gainDescriptionFor(caps: DeviceCapabilities): string | undefined {
+  return lookupPreset(caps.driver_key)?.gain_description;
+}
+
+/** Whether the master gain slider's displayed value should be
+ *  inverted relative to the raw `gain_db` param. See
+ *  `SdrPreset.gain_inverted`. */
+export function gainInvertedFor(caps: DeviceCapabilities): boolean {
+  return lookupPreset(caps.driver_key)?.gain_inverted === true;
+}
+
+/** Convert raw `gain_db` value to the value the user sees on the
+ *  slider. With `inverted=true`: `displayed = max + min - raw`. With
+ *  `inverted=false`: identity. Used by both LiveControls and
+ *  InputControls so the master-slider semantic is consistent. */
+export function gainDisplayValue(raw: number, range: RangeSpec, inverted: boolean): number {
+  if (!inverted) return raw;
+  return range.min + range.max - raw;
+}
+
+/** Inverse of `gainDisplayValue` — convert a slider position back to
+ *  the raw `gain_db` to send to the daemon. */
+export function gainRawValue(displayed: number, range: RangeSpec, inverted: boolean): number {
+  if (!inverted) return displayed;
+  return range.min + range.max - displayed;
+}
+
+/** Lookup helper variant keyed directly by `driver_key` for callers that
+ *  don't carry the full capabilities struct. */
+export function autoSettingsForDriver(driverKey: string): AutoSetting[] {
+  return lookupPreset(driverKey)?.auto_settings ?? [];
+}
+
+/** Compute the desired settings dict for a given centre frequency. The
+ *  return value is the *delta* — only entries whose value differs from
+ *  `currentSettings` are included. An empty result means no patch is
+ *  needed. The caller (typically pipeline.svelte.ts's `$effect`) writes
+ *  the merged delta to `params.settings` on tune. */
+export function autoSettingsDelta(
+  driverKey: string,
+  centerFreqHz: number,
+  currentSettings: Record<string, string>,
+): Record<string, string> {
+  const rules = autoSettingsForDriver(driverKey);
+  const delta: Record<string, string> = {};
+  for (const rule of rules) {
+    const inBand = rule.freq_bands_hz.some(([lo, hi]) => centerFreqHz >= lo && centerFreqHz <= hi);
+    const want = inBand ? rule.value_in_band : rule.value_out_of_band;
+    const have = currentSettings[rule.key];
+    if (have !== want) {
+      delta[rule.key] = want;
+    }
+  }
+  return delta;
 }
 
 /**
@@ -301,6 +392,7 @@ function midOfRange(r: RangeSpec): number {
  */
 interface SdrPreset {
   driver_key: string;
+  label?: string;
   /** Default sample rate on dialog-open. Must be in the advertised caps. */
   sample_rate_hz: number;
   /**
@@ -320,12 +412,89 @@ interface SdrPreset {
   if_filter_ladder_hz?: number[];
   /**
    * `getSettingInfo` keys to suppress in the advanced panel. Used when a
-   * driver surfaces the same underlying knob twice — e.g. SDRplay's
-   * `rfgain_sel` setting duplicates the `RFGR` gain element. Keeps the
+   * driver surfaces the same underlying knob twice — keeps the
    * "one control per capability" rule without adding device-specific code
    * to the frontend: the JSON names the redundant keys and TS filters.
    */
   hidden_settings?: string[];
+  /**
+   * Per-key UI overrides for `getSettingInfo` entries the driver returns
+   * with misleading labels. The upstream Soapy driver may name a knob
+   * one way (`rfgain_sel` → "RF Gain Select") when the actual semantic
+   * is the opposite (it's an attenuator-state index, not a gain). We
+   * fix that client-side without forking the driver. Per-option labels
+   * (e.g. `0` → "no atten — max gain") cover the integer-enum case.
+   */
+  setting_overrides?: Record<string, SettingOverride>;
+  /**
+   * Override the master gain slider's label. SoapySDR exposes one
+   * "overall" gain element per device whose semantics vary by driver:
+   * on RTL-SDR / HackRF / Airspy it spans the entire RF chain, on
+   * SDRplay it only covers IFGR (the IF stage) while the LNA
+   * attenuator (`rfgain_sel`) is a separate knob. A per-driver label
+   * ("IF gain (dB)") makes the asymmetry visible without restructuring
+   * the slider behaviour itself.
+   */
+  gain_label?: string;
+  /** Tooltip body that replaces the default range-only tooltip on
+   *  the master gain slider. Use to call out cross-stage knobs the
+   *  user must set separately (e.g. SDRplay's LNA attenuation). */
+  gain_description?: string;
+  /**
+   * Invert the master gain slider's displayed value vs the raw
+   * `gain_db` param. SoapySDRPlay3 reports per-element ranges as
+   * gain *reduction* in dB (`gRdB` for IFGR, `LNAstate` for RFGR);
+   * the SoapySDR base-class master `setGain` distributes the value
+   * forward across `[IFGR, RFGR]` from element min to max — net
+   * effect: higher slider value = more attenuation = less signal,
+   * exactly backwards from user expectation. Setting `gain_inverted:
+   * true` swaps the displayed value (`displayed = max + min - raw`)
+   * so a higher slider position means more received signal,
+   * matching every other SDR app's convention. Other drivers
+   * (RTL-SDR / HackRF / Airspy) report actual gain in dB and stay
+   * un-inverted.
+   */
+  gain_inverted?: boolean;
+  /**
+   * Frequency-band-conditioned setting toggles. The shipped use case is
+   * SDRplay's hardware notches: `rfnotch_ctrl` covers AM (540 kHz–1.7 MHz)
+   * + FM broadcast (88–108 MHz), `dabnotch_ctrl` covers DAB Band III
+   * (170–240 MHz). Out-of-band the notch is harmless and helps
+   * intermod-rejection; in-band it actively attenuates the user's target.
+   * Listing those bands here lets the UI auto-toggle on tune.
+   */
+  auto_settings?: AutoSetting[];
+  notes?: string;
+}
+
+export interface SettingOverride {
+  /** Replaces the upstream `name`. */
+  label?: string;
+  /** Replaces the upstream `description` (tooltip body). */
+  description?: string;
+  /** Force-show or force-hide; takes precedence over the legacy
+   *  `hidden_settings` array.  */
+  hidden?: boolean;
+  /** Per-option human label, keyed by the option's `value` field. Used
+   *  to label integer enum entries that upstream returns with no
+   *  `name`. */
+  option_labels?: Record<string, string>;
+}
+
+export interface AutoSetting {
+  /** `getSettingInfo.key` we toggle. */
+  key: string;
+  /** `[lo, hi]` Hz pairs (inclusive). The setting is in-band when the
+   *  centre freq falls inside ANY of these pairs. */
+  freq_bands_hz: Array<[number, number]>;
+  /** Value to write when in-band. Driver-specific stringly-typed
+   *  (matches `getSettingInfo`'s `value` field). */
+  value_in_band: string;
+  /** Value to write when out-of-band. */
+  value_out_of_band: string;
+  /** Free-text rationale shown in the UI tooltip and the auto-apply
+   *  log line. */
+  rationale?: string;
 }
 
 /**

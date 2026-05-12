@@ -11,6 +11,7 @@
   import { logs, patchConsole } from '$lib/logs/store.svelte';
   import { connectServerLogs } from '$lib/logs/client';
   import { connectAi } from '$lib/ai/client';
+  import { installAutoSettingsEffect } from '$lib/controls/autoSettings.svelte';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
   import { wsUrlFor } from '$lib/api/errors';
   import { composeSource } from '$lib/flowgraph';
@@ -25,6 +26,11 @@
   $effect(() => {
     if (leftTab === 'logs' && logs.unreadErrors > 0) logs.ackErrors();
   });
+
+  // Auto-toggle hardware notch filters / driver-specific settings
+  // when the centre frequency crosses a configured band — see
+  // web/src/lib/controls/sdr-presets/<driver>.json `auto_settings`.
+  installAutoSettingsEffect();
 
   onMount(() => {
     patchConsole();
