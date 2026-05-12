@@ -36,6 +36,8 @@ pub mod file_sink;
 pub mod file_source;
 pub mod fm_demod;
 pub mod frame;
+#[cfg(feature = "ft8")]
+pub mod ft8;
 pub mod log_mag_u8;
 #[cfg(feature = "multimon")]
 pub mod morse;
@@ -89,6 +91,8 @@ pub use file_sink::{FileIqSink, FileIqSinkParams, IqSinkFormat, WriteSeek};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
+#[cfg(feature = "ft8")]
+pub use ft8::{Ft8Demod, Ft8DemodParams, Ft8Mode};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 #[cfg(feature = "multimon")]
 pub use morse::{MorseDemod, MorseDemodParams};
@@ -207,6 +211,11 @@ mod tests {
                 "{n} missing from registry under `multimon` feature (found: {names:?})",
             );
         }
+        #[cfg(feature = "ft8")]
+        assert!(
+            names.contains("Ft8Demod"),
+            "Ft8Demod missing from registry under `ft8` feature (found: {names:?})",
+        );
     }
 
     #[test]

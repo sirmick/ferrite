@@ -9,6 +9,7 @@ members = [
     "blocks/native/multimon-ng",
     "blocks/native/dump1090",
     "blocks/native/rtl-ais",
+    "blocks/native/ft8",
     "runtime",
     "tools/ferrite-ctl",
 ]

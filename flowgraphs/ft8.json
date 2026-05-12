@@ -1,0 +1,118 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "ft8",
+  "label": "FT8 (HF weak-signal digital)",
+  "description": "FT8 is the dominant HF digital mode — 15-second slots aligned to UTC, 8-FSK at 6.25 Hz tone spacing, callsigns + grid squares + reports in 13 characters per slot. Signature on the waterfall is the tone-grid: many discrete horizontal bars at fixed audio frequencies, each spanning one slot. Common dial frequencies (USB demod): 1.840 / 3.573 / 7.074 / 10.136 / 14.074 / 18.100 / 21.074 / 24.915 / 28.074 / 50.313 MHz. Tune slightly off the dial (DC-spike rule); the channelizer's `freq_shift_hz` recovers the carrier offset. Decoded messages stream under the `decoder::ft8` log target every 15 s. Audio is teed alongside so the user can listen for activity.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/FT8",
+  "sample_path": "samples/sigidwiki/FT8_websdr_test.wav",
+  "signal_wiki_image": "samples/sigidwiki/images/FT8_Waterfall.png",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 14074000.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 12000.0
+      }
+    },
+    "chan_tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 12000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
+    },
+    "ft8": {
+      "type": "Ft8Demod",
+      "placement": "node",
+      "params": {
+        "mode": "ft8",
+        "sample_rate_hz": 12000.0,
+        "max_candidates": 40
+      }
+    },
+    "demod_browser": {
+      "type": "SsbDemod",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 12000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "neural_enable": true,
+        "neural_attenuation_db": 18.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "params": {
+        "buffer_samples": 8192
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "chan_tee.in"],
+    ["chan_tee.out0", "demod.in"],
+    ["demod.out", "ft8.in"],
+    ["chan_tee.out1", "demod_browser.in"],
+    ["demod_browser.out", "audio_resamp.in"],
+    ["audio_resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"]
+  ]
+}

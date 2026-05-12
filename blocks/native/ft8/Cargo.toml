@@ -1,0 +1,32 @@
+[package]
+name        = "ferrite-ft8"
+version     = "0.9.0"
+edition.workspace      = true
+rust-version.workspace = true
+# ft8_lib upstream is MIT — a more permissive licence than the rest of
+# the workspace's GPL-3.0+. Surfacing MIT here keeps the file
+# representative of the vendored code; the workspace consumer is GPL,
+# so the combined binary is GPL anyway.
+license     = "MIT"
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+description = "Vendored ft8_lib (kgoba/ft8_lib, MIT) + safe Rust wrappers for FT8 / FT4 decode. Native-only — the LDPC + Costas-sync hot path expects the host's f32 + libc."
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
+
+[build-dependencies]
+cc = "1"
+
+# Diagnostic CLI — point at a 12 kHz mono WAV containing FT8 audio
+# (e.g. from wsjt-x's test corpus) and dump every decoded message.
+# Useful for offline triage when a live preset isn't surfacing
+# decodes; also the smoke-test target for the e2e suite.
+[[bin]]
+name = "decode-ft8-wav"
+path = "src/bin/decode_ft8_wav.rs"
+required-features = []

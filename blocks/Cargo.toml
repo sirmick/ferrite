@@ -20,7 +20,7 @@ default  = []
 # multimon through here lets wasm-pack on this crate compile the
 # decoder blocks into the browser bundle the same way the runtime
 # crate does.
-wasm     = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_bytes", "dep:js-sys", "multimon"]
+wasm     = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_bytes", "dep:js-sys", "multimon", "ft8"]
 # Links libSoapySDR; enables the `SoapySource` block. Native only —
 # blocks with this feature panic at monomorphization on wasm32.
 soapysdr = ["dep:soapysdr"]
@@ -35,6 +35,10 @@ adsb     = ["dep:ferrite-dump1090"]
 # Links vendored aisdecoder (from rtl-ais); enables `AisDemod` (marine
 # AIS at 161.975 + 162.025 MHz). Native only.
 ais      = ["dep:ferrite-rtl-ais"]
+# Links vendored ft8_lib; enables `Ft8Demod` (FT8 / FT4 weak-signal
+# digital modes — 14.074 / 7.074 / 3.573 MHz USB). Native only — the
+# decoder's LDPC + Costas-sync hot path expects libc/libm.
+ft8      = ["dep:ferrite-ft8"]
 
 [dependencies]
 anyhow                = "1"
@@ -43,6 +47,7 @@ ferrite-liquid-dsp    = { path = "native/liquid-dsp", version     = "0.9.0" }
 ferrite-multimon-ng   = { path = "native/multimon-ng", version     = "0.9.0", optional = true }
 ferrite-dump1090      = { path = "native/dump1090",    version     = "0.9.0", optional = true }
 ferrite-rtl-ais       = { path = "native/rtl-ais",     version     = "0.9.0", optional = true }
+ferrite-ft8           = { path = "native/ft8",         version     = "0.9.0", optional = true }
 inventory             = "0.3"
 # Pure-Rust port of Xiph RNNoise. No C deps, wasm32-clean, ~50 kB with
 # embedded GRU weights. Used by audio_nr::neural. DeepFilterNet3 via
