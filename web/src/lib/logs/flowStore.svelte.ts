@@ -66,6 +66,21 @@ class FlowStore {
   ingest(side: Side, snap: DiagSnapshot): void {
     const now = Date.now();
     const prev = this.prev[side];
+
+    // De-dupe: a browser-side flowdiag line is logged locally as it's
+    // emitted by the runner AND echoed back from the server through
+    // /api/debug/log → server-logs WS, so the same payload arrives
+    // twice within milliseconds. The second ingest would see
+    // identical `samples_cum` against a prev that's already been
+    // bumped to `now`, producing delta=0 → sps=0 across every port
+    // and flickering the table to "—" once a second. Drop the
+    // duplicate by comparing the snapshot's `process_calls_cum`
+    // signature — those increase monotonically tick-by-tick, so an
+    // unchanged signature means we've seen this snapshot already.
+    if (prev && snapshotMatchesPrev(snap, prev)) {
+      return;
+    }
+
     const current: PrevSnap = {
       at: now,
       blocks: new Map(
@@ -139,6 +154,25 @@ class FlowStore {
     this.browser = null;
     this.prev = { node: null, browser: null };
   }
+}
+
+/**
+ * Cheap structural comparison between an inbound snapshot and the
+ * previously-stored one. We only need to detect "this is the same
+ * tick we just ingested," not full equality — the runtime's
+ * `process_calls_cum` advances every tick on every block that
+ * actually ticked, so comparing the cumulative call count for each
+ * known block is a sound shortcut. If the block list itself shifts
+ * (env-split changed shape) we treat that as a fresh snapshot.
+ */
+function snapshotMatchesPrev(snap: DiagSnapshot, prev: PrevSnap): boolean {
+  if (snap.blocks.length !== prev.blocks.size) return false;
+  for (const b of snap.blocks) {
+    const prevBlock = prev.blocks.get(b.id);
+    if (!prevBlock) return false;
+    if (BigInt(b.process_calls_cum) !== prevBlock.processCalls) return false;
+  }
+  return true;
 }
 
 export const flow = new FlowStore();
