@@ -210,11 +210,7 @@ impl LogMagU8 {
     #[cfg(not(target_arch = "wasm32"))]
     fn sidecar_value(&self, bytes_written: u64) -> serde_json::Value {
         let frame_size = self.params.size as u64;
-        let frames_written = if frame_size > 0 {
-            bytes_written / frame_size
-        } else {
-            0
-        };
+        let frames_written = bytes_written.checked_div(frame_size).unwrap_or(0);
         serde_json::json!({
             "format": "fft-u8-raw",
             "frame_size": self.params.size,
