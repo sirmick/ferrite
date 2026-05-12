@@ -31,7 +31,10 @@
 //! the only `ReconfigureScope::SelfBlock` param: live retuning maps
 //! to `Nco::set_frequency` without tearing down the FIR.
 
-use anyhow::{bail, Result};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context, Result};
 use ferrite_liquid_dsp::{FirdecimCx, Nco};
 use num_complex::Complex;
 use serde::Deserialize;
@@ -40,6 +43,7 @@ use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
     Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
+use crate::record::Recorder;
 
 /// Construction-time params.
 ///
@@ -50,7 +54,7 @@ use crate::block::{
 /// is only a construction-time hint used when the block is instantiated
 /// outside a runtime (e.g. unit tests); init overrides it with the
 /// scheduler-negotiated rate.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ChannelizerParams {
     /// Wideband input sample rate, Hz. Construction-time hint; init's
@@ -66,16 +70,26 @@ pub struct ChannelizerParams {
     /// resampler (`RealF32Resamp`) eats the residual drift when audio
     /// sinks need exact rates.
     pub output_rate_hz: f64,
+    /// Live-tunable. Non-empty starts a side-tee write of the
+    /// post-channelizer cf32 stream to disk; empty stops + finalises
+    /// the sidecar. Lets an AI-driven CLI capture decoder-grade IQ
+    /// without disrupting the user's UI session.
+    pub record_path: PathBuf,
+    /// Live-tunable. `0.0` = unbounded; positive caps wall-clock
+    /// recording duration so a stale record_path never silently grows.
+    pub record_max_seconds: f64,
 }
 
 impl ChannelizerParams {
     /// Shorthand for tests and defaults.
     #[must_use]
-    pub const fn new(input_rate_hz: f64, freq_shift_hz: f64, output_rate_hz: f64) -> Self {
+    pub fn new(input_rate_hz: f64, freq_shift_hz: f64, output_rate_hz: f64) -> Self {
         Self {
             input_rate_hz,
             freq_shift_hz,
             output_rate_hz,
+            record_path: PathBuf::new(),
+            record_max_seconds: 0.0,
         }
     }
 }
@@ -116,6 +130,27 @@ pub struct Channelizer {
     /// the block lands the closest integer decimation whether the SDR
     /// is at 2 MS/s, 10 MS/s, or anywhere between.
     target_output_rate_hz: f64,
+    /// Source RF centre captured at init, stamped into the sidecar so
+    /// an offline tool can label the recorded baseband signal with its
+    /// original RF frequency (= `center_freq + freq_shift`).
+    input_center_freq_hz: f64,
+    /// Live-tunable record params (mirrored from `ChannelizerParams`
+    /// so apply_live_params doesn't need to round-trip through serde).
+    record_path: PathBuf,
+    record_max_seconds: f64,
+    /// Active recording state. `None` when `record_path` is empty.
+    recording: Option<Recording>,
+}
+
+struct Recording {
+    recorder: Recorder,
+    bin_path: PathBuf,
+    /// Wall-clock timestamp of the first byte written. Used for the
+    /// `record_max_seconds` cap.
+    started_at: Option<Instant>,
+    /// Reusable encode buffer — sized for one process tick's worth of
+    /// cf32 samples × 8 B each. Avoids reallocating on every write.
+    scratch: Vec<u8>,
 }
 
 impl Channelizer {
@@ -151,6 +186,10 @@ impl Channelizer {
             input_rate_hz: params.input_rate_hz,
             freq_shift_hz: params.freq_shift_hz,
             target_output_rate_hz: params.output_rate_hz,
+            input_center_freq_hz: 0.0,
+            record_path: params.record_path.clone(),
+            record_max_seconds: params.record_max_seconds,
+            recording: None,
         };
         s.rebuild_for_input_rate(params.input_rate_hz)?;
         Ok(s)
@@ -221,6 +260,103 @@ impl Channelizer {
     #[must_use]
     pub fn freq_shift_hz(&self) -> f64 {
         self.freq_shift_hz
+    }
+
+    /// True when a side-tee write is currently open.
+    #[must_use]
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// Open a fresh recording at `path`, closing any prior recording
+    /// first so a path swap mid-stream doesn't leak the open file.
+    fn start_recording(&mut self, path: PathBuf) -> Result<()> {
+        self.finish_recording()?;
+        let recorder = Recorder::open(&path, None)?;
+        write_sidecar(&path, &self.sidecar_value(0))?;
+        self.recording = Some(Recording {
+            recorder,
+            bin_path: path,
+            started_at: None,
+            scratch: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Flush the file + rewrite the sidecar with the final byte count.
+    /// Idempotent.
+    fn finish_recording(&mut self) -> Result<()> {
+        let Some(mut rec) = self.recording.take() else {
+            return Ok(());
+        };
+        let bytes_written = rec.recorder.bytes_written();
+        rec.recorder.finalise()?;
+        write_sidecar(&rec.bin_path, &self.sidecar_value(bytes_written))
+            .with_context(|| format!("update sidecar for {}", rec.bin_path.display()))?;
+        Ok(())
+    }
+
+    /// Tap helper called from `process` after the cf32 output samples
+    /// are computed. Encodes them as interleaved little-endian f32 and
+    /// writes via the [`Recorder`]; closes the file when
+    /// `record_max_seconds` elapses.
+    fn tap_recording(&mut self, samples: &[Complex<f32>]) -> Result<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        let cap_secs = self.record_max_seconds;
+        let cap_fired = {
+            let Some(rec) = self.recording.as_mut() else {
+                return Ok(());
+            };
+            if rec.started_at.is_none() {
+                rec.started_at = Some(Instant::now());
+            }
+            let need = samples.len() * 8;
+            if rec.scratch.len() < need {
+                rec.scratch.resize(need, 0);
+            }
+            let buf = &mut rec.scratch[..need];
+            for (i, c) in samples.iter().enumerate() {
+                let off = i * 8;
+                buf[off..off + 4].copy_from_slice(&c.re.to_le_bytes());
+                buf[off + 4..off + 8].copy_from_slice(&c.im.to_le_bytes());
+            }
+            rec.recorder.write(buf)?;
+            let started = rec.started_at.expect("set above");
+            cap_secs > 0.0 && started.elapsed() >= Duration::from_secs_f64(cap_secs)
+        };
+        if cap_fired {
+            self.finish_recording()?;
+            self.record_path = PathBuf::new();
+        }
+        Ok(())
+    }
+
+    /// Sidecar JSON shape — used both at open (`bytes_written: 0`) and
+    /// at finalise (with the real count). `center_freq_hz` is the RF
+    /// centre of the recorded baseband signal (source centre + VFO
+    /// shift) so the file is self-describing.
+    fn sidecar_value(&self, bytes_written: u64) -> serde_json::Value {
+        #[allow(clippy::cast_precision_loss)]
+        let output_rate_hz = if self.factor > 0 {
+            self.input_rate_hz / self.factor as f64
+        } else {
+            0.0
+        };
+        let center_freq_hz = self.input_center_freq_hz + self.freq_shift_hz;
+        let samples_written = bytes_written / 8;
+        serde_json::json!({
+            "format": "cf32",
+            "sample_rate_hz": output_rate_hz,
+            "input_rate_hz": self.input_rate_hz,
+            "decim_factor": self.factor,
+            "freq_shift_hz": self.freq_shift_hz,
+            "center_freq_hz": center_freq_hz,
+            "bytes_written": bytes_written,
+            "samples_written": samples_written,
+            "source": { "origin": "ferrite-record" },
+        })
     }
 
     /// Shared core of [`Block::init`] and [`Block::update_rates`] — if
@@ -298,6 +434,24 @@ impl Block for Channelizer {
                     // chain reinits since the actual output shifts.
                     reconfig_scope: ReconfigureScope::Downstream,
                 },
+                ParamSpec {
+                    key: "record_path",
+                    label: "Record path",
+                    kind: ParamKind::Text { default: "" },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                },
+                ParamSpec {
+                    key: "record_max_seconds",
+                    label: "Record cap",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 3600.0,
+                        step: 0.1,
+                        default: 0.0,
+                        unit: "s",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                },
             ],
         }
     }
@@ -309,7 +463,25 @@ impl Block for Channelizer {
     }
 
     fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
-        self.sync_to_ctx_rate(ctx, "channelizer init")
+        // Future-correct read — runtime currently hardcodes
+        // PortMeta.center_freq_hz to 0.0 (runtime/src/runtime.rs
+        // ~L671/764), so the recorded sidecar's `center_freq_hz` will
+        // sit at `freq_shift_hz` until centre-freq propagation lands.
+        self.input_center_freq_hz = ctx
+            .input_meta
+            .iter()
+            .find(|(n, _)| *n == "in")
+            .map(|(_, m)| m.center_freq_hz)
+            .unwrap_or(0.0);
+        self.sync_to_ctx_rate(ctx, "channelizer init")?;
+        // Honour a construction-time `record_path` — apply_live_params
+        // doesn't fire for params set in the preset itself, so an
+        // authored "record on load" preset would otherwise drop the path.
+        if !self.record_path.as_os_str().is_empty() && self.recording.is_none() {
+            let path = self.record_path.clone();
+            self.start_recording(path)?;
+        }
+        Ok(())
     }
 
     fn output_rate_hz(&self, _port: usize) -> Option<f64> {
@@ -328,20 +500,36 @@ impl Block for Channelizer {
         self.sync_to_ctx_rate(ctx, "channelizer rate update")
     }
 
-    /// Live VFO retune — the reason this block exists. Only `freq_shift_hz`
-    /// is accepted; rebuilding for anything else (factor/taps/cutoff)
-    /// requires a fresh filter design, so we return `Ok(false)` and let
-    /// the runtime fall back to a block-scoped rebuild.
+    /// Live-tunable: `freq_shift_hz` (VFO retune — the original reason
+    /// this block exists), `record_path` + `record_max_seconds`
+    /// (start/stop the side-tee write). Anything else (factor / taps /
+    /// rate) returns `Ok(false)` so the runtime falls back to a
+    /// block-scoped rebuild.
     fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
         let Some(obj) = delta.as_object() else {
             return Ok(false);
         };
-        const LIVE_KEYS: &[&str] = &["freq_shift_hz"];
+        const LIVE_KEYS: &[&str] = &["freq_shift_hz", "record_path", "record_max_seconds"];
         if !obj.keys().all(|k| LIVE_KEYS.contains(&k.as_str())) {
             return Ok(false);
         }
         if let Some(v) = obj.get("freq_shift_hz").and_then(|v| v.as_f64()) {
             self.set_freq_shift(v);
+        }
+        if let Some(v) = obj.get("record_max_seconds").and_then(|v| v.as_f64()) {
+            self.record_max_seconds = v.max(0.0);
+        }
+        if let Some(v) = obj.get("record_path") {
+            let new_path = match v {
+                serde_json::Value::String(s) => PathBuf::from(s),
+                _ => PathBuf::new(),
+            };
+            self.record_path = new_path.clone();
+            if new_path.as_os_str().is_empty() {
+                self.finish_recording()?;
+            } else {
+                self.start_recording(new_path)?;
+            }
         }
         Ok(true)
     }
@@ -373,6 +561,8 @@ impl Block for Channelizer {
                 let (re, im) = self.nco.mix_down_one(src[i].re, src[i].im);
                 dst[i] = Complex::new(re, im);
             }
+            // Tap the just-emitted samples to disk if recording.
+            self.tap_recording(&dst[..n])?;
             let mut w = Work::new();
             w.consumed[0] = n;
             w.produced[0] = n;
@@ -403,10 +593,27 @@ impl Block for Channelizer {
             }
         }
 
+        // Tap the just-emitted samples to disk if recording. After the
+        // output computation so a recorder failure can't poison the
+        // wired downstream consumer.
+        self.tap_recording(&dst[..produced])?;
+
         let mut w = Work::new();
         w.consumed[0] = consumed;
         w.produced[0] = produced;
         Ok(w)
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        self.finish_recording()
+    }
+}
+
+impl Drop for Channelizer {
+    fn drop(&mut self) {
+        if let Err(e) = self.finish_recording() {
+            eprintln!("Channelizer: finish_recording on drop: {e:#}");
+        }
     }
 }
 
@@ -415,6 +622,26 @@ impl BlockFactory for Channelizer {
         let p: ChannelizerParams = crate::block::deserialize_params(params)?;
         Ok(Box::new(Channelizer::new(p)?))
     }
+}
+
+fn write_sidecar(bin_path: &std::path::Path, value: &serde_json::Value) -> Result<()> {
+    let sidecar = sidecar_path_for(bin_path);
+    let json = serde_json::to_string_pretty(value)?;
+    std::fs::write(&sidecar, json)
+        .with_context(|| format!("write sidecar {}", sidecar.display()))?;
+    Ok(())
+}
+
+fn sidecar_path_for(bin_path: &std::path::Path) -> PathBuf {
+    let mut p = bin_path.to_path_buf();
+    if p.extension().is_some() {
+        p.set_extension("json");
+    } else {
+        let mut s = p.into_os_string();
+        s.push(".json");
+        p = PathBuf::from(s);
+    }
+    p
 }
 
 fn omega_for(freq_shift_hz: f64, input_rate_hz: f64) -> f32 {
@@ -634,5 +861,60 @@ mod tests {
         let (_, consumed_b, produced_b) = run(&mut ch, &input[consumed_a..], 20);
         assert_eq!(produced_a + produced_b, 10);
         assert_eq!(consumed_a + consumed_b, input.len());
+    }
+
+    #[test]
+    fn live_record_path_writes_cf32_and_sidecar() {
+        // Drive the channelizer with enough samples for ~10 outputs at
+        // factor 4, with record_path set live; verify on-disk bytes
+        // match the produced samples × 8 (cf32 LE) and the sidecar
+        // describes the rate / decim factor.
+        let dir = tempdir();
+        let path = dir.join("chan.cf32");
+        let mut ch = Channelizer::new(ChannelizerParams::new(2.0e6, 0.0, 500_000.0)).unwrap();
+        ch.apply_live_params(&serde_json::json!({
+            "record_path": path.to_str().unwrap(),
+        }))
+        .unwrap();
+        assert!(ch.is_recording());
+
+        let input = vec![Complex::new(1.0_f32, 0.0); 80]; // factor 4 → ~20 outs
+        let (_, _, produced) = run(&mut ch, &input, 32);
+        assert!(produced > 0);
+
+        ch.apply_live_params(&serde_json::json!({ "record_path": "" }))
+            .unwrap();
+        assert!(!ch.is_recording());
+
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(
+            on_disk.len(),
+            produced * 8,
+            "8 B per cf32 sample × {produced}",
+        );
+        let sidecar = dir.join("chan.json");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert_eq!(v["format"], "cf32");
+        assert_eq!(v["decim_factor"], 4);
+        assert!((v["sample_rate_hz"].as_f64().unwrap() - 500_000.0).abs() < 1e-6);
+        assert_eq!(v["bytes_written"], (produced * 8) as u64);
+        assert_eq!(v["samples_written"], produced as u64);
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&sidecar).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn tempdir() -> std::path::PathBuf {
+        let mut base = std::env::temp_dir();
+        let pid = std::process::id();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        base.push(format!("ferrite-channelizer-record-{pid}-{ts}"));
+        std::fs::create_dir_all(&base).unwrap();
+        base
     }
 }

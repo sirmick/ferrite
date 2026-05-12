@@ -46,6 +46,7 @@ pub mod packet;
 pub mod pager;
 pub mod rds_demod;
 pub mod real_resamp;
+pub mod record;
 pub mod registry;
 pub mod render;
 pub mod rssi_probe;

@@ -68,6 +68,7 @@ fn run() -> Result<()> {
     let mut logmag = LogMagU8::new(LogMagU8Params {
         size: fft_size,
         alpha: ALPHA,
+        ..LogMagU8Params::default()
     });
 
     let mut rows: Vec<Vec<u8>> = Vec::new();
