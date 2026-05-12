@@ -533,10 +533,37 @@ impl Driver {
             params.insert("bandwidth_hz".into(), json!(parse_si(b)?));
         }
         if let Some(r) = rate {
-            params.insert("sample_rate_hz".into(), json!(parse_si(r)?));
+            let rate_hz = parse_si(r)?;
+            params.insert("sample_rate_hz".into(), json!(rate_hz));
+            // Auto-derive bandwidth when the caller didn't pin it and
+            // the rate changed. Otherwise the previous BW (often a
+            // preset hint set for a different rate) sticks — the
+            // hardware IF filter brick-walls the spectrum well below
+            // the new sample rate. The web UI does the same via
+            // `bandwidthForRate(caps, rate)` in optionsModel.ts; we
+            // mirror its driver-keyed ladder here.
+            if bw.is_none() {
+                let driver = params
+                    .get("args")
+                    .and_then(Value::as_str)
+                    .map(driver_key_from_args)
+                    .unwrap_or_default();
+                if let Some(bw_hz) = recommended_bandwidth_for(&driver, rate_hz) {
+                    params.insert("bandwidth_hz".into(), json!(bw_hz));
+                }
+            }
         }
         if let Some(g) = gain {
             params.insert("gain_db".into(), json!(g));
+            // `--gain N` is a manual-gain intent; SDRplay (and a few
+            // others) silently ignore manual IFGR while AGC is on and
+            // log `Not updating IFGR gain because AGC is enabled`. Fold
+            // `agc_enable=false` into the same PATCH so the manual
+            // value actually lands — atomic from the API's POV, no
+            // operator dance to remember. If the caller really wants
+            // AGC on, they pass no `--gain` flag (and the rest of the
+            // tune still works fine).
+            params.insert("agc_enable".into(), json!(false));
         }
         let body = json!({ "type": type_name, "params": Value::Object(params) });
         let v = self.patch("/api/source", body).await?;
@@ -1142,4 +1169,91 @@ fn ensure_parent_dir(path: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Pull the SoapySDR driver name out of an `args` string. Soapy
+/// accepts plain `"sdrplay"` (the driver name alone) or a kv form
+/// like `"driver=sdrplay,serial=xxx"`. Returns `""` when neither
+/// shape parses.
+fn driver_key_from_args(args: &str) -> String {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some((_, rest)) = trimmed.split_once("driver=") {
+        return rest.split(&[',', ' ']).next().unwrap_or("").to_string();
+    }
+    if !trimmed.contains('=') && !trimmed.contains(',') {
+        return trimmed.to_string();
+    }
+    String::new()
+}
+
+/// Largest IF-filter ladder entry ≤ `rate_hz` for the given driver,
+/// matching the rule the web UI's `bandwidthForRate` uses. Returns
+/// `None` when the driver has no known ladder — the web side falls
+/// back to the device probe in that case; we just leave bandwidth
+/// alone so the driver keeps whatever it already had.
+///
+/// **DUPLICATE-OF**: `web/src/lib/controls/sdr-presets/<driver>.json`
+/// `if_filter_ladder_hz`. TODO: move the per-driver ladder data into
+/// a shared file the server, the CLI, and the web all read, instead
+/// of three copies in three languages.
+fn recommended_bandwidth_for(driver: &str, rate_hz: f64) -> Option<f64> {
+    let ladder: &[f64] = match driver {
+        "sdrplay" => &[
+            200_000.0,
+            300_000.0,
+            600_000.0,
+            1_536_000.0,
+            5_000_000.0,
+            6_000_000.0,
+            7_000_000.0,
+            8_000_000.0,
+        ],
+        _ => return None,
+    };
+    ladder.iter().rev().find(|&&x| x <= rate_hz).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn driver_key_from_args_handles_both_shapes() {
+        assert_eq!(driver_key_from_args("sdrplay"), "sdrplay");
+        assert_eq!(driver_key_from_args("driver=sdrplay"), "sdrplay");
+        assert_eq!(
+            driver_key_from_args("driver=sdrplay,serial=224001D748"),
+            "sdrplay"
+        );
+        assert_eq!(driver_key_from_args(""), "");
+        assert_eq!(driver_key_from_args("   "), "");
+    }
+
+    #[test]
+    fn recommended_bandwidth_picks_largest_le_rate() {
+        // Mirrors the web side's `bandwidthForRate` for the SDRplay
+        // ladder. Anything below the smallest ladder entry returns
+        // None (no entry ≤ rate).
+        assert_eq!(
+            recommended_bandwidth_for("sdrplay", 10_000_000.0),
+            Some(8_000_000.0)
+        );
+        assert_eq!(
+            recommended_bandwidth_for("sdrplay", 8_000_000.0),
+            Some(8_000_000.0)
+        );
+        assert_eq!(
+            recommended_bandwidth_for("sdrplay", 6_000_000.0),
+            Some(6_000_000.0)
+        );
+        assert_eq!(
+            recommended_bandwidth_for("sdrplay", 2_000_000.0),
+            Some(1_536_000.0)
+        );
+        assert_eq!(recommended_bandwidth_for("sdrplay", 100_000.0), None);
+        assert_eq!(recommended_bandwidth_for("rtlsdr", 2_000_000.0), None);
+    }
 }
