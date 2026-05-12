@@ -1,0 +1,25 @@
+[package]
+name        = "ferrite-ctl"
+version     = "0.9.0"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+description = "CLI driver for a running ferrited — list devices, load presets, tune, start/stop, capture. Designed so an AI agent (or shell scripts) can drive Ferrite via the same REST API the browser UI uses."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ferrite-ctl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow      = "1"
+clap        = { version = "4", features = ["derive"] }
+reqwest     = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+tokio       = { version = "1", features = ["macros", "rt", "signal", "process", "time"] }

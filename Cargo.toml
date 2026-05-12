@@ -10,6 +10,7 @@ members = [
     "blocks/native/dump1090",
     "blocks/native/rtl-ais",
     "runtime",
+    "tools/ferrite-ctl",
 ]
 
 [workspace.package]

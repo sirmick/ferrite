@@ -1,0 +1,21 @@
+{
+  "name": "ferrite-ai",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code sidecar for Ferrite SDR. Exposes /ws/chat to the UI; AI drives ferrite-ctl via Bash.",
+  "scripts": {
+    "dev": "node --import tsx/esm index.ts",
+    "start": "node --import tsx/esm index.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
