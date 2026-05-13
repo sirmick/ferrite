@@ -2,13 +2,11 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "adsb",
   "label": "ADS-B / Mode S (1090 MHz)",
-  "description": "Decode aircraft transponder messages on 1090 MHz — Mode S short + DF17 ADS-B extended squitters. Vendored dump1090; locked to a 2 MS/s channel.",
+  "description": "Decode aircraft transponder messages on 1090 MHz \u2014 Mode S short + DF17 ADS-B extended squitters. Vendored dump1090; locked to a 2 MS/s channel.",
+  "ai_notes": "ADS-B / Mode-S aircraft transponders on 1090 MHz. Vendored dump1090; locked at 2 MS/s. Best with a vertical antenna on a roof or window \u2014 line-of-sight to airliners is what matters, not antenna gain. Output: `tail decoder --category adsb`. Most decodes will be DF17 extended squitters with positions + IDs.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Dependent_Surveillance-Broadcast_(ADS-B)",
   "signal_wiki_image": "samples/sigidwiki/images/ADS-BTHMB.jpg",
-  "environments": [
-    "node",
-    "browser"
-  ],
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -56,29 +54,11 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "tee.in"
-    ],
-    [
-      "tee.out0",
-      "chan.in"
-    ],
-    [
-      "tee.out1",
-      "fft.in"
-    ],
-    [
-      "chan.out",
-      "adsb.in"
-    ],
-    [
-      "fft.out",
-      "logmag.in"
-    ],
-    [
-      "logmag.out",
-      "ui:fft"
-    ]
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "adsb.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"]
   ]
 }

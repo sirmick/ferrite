@@ -2,14 +2,12 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "nbfm",
   "label": "Narrowband FM (voice)",
-  "description": "Narrowband FM voice — 25 kHz channels: NOAA weather, marine VHF, public-safety, FRS/GMRS, 2 m / 70 cm amateur. ±5 kHz deviation.",
+  "description": "Narrowband FM voice \u2014 25 kHz channels: NOAA weather, marine VHF, public-safety, FRS/GMRS, 2 m / 70 cm amateur. \u00b15 kHz deviation.",
+  "ai_notes": "Narrowband FM voice, 25 kHz channels. Use for 2 m / 70 cm amateur repeaters, marine VHF (156\u2013162 MHz), public-safety, FRS/GMRS (462\u2013467 MHz). \u00b15 kHz deviation default \u2014 fine for most NBFM channels. Audio NR: `blanker@20dB` + `neural@18dB`; bump the blanker if there's electrical / ignition noise.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/NFM_Voice",
   "sample_path": "samples/sigidwiki/Nfm_voice.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Nfm.jpg",
-  "environments": [
-    "node",
-    "browser"
-  ],
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -84,41 +82,14 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "tee.in"
-    ],
-    [
-      "tee.out0",
-      "chan.in"
-    ],
-    [
-      "tee.out1",
-      "fft.in"
-    ],
-    [
-      "chan.out",
-      "demod.in"
-    ],
-    [
-      "fft.out",
-      "logmag.in"
-    ],
-    [
-      "logmag.out",
-      "ui:fft"
-    ],
-    [
-      "demod.out",
-      "resamp.in"
-    ],
-    [
-      "resamp.out",
-      "audio_nr.in"
-    ],
-    [
-      "audio_nr.out",
-      "audio.in"
-    ]
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "resamp.in"],
+    ["resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"]
   ]
 }

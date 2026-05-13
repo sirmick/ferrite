@@ -2,10 +2,9 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "fm-audio-record",
   "label": "FM audio record (headless)",
-  "description": "All-native FM receiver that writes demodulated mono audio to /tmp/ferrite-fm-audio.wav. Source → Channelizer (10× → 240 kHz) → FmDemod @ 240 kHz → RealF32Decimator (5× → 48 kHz) → FileAudioSink. The demod sits at channel rate, not audio rate, so the ±75 kHz peak deviation is well inside the discriminator Nyquist; decimation to audio happens on the real post-discriminator signal where aliasing is not a concern. Designed for `ferrited --flowgraph fm-audio-record.json --source-type SoapySource --source-args driver=rtlsdr --run-for-secs 30 --start`.",
-  "environments": [
-    "node"
-  ],
+  "description": "All-native FM receiver that writes demodulated mono audio to /tmp/ferrite-fm-audio.wav. Source \u2192 Channelizer (10\u00d7 \u2192 240 kHz) \u2192 FmDemod @ 240 kHz \u2192 RealF32Decimator (5\u00d7 \u2192 48 kHz) \u2192 FileAudioSink. The demod sits at channel rate, not audio rate, so the \u00b175 kHz peak deviation is well inside the discriminator Nyquist; decimation to audio happens on the real post-discriminator signal where aliasing is not a concern. Designed for `ferrited --flowgraph fm-audio-record.json --source-type SoapySource --source-args driver=rtlsdr --run-for-secs 30 --start`.",
+  "ai_notes": "Headless all-native FM receiver that writes demodulated mono audio to a WAV file. Like `am-audio-record` but for an FM station. No browser AudioSink \u2014 server-side recording only.",
+  "environments": ["node"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -52,21 +51,9 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "chan.in"
-    ],
-    [
-      "chan.out",
-      "demod.in"
-    ],
-    [
-      "demod.out",
-      "decim.in"
-    ],
-    [
-      "decim.out",
-      "audio.in"
-    ]
+    ["src.out", "chan.in"],
+    ["chan.out", "demod.in"],
+    ["demod.out", "decim.in"],
+    ["decim.out", "audio.in"]
   ]
 }

@@ -2,14 +2,12 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "ais",
   "label": "AIS / marine (161.975 + 162.025 MHz)",
-  "description": "Decode marine AIS Class A/B vessel transponders on AIS-1 (161.975 MHz) + AIS-2 (162.025 MHz). Centre at 162.000 MHz with ≥100 kHz bandwidth.",
+  "description": "Decode marine AIS Class A/B vessel transponders on AIS-1 (161.975 MHz) + AIS-2 (162.025 MHz). Centre at 162.000 MHz with \u2265100 kHz bandwidth.",
+  "ai_notes": "Marine AIS Class A/B vessel transponders on AIS-1 (161.975 MHz) + AIS-2 (162.025 MHz). Centred at 162.000 MHz so both channels fall inside one channelized slice. Best near coastlines or major shipping lanes. Output: `tail decoder --category ais` \u2014 MMSI / position / course / vessel type.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Identification_System_(AIS)",
   "sample_path": "samples/sigidwiki/AIS_IQ_5s.wav",
   "signal_wiki_image": "samples/sigidwiki/images/AIS_Waterfall.jpg",
-  "environments": [
-    "node",
-    "browser"
-  ],
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -103,57 +101,18 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "tee_main.in"
-    ],
-    [
-      "tee_main.out0",
-      "tee_chans.in"
-    ],
-    [
-      "tee_main.out1",
-      "fft.in"
-    ],
-    [
-      "tee_chans.out0",
-      "chan_a.in"
-    ],
-    [
-      "tee_chans.out1",
-      "chan_b.in"
-    ],
-    [
-      "chan_a.out",
-      "fm_a.in"
-    ],
-    [
-      "chan_b.out",
-      "fm_b.in"
-    ],
-    [
-      "fm_a.out",
-      "resamp_a.in"
-    ],
-    [
-      "fm_b.out",
-      "resamp_b.in"
-    ],
-    [
-      "resamp_a.out",
-      "ais.ch_a"
-    ],
-    [
-      "resamp_b.out",
-      "ais.ch_b"
-    ],
-    [
-      "fft.out",
-      "logmag.in"
-    ],
-    [
-      "logmag.out",
-      "ui:fft"
-    ]
+    ["src.out", "tee_main.in"],
+    ["tee_main.out0", "tee_chans.in"],
+    ["tee_main.out1", "fft.in"],
+    ["tee_chans.out0", "chan_a.in"],
+    ["tee_chans.out1", "chan_b.in"],
+    ["chan_a.out", "fm_a.in"],
+    ["chan_b.out", "fm_b.in"],
+    ["fm_a.out", "resamp_a.in"],
+    ["fm_b.out", "resamp_b.in"],
+    ["resamp_a.out", "ais.ch_a"],
+    ["resamp_b.out", "ais.ch_b"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"]
   ]
 }

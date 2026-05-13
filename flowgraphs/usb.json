@@ -2,14 +2,12 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "usb",
   "label": "Upper sideband (voice)",
-  "description": "Upper-sideband SSB voice — amateur 20 / 17 / 15 m DX, 6 / 10 m calling. Tune the VFO precisely so voices sound natural, not squeaky.",
+  "description": "Upper-sideband SSB voice \u2014 amateur 20 / 17 / 15 m DX, 6 / 10 m calling. Tune the VFO precisely so voices sound natural, not squeaky.",
+  "ai_notes": "Upper-sideband SSB voice. Amateur convention: USB above 10 MHz (20 m DX = 14.150\u201314.350, 17 m, 15 m, 6 m, 10 m). Tune the VFO precisely so voices sound natural \u2014 too high makes speakers sound like chipmunks, too low like Darth Vader. Audio NR: same stack as `wbam` with `neural@24dB` since HF SSB is noisier than AM.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Single_Sideband_Voice",
   "sample_path": "samples/sigidwiki/USB_Sound.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/USB_Waterfall.png",
-  "environments": [
-    "node",
-    "browser"
-  ],
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -94,41 +92,14 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "tee.in"
-    ],
-    [
-      "tee.out0",
-      "chan.in"
-    ],
-    [
-      "tee.out1",
-      "fft.in"
-    ],
-    [
-      "chan.out",
-      "demod.in"
-    ],
-    [
-      "fft.out",
-      "logmag.in"
-    ],
-    [
-      "logmag.out",
-      "ui:fft"
-    ],
-    [
-      "demod.out",
-      "resamp.in"
-    ],
-    [
-      "resamp.out",
-      "audio_nr.in"
-    ],
-    [
-      "audio_nr.out",
-      "audio.in"
-    ]
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "resamp.in"],
+    ["resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"]
   ]
 }

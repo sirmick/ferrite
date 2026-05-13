@@ -2,14 +2,12 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "nwr",
   "label": "NOAA Weather Radio + EAS (162.55 MHz)",
-  "description": "NOAA Weather Radio with SAME / EAS header decoding. 162.400–162.550 MHz NBFM (7 channels, 25 kHz spaced); default 162.550.",
+  "description": "NOAA Weather Radio with SAME / EAS header decoding. 162.400\u2013162.550 MHz NBFM (7 channels, 25 kHz spaced); default 162.550.",
+  "ai_notes": "NOAA Weather Radio + SAME / EAS header decode. 162.400\u2013162.550 MHz NBFM in 25 kHz steps (7 channels); default 162.550 MHz. Always-on EAS decoder so emergency alerts surface in `tail decoder --category eas`. US-only by frequency; equivalent services elsewhere may differ.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Emergency_Alert_System_(EAS)",
   "sample_path": "samples/sigidwiki/EAS_Alert_Tornado_Warning.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/EAS.jpg",
-  "environments": [
-    "node",
-    "browser"
-  ],
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -73,37 +71,13 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "tee.in"
-    ],
-    [
-      "tee.out0",
-      "chan.in"
-    ],
-    [
-      "tee.out1",
-      "fft.in"
-    ],
-    [
-      "chan.out",
-      "demod.in"
-    ],
-    [
-      "fft.out",
-      "logmag.in"
-    ],
-    [
-      "logmag.out",
-      "ui:fft"
-    ],
-    [
-      "demod.out",
-      "resamp.in"
-    ],
-    [
-      "resamp.out",
-      "eas.in"
-    ]
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "resamp.in"],
+    ["resamp.out", "eas.in"]
   ]
 }

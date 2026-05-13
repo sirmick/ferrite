@@ -2,14 +2,12 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "cw",
   "label": "CW / Morse decode (HF)",
-  "description": "Auto-decode Morse on HF CW bands (14.030 / 7.030 / 10.115 / 21.030 / 28.030 MHz). Tune so the CW tone sits at 600–800 Hz in audio.",
+  "description": "Auto-decode Morse on HF CW bands (14.030 / 7.030 / 10.115 / 21.030 / 28.030 MHz). Tune so the CW tone sits at 600\u2013800 Hz in audio.",
+  "ai_notes": "Morse / CW decoder for HF ham bands. Standard calling frequencies: 14.030 / 7.030 / 10.115 / 21.030 / 28.030 MHz. Tune so the CW tone sits at 600\u2013800 Hz audio (USB demod, dial freq slightly below the carrier). The auto-WPM detector handles ~5\u201340 wpm. Output: `tail decoder --category cw`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Morse_Code_(CW)",
   "sample_path": "samples/sigidwiki/Cw_morse.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/CW.jpg",
-  "environments": [
-    "node",
-    "browser"
-  ],
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -74,37 +72,13 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "tee.in"
-    ],
-    [
-      "tee.out0",
-      "chan.in"
-    ],
-    [
-      "tee.out1",
-      "fft.in"
-    ],
-    [
-      "chan.out",
-      "demod.in"
-    ],
-    [
-      "fft.out",
-      "logmag.in"
-    ],
-    [
-      "logmag.out",
-      "ui:fft"
-    ],
-    [
-      "demod.out",
-      "resamp.in"
-    ],
-    [
-      "resamp.out",
-      "morse.in"
-    ]
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "resamp.in"],
+    ["resamp.out", "morse.in"]
   ]
 }

@@ -2,14 +2,12 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "wbam",
   "label": "AM broadcast",
-  "description": "AM broadcast — medium wave (540–1700 kHz), shortwave, and aviation (118–137 MHz). Coherent demod via liquid-dsp ampmodem.",
+  "description": "AM broadcast \u2014 medium wave (540\u20131700 kHz), shortwave, and aviation (118\u2013137 MHz). Coherent demod via liquid-dsp ampmodem.",
+  "ai_notes": "AM broadcast + shortwave SWL + aviation AM. Pins `agc_enable=false` via force_params to dodge envelope-pumping on sustained voice. Full audio_nr stack on by default (blanker + notch + spectral mmse_lsa@1.8x + neural@18dB) \u2014 AM picks up everything, the stack earns its keep. On SDRplay, best with the HF antenna port (see driver notes).",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Amplitude_Modulation_(AM)",
   "sample_path": "samples/sigidwiki/AM_Sound.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/AM_Waterfall.jpg",
-  "environments": [
-    "node",
-    "browser"
-  ],
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -98,41 +96,14 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "tee.in"
-    ],
-    [
-      "tee.out0",
-      "chan.in"
-    ],
-    [
-      "tee.out1",
-      "fft.in"
-    ],
-    [
-      "chan.out",
-      "demod.in"
-    ],
-    [
-      "fft.out",
-      "logmag.in"
-    ],
-    [
-      "logmag.out",
-      "ui:fft"
-    ],
-    [
-      "demod.out",
-      "resamp.in"
-    ],
-    [
-      "resamp.out",
-      "audio_nr.in"
-    ],
-    [
-      "audio_nr.out",
-      "audio.in"
-    ]
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "resamp.in"],
+    ["resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"]
   ]
 }

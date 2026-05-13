@@ -2,10 +2,9 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "am-audio-record",
   "label": "AM audio record (headless)",
-  "description": "All-native AM receiver that writes demodulated mono audio to /tmp/ferrite-am-audio.wav. Source → Channelizer (10×, tight filter) → Decimator (5×) → AmDemod @ 48 kHz with post-demod gain → FileAudioSink. AM has a 10 kHz channel so the discriminator stays at audio rate — no aliasing concern. The envelope detector leaves a small AC residual after the DC blocker, so audio_gain ≈ 20 brings a strong station to a playable level. Tune center_freq_hz to the station of interest (AM broadcast is 530–1700 kHz; shortwave lives higher) before invoking `ferrited --flowgraph am-audio-record.json --source-type SoapySource --source-args driver=sdrplay --run-for-secs 30 --start`.",
-  "environments": [
-    "node"
-  ],
+  "description": "All-native AM receiver that writes demodulated mono audio to /tmp/ferrite-am-audio.wav. Source \u2192 Channelizer (10\u00d7, tight filter) \u2192 Decimator (5\u00d7) \u2192 AmDemod @ 48 kHz with post-demod gain \u2192 FileAudioSink. AM has a 10 kHz channel so the discriminator stays at audio rate \u2014 no aliasing concern. The envelope detector leaves a small AC residual after the DC blocker, so audio_gain \u2248 20 brings a strong station to a playable level. Tune center_freq_hz to the station of interest (AM broadcast is 530\u20131700 kHz; shortwave lives higher) before invoking `ferrited --flowgraph am-audio-record.json --source-type SoapySource --source-args driver=sdrplay --run-for-secs 30 --start`.",
+  "ai_notes": "Headless all-native AM receiver that writes demodulated mono audio to a WAV file. Useful for unattended recording of an AM station over a defined window; the demod runs on the server with no UI involvement. Not a listen preset \u2014 there's no AudioSink, so the browser won't play audio while this is loaded.",
+  "environments": ["node"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -55,21 +54,9 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "chan.in"
-    ],
-    [
-      "chan.out",
-      "decim.in"
-    ],
-    [
-      "decim.out",
-      "demod.in"
-    ],
-    [
-      "demod.out",
-      "audio.in"
-    ]
+    ["src.out", "chan.in"],
+    ["chan.out", "decim.in"],
+    ["decim.out", "demod.in"],
+    ["demod.out", "audio.in"]
   ]
 }

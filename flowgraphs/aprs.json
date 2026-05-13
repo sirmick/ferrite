@@ -2,14 +2,12 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "aprs",
   "label": "APRS / packet (144.39 MHz)",
-  "description": "APRS / amateur packet radio on 144.39 MHz US (144.800 EU). Five multimon decoders in parallel: AFSK1200, AFSK2400 ×3, FSK9600 G3RUH.",
+  "description": "APRS / amateur packet radio on 144.39 MHz US (144.800 EU). Five multimon decoders in parallel: AFSK1200, AFSK2400 \u00d73, FSK9600 G3RUH.",
+  "ai_notes": "APRS / packet on 144.39 MHz (NA), 144.800 MHz (EU), 145.175 MHz (AU). Five multimon decoders run in parallel (AFSK1200, AFSK2400 \u00d73, FSK9600) so you don't need to pick a variant manually. Output: `tail decoder --category packet`. For diagnostic side-by-side with a WAV recording see `aprs-debug`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Packet_Reporting_System_(APRS)",
   "sample_path": "samples/sigidwiki/AFSK1200_Sound.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/AFSK1200_Waterfall.png",
-  "environments": [
-    "node",
-    "browser"
-  ],
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -99,53 +97,17 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "tee.in"
-    ],
-    [
-      "tee.out0",
-      "chan.in"
-    ],
-    [
-      "tee.out1",
-      "fft.in"
-    ],
-    [
-      "chan.out",
-      "chan_tee.in"
-    ],
-    [
-      "fft.out",
-      "logmag.in"
-    ],
-    [
-      "logmag.out",
-      "ui:fft"
-    ],
-    [
-      "chan_tee.out0",
-      "demod.in"
-    ],
-    [
-      "demod.out",
-      "resamp.in"
-    ],
-    [
-      "resamp.out",
-      "packet.in"
-    ],
-    [
-      "chan_tee.out1",
-      "demod_browser.in"
-    ],
-    [
-      "demod_browser.out",
-      "audio_resamp.in"
-    ],
-    [
-      "audio_resamp.out",
-      "audio.in"
-    ]
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "chan_tee.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["chan_tee.out0", "demod.in"],
+    ["demod.out", "resamp.in"],
+    ["resamp.out", "packet.in"],
+    ["chan_tee.out1", "demod_browser.in"],
+    ["demod_browser.out", "audio_resamp.in"],
+    ["audio_resamp.out", "audio.in"]
   ]
 }

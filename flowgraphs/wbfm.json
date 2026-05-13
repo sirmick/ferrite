@@ -2,14 +2,12 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "wbfm",
   "label": "FM broadcast (mono)",
-  "description": "Wideband FM broadcast — commercial radio, 87.9–107.9 MHz. Mono playback; pick the stereo preset if you want pilot-locked L/R.",
+  "description": "Wideband FM broadcast \u2014 commercial radio, 87.9\u2013107.9 MHz. Mono playback; pick the stereo preset if you want pilot-locked L/R.",
+  "ai_notes": "Wideband FM broadcast, mono. Pick for commercial radio (87.9\u2013107.9 MHz). Includes RdsDemod, so RDS station name + program type appear in the UI's RdsReadout. Audio NR profile: `deemph` + `neural@18dB` \u2014 music wants minimal NR. For pilot-locked stereo use `wbfm_stereo` instead.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/FM_Broadcast_Radio",
   "sample_path": "samples/sigidwiki/WFM.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Broadcast_FM.jpg",
-  "environments": [
-    "node",
-    "browser"
-  ],
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -113,65 +111,20 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "tee.in"
-    ],
-    [
-      "tee.out0",
-      "chan.in"
-    ],
-    [
-      "tee.out1",
-      "fft.in"
-    ],
-    [
-      "chan.out",
-      "chan_tee.in"
-    ],
-    [
-      "chan_tee.out0",
-      "rssi.in"
-    ],
-    [
-      "chan_tee.out1",
-      "demod_rds.in"
-    ],
-    [
-      "demod_rds.out",
-      "rds.in"
-    ],
-    [
-      "rds.events",
-      "ui:rds"
-    ],
-    [
-      "rssi.out",
-      "demod.in"
-    ],
-    [
-      "rssi.events",
-      "ui:rssi"
-    ],
-    [
-      "fft.out",
-      "logmag.in"
-    ],
-    [
-      "logmag.out",
-      "ui:fft"
-    ],
-    [
-      "demod.out",
-      "decim.in"
-    ],
-    [
-      "decim.out",
-      "audio_nr.in"
-    ],
-    [
-      "audio_nr.out",
-      "audio.in"
-    ]
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "chan_tee.in"],
+    ["chan_tee.out0", "rssi.in"],
+    ["chan_tee.out1", "demod_rds.in"],
+    ["demod_rds.out", "rds.in"],
+    ["rds.events", "ui:rds"],
+    ["rssi.out", "demod.in"],
+    ["rssi.events", "ui:rssi"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "decim.in"],
+    ["decim.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"]
   ]
 }

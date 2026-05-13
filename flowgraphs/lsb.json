@@ -2,13 +2,11 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "lsb",
   "label": "Lower sideband (voice)",
-  "description": "Lower-sideband SSB voice — amateur 160 / 80 / 40 m phone bands by convention. Spectrum is the same band-limited speech wedge as USB but mirrored: the speech tail extends below the (suppressed) carrier instead of above. Pick the right mode for the band.",
+  "description": "Lower-sideband SSB voice \u2014 amateur 160 / 80 / 40 m phone bands by convention. Spectrum is the same band-limited speech wedge as USB but mirrored: the speech tail extends below the (suppressed) carrier instead of above. Pick the right mode for the band.",
+  "ai_notes": "Lower-sideband SSB voice. Amateur convention: LSB below 10 MHz (160 m, 80 m, 40 m phone). Same chain as `usb` but with the demodulator's sideband flipped. Tune the VFO precisely so voice sounds natural; same audio NR stack as `wbam` with `neural@24dB`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Single_Sideband_Voice",
   "signal_wiki_image": "samples/sigidwiki/images/USB_Waterfall.png",
-  "environments": [
-    "node",
-    "browser"
-  ],
+  "environments": ["node", "browser"],
   "blocks": {
     "src": {
       "type": "Source",
@@ -93,41 +91,14 @@
     }
   },
   "wires": [
-    [
-      "src.out",
-      "tee.in"
-    ],
-    [
-      "tee.out0",
-      "chan.in"
-    ],
-    [
-      "tee.out1",
-      "fft.in"
-    ],
-    [
-      "chan.out",
-      "demod.in"
-    ],
-    [
-      "fft.out",
-      "logmag.in"
-    ],
-    [
-      "logmag.out",
-      "ui:fft"
-    ],
-    [
-      "demod.out",
-      "resamp.in"
-    ],
-    [
-      "resamp.out",
-      "audio_nr.in"
-    ],
-    [
-      "audio_nr.out",
-      "audio.in"
-    ]
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "resamp.in"],
+    ["resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"]
   ]
 }
