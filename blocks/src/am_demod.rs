@@ -149,7 +149,7 @@ impl Block for AmDemod {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Demod input rate (typically the channelizer's output).",
                 },
                 ParamSpec {
                     key: "mod_index",
@@ -162,7 +162,7 @@ impl Block for AmDemod {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "AM modulation index used in envelope normalisation. 0.8 matches commercial broadcast; lower for under-modulated stations.",
                 },
                 ParamSpec {
                     key: "audio_gain",
@@ -175,10 +175,10 @@ impl Block for AmDemod {
                         unit: "×",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Linear post-demod gain. Bump if the audio sounds quiet after NR; drop if it clips.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "AM envelope demodulator. Use for AM broadcast (540 kHz – 1.7 MHz), shortwave broadcast, aviation AM. NB: AM modulation chases the envelope — pair with the `wbam` preset's `agc_enable=false` force_param to avoid AGC pumping on sustained speech.",
         }
     }
 

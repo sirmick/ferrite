@@ -134,7 +134,7 @@ impl Block for FmDemod {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Demod input rate (typically the channelizer's output). Higher rate = more SNR margin but more CPU.",
                 },
                 ParamSpec {
                     key: "max_deviation_hz",
@@ -147,10 +147,10 @@ impl Block for FmDemod {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Maximum expected FM peak deviation. WBFM broadcast = 75 kHz, NBFM voice = 2.5–5 kHz, NWR weather = 5 kHz. Too low = clipping at peaks; too high = lower audio output.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "FM demodulator (atan2 discriminator). Outputs the instantaneous frequency as real-valued audio. Use for WBFM broadcast, NBFM voice (ham 2m/70cm, marine VHF, weather), and any other FM mode — `max_deviation_hz` is the discriminator.",
         }
     }
 

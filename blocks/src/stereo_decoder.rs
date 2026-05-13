@@ -335,7 +335,7 @@ impl Block for StereoDecoder {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Input rate — needs ≥106 kHz to keep the 38 kHz subcarrier above Nyquist (typically 240 kHz from the channelizer).",
                 },
                 ParamSpec {
                     key: "lock_threshold",
@@ -348,7 +348,7 @@ impl Block for StereoDecoder {
                         unit: "rms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "RMS amplitude required on the 19 kHz pilot to declare stereo lock. Lower = stickier lock on weak stations; higher = drop to mono faster on noisy signals.",
                 },
                 ParamSpec {
                     key: "lock_tau_ms",
@@ -361,7 +361,7 @@ impl Block for StereoDecoder {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Pilot envelope smoothing time constant. Shorter = faster lock/unlock; longer = stabler over fades.",
                 },
                 ParamSpec {
                     key: "emit_interval_ms",
@@ -374,10 +374,10 @@ impl Block for StereoDecoder {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "How often the events port publishes a stereo-status frame (lock state, pilot level). Decouples UI refresh rate from audio rate.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Stereo FM decoder. Takes the FM-demod composite (mono + 19 kHz pilot + 38 kHz subcarrier) and outputs L/R audio plus a lock-status events stream. Falls back to mono when the pilot is below `lock_threshold`. Use after `FmDemod` for `wbfm_stereo`.",
         }
     }
 
