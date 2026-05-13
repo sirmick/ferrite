@@ -166,7 +166,7 @@ impl Block for Decimator {
                     // Output rate = input_rate / factor — every downstream
                     // block re-inits at the new negotiated rate.
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Output rate = input_rate / factor. Integer-only; prefer Channelizer for fractional or VFO-aware downsampling.",
                 },
                 ParamSpec {
                     key: "num_taps",
@@ -181,7 +181,7 @@ impl Block for Decimator {
                     // Filter length is baked into the FIR state — needs
                     // a re-init, but output rate is unchanged.
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Anti-alias FIR length. More taps = sharper transition + more CPU. 33 is a sensible default.",
                 },
                 ParamSpec {
                     key: "cutoff_normalized",
@@ -194,10 +194,10 @@ impl Block for Decimator {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "FIR cutoff as a fraction of the input rate. Default 0.1 matches a factor-of-4 decimator (0.5 / 4 ≈ 0.125 with some margin).",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Integer-rate downsampler with an anti-alias FIR. Plain decimation, no VFO. Reach for it inside chains that downsample but don't retune.",
         }
     }
 

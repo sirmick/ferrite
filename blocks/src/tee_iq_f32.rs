@@ -54,7 +54,7 @@ impl Block for TeeIqF32 {
                 },
             ],
             params: &[],
-            ai_notes: "",
+            ai_notes: "Forks an IQ stream into two outputs. No params. Standard pattern: after the channelizer, tee to (a) the FFT for the waterfall and (b) the demod chain.",
         }
     }
 

@@ -112,7 +112,7 @@ impl Block for RealF32Resamp {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Target sample rate. Typically the audio rate downstream blocks expect (e.g. 48 kHz for AudioSink).",
                 },
                 ParamSpec {
                     key: "stopband_db",
@@ -125,10 +125,10 @@ impl Block for RealF32Resamp {
                         unit: "dB",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Anti-alias filter rejection. 60 dB is the standard default; raise for cleaner output, lower if CPU is tight.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Polyphase real-valued resampler. Sits between a post-demod audio chain and an output rate that doesn't match (e.g. demod at 240 kHz → AudioSink at 48 kHz).",
         }
     }
 

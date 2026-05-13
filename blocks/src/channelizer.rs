@@ -418,7 +418,7 @@ impl Block for Channelizer {
                     // The only "tune knob" on the VFO — the whole point is
                     // to retune without restarting the graph.
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "VFO offset in Hz applied before downsampling. Positive shifts the channel of interest left, negative right. This is the live-tune knob you reach for after the source is parked off-target to dodge the DC spike.",
                 },
                 ParamSpec {
                     key: "output_rate_hz",
@@ -434,14 +434,14 @@ impl Block for Channelizer {
                     // from `input_rate / output_rate` at init; downstream
                     // chain reinits since the actual output shifts.
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Target channel rate. Decimation factor and FIR are auto-derived from `input_rate / output_rate`; changing this re-inits the downstream chain.",
                 },
                 ParamSpec {
                     key: "record_path",
                     label: "Record path",
                     kind: ParamKind::Text { default: "" },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Optional path to tee channelized IQ to disk. Empty = no recording. Used by the capture-* presets.",
                 },
                 ParamSpec {
                     key: "record_max_seconds",
@@ -454,10 +454,10 @@ impl Block for Channelizer {
                         unit: "s",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Stop recording after N seconds (0 = no cap). Guards against runaway disk usage.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Frequency-shift + decimate. VFO that pulls a chosen channel to baseband and downsamples to the target rate. Where most decoder chains start after the source; `freq_shift_hz` is the live retune knob.",
         }
     }
 
