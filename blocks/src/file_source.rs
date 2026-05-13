@@ -204,17 +204,17 @@ impl Block for FileIqSource {
                     kind: ParamKind::Text { default: "" },
                     // New file = new stream; re-open the source.
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Filesystem path to the IQ file. Auto-detects cf32 (raw interleaved f32) or WAV-PCM-s16 stereo (I=L, Q=R).",
                 },
                 ParamSpec {
                     key: "loop",
                     label: "Loop",
                     kind: ParamKind::Toggle { default: false },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "True = rewind to start on EOF (cyclic replay). False = stop the stream when the file ends.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Replays a recorded IQ file as if it were live RF. Use for offline analysis of a known-good capture, regression-testing demods against fixed inputs, or experimenting without an SDR.",
         }
     }
 

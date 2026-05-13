@@ -209,14 +209,14 @@ impl Block for DtmfAudioSource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Output audio rate. 8 kHz is enough for DTMF (tones are 697–1633 Hz).",
                 },
                 ParamSpec {
                     key: "digits",
                     label: "Digit sequence",
                     kind: ParamKind::Text { default: "1234" },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Sequence to emit, e.g. `1234567890*#ABCD`. Unrecognised chars are skipped.",
                 },
                 ParamSpec {
                     key: "hold_ms",
@@ -229,7 +229,7 @@ impl Block for DtmfAudioSource {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Per-digit on-time. ITU minimum is 40 ms; 100–200 ms is realistic.",
                 },
                 ParamSpec {
                     key: "gap_ms",
@@ -242,7 +242,7 @@ impl Block for DtmfAudioSource {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Silence between digits. ITU minimum is 40 ms.",
                 },
                 ParamSpec {
                     key: "amplitude",
@@ -255,17 +255,17 @@ impl Block for DtmfAudioSource {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Output level, 0–1.",
                 },
                 ParamSpec {
                     key: "loop_sequence",
                     label: "Loop sequence",
                     kind: ParamKind::Toggle { default: true },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "True = restart digits from start when the list ends. False = silence after.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Audio-rate DTMF tone generator (mono real-valued). Pair with `DtmfDecoder` for end-to-end tests of the decode chain without a phone signal.",
         }
     }
 

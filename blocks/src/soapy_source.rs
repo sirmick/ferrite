@@ -454,7 +454,7 @@ impl Block for SoapySource {
                         default: "driver=rtlsdr",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "SoapySDR device-args string (`driver=...,serial=...`). Selects the device when multiple are attached.",
                 },
                 ParamSpec {
                     key: "sample_rate_hz",
@@ -467,7 +467,7 @@ impl Block for SoapySource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Stream rate. Drivers expose a discrete set — see driver notes for valid values.",
                 },
                 ParamSpec {
                     key: "center_freq_hz",
@@ -480,7 +480,7 @@ impl Block for SoapySource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "RF tuning. Park 50–100 kHz off your target on zero-IF drivers to dodge the DC spike; use the channelizer's `freq_shift_hz` to recover the carrier.",
                 },
                 ParamSpec {
                     key: "gain_db",
@@ -493,7 +493,7 @@ impl Block for SoapySource {
                         unit: "dB",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Overall SoapySDR gain element. Mutually exclusive with `agc_enable=true`; ferrite-ctl folds them atomically. Some drivers expose a separate LNA stage on top — see driver notes.",
                 },
                 ParamSpec {
                     key: "channel",
@@ -506,10 +506,10 @@ impl Block for SoapySource {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Receive channel index. 0 for single-tuner SDRs (most common case).",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Hardware IQ source via SoapySDR. The actual radio. Live-tunable params: centre, gain, antenna, AGC. Driver-specific gain stages, antenna ports, and notches are documented in the driver-specific operator notes appended to the system prompt.",
         }
     }
 

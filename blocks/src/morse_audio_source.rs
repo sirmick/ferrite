@@ -300,7 +300,7 @@ impl Block for MorseAudioSource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Output audio rate.",
                 },
                 ParamSpec {
                     key: "text",
@@ -309,7 +309,7 @@ impl Block for MorseAudioSource {
                         default: "PARIS PARIS PARIS",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Plain text to key. Letters, digits, basic punctuation; unknown chars become word breaks.",
                 },
                 ParamSpec {
                     key: "wpm",
@@ -322,7 +322,7 @@ impl Block for MorseAudioSource {
                         unit: "wpm",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Words per minute (PARIS standard). 12–25 wpm is comfortable conversational CW.",
                 },
                 ParamSpec {
                     key: "tone_hz",
@@ -335,7 +335,7 @@ impl Block for MorseAudioSource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Carrier pitch. 600–800 Hz is the traditional CW comfort range.",
                 },
                 ParamSpec {
                     key: "amplitude",
@@ -348,17 +348,17 @@ impl Block for MorseAudioSource {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Output level, 0–1.",
                 },
                 ParamSpec {
                     key: "loop_sequence",
                     label: "Loop sequence",
                     kind: ParamKind::Toggle { default: true },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "True = restart text from start on EOF. False = silence after.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Audio-rate CW tone generator that keys a given text in Morse. Pair with `MorseDemod` for end-to-end tests of the decode chain without an antenna.",
         }
     }
 

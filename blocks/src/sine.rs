@@ -167,7 +167,7 @@ impl Block for SineSource {
                     // Source rate ripples through every downstream rate
                     // negotiation — treat as a source restart.
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Output sample rate. Pick to match downstream block expectations.",
                 },
                 ParamSpec {
                     key: "center_freq_hz",
@@ -180,7 +180,7 @@ impl Block for SineSource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Pretend RF centre — sets PortMeta downstream blocks read for axis labels.",
                 },
                 ParamSpec {
                     key: "tone_freq_abs_hz",
@@ -193,7 +193,7 @@ impl Block for SineSource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Absolute tone frequency. Block emits a complex exponential at `tone - center` baseband offset; set both to place the carrier where you want it on the waterfall.",
                 },
                 ParamSpec {
                     key: "amplitude",
@@ -206,10 +206,10 @@ impl Block for SineSource {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Output level, 0–1. ~0.25 leaves headroom for downstream gain.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Software IQ source: complex sinusoid at a configurable frequency. Reach for it when you need a deterministic signal — tests, demos, end-to-end checks — without an SDR attached.",
         }
     }
 
