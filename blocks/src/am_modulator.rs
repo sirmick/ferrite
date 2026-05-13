@@ -144,7 +144,7 @@ impl Block for AmModulator {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Audio-rate input (typical 8 kHz).",
                 },
                 ParamSpec {
                     key: "output_rate_hz",
@@ -157,7 +157,7 @@ impl Block for AmModulator {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "IQ output rate. Match the SDR rate when feeding hardware; typically 2.4 MS/s.",
                 },
                 ParamSpec {
                     key: "offset_hz",
@@ -170,7 +170,7 @@ impl Block for AmModulator {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Where to place the AM carrier relative to baseband. Non-zero so the spectrum shows the upper + lower sidebands cleanly without DC interference.",
                 },
                 ParamSpec {
                     key: "mod_depth",
@@ -183,10 +183,10 @@ impl Block for AmModulator {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "AM modulation depth. 0.7 = 70 % (broadcast typical). Avoid >1.0 to prevent envelope inversion / over-mod distortion.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "AM modulator — audio + carrier offset → IQ. Used in loopback / test scenarios (paired with AmDemod for end-to-end decoder verification). Not a runtime block in any listen preset.",
         }
     }
 

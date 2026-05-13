@@ -128,7 +128,7 @@ const STREAM_ID_PARAM: ParamSpec = ParamSpec {
     // Bridge wiring is fixed per graph load — re-plumbing the WS pair
     // is a source-level restart.
     reconfig_scope: ReconfigureScope::SourceRestart,
-    ai_notes: "",
+    ai_notes: "Numeric id used to pair the WsBridgeTx (server) with its WsBridgeRx (browser). Don't tune — set once by the env-split planner.",
 };
 
 /// Narrow the `u32` param back to the wire's `u16` stream id. `u16` is
@@ -232,7 +232,7 @@ impl Block for WsBridgeTx {
             }],
             outputs: &[],
             params: &[STREAM_ID_PARAM],
-            ai_notes: "",
+            ai_notes: "Server-side end of the IQ WebSocket bridge. Auto-inserted by env_split at node→browser boundaries; not authored by hand in presets.",
         }
     }
 
@@ -351,7 +351,7 @@ const RX_BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
         unit: "samples",
     },
     reconfig_scope: ReconfigureScope::SourceRestart,
-    ai_notes: "",
+    ai_notes: "Receive-side ring capacity in samples. Larger = more robust against bursty WS delivery; smaller = lower latency / memory.",
 };
 
 pub struct WsBridgeRx {
@@ -444,7 +444,7 @@ impl Block for WsBridgeRx {
                 port_type: PortType::IqF32,
             }],
             params: &[STREAM_ID_PARAM, RX_BUFFER_SAMPLES_PARAM],
-            ai_notes: "",
+            ai_notes: "Browser-side end of the IQ WebSocket bridge. Auto-inserted by env_split at node→browser boundaries; paired with a WsBridgeTx by `stream_id`.",
         }
     }
 
@@ -553,10 +553,10 @@ impl Block for WsBridgeTxFftU8 {
                     // downstream consumers that pin the FFT size must
                     // re-init.
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "WS frame size in bins. Must match the upstream FFT/LogMagU8 size or the browser-side waterfall mis-frames.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Server-side WS bridge for FFT byte frames. Carries the LogMagU8 stream to the browser's WebGL waterfall.",
         }
     }
 
@@ -648,7 +648,7 @@ impl Block for WsBridgeTxEvents {
             }],
             outputs: &[],
             params: &[STREAM_ID_PARAM],
-            ai_notes: "",
+            ai_notes: "Server-side WS bridge for structured events (RSSI readings, decoder messages, lock-state frames). Forwards `events` ports to the browser.",
         }
     }
 

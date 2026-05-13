@@ -50,7 +50,7 @@ impl Block for TeeRealF32 {
                 },
             ],
             params: &[],
-            ai_notes: "",
+            ai_notes: "Forks a real-valued audio stream into two outputs. Mirror of `TeeIqF32` for post-demod chains (e.g. audio + decoder branch sharing the same demodulated signal).",
         }
     }
 

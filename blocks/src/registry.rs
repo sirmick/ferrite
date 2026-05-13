@@ -95,4 +95,39 @@ mod tests {
         let params = serde_json::json!({ "rate_hz": 250_000.0, "_comment": "ignored" });
         entry.construct(&params).expect("extra fields tolerated");
     }
+
+    /// Schema-rollout enforcement: every registered block must carry
+    /// non-empty `ai_notes` (block-level + per-param). See
+    /// `docs/13-ai-notes-migration.md` for the authoring guide. Length
+    /// floor of 10 words on the block-level note rejects placeholder
+    /// stubs without being so strict it discourages utility-block
+    /// authors from one-line entries.
+    #[test]
+    fn every_registered_block_has_ai_notes() {
+        let mut missing: Vec<String> = Vec::new();
+        for entry in super::entries() {
+            let s = entry.spec();
+            if s.ai_notes.is_empty() {
+                missing.push(format!("block `{}` ai_notes is empty", s.type_name));
+            } else if s.ai_notes.split_whitespace().count() < 10 {
+                missing.push(format!(
+                    "block `{}` ai_notes is too terse (need ≥10 words)",
+                    s.type_name
+                ));
+            }
+            for p in s.params {
+                if p.ai_notes.is_empty() {
+                    missing.push(format!(
+                        "param `{}::{}` ai_notes is empty",
+                        s.type_name, p.key
+                    ));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "ai_notes coverage incomplete:\n  - {}",
+            missing.join("\n  - "),
+        );
+    }
 }

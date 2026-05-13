@@ -165,7 +165,7 @@ impl Block for Squelch {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Input rate.",
                 },
                 ParamSpec {
                     key: "threshold_db",
@@ -178,7 +178,7 @@ impl Block for Squelch {
                         unit: "dBFS",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Power threshold to open the gate. Set just above the noise floor measured on a quiet channel.",
                 },
                 ParamSpec {
                     key: "hysteresis_db",
@@ -191,7 +191,7 @@ impl Block for Squelch {
                         unit: "dB",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Gap between open and close thresholds (close = threshold - hysteresis). Prevents chatter on borderline signals.",
                 },
                 ParamSpec {
                     key: "power_tau_ms",
@@ -204,7 +204,7 @@ impl Block for Squelch {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Envelope smoother time constant. Shorter = faster open/close response; longer = stabler decisions on weak/fluttery signals.",
                 },
                 ParamSpec {
                     key: "fade_tau_ms",
@@ -217,10 +217,10 @@ impl Block for Squelch {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Cross-fade time when opening/closing the gate. Avoids audible clicks.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Power-threshold squelch on an IQ stream. Mutes the output below `threshold_db` (closed) and passes through above + hysteresis (open). Sits before the demod chain to skip processing quiet channels.",
         }
     }
 
