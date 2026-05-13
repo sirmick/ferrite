@@ -1,0 +1,19 @@
+{
+  "name": "ferrite-screenshot",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Reproducible Ferrite UI screenshots and Playwright e2e harness. Spawns ferrited on a temp port, drives the UI headless, captures PNGs to docs/images/.",
+  "scripts": {
+    "shot": "node --import tsx/esm src/take-screenshot.ts",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
