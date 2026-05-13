@@ -17,6 +17,16 @@ export default ts.config(
         ...globals.node,
       },
     },
+    rules: {
+      // Accept the `_`-prefix convention for intentionally unused args
+      // / catch bindings / destructured slots. Matches TSLint's old
+      // default and is the standard signal for "kept for compatibility,
+      // not used here."
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
+      ],
+    },
   },
   {
     files: ['**/*.svelte'],

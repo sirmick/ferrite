@@ -34,7 +34,6 @@ export const fd_prestat_get = noop;
 export const fd_prestat_dir_name = noop;
 export const environ_get = noop;
 export const environ_sizes_get = noop;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export const proc_exit = (_code: number): void => {
   // Don't actually exit — liquid's `liquid_error_fl` calls into here
   // on hard failures we'd like to surface as exceptions. Silently

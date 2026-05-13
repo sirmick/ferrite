@@ -237,27 +237,32 @@ export function gainDescriptionFor(caps: DeviceCapabilities): string | undefined
   return lookupPreset(caps.driver_key)?.gain_description;
 }
 
-/** Whether the master gain slider's displayed value should be
- *  inverted relative to the raw `gain_db` param. See
- *  `SdrPreset.gain_inverted`. */
-export function gainInvertedFor(caps: DeviceCapabilities): boolean {
-  return lookupPreset(caps.driver_key)?.gain_inverted === true;
+/** Historically: whether to flip the slider for drivers whose Soapy
+ *  "overall gain" element is in reduction terms (high raw = quiet,
+ *  notably SDRplay's SoapySDRPlay3). The flip now lives server-side in
+ *  `SoapySource` — the wire `gain_db` is always user-facing (high =
+ *  loud) regardless of driver. This helper stays as a stable export
+ *  but always returns `false`; the per-preset `gain_inverted` field
+ *  is ignored (and the lone `sdrplay.json` that set it has been
+ *  cleared). Callers can drop the inversion plumbing at their leisure. */
+export function gainInvertedFor(_caps: DeviceCapabilityHint): boolean {
+  return false;
 }
+
+type DeviceCapabilityHint = DeviceCapabilities | { driver_key: string };
 
 /** Convert raw `gain_db` value to the value the user sees on the
- *  slider. With `inverted=true`: `displayed = max + min - raw`. With
- *  `inverted=false`: identity. Used by both LiveControls and
- *  InputControls so the master-slider semantic is consistent. */
-export function gainDisplayValue(raw: number, range: RangeSpec, inverted: boolean): number {
-  if (!inverted) return raw;
-  return range.min + range.max - raw;
+ *  slider. With the new wire convention this is always identity —
+ *  the parameters are kept so existing callers (`InputControls`,
+ *  `LiveControls`) don't need a code change. */
+export function gainDisplayValue(raw: number, _range: RangeSpec, _inverted: boolean): number {
+  return raw;
 }
 
-/** Inverse of `gainDisplayValue` — convert a slider position back to
- *  the raw `gain_db` to send to the daemon. */
-export function gainRawValue(displayed: number, range: RangeSpec, inverted: boolean): number {
-  if (!inverted) return displayed;
-  return range.min + range.max - displayed;
+/** Inverse of `gainDisplayValue`. Identity under the new wire
+ *  convention; same shape kept for caller compatibility. */
+export function gainRawValue(displayed: number, _range: RangeSpec, _inverted: boolean): number {
+  return displayed;
 }
 
 /** Lookup helper variant keyed directly by `driver_key` for callers that

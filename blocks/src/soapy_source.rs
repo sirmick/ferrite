@@ -168,6 +168,61 @@ pub struct SoapyReadback {
 
 type RingHandle = Arc<Mutex<IqRing>>;
 
+// ---------------------------------------------------------------------------
+// Gain convention helpers
+// ---------------------------------------------------------------------------
+//
+// Soapy's "overall gain" element is reported in *forward* dB on most
+// drivers (RTL-SDR, HackRF, Airspy, …) — higher value = more signal.
+// SoapySDRPlay3 is the odd one out: its overall element ranges 0..66 dB
+// but the value is gain *reduction* — raw `setGain(0)` is loudest,
+// `setGain(66)` is quietest. The element ranges (`IFGR` 20–59, `RFGR`
+// 0–27) are likewise in reduction terms.
+//
+// To keep the wire format uniform we adopt a single convention: the
+// `gain_db` field on `SoapySource` params (and on `/api/source`) means
+// **user-facing dB gain, higher = louder.** For drivers whose overall
+// element is reduction-shaped we invert at the boundary here — both
+// when writing (`set_gain`) and when reading back (`gain()`).
+//
+// This makes `ferrite-ctl tune --gain 50` mean "50 dB of gain" on every
+// driver, eliminating the SDRplay-specific UI inversion that lived in
+// the frontend and the AI-confusing wire asymmetry.
+
+fn driver_has_inverted_gain(driver_key: &str) -> bool {
+    // Match on the lowercase driver name. SoapySDRPlay3 advertises
+    // `driver=sdrplay` regardless of which RSP model is attached.
+    matches!(driver_key.to_ascii_lowercase().as_str(), "sdrplay")
+}
+
+/// Pure-math inversion against the driver's reported gain range —
+/// `raw = min + max - user`. The map is symmetric (its own inverse),
+/// so the same function converts user→raw and raw→user.
+fn invert_gain(value: f64, min: f64, max: f64) -> f64 {
+    min + max - value
+}
+
+/// Convert a user-facing gain value (high = loud) to the raw value the
+/// driver's `setGain` expects. Identity for drivers without inverted
+/// gain; for inverted drivers: `raw = min + max - user`.
+fn user_gain_to_raw(device: &Device, dir: Direction, ch: usize, user_db: f64) -> f64 {
+    let driver = device.driver_key().unwrap_or_default();
+    if !driver_has_inverted_gain(&driver) {
+        return user_db;
+    }
+    match device.gain_range(dir, ch).ok() {
+        Some(r) => invert_gain(user_db, r.minimum, r.maximum),
+        None => user_db,
+    }
+}
+
+/// Inverse of [`user_gain_to_raw`]: convert the driver's reported gain
+/// back to a user-facing value (high = loud). Same call shape because
+/// the map is symmetric.
+fn raw_gain_to_user(device: &Device, dir: Direction, ch: usize, raw_db: f64) -> f64 {
+    user_gain_to_raw(device, dir, ch, raw_db)
+}
+
 pub struct SoapySource {
     #[allow(dead_code)]
     device: Device,
@@ -283,9 +338,10 @@ impl SoapySource {
             let _ = device.set_gain_mode(dir, ch, agc);
         }
         if let Some(g) = params.gain_db {
+            let raw = user_gain_to_raw(&device, dir, ch, g);
             device
-                .set_gain(dir, ch, g)
-                .with_context(|| format!("set gain={g}"))?;
+                .set_gain(dir, ch, raw)
+                .with_context(|| format!("set gain={g} (raw={raw})"))?;
         }
         for (key, value) in &params.settings {
             // Soapy's writeSetting is the catch-all for driver-specific
@@ -428,7 +484,11 @@ impl SoapySource {
             sample_rate_hz: self.device.sample_rate(dir, ch).ok(),
             center_freq_hz: self.device.frequency(dir, ch).ok(),
             bandwidth_hz: self.device.bandwidth(dir, ch).ok(),
-            gain_db: self.device.gain(dir, ch).ok(),
+            gain_db: self
+                .device
+                .gain(dir, ch)
+                .ok()
+                .map(|raw| raw_gain_to_user(&self.device, dir, ch, raw)),
             agc: self.device.gain_mode(dir, ch).ok(),
             antenna: self.device.antenna(dir, ch).ok().filter(|s| !s.is_empty()),
         }
@@ -540,9 +600,10 @@ impl Block for SoapySource {
             self.center_freq_hz = self.device.frequency(dir, ch).unwrap_or(v);
         }
         if let Some(v) = obj.get("gain_db").and_then(|v| v.as_f64()) {
+            let raw = user_gain_to_raw(&self.device, dir, ch, v);
             self.device
-                .set_gain(dir, ch, v)
-                .with_context(|| format!("live set_gain={v}"))?;
+                .set_gain(dir, ch, raw)
+                .with_context(|| format!("live set_gain={v} (raw={raw})"))?;
         }
         if let Some(v) = obj.get("antenna").and_then(|v| v.as_str()) {
             self.device
@@ -778,8 +839,42 @@ fn open_with_retry(args: &str) -> Result<Device> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SoapySource, SoapySourceParams};
+    use super::{driver_has_inverted_gain, invert_gain, SoapySource, SoapySourceParams};
     use crate::block::{Block, Placement, PortType};
+
+    #[test]
+    fn sdrplay_is_the_only_inverted_driver() {
+        assert!(driver_has_inverted_gain("sdrplay"));
+        assert!(driver_has_inverted_gain("SDRplay")); // case-insensitive
+        assert!(!driver_has_inverted_gain("rtlsdr"));
+        assert!(!driver_has_inverted_gain("hackrf"));
+        assert!(!driver_has_inverted_gain("airspy"));
+        assert!(!driver_has_inverted_gain(""));
+    }
+
+    #[test]
+    fn gain_inversion_round_trips() {
+        // SDRplay's overall element range is 0..66.
+        let (min, max) = (0.0, 66.0);
+        // User asks for "50 dB of gain" (high = loud); raw on the wire
+        // becomes 16 (low = loud for an inverted driver). Round-trip
+        // through the symmetric map yields the original.
+        let raw = invert_gain(50.0, min, max);
+        assert!((raw - 16.0).abs() < f64::EPSILON);
+        let user = invert_gain(raw, min, max);
+        assert!((user - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn gain_inversion_boundary_values() {
+        let (min, max) = (0.0, 66.0);
+        // Loudest user-facing = highest raw on a non-inverted driver,
+        // and the lowest raw on an inverted driver.
+        assert_eq!(invert_gain(0.0, min, max), 66.0);
+        assert_eq!(invert_gain(66.0, min, max), 0.0);
+        // Midpoint maps to itself.
+        assert_eq!(invert_gain(33.0, min, max), 33.0);
+    }
 
     #[test]
     fn spec_is_native_only_iq_out() {
