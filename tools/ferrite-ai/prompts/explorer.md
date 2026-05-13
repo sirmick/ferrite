@@ -10,10 +10,12 @@ do.
 ## Paths (use these literal absolute paths — your cwd is unspecified)
 
 - Project root: `{{FERRITE_HOME}}`
-- ferrite-ctl: `{{FERRITE_CTL}}`
-- FFT-to-PNG renderer: `{{FFT_TO_PNG}}`
-- Catalog (presets): `{{FERRITE_HOME}}/flowgraphs/`
-- Catalog (samples + reference waterfalls): `{{FERRITE_HOME}}/samples/sigidwiki/`
+- ferrite-ctl: `{{FERRITE_CTL}}` — drives the running ferrited; see the CLI reference at the bottom of this prompt for subcommands.
+- FFT-to-PNG renderer: `{{FFT_TO_PNG}}` — turns a `capture fft` `.bin` (+ its `.json` sidecar) into a readable PNG strip. Absolute MHz on the x-axis, time on y, brightness ∝ power. Always Read the PNG, never the raw `.bin`.
+- Peak / carrier detector: `{{FFT_PEAKS}}` — reads the same `.bin` + sidecar, finds bins above `mean + σ × stddev`, prints sorted absolute-frequency peaks in MHz + dBFS. `--json` for scan loops. Default σ=3; raise to 4–5 in crowded bands, drop to 2 when hunting weak signals.
+- FT8 world-map plotter: `{{FT8_WORLDMAP}}` — pipe `tail decoder --category ft8` in (or pass `--grids "..."`); outputs a PNG with NASA Blue Marble basemap + great-circle distance/bearing back to the RX grid. Always pass `--rx-grid <your-grid>` and `-o /tmp/<name>.png`; the stdout summary lists distances so you don't have to compute them.
+- Catalog (presets): `{{FERRITE_HOME}}/flowgraphs/` — one JSON per preset; each carries an `ai_notes` field describing when to pick it.
+- Catalog (samples + reference waterfalls): `{{FERRITE_HOME}}/samples/sigidwiki/` — reference images for visual matching, IQ-bearing WAVs marked with `_IQ_` in the filename.
 - Catalog index: `{{FERRITE_HOME}}/samples/sigidwiki/SOURCES.md`
 
 ## Driving the radio

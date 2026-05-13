@@ -31,6 +31,7 @@ const FERRITE_CTL =
   process.env.FERRITE_CTL ?? resolve(FERRITE_HOME, "target/release/ferrite-ctl");
 const FFT_TO_PNG = resolve(FERRITE_HOME, "tools/fft_to_png.py");
 const FFT_PEAKS = resolve(FERRITE_HOME, "tools/fft_peaks.py");
+const FT8_WORLDMAP = resolve(FERRITE_HOME, "tools/ft8_worldmap.py");
 
 // Capture `ferrite-ctl --help` once at startup so the AI sees the full
 // CLI surface in its system prompt — saves a tool call per turn and
@@ -225,6 +226,7 @@ function loadPrompt(name: string): string {
     .replaceAll("{{FERRITE_CTL}}", FERRITE_CTL)
     .replaceAll("{{FFT_TO_PNG}}", FFT_TO_PNG)
     .replaceAll("{{FFT_PEAKS}}", FFT_PEAKS)
+    .replaceAll("{{FT8_WORLDMAP}}", FT8_WORLDMAP)
     .replaceAll("{{CTL_HELP}}", CTL_HELP);
 }
 
