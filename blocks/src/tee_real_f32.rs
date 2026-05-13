@@ -50,6 +50,7 @@ impl Block for TeeRealF32 {
                 },
             ],
             params: &[],
+            ai_notes: "",
         }
     }
 

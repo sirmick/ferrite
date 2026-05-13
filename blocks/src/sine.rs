@@ -167,6 +167,7 @@ impl Block for SineSource {
                     // Source rate ripples through every downstream rate
                     // negotiation — treat as a source restart.
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "center_freq_hz",
@@ -179,6 +180,7 @@ impl Block for SineSource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "tone_freq_abs_hz",
@@ -191,6 +193,7 @@ impl Block for SineSource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "amplitude",
@@ -203,8 +206,10 @@ impl Block for SineSource {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

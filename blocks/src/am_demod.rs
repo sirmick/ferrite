@@ -149,6 +149,7 @@ impl Block for AmDemod {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "mod_index",
@@ -161,6 +162,7 @@ impl Block for AmDemod {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "audio_gain",
@@ -173,8 +175,10 @@ impl Block for AmDemod {
                         unit: "×",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

@@ -195,6 +195,7 @@ impl Block for FileAudioSink {
                     label: "Path",
                     kind: ParamKind::Text { default: "" },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "rate_hz",
@@ -207,6 +208,7 @@ impl Block for FileAudioSink {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "max_seconds",
@@ -219,8 +221,10 @@ impl Block for FileAudioSink {
                         unit: "s",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

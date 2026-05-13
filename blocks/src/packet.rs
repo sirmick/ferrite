@@ -121,7 +121,9 @@ impl Block for PacketDemod {
                     unit: "Hz",
                 },
                 reconfig_scope: ReconfigureScope::SourceRestart,
+                ai_notes: "",
             }],
+            ai_notes: "",
         }
     }
 

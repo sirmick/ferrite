@@ -339,6 +339,7 @@ mod tests {
         inputs: NO_PORTS,
         outputs: SRC_PORTS_OUT,
         params: NO_PARAMS,
+        ai_notes: "",
     };
     const SINK: BlockSpec = BlockSpec {
         type_name: "Sink",
@@ -346,6 +347,7 @@ mod tests {
         inputs: SINK_PORTS_IN,
         outputs: NO_PORTS,
         params: NO_PARAMS,
+        ai_notes: "",
     };
     const AUDIO: BlockSpec = BlockSpec {
         type_name: "Audio",
@@ -353,6 +355,7 @@ mod tests {
         inputs: AUDIO_PORTS_IN,
         outputs: NO_PORTS,
         params: NO_PARAMS,
+        ai_notes: "",
     };
     const SOAPY: BlockSpec = BlockSpec {
         type_name: "Soapy",
@@ -360,6 +363,7 @@ mod tests {
         inputs: NO_PORTS,
         outputs: SRC_PORTS_OUT,
         params: NO_PARAMS,
+        ai_notes: "",
     };
 
     fn stub() -> StubRegistry {

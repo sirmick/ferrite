@@ -138,14 +138,17 @@ impl Block for PagerDemod {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "show_partial",
                     label: "Show partial decodes",
                     kind: ParamKind::Toggle { default: true },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

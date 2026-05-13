@@ -191,6 +191,7 @@ impl Block for FftBlock {
                     // Changing FFT size changes the output port's bin count,
                     // so every downstream consumer must re-init.
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "window",
@@ -202,6 +203,7 @@ impl Block for FftBlock {
                     // Window is just a coefficient table — swap in place
                     // on the next `process` call.
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "max_frames_per_second",
@@ -214,8 +216,10 @@ impl Block for FftBlock {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

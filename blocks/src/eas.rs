@@ -105,7 +105,9 @@ impl Block for EasDemod {
                     unit: "Hz",
                 },
                 reconfig_scope: ReconfigureScope::SourceRestart,
+                ai_notes: "",
             }],
+            ai_notes: "",
         }
     }
 

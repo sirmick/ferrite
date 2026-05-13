@@ -20,6 +20,11 @@ export interface FlowgraphDoc {
   readonly name?: string;
   readonly label?: string;
   readonly description?: string;
+  /** Plain-prose preset-level note injected into the ferrite-ai system
+   *  prompt when this preset is active. 3–6 sentences answering
+   *  "when do I pick this preset? what signal does it expect? any
+   *  gotchas?" See `docs/13-ai-notes-migration.md`. */
+  readonly ai_notes?: string;
   readonly environments?: ReadonlyArray<Environment>;
   readonly blocks?: Readonly<Record<string, BlockInstanceDecl>>;
   readonly wires?: ReadonlyArray<Wire>;

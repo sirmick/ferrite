@@ -210,6 +210,7 @@ pub fn split_for_environment(
         name: doc.name.clone(),
         label: doc.label.clone(),
         description: doc.description.clone(),
+        ai_notes: doc.ai_notes.clone(),
         environments: vec![env],
         blocks: new_blocks,
         wires: new_wires,
@@ -517,6 +518,7 @@ mod tests {
         inputs: NO_PORTS,
         outputs: IQ_OUT,
         params: NO_PARAMS,
+        ai_notes: "",
     };
     const WASM_SINK: BlockSpec = BlockSpec {
         type_name: "WasmSink",
@@ -524,6 +526,7 @@ mod tests {
         inputs: IQ_IN,
         outputs: NO_PORTS,
         params: NO_PARAMS,
+        ai_notes: "",
     };
     const EITHER: BlockSpec = BlockSpec {
         type_name: "Either",
@@ -531,6 +534,7 @@ mod tests {
         inputs: IQ_IN,
         outputs: IQ_OUT,
         params: NO_PARAMS,
+        ai_notes: "",
     };
     const WS_TX: BlockSpec = BlockSpec {
         type_name: "WsBridgeTx",
@@ -538,6 +542,7 @@ mod tests {
         inputs: IQ_IN,
         outputs: NO_PORTS,
         params: NO_PARAMS,
+        ai_notes: "",
     };
     const WS_RX: BlockSpec = BlockSpec {
         type_name: "WsBridgeRx",
@@ -545,6 +550,7 @@ mod tests {
         inputs: NO_PORTS,
         outputs: IQ_OUT,
         params: NO_PARAMS,
+        ai_notes: "",
     };
     const FFT_OUT: &[PortSpec] = &[PortSpec {
         name: "out",
@@ -556,6 +562,7 @@ mod tests {
         inputs: NO_PORTS,
         outputs: FFT_OUT,
         params: NO_PARAMS,
+        ai_notes: "",
     };
     const REAL_OUT: &[PortSpec] = &[PortSpec {
         name: "out",
@@ -567,6 +574,7 @@ mod tests {
         inputs: NO_PORTS,
         outputs: REAL_OUT,
         params: NO_PARAMS,
+        ai_notes: "",
     };
     const EVENTS_OUT: &[PortSpec] = &[PortSpec {
         name: "out",
@@ -578,6 +586,7 @@ mod tests {
         inputs: NO_PORTS,
         outputs: EVENTS_OUT,
         params: NO_PARAMS,
+        ai_notes: "",
     };
 
     fn stub() -> StubRegistry {

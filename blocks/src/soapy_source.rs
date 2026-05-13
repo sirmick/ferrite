@@ -454,6 +454,7 @@ impl Block for SoapySource {
                         default: "driver=rtlsdr",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "sample_rate_hz",
@@ -466,6 +467,7 @@ impl Block for SoapySource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "center_freq_hz",
@@ -478,6 +480,7 @@ impl Block for SoapySource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "gain_db",
@@ -490,6 +493,7 @@ impl Block for SoapySource {
                         unit: "dB",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "channel",
@@ -502,8 +506,10 @@ impl Block for SoapySource {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

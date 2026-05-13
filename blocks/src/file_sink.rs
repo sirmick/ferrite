@@ -317,6 +317,7 @@ impl Block for FileIqSink {
                     label: "Path",
                     kind: ParamKind::Text { default: "" },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "format",
@@ -326,6 +327,7 @@ impl Block for FileIqSink {
                         default: "cf32",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "max_seconds",
@@ -338,8 +340,10 @@ impl Block for FileIqSink {
                         unit: "s",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

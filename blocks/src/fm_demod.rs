@@ -134,6 +134,7 @@ impl Block for FmDemod {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "max_deviation_hz",
@@ -146,8 +147,10 @@ impl Block for FmDemod {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

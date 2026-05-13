@@ -59,6 +59,9 @@ pub struct ParamSchemaDto {
     #[serde(flatten)]
     pub kind: ParamKindDto,
     pub reconfig_scope: &'static str,
+    /// Plain-prose tooltip / AI-prompt note. See [`ParamSpec::ai_notes`].
+    /// Empty during the schema rollout.
+    pub ai_notes: String,
 }
 
 /// Full schema for one block type. Top-level response is `Vec<Self>`
@@ -70,6 +73,9 @@ pub struct BlockSchemaDto {
     pub inputs: Vec<PortSchemaDto>,
     pub outputs: Vec<PortSchemaDto>,
     pub params: Vec<ParamSchemaDto>,
+    /// Plain-prose block-level note. See [`BlockSpec::ai_notes`].
+    /// Empty during the schema rollout.
+    pub ai_notes: String,
 }
 
 impl From<&PortSpec> for PortSchemaDto {
@@ -147,6 +153,7 @@ impl From<&ParamSpec> for ParamSchemaDto {
             label: p.label.to_string(),
             kind: (&p.kind).into(),
             reconfig_scope: reconfig_scope_wire(p.reconfig_scope),
+            ai_notes: p.ai_notes.to_string(),
         }
     }
 }
@@ -163,6 +170,7 @@ impl From<BlockSpec> for BlockSchemaDto {
             inputs: spec.inputs.iter().map(PortSchemaDto::from).collect(),
             outputs: spec.outputs.iter().map(PortSchemaDto::from).collect(),
             params: spec.params.iter().map(ParamSchemaDto::from).collect(),
+            ai_notes: spec.ai_notes.to_string(),
         }
     }
 }

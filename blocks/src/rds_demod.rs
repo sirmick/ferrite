@@ -407,7 +407,9 @@ impl Block for RdsDemod {
                     unit: "Hz",
                 },
                 reconfig_scope: ReconfigureScope::SourceRestart,
+                ai_notes: "",
             }],
+            ai_notes: "",
         }
     }
 

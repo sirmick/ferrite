@@ -204,14 +204,17 @@ impl Block for FileIqSource {
                     kind: ParamKind::Text { default: "" },
                     // New file = new stream; re-open the source.
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "loop",
                     label: "Loop",
                     kind: ParamKind::Toggle { default: false },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

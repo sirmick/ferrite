@@ -128,6 +128,7 @@ const STREAM_ID_PARAM: ParamSpec = ParamSpec {
     // Bridge wiring is fixed per graph load — re-plumbing the WS pair
     // is a source-level restart.
     reconfig_scope: ReconfigureScope::SourceRestart,
+    ai_notes: "",
 };
 
 /// Narrow the `u32` param back to the wire's `u16` stream id. `u16` is
@@ -231,6 +232,7 @@ impl Block for WsBridgeTx {
             }],
             outputs: &[],
             params: &[STREAM_ID_PARAM],
+            ai_notes: "",
         }
     }
 
@@ -349,6 +351,7 @@ const RX_BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
         unit: "samples",
     },
     reconfig_scope: ReconfigureScope::SourceRestart,
+    ai_notes: "",
 };
 
 pub struct WsBridgeRx {
@@ -441,6 +444,7 @@ impl Block for WsBridgeRx {
                 port_type: PortType::IqF32,
             }],
             params: &[STREAM_ID_PARAM, RX_BUFFER_SAMPLES_PARAM],
+            ai_notes: "",
         }
     }
 
@@ -549,8 +553,10 @@ impl Block for WsBridgeTxFftU8 {
                     // downstream consumers that pin the FFT size must
                     // re-init.
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 
@@ -642,6 +648,7 @@ impl Block for WsBridgeTxEvents {
             }],
             outputs: &[],
             params: &[STREAM_ID_PARAM],
+            ai_notes: "",
         }
     }
 

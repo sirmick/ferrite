@@ -54,6 +54,7 @@ impl Block for TeeIqF32 {
                 },
             ],
             params: &[],
+            ai_notes: "",
         }
     }
 

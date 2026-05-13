@@ -261,6 +261,17 @@ type IncomingMessage = {
    *  operator-supplied setup so the AI sees device capabilities
    *  before reading what the operator did with them. */
   driver_notes?: string;
+  /** Preset-level note from `flowgraphs/<name>.json::ai_notes` — when
+   *  the AI would pick this preset, what signal it expects, gotchas.
+   *  Empty / absent during the schema rollout (see
+   *  `docs/13-ai-notes-migration.md`). */
+  preset_notes?: string;
+  /** Per-block notes for the blocks currently in the pipeline. The UI
+   *  assembles this by joining `/api/pipeline/blocks` (which blocks
+   *  are live) against `/api/blocks` (their schema + ai_notes), so
+   *  the AI only sees notes for blocks it can actually tweak. Empty /
+   *  absent during the schema rollout. */
+  block_notes?: BlockNote[];
   /** Operator's wall-clock time and IANA timezone, captured on each
    *  turn from the browser. Gives the AI a sense of local time (for
    *  band/propagation reasoning) and rough geographic region (via
@@ -270,14 +281,53 @@ type IncomingMessage = {
   time_zone?: string;
 };
 
+/** One entry in the active-pipeline block-notes section. The UI sends
+ *  these per turn; the sidecar pastes them into a heading + bullet
+ *  list. `params` may be empty (utility blocks). */
+type BlockNote = {
+  id: string;
+  type_name: string;
+  ai_notes?: string;
+  params?: Array<{ key: string; label?: string; ai_notes?: string }>;
+};
+
+/** Render the per-block notes section. Blocks with both block-level
+ *  prose and per-param prose get a full sub-section; blocks with only
+ *  one or the other get a compact one-line entry. Empty notes
+ *  (rollout state) are skipped entirely so the prompt stays clean. */
+function renderBlockNotes(blocks: BlockNote[] | undefined): string {
+  if (!blocks || blocks.length === 0) return "";
+  const sections: string[] = [];
+  for (const b of blocks) {
+    const head = (b.ai_notes ?? "").trim();
+    const params = (b.params ?? []).filter((p) => (p.ai_notes ?? "").trim());
+    if (!head && params.length === 0) continue;
+    let body = `### \`${b.id}\` — ${b.type_name}\n`;
+    if (head) body += `\n${head}\n`;
+    if (params.length) {
+      body += `\nParams:\n`;
+      for (const p of params) {
+        const lbl = p.label ? ` (${p.label})` : "";
+        body += `- \`${p.key}\`${lbl} — ${(p.ai_notes ?? "").trim()}\n`;
+      }
+    }
+    sections.push(body);
+  }
+  if (sections.length === 0) return "";
+  return `\n\n## Active pipeline — block notes\n\n${sections.join("\n")}`;
+}
+
 /** Glue caller-supplied prompt extensions onto the mode's system
  *  prompt. Order is: base mode prompt → driver-specific operator notes
- *  (capabilities) → operator-supplied setup (this rig's physical
- *  reality) → local clock / TZ. Each is wrapped in a heading so the
- *  AI can tell them apart from the base prompt. */
+ *  (capabilities) → active preset notes → active-pipeline block notes
+ *  → operator-supplied setup (this rig's physical reality) → local
+ *  clock / TZ. Each section is wrapped in a heading so the AI can
+ *  tell them apart from the base prompt. */
 function appendPromptExtras(
   systemPrompt: string,
   driverNotes: string | undefined,
+  presetNotes: string | undefined,
+  blockNotes: BlockNote[] | undefined,
   setup: string | undefined,
   localTimeHuman: string | undefined,
   localTimeIso: string | undefined,
@@ -288,6 +338,11 @@ function appendPromptExtras(
   if (driver) {
     out = `${out}\n\n## Active SDR — driver-specific operator notes\n\n${driver}\n`;
   }
+  const preset = (presetNotes ?? "").trim();
+  if (preset) {
+    out = `${out}\n\n## Active preset — AI notes\n\n${preset}\n`;
+  }
+  out += renderBlockNotes(blockNotes);
   const op = (setup ?? "").trim();
   if (op) {
     out = `${out}\n\n## Operator-supplied radio setup\n\n${op}\n`;
@@ -385,6 +440,8 @@ wss.on("connection", (ws) => {
       systemPrompt: appendPromptExtras(
         SYSTEM_PROMPTS[mode],
         parsed.driver_notes,
+        parsed.preset_notes,
+        parsed.block_notes,
         parsed.setup_description,
         parsed.local_time_human,
         parsed.local_time_iso,

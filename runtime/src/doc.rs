@@ -146,6 +146,14 @@ pub struct FlowgraphDoc {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Plain-prose preset-level note for ferrite-ai. Answers "when
+    /// would I pick this preset? what signal does it expect? any
+    /// gotchas?" Injected into the system prompt when this preset is
+    /// active. 3–6 sentences. Empty during the schema rollout
+    /// (see `docs/13-ai-notes-migration.md`); a vitest assertion will
+    /// require non-empty once the backfill finishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_notes: Option<String>,
     pub environments: Vec<Environment>,
     /// Block id → declaration. `BTreeMap` keeps iteration deterministic
     /// (important for scheduler output ordering and for snapshot tests).

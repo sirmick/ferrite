@@ -327,6 +327,7 @@ impl Block for DtmfDecoder {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "block_size",
@@ -339,6 +340,7 @@ impl Block for DtmfDecoder {
                         unit: "samples",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "hold_ms",
@@ -351,6 +353,7 @@ impl Block for DtmfDecoder {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "off_ms",
@@ -363,6 +366,7 @@ impl Block for DtmfDecoder {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "dominance",
@@ -375,8 +379,10 @@ impl Block for DtmfDecoder {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

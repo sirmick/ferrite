@@ -106,7 +106,9 @@ impl Block for EventsSink {
                     unit: "events",
                 },
                 reconfig_scope: ReconfigureScope::SelfBlock,
+                ai_notes: "",
             }],
+            ai_notes: "",
         }
     }
 

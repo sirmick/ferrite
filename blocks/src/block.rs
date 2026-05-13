@@ -174,6 +174,15 @@ pub struct ParamSpec {
     pub label: &'static str,
     pub kind: ParamKind,
     pub reconfig_scope: ReconfigureScope,
+    /// Plain-prose note about this param, dual-purpose: injected into
+    /// the ferrite-ai system prompt for the active pipeline, and
+    /// surfaced by the UI as the param-control tooltip. One sentence
+    /// describing what the knob does and its useful range; two if
+    /// there's a meaningful interaction with another param. Empty
+    /// string is a temporary placeholder while the schema rolls out
+    /// (see `docs/13-ai-notes-migration.md`); a unit test will start
+    /// asserting non-empty once the backfill finishes.
+    pub ai_notes: &'static str,
 }
 
 /// Type-level shape of one param. Rendered 1:1 by the generic options
@@ -214,6 +223,16 @@ pub struct BlockSpec {
     pub inputs: &'static [PortSpec],
     pub outputs: &'static [PortSpec],
     pub params: &'static [ParamSpec],
+    /// Plain-prose note about this block, dual-purpose like
+    /// [`ParamSpec::ai_notes`]: injected into the ferrite-ai system
+    /// prompt for blocks in the active pipeline, and available for
+    /// UI surfacing (block-card tooltip / catalog entry). ~50–100
+    /// words: what the block does, when you'd reach for it in a
+    /// chain, one key gotcha. Even utility blocks (`TeeIqF32`,
+    /// `LogMagU8`) get a one-line note — universal discipline, no
+    /// judgement calls about what's "user-facing". Empty during the
+    /// schema rollout (see `docs/13-ai-notes-migration.md`).
+    pub ai_notes: &'static str,
 }
 
 /// Metadata carried alongside sample buffers on a port.
@@ -662,7 +681,9 @@ mod tests {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 }],
+                ai_notes: "",
             }
         }
         fn init(&mut self, _ctx: &mut InitCtx<'_>) -> anyhow::Result<()> {

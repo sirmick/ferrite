@@ -147,6 +147,7 @@ impl Block for SsbDemod {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "sideband",
@@ -158,6 +159,7 @@ impl Block for SsbDemod {
                     // Sideband choice picks an entirely different
                     // ampmodem mode under the hood — re-init the block.
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "audio_gain",
@@ -170,8 +172,10 @@ impl Block for SsbDemod {
                         unit: "×",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

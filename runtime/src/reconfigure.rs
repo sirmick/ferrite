@@ -301,6 +301,7 @@ mod tests {
                     unit: "",
                 },
                 reconfig_scope: ReconfigureScope::SelfBlock,
+                ai_notes: "",
             },
             FBParamSpec {
                 key: "taps",
@@ -313,6 +314,7 @@ mod tests {
                     unit: "",
                 },
                 reconfig_scope: ReconfigureScope::Downstream,
+                ai_notes: "",
             },
             FBParamSpec {
                 key: "rate",
@@ -325,8 +327,10 @@ mod tests {
                     unit: "Hz",
                 },
                 reconfig_scope: ReconfigureScope::SourceRestart,
+                ai_notes: "",
             },
         ],
+        ai_notes: "",
     };
 
     const OTHER_SPEC: BlockSpec = BlockSpec {
@@ -338,6 +342,7 @@ mod tests {
             port_type: PortType::RealF32,
         }],
         params: &[],
+        ai_notes: "",
     };
 
     impl SpecRegistry for TestRegistry {

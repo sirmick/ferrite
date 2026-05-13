@@ -24,6 +24,8 @@ export type ParamSchema = {
   key: string;
   label: string;
   reconfig_scope: ReconfigScope;
+  /** AI-prompt + UI-tooltip prose. Empty during schema rollout. */
+  ai_notes: string;
 } & ParamKind;
 
 export interface BlockSchema {
@@ -32,6 +34,8 @@ export interface BlockSchema {
   inputs: PortSchema[];
   outputs: PortSchema[];
   params: ParamSchema[];
+  /** AI-prompt + UI-tooltip prose. Empty during schema rollout. */
+  ai_notes: string;
 }
 
 export interface ParamChange {

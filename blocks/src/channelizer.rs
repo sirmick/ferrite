@@ -418,6 +418,7 @@ impl Block for Channelizer {
                     // The only "tune knob" on the VFO — the whole point is
                     // to retune without restarting the graph.
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "output_rate_hz",
@@ -433,12 +434,14 @@ impl Block for Channelizer {
                     // from `input_rate / output_rate` at init; downstream
                     // chain reinits since the actual output shifts.
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "record_path",
                     label: "Record path",
                     kind: ParamKind::Text { default: "" },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "record_max_seconds",
@@ -451,8 +454,10 @@ impl Block for Channelizer {
                         unit: "s",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

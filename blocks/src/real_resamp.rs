@@ -112,6 +112,7 @@ impl Block for RealF32Resamp {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "stopband_db",
@@ -124,8 +125,10 @@ impl Block for RealF32Resamp {
                         unit: "dB",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

@@ -65,6 +65,7 @@ const BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
     // a fresh SAB handed to a fresh AudioWorklet, which only happens on
     // a source-level restart.
     reconfig_scope: ReconfigureScope::SourceRestart,
+    ai_notes: "",
 };
 
 pub struct AudioSink {
@@ -117,6 +118,7 @@ impl Block for AudioSink {
             }],
             outputs: &[],
             params: &[BUFFER_SAMPLES_PARAM],
+            ai_notes: "",
         }
     }
 

@@ -185,12 +185,14 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "Hz",
         },
         reconfig_scope: ReconfigureScope::SourceRestart,
+        ai_notes: "",
     },
     ParamSpec {
         key: "deemph_enable",
         label: "FM de-emphasis",
         kind: ParamKind::Toggle { default: false },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "deemph_tau_us",
@@ -201,12 +203,14 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "µs",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "blanker_enable",
         label: "Impulse blanker",
         kind: ParamKind::Toggle { default: false },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "blanker_threshold_db",
@@ -219,6 +223,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "dB",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "blanker_hold_ms",
@@ -231,12 +236,14 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "ms",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "notch_enable",
         label: "Auto-notch",
         kind: ParamKind::Toggle { default: false },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "notch_taps",
@@ -247,6 +254,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "taps",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "notch_mu",
@@ -259,6 +267,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "notch_delay",
@@ -271,12 +280,14 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "samples",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "spectral_enable",
         label: "Spectral NR",
         kind: ParamKind::Toggle { default: false },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "spectral_method",
@@ -286,6 +297,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             default: "boll",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "spectral_block_size",
@@ -296,6 +308,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "samples",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "spectral_oversub",
@@ -308,6 +321,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "spectral_floor",
@@ -320,6 +334,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "spectral_noise_alpha",
@@ -332,12 +347,14 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "neural_enable",
         label: "Neural NR (DFN3)",
         kind: ParamKind::Toggle { default: false },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
     ParamSpec {
         key: "neural_attenuation_db",
@@ -350,6 +367,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "dB",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "",
     },
 ];
 
@@ -458,6 +476,7 @@ impl Block for AudioNrMono {
                 port_type: PortType::RealF32,
             }],
             params: COMMON_PARAMS,
+            ai_notes: "",
         }
     }
 
@@ -565,6 +584,7 @@ impl Block for AudioNrStereo {
                 },
             ],
             params: COMMON_PARAMS,
+            ai_notes: "",
         }
     }
 

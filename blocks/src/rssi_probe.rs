@@ -147,6 +147,7 @@ impl Block for RssiProbe {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "smooth_tau_ms",
@@ -159,6 +160,7 @@ impl Block for RssiProbe {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "emit_interval_ms",
@@ -171,8 +173,10 @@ impl Block for RssiProbe {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

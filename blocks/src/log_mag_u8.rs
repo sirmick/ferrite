@@ -303,6 +303,7 @@ impl Block for LogMagU8 {
                     },
                     // Output bin count — downstream consumers re-init.
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "alpha",
@@ -315,6 +316,7 @@ impl Block for LogMagU8 {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "record_path",
@@ -323,6 +325,7 @@ impl Block for LogMagU8 {
                     // Live: opening / closing a file is a self-block
                     // side effect — no port shapes change.
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "record_max_seconds",
@@ -335,8 +338,10 @@ impl Block for LogMagU8 {
                         unit: "s",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

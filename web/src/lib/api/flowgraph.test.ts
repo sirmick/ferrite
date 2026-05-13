@@ -11,6 +11,7 @@ const RANGE_SELF = (key: string, scope: ReconfigScope): ParamSchema => ({
   key,
   label: key,
   reconfig_scope: scope,
+  ai_notes: '',
   kind: 'range',
   min: 0,
   max: 1e9,
@@ -28,6 +29,7 @@ const FM_DEMOD: BlockSchema = {
     RANGE_SELF('sample_rate_hz', 'sourceRestart'),
     RANGE_SELF('max_deviation_hz', 'downstream'),
   ],
+  ai_notes: '',
 };
 
 const AM_DEMOD: BlockSchema = {
@@ -36,6 +38,7 @@ const AM_DEMOD: BlockSchema = {
   inputs: [{ name: 'in', port_type: 'iq_f32' }],
   outputs: [{ name: 'out', port_type: 'real_f32' }],
   params: [RANGE_SELF('sample_rate_hz', 'sourceRestart'), RANGE_SELF('bias_tau_ms', 'downstream')],
+  ai_notes: '',
 };
 
 const DECIMATOR: BlockSchema = {
@@ -48,6 +51,7 @@ const DECIMATOR: BlockSchema = {
     RANGE_SELF('num_taps', 'downstream'),
     RANGE_SELF('cutoff_normalized', 'downstream'),
   ],
+  ai_notes: '',
 };
 
 const SOAPY_SOURCE: BlockSchema = {
@@ -60,6 +64,7 @@ const SOAPY_SOURCE: BlockSchema = {
     RANGE_SELF('center_freq_hz', 'self'),
     RANGE_SELF('bandwidth_hz', 'self'),
   ],
+  ai_notes: '',
 };
 
 const SCHEMAS: BlockSchema[] = [AM_DEMOD, FM_DEMOD, DECIMATOR, SOAPY_SOURCE];

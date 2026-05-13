@@ -144,6 +144,7 @@ impl Block for AmModulator {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "output_rate_hz",
@@ -156,6 +157,7 @@ impl Block for AmModulator {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "offset_hz",
@@ -168,6 +170,7 @@ impl Block for AmModulator {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "mod_depth",
@@ -180,8 +183,10 @@ impl Block for AmModulator {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

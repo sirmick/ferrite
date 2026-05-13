@@ -165,6 +165,7 @@ impl Block for Squelch {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "threshold_db",
@@ -177,6 +178,7 @@ impl Block for Squelch {
                         unit: "dBFS",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "hysteresis_db",
@@ -189,6 +191,7 @@ impl Block for Squelch {
                         unit: "dB",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "power_tau_ms",
@@ -201,6 +204,7 @@ impl Block for Squelch {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "fade_tau_ms",
@@ -213,8 +217,10 @@ impl Block for Squelch {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

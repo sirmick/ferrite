@@ -335,6 +335,7 @@ impl Block for StereoDecoder {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "lock_threshold",
@@ -347,6 +348,7 @@ impl Block for StereoDecoder {
                         unit: "rms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "lock_tau_ms",
@@ -359,6 +361,7 @@ impl Block for StereoDecoder {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "emit_interval_ms",
@@ -371,8 +374,10 @@ impl Block for StereoDecoder {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

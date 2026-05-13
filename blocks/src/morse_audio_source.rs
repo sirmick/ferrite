@@ -300,6 +300,7 @@ impl Block for MorseAudioSource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "text",
@@ -308,6 +309,7 @@ impl Block for MorseAudioSource {
                         default: "PARIS PARIS PARIS",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "wpm",
@@ -320,6 +322,7 @@ impl Block for MorseAudioSource {
                         unit: "wpm",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "tone_hz",
@@ -332,6 +335,7 @@ impl Block for MorseAudioSource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "amplitude",
@@ -344,14 +348,17 @@ impl Block for MorseAudioSource {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "loop_sequence",
                     label: "Loop sequence",
                     kind: ParamKind::Toggle { default: true },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

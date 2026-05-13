@@ -24,6 +24,7 @@ const P = (key: string, scope: 'self' | 'downstream' | 'sourceRestart'): ParamSc
   key,
   label: key,
   reconfig_scope: scope,
+  ai_notes: '',
   kind: 'range',
   min: 0,
   max: 1e9,
@@ -42,6 +43,7 @@ const SOURCE_SCHEMA: BlockSchema = {
     P('center_freq_hz', 'self'),
     P('bandwidth_hz', 'self'),
   ],
+  ai_notes: '',
 };
 
 const FM_SCHEMA: BlockSchema = {
@@ -50,6 +52,7 @@ const FM_SCHEMA: BlockSchema = {
   inputs: [{ name: 'in', port_type: 'iq_f32' }],
   outputs: [{ name: 'out', port_type: 'real_f32' }],
   params: [P('sample_rate_hz', 'sourceRestart'), P('max_deviation_hz', 'downstream')],
+  ai_notes: '',
 };
 
 // --- fake server state -----------------------------------------------

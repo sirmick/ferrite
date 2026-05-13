@@ -209,12 +209,14 @@ impl Block for DtmfAudioSource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "digits",
                     label: "Digit sequence",
                     kind: ParamKind::Text { default: "1234" },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "hold_ms",
@@ -227,6 +229,7 @@ impl Block for DtmfAudioSource {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "gap_ms",
@@ -239,6 +242,7 @@ impl Block for DtmfAudioSource {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "amplitude",
@@ -251,14 +255,17 @@ impl Block for DtmfAudioSource {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "loop_sequence",
                     label: "Loop sequence",
                     kind: ParamKind::Toggle { default: true },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

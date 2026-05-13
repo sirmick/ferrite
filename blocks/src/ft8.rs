@@ -268,6 +268,7 @@ impl Block for Ft8Demod {
                     // Switching protocol rebuilds the monitor (FT4
                     // and FT8 differ in symbol rate); not live.
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "sample_rate_hz",
@@ -283,6 +284,7 @@ impl Block for Ft8Demod {
                     // any other value, but exposing the param keeps
                     // the schema explicit.
                     reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "",
                 },
                 ParamSpec {
                     key: "max_candidates",
@@ -295,8 +297,10 @@ impl Block for Ft8Demod {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "",
                 },
             ],
+            ai_notes: "",
         }
     }
 

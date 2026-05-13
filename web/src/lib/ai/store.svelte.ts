@@ -298,6 +298,28 @@ class AiStore {
       const notes = aiOperatorNotesForDriver(caps.capabilities.driver_key);
       if (notes.trim()) payload.driver_notes = notes;
     }
+    // Active preset's prose note (FlowgraphDoc.ai_notes) — when the AI
+    // would pick this preset, what signal it expects, gotchas. Empty
+    // during the schema rollout (see docs/13-ai-notes-migration.md).
+    const presetNotes = (pipeline.flowgraph?.ai_notes ?? '').trim();
+    if (presetNotes) payload.preset_notes = presetNotes;
+    // Per-block notes for blocks currently in the pipeline. Empty
+    // blocks (notes-not-yet-authored) are filtered out by the sidecar's
+    // renderer so this list can include everything without bloating
+    // the prompt.
+    const blockNotes = Object.values(pipeline.blocks)
+      .map((b) => ({
+        id: b.id,
+        type_name: b.type_name,
+        ai_notes: b.spec?.ai_notes ?? '',
+        params: (b.spec?.params ?? []).map((p) => ({
+          key: p.key,
+          label: p.label,
+          ai_notes: p.ai_notes ?? '',
+        })),
+      }))
+      .filter((b) => b.ai_notes.trim() || b.params.some((p) => p.ai_notes.trim()));
+    if (blockNotes.length > 0) payload.block_notes = blockNotes;
     this.ws.send(JSON.stringify(payload));
   }
 
