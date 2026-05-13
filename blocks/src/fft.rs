@@ -191,7 +191,7 @@ impl Block for FftBlock {
                     // Changing FFT size changes the output port's bin count,
                     // so every downstream consumer must re-init.
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Bin count. 16384 at 2.4 MS/s ≈ 146 Hz/bin; larger = finer resolution but more CPU. Downstream `LogMagU8` and the WS bridge re-init when this changes.",
                 },
                 ParamSpec {
                     key: "window",
@@ -203,7 +203,7 @@ impl Block for FftBlock {
                     // Window is just a coefficient table — swap in place
                     // on the next `process` call.
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Tapering function. `hann` is the sensible default; `blackman` for narrow carriers, `none` only for analysis where leakage is OK.",
                 },
                 ParamSpec {
                     key: "max_frames_per_second",
@@ -216,10 +216,10 @@ impl Block for FftBlock {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Wall-clock throttle on FFT output. 0 = unlimited. Typically 30 fps for waterfalls. NB: a `capture fft` recording's true wall-clock duration is governed by this, not by sample-rate math — read the sidecar `capture_duration_s` instead of re-deriving.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Forward FFT, emitting complex frequency-domain frames. Throttle the output FPS via `max_frames_per_second` for waterfall use; downstream `LogMagU8` converts to displayable bytes.",
         }
     }
 

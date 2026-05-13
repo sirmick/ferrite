@@ -195,7 +195,7 @@ impl Block for FileAudioSink {
                     label: "Path",
                     kind: ParamKind::Text { default: "" },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Output WAV path.",
                 },
                 ParamSpec {
                     key: "rate_hz",
@@ -208,7 +208,7 @@ impl Block for FileAudioSink {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Audio sample rate to write into the WAV header. Must match the upstream chain.",
                 },
                 ParamSpec {
                     key: "max_seconds",
@@ -221,10 +221,10 @@ impl Block for FileAudioSink {
                         unit: "s",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Stop after N seconds (0 = no cap).",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Node-side audio recording sink — writes WAV-s16 mono. Terminal block in `*-audio-record` flowgraphs. Use when you want to capture demodulated audio to disk on the server without going through the browser AudioSink.",
         }
     }
 

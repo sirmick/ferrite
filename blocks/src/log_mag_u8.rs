@@ -303,7 +303,7 @@ impl Block for LogMagU8 {
                     },
                     // Output bin count — downstream consumers re-init.
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Must match the upstream FFT's `size`. UI ties them together; if you change one, change the other.",
                 },
                 ParamSpec {
                     key: "alpha",
@@ -316,7 +316,7 @@ impl Block for LogMagU8 {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Time-domain EMA across consecutive frames. Lower = more smoothing (slower waterfall response); higher = livelier but jittery. 0.3 is a balanced default.",
                 },
                 ParamSpec {
                     key: "record_path",
@@ -325,7 +325,7 @@ impl Block for LogMagU8 {
                     // Live: opening / closing a file is a self-block
                     // side effect — no port shapes change.
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Optional output path for the live `capture fft` flow. Set by `ferrite-ctl capture fft`; leave empty for normal operation.",
                 },
                 ParamSpec {
                     key: "record_max_seconds",
@@ -338,10 +338,10 @@ impl Block for LogMagU8 {
                         unit: "s",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Stop recording after N seconds (0 = no cap). Pairs with `record_path`.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Log-magnitude FFT → u8 byte map (floor/ceil dBfs are baked constants). The thing the waterfall actually renders; also where `capture fft` taps the spectrum. Reads `floor_dbfs`/`ceil_dbfs` from a fixed schema, doesn't expose them as live params.",
         }
     }
 

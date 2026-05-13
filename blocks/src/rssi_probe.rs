@@ -147,7 +147,7 @@ impl Block for RssiProbe {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Input rate of the IQ stream being measured.",
                 },
                 ParamSpec {
                     key: "smooth_tau_ms",
@@ -160,7 +160,7 @@ impl Block for RssiProbe {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Exponential time constant on the power envelope. Shorter = peakier readings, longer = steadier; ~50 ms is the typical S-meter feel.",
                 },
                 ParamSpec {
                     key: "emit_interval_ms",
@@ -173,10 +173,10 @@ impl Block for RssiProbe {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "How often to publish an RSSI event. 50 ms ≈ 20 Hz refresh — fast enough to feel live without flooding the WS.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Wideband RSSI meter on an IQ stream. Emits structured events with smoothed power readings; drives the UI's S-meter and lets decoders see signal strength alongside their own state.",
         }
     }
 

@@ -317,7 +317,7 @@ impl Block for FileIqSink {
                     label: "Path",
                     kind: ParamKind::Text { default: "" },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Output filesystem path. Used by `capture iq` and the `capture-*` recording presets.",
                 },
                 ParamSpec {
                     key: "format",
@@ -327,7 +327,7 @@ impl Block for FileIqSink {
                         default: "cf32",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "`cf32` = raw interleaved f32 (pairs with FileIqSource). `wav-s16` = SDR# / HDSDR-compatible WAV (I=L, Q=R, 16-bit).",
                 },
                 ParamSpec {
                     key: "max_seconds",
@@ -340,10 +340,10 @@ impl Block for FileIqSink {
                         unit: "s",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Stop the recording after N seconds (0 = no cap). Guards against runaway disk usage.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "Sink that writes IQ samples to disk. The terminal block of the `capture-*` flowgraphs and the live-record path inside the channelizer when `record_path` is set. Native-only.",
         }
     }
 

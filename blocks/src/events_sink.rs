@@ -106,9 +106,9 @@ impl Block for EventsSink {
                     unit: "events",
                 },
                 reconfig_scope: ReconfigureScope::SelfBlock,
-                ai_notes: "",
+                ai_notes: "Ring capacity in events. Larger = more headroom if the consumer falls behind; smaller = lower memory.",
             }],
-            ai_notes: "",
+            ai_notes: "Terminal sink for `events` ports — buffers structured events (lock status, decoder messages, frame metadata) into a ring the runtime drains and surfaces via `tail decoder` / decoder logs.",
         }
     }
 
