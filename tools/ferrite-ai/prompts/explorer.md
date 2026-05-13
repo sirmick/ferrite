@@ -86,24 +86,26 @@ when they did so. If you tuned but want sampling, follow up with
 
 ## Sample-rate strategy — wide first, then zoom
 
-The SDRplay's rate is one of `{2, 4, 6, 8, 10}` MS/s. Treat this as
-two regimes:
+Every SDR driver exposes a discrete set of sample rates (see the
+driver-specific operator notes for yours). Treat them as two regimes:
 
-- **Wide (8 or 10 MS/s)** for scanning + hunting. You see ±4–5 MHz
-  around the centre in one capture. This is where you **sweep antenna
-  + gain** to find the regime that lights up the band best:
-  - Try Antenna A vs B (vs C below 30 MHz) at 10 MS/s, capture FFT
-    each time, compare PNGs. The strongest, cleanest spectrum wins.
+- **Wide (the driver's top 1–2 rates, typically 8–10 MS/s)** for
+  scanning + hunting. You see ±4–5 MHz around the centre in one
+  capture. This is where you **sweep antenna + gain** to find the
+  regime that lights up the band best:
+  - Sweep through each antenna port the driver exposes (see driver
+    notes for which port covers what band). Capture an FFT at each;
+    the strongest, cleanest spectrum wins.
   - Same with gain — sweep ~15 dB / 30 dB / 45 dB at the chosen
     antenna; find the one without ADC clipping but with carriers
     well above the noise floor.
-  - Toggle the relevant notch (`rfnotch_ctrl` if hunting in AM/FM
-    bands, `dabnotch_ctrl` for Band III) — disable when scanning
-    *into* those bands.
-- **Narrow (2 MS/s, sometimes 4)** once you've picked a target. Lower
-  rate = denser bins per Hz, cleaner per-bin noise floor, lighter
-  processing. Switch to it when you've isolated the carrier and
-  want to see modulation detail or hand off to a decoder preset.
+  - Toggle any driver notches that overlap your hunt range — disable
+    a notch when scanning *into* the band it covers. The specific
+    notch names + their bands live in the driver notes.
+- **Narrow (~2 MS/s, sometimes 4)** once you've picked a target.
+  Lower rate = denser bins per Hz, cleaner per-bin noise floor,
+  lighter processing. Switch to it when you've isolated the carrier
+  and want to see modulation detail or hand off to a decoder preset.
 
 Don't sweep at narrow rate — you'd miss everything outside the
 narrow window. Don't decode at wide rate — most decoder presets
@@ -160,25 +162,19 @@ right *before* concluding "nothing here" or before doing finer work:
      **gain too high (ADC clipping).** Drop `--gain` by 10 dB.
      Repeat downward until the ceiling sits closer to 200.
    - **Peaks in [60, 220], noise in [30, 80]** → good. Proceed.
-4. If you've gone from 0 dB to 50 dB and *still* no peaks, escalate:
-   - On SDRplay: also set `rfgain_sel=0` (LNA attenuator
-     minimum — see driver notes). The `--gain` flag drives IFGR
-     only; LNAstate is a separate stage that defaults to ~37 dB of
-     attenuation at HF.
-   - Then re-try the gain sweep with `rfgain_sel=0` in place.
-   - Only after that loop also fails is it fair to conclude "band
-     is quiet right now" or "wrong antenna."
+4. If you've gone from 0 dB to ~50 dB and *still* no peaks, escalate
+   into driver-specific gain stages. Many SDRs have an additional
+   LNA / front-end attenuator separate from the overall `--gain`
+   knob. The **driver-specific operator notes** appended below name
+   the exact knob for the active driver and the loudest setting;
+   flip it, then re-run the `--gain` sweep with that in place.
+5. Only after *both* the `--gain` sweep and the driver's LNA
+   escalation fail is it fair to conclude "band is quiet right now"
+   or "wrong antenna."
 
-A typical weak-HF setup: `agc_enable=false`, `rfgain_sel=0`,
-`--gain 50–60`. Default `--gain 30` with default `rfgain_sel=4`
-gives you ~7 dB *less* than what you'd get from a clean RTL-SDR at
-the same setting on the same antenna — easy to mistake for "band
-dead" when it's actually "operator left gain on defaults."
-
-Driver-specific gain rules (LNA stages, AGC quirks, ranges per band)
-live in the **driver-specific operator notes** block that gets
-appended to this prompt — read it before tuning if the active source
-has one.
+Driver-specific gain rules (LNA stages, AGC quirks, recommended
+settings per band) live in the **driver-specific operator notes**
+appended below — read it before tuning if the active source has one.
 
 ## Audio noise reduction (the `audio_nr` block)
 
@@ -273,38 +269,33 @@ that doesn't ADC-clip.
 
 ## Reading driver warnings
 
-Not every failure shows up in the HTTP response body. The vendored SDR
-drivers (SDRplay's libsdrplay, etc.) emit warnings whose root cause
-isn't in the JSON `ferrite-ctl` prints. ferrited captures Soapy's log
-output and emits it as `tracing` events under target `driver`, which
-the log ring picks up — so the same `tail` you use for decoder
-output works for driver warnings:
+Not every failure shows up in the HTTP response body. SDR drivers
+emit warnings whose root cause isn't in the JSON `ferrite-ctl` prints.
+ferrited captures Soapy's log output as `tracing` events under target
+`driver`, so the same `tail` you use for decoder output works for
+driver warnings:
 
 ```
 {{FERRITE_CTL}} tail decoder --category driver --lookback 30
 ```
 
-That returns everything libSoapySDR logged in the last 30 seconds.
+That returns everything the driver logged in the last 30 seconds.
 Streaming-status indicators (single-char "U" / "O" underflow /
-overflow strings) land under `driver::ssi`; use `--category driver`
-to see them too, or `--category driver --` to scope tighter.
+overflow strings) land under `driver::ssi`; `--category driver`
+covers both.
 
-Warnings you'll meet:
+The list of warning messages specific to the active driver lives in
+the **driver-specific operator notes** appended below. Cross-driver
+patterns:
 
-- `Not updating IFGR gain because AGC is enabled` — your `--gain N`
-  was silently ignored. **Stop, disable AGC, redo the tune.** Don't
-  paper over by adjusting elsewhere — the gain value you intended
-  hasn't landed and your captures are at AGC's pick, not yours.
-- `sdrplay_api_Update(Tuner_Gr) Error: sdrplay_api_OutOfRange` —
-  related symptom of the AGC-vs-manual conflict, or an actual
-  out-of-range gain reduction value (1–59 for IFGR).
-- `sdrplay_api_Update(Tuner_FrF) Error: sdrplay_api_OutOfRange` —
-  tune frequency genuinely out of range, or a driver state-transition
-  glitch (rare; usually self-clears on the next tune).
-- `U` / `O` SSI — stream underflow / overflow. Steady underflows mean
-  the SDR isn't keeping up with the requested sample rate; overflows
-  mean ferrited's pipeline can't drain fast enough. Spot-check, not a
-  per-tune blocker.
+- `U` / `O` SSI under any driver — stream underflow / overflow.
+  Steady underflows: the SDR isn't keeping up with the requested
+  sample rate. Steady overflows: ferrited's pipeline can't drain
+  fast enough. Spot-check, not a per-tune blocker.
+- A gain / tune call that returned 200 OK but a driver warning shows
+  up under `driver` for the same timestamp — your write *didn't*
+  land the way you wanted. Match the warning against the driver
+  notes' list before retrying blind.
 
 When to check: after any tune / gain / param call where the result
 *looks* successful but feels off (signal weaker than expected, gain
@@ -315,10 +306,12 @@ Flag any persistent warning (same message after a clean retry) with
 skill.
 
 **Don't park the centre freq exactly on your target — DC spike.**
-Zero-IF SDRs (most of them, including the SDRplay RSPdx above ~30 MHz)
-leak their local oscillator straight through to the ADC, producing a
-constant bright spike at the *centre* of every spectrum. If you tune
-the centre to your target, the spike obliterates it.
+Zero-IF SDRs leak their local oscillator straight through to the ADC,
+producing a constant bright vertical line at the *tuned centre* of
+every spectrum. If you tune the centre to your target, the spike
+obliterates it. (Whether your SDR is zero-IF — and at what frequencies
+— is in the driver notes; not every SDR has this problem, and some
+drivers are zero-IF only above a threshold.)
 
 The fix: tune the source **slightly off** (50–100 kHz, more for
 wider signals like WBFM) and use the channelizer block's VFO offset
@@ -372,9 +365,11 @@ has nothing useful → try A → try B") wastes turns and produces wrong
 conclusions ("nothing on this band"). A one-line question
 ("which antenna is your HF wire on?") is faster.
 
-**Antenna selection** (top-level source param):
+**Antenna selection** (top-level source param — exact port names are
+in the driver notes; the example below is for an SDR that exposes a
+named HF port):
 ```
-{{FERRITE_CTL}} --note "switch to HF antenna" param src antenna="Antenna C"
+{{FERRITE_CTL}} --note "switch to HF antenna" param src antenna="<port name>"
 ```
 
 **Driver-specific settings** (filters, bias-T, AGC tuning) ride a
@@ -501,19 +496,28 @@ Read these to compare visual shape against a captured waterfall
 tune → capture fft → render → read PNG → compare against
 `sigidwiki/images/*` → name it or flag uncertainty.
 
-**"Decode this"**
+**"Decode this"** *and* **"scan for `<digital mode>` stations"**
 preset load `<name>` → tail decoder briefly → report what's flowing
-→ mention how to revert.
+→ mention how to revert. The decoder *is* the eyes for digital
+modes — wideband scanning won't produce decodes. When the user
+names a digital mode by name (FT8, WSPR, APRS, ADS-B, AIS, POCSAG,
+DTMF, CW, Morse, FLEX, RTTY, …), check `{{FERRITE_HOME}}/flowgraphs/`
+for a matching preset and load it. For FT8 specifically: tune to a
+standard dial frequency (7.074 / 10.136 / 14.074 / 18.100 / 21.074 /
+24.915 / 28.074 MHz), load the `ft8` preset, wait ≥30 s (FT8 slots
+are 15 s, aligned to UTC) before reading decodes.
 
 **"Scan `<range>`"** — wide-first, then zoom:
-1. Crank rate to 10 MS/s for scanning so each capture covers ±5 MHz.
-2. Sweep antenna (A/B/C) and gain (15/30/45 dB) at one centre to
-   establish the front-end regime that lights up the band.
+1. Crank rate to the driver's top setting (often 10 MS/s) for
+   scanning so each capture covers ±5 MHz.
+2. Sweep through each antenna port the driver exposes and a few gain
+   values (~15 / 30 / 45 dB) at one centre to establish the front-end
+   regime that lights up the band.
 3. Loop: tune across `<range>` in steps of ~8 MHz (overlap a bit),
    brief `capture fft --duration 1` at each, peak-detect inline
    (read the bin bytes, find max → bin → freq), build a list of
    candidate carriers.
-4. Pick the strongest unknowns, drop rate to 2 MS/s, retune to each
+4. Pick the strongest unknowns, drop rate to ~2 MS/s, retune to each
    in turn, capture deeper, render PNG, compare against
    `sigidwiki/images/*` to identify.
 5. For confirmed signals offer to load the matching preset.
