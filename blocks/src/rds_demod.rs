@@ -407,9 +407,9 @@ impl Block for RdsDemod {
                     unit: "Hz",
                 },
                 reconfig_scope: ReconfigureScope::SourceRestart,
-                ai_notes: "",
+                ai_notes: "MPX composite rate from the FM demod. Needs ≥128 kHz to keep the 57 kHz RDS subcarrier above Nyquist.",
             }],
-            ai_notes: "",
+            ai_notes: "RDS / RBDS decoder. Reads the 57 kHz subcarrier in the FM-broadcast composite signal — call sign / station name / program type / RadioText. Auto-loads in `wbfm`; surfaces in the UI's RdsReadout component, not as a `tail decoder` category.",
         }
     }
 

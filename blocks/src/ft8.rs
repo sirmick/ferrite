@@ -268,7 +268,7 @@ impl Block for Ft8Demod {
                     // Switching protocol rebuilds the monitor (FT4
                     // and FT8 differ in symbol rate); not live.
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "`ft8` = 15 s slots, 8-FSK at 6.25 Hz spacing. `ft4` = 7.5 s slots, faster but shorter range. Most HF activity is FT8.",
                 },
                 ParamSpec {
                     key: "sample_rate_hz",
@@ -284,7 +284,7 @@ impl Block for Ft8Demod {
                     // any other value, but exposing the param keeps
                     // the schema explicit.
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Hard-pinned at 12 kHz. The channelizer's output_rate_hz must match.",
                 },
                 ParamSpec {
                     key: "max_candidates",
@@ -297,10 +297,10 @@ impl Block for Ft8Demod {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Max simultaneous FT8 signals to decode per 15 s slot. 40 is plenty for a typical 3 kHz audio passband; raise on a crowded band, lower if CPU is tight.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "FT8 / FT4 weak-signal decoder (kgoba/ft8_lib). Standard HF dial frequencies (USB demod, listen +1500 Hz audio offset): 1.840 / 3.573 / 7.074 / 10.136 / 14.074 / 18.100 / 21.074 / 24.915 / 28.074 / 50.313 MHz. Decodes appear every 15 s, UTC-aligned. Output: `tail decoder --category ft8` (or `ft4`).",
         }
     }
 

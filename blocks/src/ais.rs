@@ -122,9 +122,9 @@ impl Block for AisDemod {
                     unit: "Hz",
                 },
                 reconfig_scope: ReconfigureScope::SourceRestart,
-                ai_notes: "",
+                ai_notes: "Locked at 48 kHz — the post-channelizer audio rate AIS GMSK detection expects.",
             }],
-            ai_notes: "",
+            ai_notes: "AIS ship-tracking decoder (GMSK, 9600 bps). Two channels: 161.975 MHz and 162.025 MHz. Load the `ais` preset, watch `tail decoder --category ais` for MMSI / position / course. Best near coastlines.",
         }
     }
 

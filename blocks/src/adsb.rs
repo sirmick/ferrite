@@ -118,9 +118,9 @@ impl Block for AdsbDemod {
                     unit: "Hz",
                 },
                 reconfig_scope: ReconfigureScope::SourceRestart,
-                ai_notes: "",
+                ai_notes: "Locked at 2 MS/s — the rate the Mode-S preamble + 1 µs PPM bit detector expects.",
             }],
-            ai_notes: "",
+            ai_notes: "ADS-B / Mode-S decoder. Tune to 1090 MHz, load the `adsb` preset, watch `tail decoder --category adsb` for aircraft positions + identifiers. Requires line-of-sight to airliners and a VHF/UHF whip antenna.",
         }
     }
 

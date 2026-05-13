@@ -104,9 +104,9 @@ impl Block for MorseDemod {
                     unit: "Hz",
                 },
                 reconfig_scope: ReconfigureScope::SourceRestart,
-                ai_notes: "",
+                ai_notes: "Locked at 22.05 kHz post-demod.",
             }],
-            ai_notes: "",
+            ai_notes: "CW / Morse decoder. Auto-detects element timing (dots/dashes) from envelope on/off; tolerates ~5–40 wpm. Use after `SsbDemod` on HF ham bands. Output: `tail decoder --category cw`.",
         }
     }
 

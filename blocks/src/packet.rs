@@ -121,9 +121,9 @@ impl Block for PacketDemod {
                     unit: "Hz",
                 },
                 reconfig_scope: ReconfigureScope::SourceRestart,
-                ai_notes: "",
+                ai_notes: "Locked at 22.05 kHz post-demod.",
             }],
-            ai_notes: "",
+            ai_notes: "AX.25 packet decoder (1200 bps AFSK). Used by the APRS preset on 144.39 MHz (NA) / 144.80 MHz (EU); also receives raw ham packet on other VHF/UHF channels. Output: `tail decoder --category packet`.",
         }
     }
 

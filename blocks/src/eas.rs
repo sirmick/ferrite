@@ -105,9 +105,9 @@ impl Block for EasDemod {
                     unit: "Hz",
                 },
                 reconfig_scope: ReconfigureScope::SourceRestart,
-                ai_notes: "",
+                ai_notes: "Locked at 22.05 kHz — the standard SAME AFSK rate.",
             }],
-            ai_notes: "",
+            ai_notes: "EAS / SAME decoder for Emergency Alert System headers on NOAA Weather Radio (162.4–162.55 MHz) and broadcast TV/radio. Riding atop FM/NBFM audio; load the `nwr` preset for typical weather use. Output: `tail decoder --category eas`.",
         }
     }
 

@@ -327,7 +327,7 @@ impl Block for DtmfDecoder {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Audio rate. 8 kHz is enough — DTMF tones are 697–1633 Hz.",
                 },
                 ParamSpec {
                     key: "block_size",
@@ -340,7 +340,7 @@ impl Block for DtmfDecoder {
                         unit: "samples",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "",
+                    ai_notes: "Goertzel detection window. Larger = better SNR + more latency; 200 samples ≈ 25 ms at 8 kHz.",
                 },
                 ParamSpec {
                     key: "hold_ms",
@@ -353,7 +353,7 @@ impl Block for DtmfDecoder {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Minimum continuous detection time before a digit is emitted. ITU minimum tone duration is 40 ms.",
                 },
                 ParamSpec {
                     key: "off_ms",
@@ -366,7 +366,7 @@ impl Block for DtmfDecoder {
                         unit: "ms",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Minimum gap between digits — guards against double-emissions on a single sustained press.",
                 },
                 ParamSpec {
                     key: "dominance",
@@ -379,10 +379,10 @@ impl Block for DtmfDecoder {
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "How much louder the two DTMF tones must be than any other bin to register. Lower = more sensitive but more false positives on speech.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "DTMF (touch-tone) decoder using Goertzel filters on the eight DTMF frequencies. Decodes digits from phone-call audio or any 0–9*#ABCD-keyed signal. Output: `tail decoder --category dtmf`.",
         }
     }
 

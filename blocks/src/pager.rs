@@ -138,17 +138,17 @@ impl Block for PagerDemod {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "",
+                    ai_notes: "Locked at 22.05 kHz — the rate the POCSAG/FLEX bit detectors expect.",
                 },
                 ParamSpec {
                     key: "show_partial",
                     label: "Show partial decodes",
                     kind: ParamKind::Toggle { default: true },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "",
+                    ai_notes: "Surface decodes that pass framing but fail BCH error-check. Useful for spotting traffic on encrypted channels; turn off for a clean log.",
                 },
             ],
-            ai_notes: "",
+            ai_notes: "POCSAG + FLEX paging decoder. Tune to commercial paging channels (US: 929–932 MHz, 152–162 MHz; UK: 153 MHz; varies regionally) on NBFM. Output: `tail decoder --category pocsag` and `--category flex`.",
         }
     }
 
