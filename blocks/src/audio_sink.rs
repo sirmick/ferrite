@@ -65,7 +65,7 @@ const BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
     // a fresh SAB handed to a fresh AudioWorklet, which only happens on
     // a source-level restart.
     reconfig_scope: ReconfigureScope::SourceRestart,
-    ai_notes: "",
+    ai_notes: "SharedArrayBuffer ring capacity in samples. Larger = more latency, more underflow resilience. Sized to ~100–500 ms at the audio rate.",
 };
 
 pub struct AudioSink {
@@ -118,7 +118,7 @@ impl Block for AudioSink {
             }],
             outputs: &[],
             params: &[BUFFER_SAMPLES_PARAM],
-            ai_notes: "",
+            ai_notes: "Terminal block for the audio chain — writes mono PCM into a SharedArrayBuffer ring that the browser AudioWorklet drains. Browser-only (WasmOnly placement); the node-side equivalent is FileAudioSink. Every voice-mode preset ends here.",
         }
     }
 

@@ -185,14 +185,14 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "Hz",
         },
         reconfig_scope: ReconfigureScope::SourceRestart,
-        ai_notes: "",
+        ai_notes: "Audio rate (typically 48 kHz). Set by the upstream resampler.",
     },
     ParamSpec {
         key: "deemph_enable",
         label: "FM de-emphasis",
         kind: ParamKind::Toggle { default: false },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "Stage 1 of the NR chain. Inverse of FM-broadcast pre-emphasis. Enable for WBFM/wbfm_stereo only; harmful on non-FM modes (no pre-emphasis to undo).",
     },
     ParamSpec {
         key: "deemph_tau_us",
@@ -203,14 +203,14 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "µs",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "Time constant — 75 µs in US/JP, 50 µs in EU/AU. Match the broadcaster's region.",
     },
     ParamSpec {
         key: "blanker_enable",
         label: "Impulse blanker",
         kind: ParamKind::Toggle { default: false },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "Stage 2. Wipes brief loud transients (lightning, ignition pops, electrical clicks). Always-on for HF AM/SSB; selective elsewhere.",
     },
     ParamSpec {
         key: "blanker_threshold_db",
@@ -223,7 +223,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "dB",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "Transients louder than the slow envelope by this many dB get blanked. 12–20 dB useful range; too low blanks voice peaks.",
     },
     ParamSpec {
         key: "blanker_hold_ms",
@@ -236,14 +236,14 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "ms",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "How long to hold the blank once triggered. 0.3–1.0 ms covers typical impulse widths.",
     },
     ParamSpec {
         key: "notch_enable",
         label: "Auto-notch",
         kind: ParamKind::Toggle { default: false },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "Stage 3. Adaptive LMS notch for tonal interference (heterodynes, AC hum + harmonics, fixed carriers). Turn on when you hear a fixed whistle.",
     },
     ParamSpec {
         key: "notch_taps",
@@ -254,7 +254,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "taps",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "FIR length. 64 is a good default; 128 for narrower notches at the cost of more CPU.",
     },
     ParamSpec {
         key: "notch_mu",
@@ -267,7 +267,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "LMS step size. 0.005–0.02 useful range; higher converges faster but tracks voice into the notch, killing consonants.",
     },
     ParamSpec {
         key: "notch_delay",
@@ -280,14 +280,14 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "samples",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "Samples of delay between the notch's input and its reference path. 1–2 decorrelates voice from the notch so speech survives.",
     },
     ParamSpec {
         key: "spectral_enable",
         label: "Spectral NR",
         kind: ParamKind::Toggle { default: false },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "Stage 4. FFT-domain noise-floor reduction against an estimated stationary noise model. Best for steady noise (atmospheric hiss, hum); poor against bursty interference.",
     },
     ParamSpec {
         key: "spectral_method",
@@ -297,7 +297,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             default: "boll",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "`boll` = classic spectral subtraction (faster, more \"musical\" residue). `mmse_lsa` = log-spectral amplitude (better-perceived for voice, slightly more CPU).",
     },
     ParamSpec {
         key: "spectral_block_size",
@@ -308,7 +308,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "samples",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "FFT window length. Larger = finer frequency resolution + more latency. 512 at 48 kHz ≈ 10 ms.",
     },
     ParamSpec {
         key: "spectral_oversub",
@@ -321,7 +321,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "How aggressively to over-subtract the estimated noise. 1.0–2.5 useful; higher = more aggressive, more musical artifacts.",
     },
     ParamSpec {
         key: "spectral_floor",
@@ -334,7 +334,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "Minimum residual gain per bin. Lower is quieter background but bubbles more (\"musical noise\"). 0.05–0.2 typical.",
     },
     ParamSpec {
         key: "spectral_noise_alpha",
@@ -347,14 +347,14 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "How fast the noise model adapts during silent gaps. Higher = faster tracking of changing noise; lower = stabler suppression on intermittent signals.",
     },
     ParamSpec {
         key: "neural_enable",
         label: "Neural NR (DFN3)",
         kind: ParamKind::Toggle { default: false },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "Stage 5 (final). DeepFilterNet 3 learned denoiser. Always-on default for voice modes; consider off for broadcast FM music (high-fidelity).",
     },
     ParamSpec {
         key: "neural_attenuation_db",
@@ -367,7 +367,7 @@ const COMMON_PARAMS: &[ParamSpec] = &[
             unit: "dB",
         },
         reconfig_scope: ReconfigureScope::SelfBlock,
-        ai_notes: "",
+        ai_notes: "Cap on suppression depth. 12 = subtle, 18 = default, 24 = strong (HF SSB), 30+ = aggressive (artifacts on music).",
     },
 ];
 
@@ -476,7 +476,7 @@ impl Block for AudioNrMono {
                 port_type: PortType::RealF32,
             }],
             params: COMMON_PARAMS,
-            ai_notes: "",
+            ai_notes: "Mono audio noise-reduction chain: deemph → blanker → notch → spectral → neural, each independently toggleable. All params are live-tunable. Default profiles per mode are wired by the preset; tweak from `wbam` baseline (full stack + neural@18dB) or disable stages individually.",
         }
     }
 
@@ -584,7 +584,7 @@ impl Block for AudioNrStereo {
                 },
             ],
             params: COMMON_PARAMS,
-            ai_notes: "",
+            ai_notes: "Stereo audio NR — same chain as AudioNrMono, applied independently to L/R. Used downstream of StereoDecoder in `wbfm_stereo`.",
         }
     }
 
