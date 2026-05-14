@@ -631,16 +631,18 @@ pub async fn patch_profile(
     State(state): State<AppState>,
     Json(profile): Json<Profile>,
 ) -> Result<Json<Profile>, (StatusCode, Json<ApiError>)> {
+    // Transactional swap: stash the previous profile, apply the new
+    // one, then re-compose. If the compose fails (e.g. flipping
+    // `demod_placement` produces an unsupported browser→node wire),
+    // roll the profile back so subsequent preset loads don't carry
+    // forward the bad state.
+    let prev = state.get_profile().await;
     state.set_profile(profile.clone()).await;
-    // Re-running the preset's compose pipeline through the same
-    // `patch_flowgraph` path the preset-swap uses applies the new
-    // profile to a live pipeline without a stop/start. When no
-    // pipeline is running, this is a cheap no-op.
     let current = state.get_flowgraph().await;
-    state
-        .patch_flowgraph(current)
-        .await
-        .map_err(|e| bad_request("PROFILE_APPLY_FAILED", format!("{e:#}")))?;
+    if let Err(e) = state.patch_flowgraph(current).await {
+        state.set_profile(prev).await;
+        return Err(bad_request("PROFILE_APPLY_FAILED", format!("{e:#}")));
+    }
     Ok(Json(profile))
 }
 

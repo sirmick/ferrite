@@ -1,19 +1,18 @@
 <script lang="ts">
-  // Two compact toggles next to the active preset name:
-  //   • Audio   — gates blocks marked `when: { audio: true }`.
-  //               Hidden when the preset declares no audio chain.
-  //   • Demod   — flips placement of the block tagged
-  //               `placement_role: "demod"` between node and browser.
-  //               Hidden when the preset has no such block.
+  // Two compact segmented chip-groups next to the active preset name:
+  //   • Audio  — off | on
+  //   • Demod  — auto | server | browser
+  //              (auto = follow the preset author's placement;
+  //               server/browser override it. "server" maps to the
+  //               `node` API value — kept terse for the UI.)
   //
-  // The chips read the active doc from `pipeline.flowgraph`, so they
-  // self-hide on presets that don't declare the corresponding tags
-  // (e.g. ADS-B/AIS show neither — those modes have no audio path
-  // and no togglable demod). Clicking either chip PATCHes the server's
-  // profile and re-composes the live pipeline.
+  // Each chip self-hides on presets that don't declare the
+  // corresponding tag (`when: { audio: ... }` for audio,
+  // `placement_role: "demod"` for demod), so ADS-B/AIS show neither
+  // and digital-with-decoder presets only show audio. Clicking a
+  // segment PATCHes the server's profile and re-composes live.
   import { pipeline } from '$lib/pipeline.svelte';
 
-  // Derived availability: which axes does the active preset support?
   let hasAudioToggle = $derived.by(() => {
     const blocks = pipeline.flowgraph?.blocks ?? {};
     for (const b of Object.values(blocks)) {
@@ -30,131 +29,134 @@
     return false;
   });
 
-  // Show the row only when at least one chip would render — otherwise
-  // even the row's spacing is dead pixels on a no-toggle preset.
   let visible = $derived(hasAudioToggle || hasDemodToggle);
 
-  function toggleAudio(): void {
-    void pipeline.setProfile({
-      ...pipeline.profile,
-      audio: !pipeline.profile.audio,
-    });
+  function pickAudio(on: boolean): void {
+    void pipeline.setProfile({ ...pipeline.profile, audio: on });
   }
 
   function pickDemod(side: 'node' | 'browser' | null): void {
-    void pipeline.setProfile({
-      ...pipeline.profile,
-      demod_placement: side,
-    });
+    void pipeline.setProfile({ ...pipeline.profile, demod_placement: side });
   }
 
-  // "auto" means the preset's authored placement wins. Surfaced
-  // explicitly so the user can see when they're overriding and reset
-  // back to "follow preset author".
+  // Reads `pipeline.profile.demod_placement` (`'node' | 'browser' | null`)
+  // and translates to the UI's tri-state. `null` = "auto" (preset
+  // author's authored placement wins). The API-side `node` is shown
+  // as "server" in the UI — same value, less jargon.
   let demodValue = $derived(pipeline.profile.demod_placement ?? 'auto');
 </script>
 
 {#if visible}
   <div class="flex flex-wrap items-center gap-2 text-[10px]">
     {#if hasAudioToggle}
-      <button
-        type="button"
-        class="chip"
-        class:chip-on={pipeline.profile.audio}
-        class:chip-off={!pipeline.profile.audio}
-        onclick={toggleAudio}
-        title="Toggle the audio chain. When off, the audio_resamp / audio_nr / audio blocks (and their WS bridge) are pruned before the pipeline starts."
-      >
+      <div class="chip-group" role="group" aria-label="Audio">
         <span class="chip-label">Audio</span>
-        <span class="chip-value">{pipeline.profile.audio ? 'on' : 'off'}</span>
-      </button>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={!pipeline.profile.audio}
+          onclick={() => pickAudio(false)}
+          title="Strip the audio chain — saves WS bandwidth on decoder-only listening."
+        >
+          off
+        </button>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={pipeline.profile.audio}
+          onclick={() => pickAudio(true)}
+          title="Enable the audio chain (default)."
+        >
+          on
+        </button>
+      </div>
     {/if}
 
     {#if hasDemodToggle}
       <div class="chip-group" role="group" aria-label="Demod placement">
-        <span class="chip-label pl-1">Demod</span>
-        {#each ['auto', 'node', 'browser'] as const as opt}
-          <button
-            type="button"
-            class="chip-segment"
-            class:chip-segment-active={demodValue === opt}
-            onclick={() => pickDemod(opt === 'auto' ? null : opt)}
-            title={opt === 'auto'
-              ? 'Follow the preset author (default).'
-              : opt === 'node'
-                ? 'Run the demod server-side; stream real audio across the WS.'
-                : 'Stream IQ across the WS and demod in the browser.'}
-          >
-            {opt}
-          </button>
-        {/each}
+        <span class="chip-label">Demod</span>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={demodValue === 'auto'}
+          onclick={() => pickDemod(null)}
+          title="Follow the preset author's placement (default)."
+        >
+          auto
+        </button>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={demodValue === 'node'}
+          onclick={() => pickDemod('node')}
+          title="Run the demod on the server; stream real audio across the WS."
+        >
+          server
+        </button>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={demodValue === 'browser'}
+          onclick={() => pickDemod('browser')}
+          title="Stream IQ across the WS and demod in the browser."
+        >
+          browser
+        </button>
       </div>
     {/if}
   </div>
 {/if}
 
 <style>
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.15rem 0.5rem;
-    border: 1px solid rgb(51 65 85);
-    border-radius: 9999px;
-    background: rgb(15 23 42);
-    color: rgb(148 163 184);
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    cursor: pointer;
-    transition:
-      background 0.1s,
-      color 0.1s,
-      border-color 0.1s;
-  }
-  .chip:hover {
-    background: rgb(30 41 59);
-    color: rgb(226 232 240);
-  }
-  .chip-on {
-    border-color: rgb(56 189 248);
-    color: rgb(125 211 252);
-  }
-  .chip-off {
-    border-color: rgb(71 85 105);
-    color: rgb(100 116 139);
-  }
-  .chip-label {
-    font-weight: 600;
-    color: rgb(148 163 184);
-  }
-  .chip-value {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
+  /* Palette matches the leftTab tabs in `routes/+page.svelte`:
+     muted text + slate-800 borders + an `--color-accent` (#7dd3fc)
+     tint for the active segment, same `rgba(125,211,252,0.08)` bg
+     used by `tab-active`. */
   .chip-group {
     display: inline-flex;
-    align-items: center;
-    border: 1px solid rgb(51 65 85);
+    align-items: stretch;
+    border: 1px solid rgb(30 41 59); /* slate-800 */
     border-radius: 9999px;
-    background: rgb(15 23 42);
+    background: transparent;
     overflow: hidden;
+    line-height: 1;
+  }
+  .chip-label,
+  .chip-segment {
+    /* Flex-center every cell so the label baseline lines up with the
+       segment text regardless of font metrics. line-height: 1 on the
+       group kills the descender drift that pushed labels slightly low. */
+    display: inline-flex;
+    align-items: center;
+    height: 1.25rem;
+    font-size: 10px;
+    line-height: 1;
+  }
+  .chip-label {
+    padding: 0 0.6rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-muted);
+    border-right: 1px solid rgb(30 41 59);
   }
   .chip-segment {
-    padding: 0.15rem 0.5rem;
-    color: rgb(148 163 184);
-    font-size: 10px;
+    padding: 0 0.55rem;
+    color: var(--color-muted);
     text-transform: lowercase;
     cursor: pointer;
+    border: 0;
+    background: transparent;
     transition:
       background 0.1s,
       color 0.1s;
   }
   .chip-segment:hover {
-    background: rgb(30 41 59);
-    color: rgb(226 232 240);
+    color: var(--color-fg);
+    background: rgba(125, 211, 252, 0.04);
   }
   .chip-segment-active {
-    background: rgb(30 58 138);
-    color: rgb(191 219 254);
+    color: var(--color-accent);
+    background: rgba(125, 211, 252, 0.08);
   }
 </style>

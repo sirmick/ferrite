@@ -49,7 +49,6 @@
     "demod": {
       "type": "FmDemod",
       "placement": "node",
-      "placement_role": "demod",
       "params": {
         "sample_rate_hz": 25000,
         "max_deviation_hz": 5000

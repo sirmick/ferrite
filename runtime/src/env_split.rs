@@ -161,22 +161,28 @@ pub fn split_for_environment(
                 let (tx_type, _rx_type) = bridge_types_for_wire(doc, registry, wire)?;
                 let sid = CROSS_ENV_STREAM_BASE + crossing_index;
                 let bridge_id = format!("__bridge_tx_{sid}");
-                // Batch IQ/F32 into ~4 kS chunks before emitting. The
-                // scheduler ticks at ~2.5 kHz; one frame per tick
-                // saturates the WS with ~2500 tiny messages/sec, which
-                // is faster than the browser's postcard decoder can
-                // drain over a dev proxy → subscriber queues fill and
-                // drop. 4096 samples per frame gives ~30 frames/sec
-                // through a 250 kS/s channelizer (32 kB per message for
-                // IQ; 16 kB for real audio) — comfortable under a
-                // localhost proxy.
+                // Pick a batch size that targets ~30 fps on the wire,
+                // computed from the producer's declared output rate
+                // when we can statically derive it. The scheduler ticks
+                // at ~2.5 kHz; one frame per tick saturates the WS with
+                // tiny messages and the browser's postcard decoder
+                // can't drain fast enough. ~30 fps keeps WS overhead
+                // low *and* keeps per-frame latency under the
+                // downstream AudioSink's buffer window (170 ms at the
+                // default 8192 samples / 48 kHz), so real-audio
+                // bridges don't underrun. Falls back to 4096 (matches
+                // the historical IQ default at 250 kS/s) when we can't
+                // resolve the rate.
+                let batch = producer_output_rate_hz(doc, &wire.src)
+                    .map(|rate| ((rate / 30.0).round() as i64).clamp(64, 8192) as u64)
+                    .unwrap_or(4096);
                 insert_bridge(
                     &mut new_blocks,
                     doc,
                     bridge_id.clone(),
                     tx_type,
                     env,
-                    json!({ "stream_id": sid, "min_samples_per_frame": 4096 }),
+                    json!({ "stream_id": sid, "min_samples_per_frame": batch }),
                 )?;
                 new_wires.push(Wire::new(wire.src.clone(), format!("{bridge_id}.in")));
                 crossing_index += 1;

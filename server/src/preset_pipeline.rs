@@ -377,13 +377,13 @@ mod tests {
                 stream_id, payload, ..
             } => {
                 assert_eq!(stream_id, 1000);
-                // env_split now sets `min_samples_per_frame: 4096` on
-                // auto-inserted bridges — the scheduler ticks at kHz
-                // rates and one frame per tick saturates the browser's
-                // WS decoder. The batch flushes on the first tick whose
-                // accumulator reaches the threshold, which for a
-                // 1024-sample ticker lands at 4×1024 = 4096 samples.
-                assert_eq!(payload.len(), 4096 * 8);
+                // env_split picks `min_samples_per_frame` per producer
+                // rate (~30 fps target, clamped 64..=8192). For this
+                // test's 1 kHz source the clamp pins it at 64; the
+                // first scheduler tick produces enough samples to
+                // exceed that, so we only assert the frame is
+                // non-empty and IQ-shaped (8 bytes per complex sample).
+                assert!(payload.len() > 0 && payload.len() % 8 == 0);
             }
             other => panic!("expected IqF32 frame, got {other:?}"),
         }

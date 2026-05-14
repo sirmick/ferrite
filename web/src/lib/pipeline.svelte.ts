@@ -30,6 +30,7 @@ import { fetchUiSinks, type UiSink } from '$lib/api/uiSinks';
 import { fetchPipelineBlocks, patchBlockParams, type PipelineBlock } from '$lib/api/pipelineBlocks';
 import { fetchPresets, loadPreset, type PresetEntry } from '$lib/api/presets';
 import { DEFAULT_PROFILE, fetchProfile, patchProfile, type Profile } from '$lib/api/profile';
+import { replaceState } from '$app/navigation';
 import { fetchSourceCapabilities, type SourceCapabilitiesResponse } from '$lib/api/sourceCaps';
 import { defaultsFor, toSourceConfig } from '$lib/controls/optionsModel';
 import { catalog } from '$lib/presets/catalog';
@@ -346,7 +347,11 @@ class PipelineStore {
     } else {
       url.searchParams.delete('demod');
     }
-    window.history.replaceState({}, '', url.toString());
+    // SvelteKit owns the navigation history; its `replaceState`
+    // wrapper updates the URL without invoking a route load. Calling
+    // `window.history.replaceState` directly works but logs a runtime
+    // warning about racing with the router.
+    replaceState(url, {});
   }
 
   /** Read the channelizer-style VFO offset from the current `blocks`

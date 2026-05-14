@@ -107,18 +107,26 @@ impl BlankerStage {
             }
 
             // Envelope: fast attack when mag > env, slow release
-            // otherwise. Gate the update on the hold state so an
-            // ongoing blanking event doesn't train the envelope with
-            // zeros and lose the reference.
-            if self.hold == 0 {
-                let alpha = if mag > self.env {
-                    self.alpha_attack
-                } else {
-                    self.alpha_release
-                };
-                self.env += alpha * (mag - self.env);
-            }
+            // otherwise. `mag` is the input magnitude so it's always
+            // safe to update — the output zeroing below doesn't feed
+            // back into env. Updating every sample (not only when hold
+            // is clear) is load-bearing: a real silent-to-loud step
+            // would otherwise trigger, then freeze env, then trigger
+            // again as soon as hold expired, chopping the first ~100 ms
+            // of every burst into 0.5 ms chunks of zeros.
+            let alpha = if mag > self.env {
+                self.alpha_attack
+            } else {
+                self.alpha_release
+            };
+            self.env += alpha * (mag - self.env);
 
+            // Threshold check stays gated on hold so an ongoing blank
+            // doesn't keep re-arming. The env-during-hold growth means
+            // by the time hold expires the ratio has fallen below the
+            // threshold for a sustained step; for a true impulse, env
+            // barely moves (mag dropped back to noise → slow release)
+            // so the next impulse is still caught.
             if self.hold == 0 && mag > self.env * self.threshold_ratio {
                 self.hold = self.hold_samples;
             }
@@ -176,5 +184,36 @@ mod tests {
                 "sample {i} should be blanked, got {sample}"
             );
         }
+    }
+
+    #[test]
+    fn sustained_step_does_not_chop_audio_after_first_blank() {
+        // Regression: a silent gap followed by sustained signal must
+        // recover within one hold cycle. With env-frozen-during-hold,
+        // the post-hold sample would re-trigger because env never
+        // caught up, chopping ~100 ms of audio into 0.5 ms zeros.
+        let mut s = BlankerStage::new(20.0, 0.5, 48_000.0);
+        // 1000 samples near-zero, then a 1.0-amplitude sine sustained
+        // for the rest of the buffer.
+        let mut buf: Vec<f32> = (0..8192)
+            .map(|i| {
+                if i < 1000 {
+                    0.001
+                } else {
+                    let t = i as f32 / 48_000.0;
+                    (2.0 * core::f32::consts::PI * 1_000.0 * t).cos()
+                }
+            })
+            .collect();
+        s.run(&mut buf);
+        // Step onset triggers a 24-sample hold; after that, audio must
+        // be passing through. Check that beyond a generous 200-sample
+        // recovery window the output isn't dominated by zeros.
+        let nonzero: usize = buf[1200..].iter().filter(|x| x.abs() > 0.01).count();
+        let total = buf.len() - 1200;
+        assert!(
+            nonzero > total / 2,
+            "blanker still chopping past recovery window: {nonzero}/{total} samples non-zero",
+        );
     }
 }

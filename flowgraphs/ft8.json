@@ -50,7 +50,6 @@
     "demod": {
       "type": "SsbDemod",
       "placement": "node",
-      "placement_role": "demod",
       "params": {
         "sample_rate_hz": 12000,
         "sideband": "usb",
