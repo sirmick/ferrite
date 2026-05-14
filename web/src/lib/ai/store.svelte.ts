@@ -303,6 +303,32 @@ class AiStore {
     // during the schema rollout (see docs/13-ai-notes-migration.md).
     const presetNotes = (pipeline.flowgraph?.ai_notes ?? '').trim();
     if (presetNotes) payload.preset_notes = presetNotes;
+    // Live source state — hand the AI ground truth for centre, rate,
+    // gain, antenna, AGC at the moment this turn starts. Replaces the
+    // need for the AI to call `ferrite-ctl status` mid-conversation to
+    // re-learn what ferrited is actually doing; a preset reload or
+    // another caller can mutate source state between turns and this
+    // section reflects the post-mutation reality.
+    const src = pipeline.source;
+    if (src) {
+      const p = (src.params ?? {}) as Record<string, unknown>;
+      const curr: Record<string, unknown> = { type: src.type };
+      for (const k of [
+        'center_freq_hz',
+        'sample_rate_hz',
+        'bandwidth_hz',
+        'antenna',
+        'gain_db',
+        'agc_enable',
+      ] as const) {
+        if (p[k] !== undefined) curr[k] = p[k];
+      }
+      const caps = pipeline.sourceCaps;
+      if (caps && caps.kind === 'hardware') {
+        curr.device_label = caps.capabilities.info.label;
+      }
+      payload.current_source = curr;
+    }
     // Per-block notes for blocks currently in the pipeline. Empty
     // blocks (notes-not-yet-authored) are filtered out by the sidecar's
     // renderer so this list can include everything without bloating

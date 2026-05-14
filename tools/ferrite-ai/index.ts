@@ -274,6 +274,14 @@ type IncomingMessage = {
    *  the AI only sees notes for blocks it can actually tweak. Empty /
    *  absent during the schema rollout. */
   block_notes?: BlockNote[];
+  /** Live snapshot of ferrited's source state at the moment the turn
+   *  was issued — centre, rate, antenna, gain, AGC. Replaces the
+   *  AI's need to call `ferrite-ctl status` to learn what the radio
+   *  is actually doing; without this the AI was reasoning from
+   *  memory of its last tune command, which got stale every time a
+   *  preset reload or another caller changed source state between
+   *  turns. */
+  current_source?: CurrentSource;
   /** Operator's wall-clock time and IANA timezone, captured on each
    *  turn from the browser. Gives the AI a sense of local time (for
    *  band/propagation reasoning) and rough geographic region (via
@@ -291,6 +299,21 @@ type BlockNote = {
   type_name: string;
   ai_notes?: string;
   params?: Array<{ key: string; label?: string; ai_notes?: string }>;
+};
+
+/** Per-turn live snapshot of ferrited's `SourceConfig`. The UI curates
+ *  this from `pipeline.source` + `pipeline.sourceCaps` — only the
+ *  fields useful for AI reasoning, not the entire `params` dict
+ *  (omits `args`, driver `settings`, etc.). */
+type CurrentSource = {
+  type: string;
+  device_label?: string;
+  center_freq_hz?: number;
+  sample_rate_hz?: number;
+  bandwidth_hz?: number;
+  antenna?: string;
+  gain_db?: number;
+  agc_enable?: boolean;
 };
 
 /** Render the per-block notes section. Blocks with both block-level
@@ -319,15 +342,63 @@ function renderBlockNotes(blocks: BlockNote[] | undefined): string {
   return `\n\n## Active pipeline — block notes\n\n${sections.join("\n")}`;
 }
 
+/** Render a "Current radio state" section from the per-turn source
+ *  snapshot. Emitted between the driver-capability notes and the
+ *  preset notes so the AI reads, in order: what the SDR *can* do →
+ *  what the SDR *is currently doing* → what the active preset *is
+ *  for*. Without this section the AI had to call `ferrite-ctl status`
+ *  every time it wanted to know the current freq, and it routinely
+ *  forgot — leading to stale-frequency reasoning across turns
+ *  (e.g. issuing a "433 MHz capture" while the radio was on 915). */
+function renderCurrentSource(s: CurrentSource | undefined): string {
+  if (!s) return "";
+  const lines: string[] = [];
+  if (s.device_label) lines.push(`- Device: ${s.device_label}`);
+  lines.push(`- Source type: \`${s.type}\``);
+  if (s.center_freq_hz !== undefined) {
+    lines.push(
+      `- Centre frequency: **${(s.center_freq_hz / 1e6).toFixed(3)} MHz**`,
+    );
+  }
+  if (s.sample_rate_hz !== undefined) {
+    lines.push(
+      `- Sample rate: ${(s.sample_rate_hz / 1e6).toFixed(3)} MS/s`,
+    );
+  }
+  if (s.bandwidth_hz !== undefined) {
+    lines.push(
+      `- Analog bandwidth: ${(s.bandwidth_hz / 1e6).toFixed(3)} MHz`,
+    );
+  }
+  if (s.antenna) lines.push(`- Antenna: ${s.antenna}`);
+  if (s.gain_db !== undefined) lines.push(`- Gain: ${s.gain_db.toFixed(1)} dB`);
+  if (s.agc_enable !== undefined) {
+    lines.push(
+      `- AGC: ${s.agc_enable ? "enabled (driver manages gain)" : "disabled (manual gain in effect)"}`,
+    );
+  }
+  return (
+    `\n\n## Current radio state — live snapshot from ferrited\n\n` +
+    `This is the source state at the moment this turn was issued. ` +
+    `Reason from these values rather than memory of recent tune ` +
+    `commands — preset reloads or other callers can change source ` +
+    `state between turns, and this section reflects the post-change ` +
+    `reality.\n\n` +
+    `${lines.join("\n")}\n`
+  );
+}
+
 /** Glue caller-supplied prompt extensions onto the mode's system
  *  prompt. Order is: base mode prompt → driver-specific operator notes
- *  (capabilities) → active preset notes → active-pipeline block notes
- *  → operator-supplied setup (this rig's physical reality) → local
+ *  (capabilities) → live source state (what the SDR is *doing right
+ *  now*) → active preset notes → active-pipeline block notes →
+ *  operator-supplied setup (this rig's physical reality) → local
  *  clock / TZ. Each section is wrapped in a heading so the AI can
  *  tell them apart from the base prompt. */
 function appendPromptExtras(
   systemPrompt: string,
   driverNotes: string | undefined,
+  currentSource: CurrentSource | undefined,
   presetNotes: string | undefined,
   blockNotes: BlockNote[] | undefined,
   setup: string | undefined,
@@ -340,6 +411,7 @@ function appendPromptExtras(
   if (driver) {
     out = `${out}\n\n## Active SDR — driver-specific operator notes\n\n${driver}\n`;
   }
+  out += renderCurrentSource(currentSource);
   const preset = (presetNotes ?? "").trim();
   if (preset) {
     out = `${out}\n\n## Active preset — AI notes\n\n${preset}\n`;
@@ -442,6 +514,7 @@ wss.on("connection", (ws) => {
       systemPrompt: appendPromptExtras(
         SYSTEM_PROMPTS[mode],
         parsed.driver_notes,
+        parsed.current_source,
         parsed.preset_notes,
         parsed.block_notes,
         parsed.setup_description,
