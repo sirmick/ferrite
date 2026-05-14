@@ -49,13 +49,6 @@ jobs:
       - name: pnpm install
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright Chromium
-        # `tools/screenshot test` runs Playwright e2e against a real
-        # browser; the runner image has the npm package but not the
-        # browser binary. `--with-deps` pulls the system libraries
-        # headless Chromium needs on Ubuntu.
-        run: pnpm --filter ferrite-screenshot exec playwright install --with-deps chromium
-
       - name: Build wasm artifacts
         # `pnpm -r check` (svelte-check) imports from
         # web/src/lib/wasm/{blocks,runtime}; both are produced by
@@ -68,5 +61,9 @@ jobs:
       - name: pnpm -r check
         run: pnpm -r check
 
-      - name: pnpm -r test
-        run: pnpm -r test
+      - name: pnpm test (web only)
+        # The `tools/screenshot` package's Playwright e2e suite needs a
+        # release ferrited binary + libSoapySDR + Chromium — too heavy
+        # for the fast pnpm CI. Run those locally / from rust.yml when
+        # we want them, not on every push.
+        run: pnpm --filter @ferrite/web test

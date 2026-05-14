@@ -370,9 +370,17 @@ fn bridge_types_for_wire(
         .blocks
         .get(block_id)
         .expect("validate_doc caught unknown source blocks before split");
-    let spec = registry
-        .get(&decl.type_name)
-        .expect("resolve_placements caught unknown block types before split");
+    // The escape hatch in `resolve_placements` lets a block with
+    // explicit `placement` through even when the registry doesn't know
+    // its type — instantiation will fail with a clearer error than
+    // env_split could provide. Mirror that here: when we can't resolve
+    // the spec, fall back to the IQ bridge pair so the split itself
+    // doesn't blow up (Rollback / bad-source tests deliberately reach
+    // this path). The instantiate step then surfaces "unknown block
+    // type" as the real error.
+    let Some(spec) = registry.get(&decl.type_name) else {
+        return Ok(("WsBridgeTx", "WsBridgeRx"));
+    };
     let port_type = spec
         .outputs
         .iter()
