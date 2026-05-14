@@ -151,13 +151,13 @@ Twenty-one shipped flowgraph presets, grouped by use:
 | Group | Presets | Notes |
 | --- | --- | --- |
 | Voice / music | `wbfm`, `wbfm_stereo`, `wbam`, `nbfm`, `lsb`, `usb`, `cw` | Full audio NR stack (deemph / blanker / notch / spectral / DFN3 neural), per-preset tuned |
-| Digital — telemetry | `adsb`, `ais`, `aprs`, `aprs-debug` | dump1090 Mode S + rtl-ais NMEA + APRS over AFSK |
+| Digital — telemetry | `adsb`, `ais`, `packet`, `packet-debug` | dump1090 Mode S + rtl-ais NMEA + AX.25 packet (APRS, BBS, AMSAT digipeaters) |
 | Digital — paging | `pager` | multimon-ng POCSAG (512/1200/2400) + FLEX |
 | Digital — weak-signal | `ft8` | kgoba ft8_lib, runs through the same channelizer/decimator chain |
 | Digital — tones | `dtmf-e2e`, `morse-e2e`, `cw` | End-to-end canaries used by CI; also useful as live decoders |
 | Weather / hazard | `nwr` | NOAA Weather Radio + EAS / SAME header decode |
 | RDS | (in `wbfm` / `wbfm_stereo`) | Station name, alt-freq, programme type, full PI/PS/RT |
-| Capture / record | `capture_fm`, `capture-aprs`, `capture-pager`, `fm-audio-record`, `am-audio-record` | Side-tee the IQ or audio without disrupting the live demod |
+| Capture / record | `capture_fm`, `capture-aprs`, `capture-pager`, `fm-audio-record`, `am-audio-record` | Side-tee the IQ or audio without disrupting the live demod. `capture-aprs` tunes the packet chain at 144.39 MHz for APRS-fixture work. |
 
 Every preset is a JSON file in [`flowgraphs/`](flowgraphs/) referencing
 blocks from [`blocks/src/`](blocks/src/). Adding a new mode is a flowgraph

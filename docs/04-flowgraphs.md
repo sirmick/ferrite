@@ -206,8 +206,8 @@ Catalog (browser-visible, picked from the Signal Catalog panel):
 | [`flowgraphs/lsb.json`](../flowgraphs/lsb.json)                                       | SSB lower sideband                                                                     |
 | [`flowgraphs/usb.json`](../flowgraphs/usb.json)                                       | SSB upper sideband                                                                     |
 | [`flowgraphs/cw.json`](../flowgraphs/cw.json)                                         | CW with multimon-ng Morse decoder                                                      |
-| [`flowgraphs/aprs.json`](../flowgraphs/aprs.json)                                     | APRS / AX.25 packet — AFSK1200 + 2400 variants + FSK9600 in parallel                   |
-| [`flowgraphs/aprs-debug.json`](../flowgraphs/aprs-debug.json)                         | APRS with audio fan-out to WAV for offline A/B against `analyze-packet-wav`            |
+| [`flowgraphs/packet.json`](../flowgraphs/packet.json)                                 | AX.25 packet — AFSK1200 + 2400 variants + FSK9600 in parallel; APRS at 144.39 MHz is the typical payload |
+| [`flowgraphs/packet-debug.json`](../flowgraphs/packet-debug.json)                     | Packet with audio fan-out to WAV for offline A/B against `analyze-packet-wav`          |
 | [`flowgraphs/pager.json`](../flowgraphs/pager.json)                                   | POCSAG (3 baud) + FLEX + FLEX_NEXT in parallel                                         |
 | [`flowgraphs/nwr.json`](../flowgraphs/nwr.json)                                       | NOAA Weather Radio (NBFM + EAS)                                                        |
 | [`flowgraphs/adsb.json`](../flowgraphs/adsb.json)                                     | ADS-B / Mode S — vendored dump1090, 1090 MHz                                           |
@@ -220,7 +220,7 @@ Headless / capture (node-only, launched with `--run-for-secs N`):
 | [`flowgraphs/fm-audio-record.json`](../flowgraphs/fm-audio-record.json)               | All-native FM mono → FileAudioSink                                                     |
 | [`flowgraphs/am-audio-record.json`](../flowgraphs/am-audio-record.json)               | All-native AM mono → FileAudioSink                                                     |
 | [`flowgraphs/capture_fm.json`](../flowgraphs/capture_fm.json)                         | Wideband IQ capture → FileIqSink (no demod)                                            |
-| [`flowgraphs/capture-aprs.json`](../flowgraphs/capture-aprs.json)                     | APRS audio capture for offline analyzer fixtures                                       |
+| [`flowgraphs/capture-aprs.json`](../flowgraphs/capture-aprs.json)                     | APRS-specific audio capture (packet chain tuned to 144.39 MHz) for offline analyzer fixtures |
 | [`flowgraphs/capture-pager.json`](../flowgraphs/capture-pager.json)                   | POCSAG / FLEX audio capture for offline analyzer fixtures                              |
 | [`flowgraphs/morse-e2e.json`](../flowgraphs/morse-e2e.json)                           | Morse round-trip canary (synthesise → decode)                                          |
 

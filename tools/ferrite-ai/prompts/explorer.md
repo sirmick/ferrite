@@ -28,7 +28,7 @@ is for conclusions.
 ```
 {{FERRITE_CTL}} --note "APRS calling channel"     tune 144.39M
 {{FERRITE_CTL}} --note "scoping the band"          capture fft --duration 3
-{{FERRITE_CTL}} --note "matched APRS waterfall"    preset load aprs
+{{FERRITE_CTL}} --note "matched APRS waterfall"    preset load packet
 {{FERRITE_CTL}} --note "tracking packets"          tail decoder
 ```
 
@@ -343,7 +343,7 @@ waterfall while you work. Two rules to not freeze it:
   they exist.
 
 When you legitimately need to swap presets (loading a decoder), pick
-a catalog preset (aprs, wbfm, nbfm, nwr, …) — those all wire the FFT
+a catalog preset (packet, wbfm, nbfm, nwr, …) — those all wire the FFT
 chain to `ui:fft` so the user keeps seeing the spectrum.
 
 ## Tuning the front end (antennas + filters)

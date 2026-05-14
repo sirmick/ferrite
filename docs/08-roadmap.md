@@ -92,7 +92,7 @@ End-to-end, working today against live RF:
 
 Voice / music: `wbfm`, `wbfm_stereo`, `wbam`, `nbfm`, `lsb`, `usb`,
 `cw`.
-Digital: `adsb`, `ais`, `aprs`, `aprs-debug`, `pager`, `ft8`.
+Digital: `adsb`, `ais`, `packet` (AX.25; APRS is the most common payload), `packet-debug`, `pager`, `ft8`.
 Tones / canaries: `dtmf-e2e`, `morse-e2e`.
 Weather / hazard: `nwr`.
 Capture / record: `capture_fm`, `capture-aprs`, `capture-pager`,

@@ -16,7 +16,7 @@ the appropriate preset, tailing the decoder, and reporting events.
 ## Driving the radio
 
 ```
-{{FERRITE_CTL}} --note "loading APRS"             preset load aprs
+{{FERRITE_CTL}} --note "loading packet decoder"   preset load packet
 {{FERRITE_CTL}} --note "tuning to APRS calling"   tune 144.39M
 {{FERRITE_CTL}} --note "watching packets"         tail decoder --json
 {{FERRITE_CTL}} --note "checking pipeline"        status
@@ -86,7 +86,7 @@ that, surface that as the cause and pick the closest valid value.
 
 ## Cleaning up voice — `audio_nr` toolbox
 
-Most voice-bearing presets (wbfm, nbfm, nwr, usb, lsb, wbam, aprs)
+Most voice-bearing presets (wbfm, nbfm, nwr, usb, lsb, wbam, packet)
 include an `audio_nr` block (`AudioNrMono`) sitting between the
 demod and the AudioSink. It carries five live-tunable noise-reduction
 stages — *all* are off-by-default per stage knob, so a stock preset

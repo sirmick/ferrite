@@ -209,7 +209,7 @@ One PR per ~3 presets. Suggested order:
 
 1. Listen presets — `wbfm`, `wbfm_stereo`, `nbfm`, `wbam`, `usb`,
    `lsb`, `nwr`
-2. Decoder presets — `ft8`, `aprs`, `adsb`, `ais`, `nbfm` (paging
+2. Decoder presets — `ft8`, `packet`, `adsb`, `ais`, `nbfm` (paging
    variant), `pager`, `cw`, `dtmf-e2e`, `morse-e2e`, `eas`
 3. Capture / record presets — `capture_fm`, `capture-aprs`,
    `capture-pager`, `am-audio-record`, `fm-audio-record`

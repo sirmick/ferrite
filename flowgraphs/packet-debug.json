@@ -1,0 +1,96 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "packet-debug",
+  "label": "Packet radio debug \u2014 parallel WAV + PacketDemod",
+  "description": "Diagnostic preset: audio after the packet NBFM chain is fanned out via TeeRealF32 to BOTH a live PacketDemod (decoder::packet log) AND a FileAudioSink (/tmp/ferrite-packet.wav). Stop the pipeline, run analyze-packet-wav on the file, and compare the offline decode count to the live decoder::packet line count. Same input samples on both branches \u2014 any divergence is a bug in the live path.",
+  "ai_notes": "Diagnostic variant of `packet` \u2014 fans the post-demod audio out to BOTH a live PacketDemod AND a WAV recording on disk. Use when the decoder seems to be missing obvious packets and you want to play the WAV back through external tools (multimon-ng, Direwolf) to compare. Not a primary listen preset.",
+  "catalog_visible": false,
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 2000000.0,
+        "bandwidth_hz": 1536000.0
+      }
+    },
+    "tee_iq": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2000000.0,
+        "output_rate_hz": 50000.0
+      }
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "FmDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 50000,
+        "max_deviation_hz": 5000
+      }
+    },
+    "resamp": {
+      "type": "RealF32Resamp",
+      "placement": "node",
+      "params": {
+        "output_rate_hz": 22050.0,
+        "stopband_db": 60.0
+      }
+    },
+    "tee_audio": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
+    "packet": {
+      "type": "PacketDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 22050.0
+      }
+    },
+    "audio": {
+      "type": "FileAudioSink",
+      "placement": "node",
+      "params": {
+        "path": "/tmp/ferrite-packet.wav",
+        "rate_hz": 22050.0,
+        "max_seconds": 1800.0
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee_iq.in"],
+    ["tee_iq.out0", "chan.in"],
+    ["tee_iq.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "resamp.in"],
+    ["resamp.out", "tee_audio.in"],
+    ["tee_audio.out0", "packet.in"],
+    ["tee_audio.out1", "audio.in"]
+  ]
+}
