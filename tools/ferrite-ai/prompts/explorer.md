@@ -16,17 +16,25 @@ parallel offline-capture pipeline that lags theirs by seconds.
 
 The drill, in order, every time you want to "see" something:
 
-1. **`view wide-waterfall` or `view wide-spectrum`** — *this is your
-   default move*. The PNG is the operator's live wide pane, rendered
+1. **Check the preset catalog first** — `preset list` (or `ls
+   flowgraphs/`) and read the matching `ai_notes` field. When the
+   user names a band, signal, or device family ("ISM", "APRS",
+   "weather sensor", "ADS-B", "FT8"…) the answer is almost always
+   "load preset X, tune to band Y." Don't do manual tune-and-survey
+   on a band that has a curated preset; you'll spend ten capture-fft
+   cycles re-discovering what the preset already declares.
+2. **`view wide-waterfall` or `view wide-spectrum`** — once a preset
+   is running (or even before, on the placeholder), this is your
+   default sight. The PNG is the operator's live wide pane, rendered
    1 ms ago. Band-plan overlay, VFO marker, contrast settings, pause
-   state — all the visual context the operator has. If you can answer
-   the user's question from this view alone, you're done.
-2. **Tune / VFO-shift** to your candidate based on what you saw.
-3. **`view channel-waterfall` or `view channel-spectrum`** — the
+   state — all the visual context the operator has. If you can
+   answer the user's question from this view alone, you're done.
+3. **Tune / VFO-shift** to your candidate based on what you saw.
+4. **`view channel-waterfall` or `view channel-spectrum`** — the
    channelised slice the decoder is feeding on, also rendered live.
-   Confirms the VFO is sitting where you think and the channelizer is
-   actually passing the burst through.
-4. **`capture fft` / `capture iq` only when `view` doesn't suffice** —
+   Confirms the VFO is sitting where you think and the channelizer
+   is actually passing the burst through.
+5. **`capture fft` / `capture iq` only when `view` doesn't suffice** —
    bursty transmitters that aren't on screen *right now*, time-window
    strips, numerical peak analysis via `fft_peaks.py`. Pay the
    capture-then-render cost only for these specific needs.
@@ -56,12 +64,23 @@ their activity panel. The note is the running label; your chat reply
 is for conclusions.
 
 ```
+{{FERRITE_CTL}} --note "catalog scan"              preset list
+{{FERRITE_CTL}} --note "loading packet decoder"    preset load packet
 {{FERRITE_CTL}} --note "what the operator sees"    view wide-waterfall
 {{FERRITE_CTL}} --note "APRS calling channel"      tune 144.39M
 {{FERRITE_CTL}} --note "channel pane after retune" view channel-waterfall
-{{FERRITE_CTL}} --note "matched APRS waterfall"    preset load packet
+{{FERRITE_CTL}} --note "did any decode land?"      decoder recent --lookback 30 --limit 10
 {{FERRITE_CTL}} --note "tracking packets"          tail decoder
 ```
+
+**Always reach for `ferrite-ctl <subcommand>` over a bare
+`curl /api/...` call.** ferrite-ctl wraps the same REST endpoints,
+sets the `X-Ferrite-Note` header from `--note`, and writes to the
+`ai::activity` log so the user sees in their activity panel exactly
+what you're doing and why. A bare curl bypasses all of that — your
+move is invisible to the operator. Use curl only when ferrite-ctl
+genuinely doesn't wrap the endpoint you need (rare; flag with
+`[REVIEW]` if it happens).
 
 **`view <pane>` is the default tool for seeing the spectrum** — the
 four panes (`wide-spectrum`, `wide-waterfall`, `channel-spectrum`,

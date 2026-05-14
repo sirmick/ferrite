@@ -135,6 +135,10 @@ enum Cmd {
         #[arg(long, default_value_t = 0.0)]
         lookback: f64,
     },
+    /// Inspect the decoder log buffer. `recent` for a one-shot recall
+    /// (the AI's "did any decode land?" check), `tail` for streaming.
+    #[command(subcommand)]
+    Decoder(DecoderCmd),
     /// Snapshot one of the four spectrum / waterfall canvases the
     /// browser is currently rendering, save it as a PNG, and print the
     /// path. Lets the AI "see what the operator sees" — band-plan
@@ -273,6 +277,36 @@ enum PresetCmd {
     Load { name: String },
 }
 
+#[derive(Subcommand, Debug)]
+enum DecoderCmd {
+    /// One-shot recall of recent decoder log entries. Lower-friction
+    /// substitute for `tail` when you want "what's in the buffer now"
+    /// without committing to a streaming tail. Prints what matches
+    /// and exits — same output format as `tail`, no SIGINT needed.
+    ///
+    /// Use this instead of `curl /api/decoder/recent` so the call
+    /// flows through `--note`-aware logging and shows up in the
+    /// activity panel like every other ferrite-ctl move.
+    Recent {
+        /// Tracing-target prefix to filter on (e.g.
+        /// `decoder::rtl_433`, `decoder::pocsag`, or just `decoder`
+        /// for everything decoder-side).
+        #[arg(long, default_value = "decoder")]
+        category: String,
+        /// Pull entries emitted in the last N seconds. Buffer caps at
+        /// ~4096 entries so very long lookbacks are bounded by ring
+        /// size anyway. Default 30 s.
+        #[arg(long, default_value_t = 30.0)]
+        lookback: f64,
+        /// Cap the number of entries printed (newest kept). 0 = no
+        /// cap (print every match). Useful for the AI's "did any
+        /// decode land in the last 30 s?" check — `--limit 5` keeps
+        /// the output short.
+        #[arg(long, default_value_t = 0_usize)]
+        limit: usize,
+    },
+}
+
 fn parse_kv(s: &str) -> Result<(String, Value), String> {
     let (k, v) = s
         .split_once('=')
@@ -373,6 +407,7 @@ fn command_summary(cmd: &Cmd) -> &'static str {
         Cmd::Capture(CaptureCmd::Audio { .. }) => "capture-audio",
         Cmd::Capture(CaptureCmd::Fft { .. }) => "capture-fft",
         Cmd::Tail { .. } => "tail",
+        Cmd::Decoder(DecoderCmd::Recent { .. }) => "decoder-recent",
         Cmd::View { .. } => "view",
     }
 }
@@ -406,6 +441,11 @@ impl Driver {
                 interval,
                 lookback,
             } => self.tail(&category, interval, lookback).await,
+            Cmd::Decoder(DecoderCmd::Recent {
+                category,
+                lookback,
+                limit,
+            }) => self.decoder_recent(&category, lookback, limit).await,
             Cmd::View { pane, out } => self.view(&pane, out.as_deref()).await,
         }
     }
@@ -1043,6 +1083,41 @@ impl Driver {
             let msg = e.get("message").and_then(Value::as_str).unwrap_or("");
             println!("[{level}] {target}: {msg}");
         }
+    }
+
+    async fn decoder_recent(&self, category: &str, lookback: f64, limit: usize) -> Result<()> {
+        // Two-step server polling so the `since` watermark is anchored
+        // to server-side time, not client-side. Same shape `tail` uses
+        // for its first poll.
+        let initial = self
+            .get(&format!("/api/decoder/recent?since=0&category={category}"))
+            .await?;
+        let server_now = initial.get("now").and_then(Value::as_u64).unwrap_or(0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let lookback_ms = (lookback.max(0.0) * 1000.0) as u64;
+        let since = server_now.saturating_sub(lookback_ms);
+        let v = self
+            .get(&format!(
+                "/api/decoder/recent?since={since}&category={category}"
+            ))
+            .await?;
+        let entries = v
+            .get("entries")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let slice: Vec<&Value> = if limit == 0 {
+            entries.iter().collect()
+        } else {
+            // Newest-kept: take the last `limit` items (the server
+            // emits entries in oldest-first order).
+            let start = entries.len().saturating_sub(limit);
+            entries[start..].iter().collect()
+        };
+        for e in slice {
+            self.emit_log_entry(e);
+        }
+        Ok(())
     }
 
     async fn view(&self, pane: &str, out: Option<&str>) -> Result<()> {
