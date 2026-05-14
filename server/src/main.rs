@@ -41,6 +41,7 @@ mod log_stream;
 mod preset_pipeline;
 mod routes;
 mod soapy_log;
+mod view_bridge;
 
 /// Ferrite SDR daemon.
 #[derive(Parser, Debug)]
@@ -367,6 +368,8 @@ async fn main() -> Result<()> {
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
         .route("/ws/chat", get(routes::ws_chat))
+        .route("/api/ui-views/:pane", get(routes::get_ui_view))
+        .route("/ws/ui-views", get(routes::ws_ui_views))
         .with_state(state);
 
     if static_root.is_dir() {

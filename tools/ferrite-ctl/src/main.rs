@@ -135,6 +135,27 @@ enum Cmd {
         #[arg(long, default_value_t = 0.0)]
         lookback: f64,
     },
+    /// Snapshot one of the four spectrum / waterfall canvases the
+    /// browser is currently rendering, save it as a PNG, and print the
+    /// path. Lets the AI "see what the operator sees" — band-plan
+    /// overlay, VFO marker, contrast, pause state, zoom, the works —
+    /// without re-rendering from raw FFT bins.
+    ///
+    /// Requires a browser tab subscribed to `/ws/ui-views` (i.e. the
+    /// UI is open). Returns 503 if no tab is connected, 504 if the
+    /// browser doesn't respond within 3 s.
+    View {
+        /// Which pane to snapshot. One of `wide-spectrum`,
+        /// `wide-waterfall`, `channel-spectrum`, `channel-waterfall`.
+        /// `channel-*` panes are only meaningful when the active
+        /// preset has a Channelizer (i.e. the channel-detail toggle is
+        /// available in the RfQuickBar).
+        pane: String,
+        /// Output path. Defaults to
+        /// `/tmp/ferrite-views/<pane>-<unix_ms>.png`.
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -352,6 +373,7 @@ fn command_summary(cmd: &Cmd) -> &'static str {
         Cmd::Capture(CaptureCmd::Audio { .. }) => "capture-audio",
         Cmd::Capture(CaptureCmd::Fft { .. }) => "capture-fft",
         Cmd::Tail { .. } => "tail",
+        Cmd::View { .. } => "view",
     }
 }
 
@@ -384,6 +406,7 @@ impl Driver {
                 interval,
                 lookback,
             } => self.tail(&category, interval, lookback).await,
+            Cmd::View { pane, out } => self.view(&pane, out.as_deref()).await,
         }
     }
 
@@ -1020,6 +1043,58 @@ impl Driver {
             let msg = e.get("message").and_then(Value::as_str).unwrap_or("");
             println!("[{level}] {target}: {msg}");
         }
+    }
+
+    async fn view(&self, pane: &str, out: Option<&str>) -> Result<()> {
+        // Validate pane locally so a typo doesn't round-trip to the
+        // server. The list mirrors `KNOWN_PANES` in routes.rs.
+        const KNOWN_PANES: &[&str] = &[
+            "wide-spectrum",
+            "wide-waterfall",
+            "channel-spectrum",
+            "channel-waterfall",
+        ];
+        if !KNOWN_PANES.contains(&pane) {
+            anyhow::bail!("unknown pane {pane:?}; expected one of {KNOWN_PANES:?}");
+        }
+
+        let resp = self
+            .client
+            .get(format!("{}/api/ui-views/{pane}", self.base))
+            .send()
+            .await
+            .with_context(|| format!("GET /api/ui-views/{pane}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("ferrited returned {status}: {body}");
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .context("reading PNG body from ferrited")?;
+
+        // Resolve output path. Default mirrors capture-fft: a
+        // dedicated /tmp dir, file named per-pane with a millisecond
+        // timestamp so two views taken back-to-back don't clobber
+        // each other.
+        let out_path = match out {
+            Some(p) => std::path::PathBuf::from(p),
+            None => {
+                let dir = std::path::PathBuf::from("/tmp/ferrite-views");
+                std::fs::create_dir_all(&dir)
+                    .with_context(|| format!("mkdir {}", dir.display()))?;
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                dir.join(format!("{pane}-{ms}.png"))
+            }
+        };
+        std::fs::write(&out_path, &bytes)
+            .with_context(|| format!("write {}", out_path.display()))?;
+        println!("{}", out_path.display());
+        Ok(())
     }
 
     async fn status(&self) -> Result<()> {

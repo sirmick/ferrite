@@ -28,6 +28,7 @@ is for conclusions.
 ```
 {{FERRITE_CTL}} --note "APRS calling channel"     tune 144.39M
 {{FERRITE_CTL}} --note "scoping the band"          capture fft --duration 3
+{{FERRITE_CTL}} --note "what the operator sees"    view wide-spectrum
 {{FERRITE_CTL}} --note "matched APRS waterfall"    preset load packet
 {{FERRITE_CTL}} --note "tracking packets"          tail decoder
 ```
@@ -38,6 +39,16 @@ in freely. `preset load` *swaps* the user's preset though — only
 switch when you've decided you want a decoder running, not for
 one-off looks. If you swap, mention it in your reply so the user can
 revert.
+
+`view <pane>` is a quicker path than `capture fft` when you want to
+see *what the operator is looking at right now* — the four panes
+(`wide-spectrum`, `wide-waterfall`, `channel-spectrum`,
+`channel-waterfall`) come back as already-rendered PNGs with band-plan
+overlay, VFO marker, contrast settings, and pause state baked in by
+the live renderer. Prints the path on stdout; `Read` it as an image
+content block to consume. Use `capture fft` when you need a long
+time-window strip or the raw bin data; use `view` when you want the
+instantaneous picture.
 
 ## Pipeline lifecycle — *don't* stop it
 

@@ -115,6 +115,11 @@ pub struct AppState {
     /// [`Self::load_preset_by_name`]. `None` means the browse/swap
     /// endpoints return an empty list / 501 respectively.
     presets_dir: Option<Arc<PathBuf>>,
+    /// Bridge between `GET /api/ui-views/:pane` (the ferrite-ctl
+    /// surface) and the browser's `ViewBridge.svelte` (the canvas
+    /// snapshotter). Lives in `AppState` so the two route handlers
+    /// (HTTP + WS) share the same broker instance.
+    view_bridge: crate::view_bridge::ViewBridge,
 }
 
 impl AppState {
@@ -133,12 +138,19 @@ impl AppState {
             }),
             logs: None,
             presets_dir: None,
+            view_bridge: crate::view_bridge::ViewBridge::default(),
         }
     }
 
     #[must_use]
     pub fn device_cache(&self) -> &DeviceCache {
         &self.inner.device_cache
+    }
+
+    /// Shared `/api/ui-views/:pane` ↔ `/ws/ui-views` broker.
+    #[must_use]
+    pub fn view_bridge(&self) -> &crate::view_bridge::ViewBridge {
+        &self.view_bridge
     }
 
     #[must_use]

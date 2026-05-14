@@ -8,6 +8,7 @@
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { bandplanUsa } from '$lib/presets/bandplan';
   import { waterfallStore } from './waterfallStore.svelte';
+  import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
 
   interface Props {
     client: FrameClient;
@@ -168,7 +169,14 @@
     // waterfall pane); install a renderer-bound impl on the shared
     // store so a click reaches our renderer here. Cleared on teardown.
     waterfallStore.resetMaxHold = () => renderer?.resetMaxHold();
+    // Register this canvas for `ferrite-ctl view wide-spectrum`. The
+    // snapshot fn is captured here so it closes over the local
+    // `canvas` ref — module-level registry stays decoupled from any
+    // particular Svelte instance.
+    const snapshot = () => dataUrlToBase64(canvas!.toDataURL('image/png'));
+    registerView('wide-spectrum', snapshot);
     return () => {
+      unregisterView('wide-spectrum', snapshot);
       waterfallStore.resetMaxHold = () => {};
       ro.disconnect();
       renderer?.destroy();

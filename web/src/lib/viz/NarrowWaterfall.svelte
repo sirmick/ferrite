@@ -23,6 +23,7 @@
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
+  import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
 
   interface Props {
     client: FrameClient;
@@ -90,7 +91,11 @@
     renderer.setManualContrast(dbfsToByte01(floorDbfs), dbfsToByte01(ceilDbfs));
     const ro = new ResizeObserver(() => renderer?.resize());
     ro.observe(canvas);
+    // Register for `ferrite-ctl view channel-waterfall`.
+    const snapshot = () => dataUrlToBase64(canvas!.toDataURL('image/png'));
+    registerView('channel-waterfall', snapshot);
     return () => {
+      unregisterView('channel-waterfall', snapshot);
       ro.disconnect();
       renderer?.destroy();
       renderer = undefined;

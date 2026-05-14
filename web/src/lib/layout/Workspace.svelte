@@ -34,6 +34,7 @@
   import Split from '$lib/layout/Split.svelte';
   import AppToolbar from '$lib/layout/AppToolbar.svelte';
   import RfQuickBar from '$lib/layout/RfQuickBar.svelte';
+  import ViewBridge from '$lib/layout/ViewBridge.svelte';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import type { FrameClient } from '$lib/ws/client';
@@ -90,6 +91,11 @@
                                 zoom, pause, Channel toggle). One
                                 strip below the grid steers both
                                 renderers. -->
+  <!-- Headless WS bridge: the AI's `ferrite-ctl view <pane>` round-trip
+       lands here; opens `/ws/ui-views`, snapshots the registered canvas
+       via the viewRegistry module, sends the PNG back. No DOM. -->
+  <ViewBridge />
+
   <header class="toolbar-row">
     <AppToolbar />
   </header>

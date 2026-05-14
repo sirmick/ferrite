@@ -8,6 +8,7 @@
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { applyControl } from '$lib/control/dispatch';
   import { clientControls } from '$lib/control/clientStore.svelte';
+  import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
 
   interface Props {
     client: FrameClient;
@@ -170,7 +171,11 @@
     });
     const ro = new ResizeObserver(() => renderer?.resize());
     ro.observe(canvas);
+    // Register for `ferrite-ctl view wide-waterfall`.
+    const snapshot = () => dataUrlToBase64(canvas!.toDataURL('image/png'));
+    registerView('wide-waterfall', snapshot);
     return () => {
+      unregisterView('wide-waterfall', snapshot);
       ro.disconnect();
       renderer?.destroy();
       renderer = undefined;

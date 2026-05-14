@@ -750,3 +750,108 @@ async fn handle_preset(mut socket: WebSocket, state: AppState) {
         }
     }
 }
+
+// ─── UI-view bridge ────────────────────────────────────────────────
+//
+// `GET /api/ui-views/:pane`: ferrited asks the connected browser tab
+// for a PNG snapshot of one of the four canvases (wide spectrum, wide
+// waterfall, channel spectrum, channel waterfall) and streams it back
+// as `image/png`. `/ws/ui-views`: the browser side of that
+// conversation. See `view_bridge.rs` for the broker.
+//
+// The AI reaches this via `ferrite-ctl view <pane>`, which is just a
+// thin GET that writes the response body to a temp file and prints
+// the path. The AI then `Read`s the PNG as an image content block.
+
+/// Allowed pane names. Validated server-side so a typo from the AI
+/// surfaces as a 400 instead of an opaque browser-side miss.
+const KNOWN_PANES: &[&str] = &[
+    "wide-spectrum",
+    "wide-waterfall",
+    "channel-spectrum",
+    "channel-waterfall",
+];
+
+pub async fn get_ui_view(
+    State(state): State<AppState>,
+    Path(pane): Path<String>,
+) -> impl IntoResponse {
+    if !KNOWN_PANES.contains(&pane.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("unknown pane {pane:?}; expected one of {KNOWN_PANES:?}"),
+        )
+            .into_response();
+    }
+    match state.view_bridge().request(&pane).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "image/png"),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e @ crate::view_bridge::ViewError::NoViewer) => {
+            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+        }
+        Err(e @ crate::view_bridge::ViewError::Timeout) => {
+            (StatusCode::GATEWAY_TIMEOUT, e.to_string()).into_response()
+        }
+    }
+}
+
+pub async fn ws_ui_views(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| ws_ui_views_loop(socket, state))
+}
+
+async fn ws_ui_views_loop(mut socket: WebSocket, state: AppState) {
+    // Install ourselves as the active viewer. Last-connect-wins —
+    // matches D06. The returned `our_sender` is our identity token
+    // for `detach_viewer_if_current` so we don't trample a newer
+    // subscriber's installation on disconnect.
+    let bridge = state.view_bridge().clone();
+    let (our_sender, mut req_rx) = bridge.install_viewer().await;
+
+    loop {
+        tokio::select! {
+            // ferrited → browser: a new snapshot request from the HTTP
+            // side. Serialise as JSON and send over the WS.
+            req = req_rx.recv() => {
+                let Some(req) = req else { break };
+                let wire = crate::view_bridge::WireRequest {
+                    kind: "view_request",
+                    req_id: req.req_id,
+                    pane: &req.pane,
+                };
+                let Ok(json) = serde_json::to_string(&wire) else { continue };
+                if socket.send(Message::Text(json)).await.is_err() {
+                    break;
+                }
+            }
+            // browser → ferrited: a view_response landing the PNG for a
+            // prior request.
+            msg = socket.recv() => {
+                let Some(msg) = msg else { break };
+                let Ok(msg) = msg else { break };
+                match msg {
+                    Message::Text(t) => {
+                        if let Ok(resp) =
+                            serde_json::from_str::<crate::view_bridge::WireResponse>(&t)
+                        {
+                            bridge.complete(resp).await;
+                        }
+                    }
+                    Message::Close(_) => break,
+                    Message::Ping(p) => {
+                        if socket.send(Message::Pong(p)).await.is_err() { break; }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    bridge.detach_viewer_if_current(&our_sender).await;
+}

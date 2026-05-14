@@ -12,6 +12,7 @@
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
+  import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
 
   interface Props {
     client: FrameClient;
@@ -64,7 +65,15 @@
     renderer = new SpectrumRenderer(canvas);
     const ro = new ResizeObserver(() => renderer?.resize());
     ro.observe(canvas);
+    // Register for `ferrite-ctl view channel-spectrum`. Only mounted
+    // when the active preset has a Channelizer (Workspace gates the
+    // narrow column behind `hasNarrowSink`), so a snapshot request
+    // before mount yields a registry miss → 503 with a helpful
+    // message rather than a spuriously-empty PNG.
+    const snapshot = () => dataUrlToBase64(canvas!.toDataURL('image/png'));
+    registerView('channel-spectrum', snapshot);
     return () => {
+      unregisterView('channel-spectrum', snapshot);
       ro.disconnect();
       renderer?.destroy();
       renderer = undefined;
