@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stop ferrited + ferrite-ai sidecar and recycle the SDRplay API service.
+# Stop ferrited + ferrite-ai sidecar + vite dev server, and recycle the
+# SDRplay API service.
 # Run this before ./build.sh or ./run.sh when a previous ferrited may
 # still be holding the SDR — the most common reason SoapySDRUtil --find
 # returns "No devices found".
@@ -22,6 +23,7 @@ for arg in "$@"; do
 done
 
 FERRITE_AI_PORT="${FERRITE_AI_PORT:-10002}"
+FERRITE_WEB_PORT="${FERRITE_WEB_PORT:-10000}"
 
 pids=$(pgrep -x ferrited || true)
 if [ -n "$pids" ]; then
@@ -73,6 +75,37 @@ if [ -n "$ai_pids" ]; then
   fi
 else
   echo "[stop] no ferrite-ai running"
+fi
+
+# vite dev runs as `pnpm dev` → node → vite. Same as ferrite-ai, identify
+# by the port it owns rather than argv to avoid matching unrelated node
+# processes (editors, build watchers, etc).
+web_pids=""
+if command -v lsof >/dev/null 2>&1; then
+  web_pids=$(lsof -t -i :"$FERRITE_WEB_PORT" 2>/dev/null || true)
+fi
+if [ -n "$web_pids" ]; then
+  echo "[stop] terminating vite dev (pids: $web_pids)"
+  # shellcheck disable=SC2086
+  kill $web_pids 2>/dev/null || true
+  for _ in 1 2 3; do
+    sleep 1
+    still=""
+    if command -v lsof >/dev/null 2>&1; then
+      still=$(lsof -t -i :"$FERRITE_WEB_PORT" 2>/dev/null || true)
+    fi
+    [ -z "$still" ] && break
+  done
+  if command -v lsof >/dev/null 2>&1; then
+    remaining=$(lsof -t -i :"$FERRITE_WEB_PORT" 2>/dev/null || true)
+    if [ -n "$remaining" ]; then
+      echo "[stop] force-killing vite dev (pids: $remaining)"
+      # shellcheck disable=SC2086
+      kill -9 $remaining 2>/dev/null || true
+    fi
+  fi
+else
+  echo "[stop] no vite dev running"
 fi
 
 if [ "$restart_sdr" = 1 ] && systemctl list-unit-files sdrplay.service >/dev/null 2>&1; then
