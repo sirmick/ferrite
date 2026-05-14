@@ -1,14 +1,41 @@
 <script lang="ts">
-  // Spectrum-over-waterfall canvas. Both panes are canvases pinned to
-  // their container — the user can drag the divider between them to
-  // bias the layout (more spectrum height when staring at peak shapes,
-  // more waterfall when watching history). The split fraction persists
-  // across sessions via localStorage.
+  // Three-level layout. From outside in:
+  //
+  //   ┌────────────────────────────────────────────────────────────┐
+  //   │ Toolbar  (HealthDots, source label, Start, Source…, etc.)  │
+  //   ├──────────────────────────────────┬─────────────────────────┤
+  //   │ Wide Spectrum                    │ Channel Spectrum        │
+  //   ├──────────────────────────────────┤                         │
+  //   │ Wide Waterfall                   ├─────────────────────────┤
+  //   │                                  │ Channel Waterfall       │
+  //   └──────────────────────────────────┴─────────────────────────┘
+  //
+  // The toolbar (AppToolbar) used to live inside the wide-Spectrum
+  // panel header — that was fine when the workspace was a single
+  // column, but with a narrow-channel column nested beside it the
+  // toolbar visually "belonged" to only the left half. Lifting it
+  // here makes it global. Sibling Splits:
+  //
+  //   - Outer horizontal split (wide | narrow), persisted under
+  //     `ferrite.split.workspace-columns`.
+  //   - Each column has its own vertical Split (spectrum | waterfall);
+  //     the wide column keeps its existing storage key so users'
+  //     existing splitter habits carry across.
+  //
+  // The narrow column is gated on (a) the runtime having injected a
+  // `ui:fft_narrow` sink (only true when the active preset has a
+  // Channelizer — `inject_narrow_fft.rs`) AND (b) the operator's
+  // `client.workspace.narrowVisible` toggle.
   import Spectrum from '$lib/viz/Spectrum.svelte';
   import Waterfall from '$lib/viz/Waterfall.svelte';
+  import NarrowSpectrum from '$lib/viz/NarrowSpectrum.svelte';
+  import NarrowWaterfall from '$lib/viz/NarrowWaterfall.svelte';
   import DisplayControls from '$lib/viz/DisplayControls.svelte';
   import Split from '$lib/layout/Split.svelte';
   import AppToolbar from '$lib/layout/AppToolbar.svelte';
+  import { pipeline, currentAxes } from '$lib/pipeline.svelte';
+  import { clientControls } from '$lib/control/clientStore.svelte';
+  import { applyControl } from '$lib/control/dispatch';
   import type { FrameClient } from '$lib/ws/client';
 
   interface Props {
@@ -16,36 +43,134 @@
   }
 
   let { client }: Props = $props();
+
+  let hasNarrowSink = $derived(pipeline.uiSinks.fft_narrow !== undefined);
+  let narrowVisible = $derived(clientControls.get('client.workspace.narrowVisible'));
+  let showNarrow = $derived(hasNarrowSink && narrowVisible);
+
+  // Channel-detail header label: "Channel · 240 kHz @ 100.001 MHz" so
+  // the operator can read the channel width + absolute centre without
+  // mental arithmetic. Falls back to a bare "Channel" when axes
+  // haven't resolved yet.
+  let narrowHeaderLabel = $derived.by(() => {
+    const axes = currentAxes(pipeline);
+    const vfoBlock = Object.values(pipeline.blocks).find((b) =>
+      b.spec.params.some((p) => p.key === 'freq_shift_hz'),
+    );
+    const vfo = (vfoBlock?.values as Record<string, unknown> | null | undefined) ?? null;
+    if (!axes || !vfo) return 'Channel';
+    const shift = typeof vfo.freq_shift_hz === 'number' ? vfo.freq_shift_hz : 0;
+    const center = axes.center_freq_hz + shift;
+    let bw: number | undefined;
+    if (typeof vfo.output_rate_hz === 'number' && vfo.output_rate_hz > 0) {
+      bw = vfo.output_rate_hz;
+    } else if (typeof vfo.factor === 'number' && vfo.factor > 0) {
+      bw = axes.sample_rate_hz / vfo.factor;
+    }
+    const bwStr = bw === undefined ? '' : ` · ${(bw / 1e3).toFixed(0)} kHz`;
+    return `Channel${bwStr} @ ${(center / 1e6).toFixed(3)} MHz`;
+  });
 </script>
 
 <div class="flex h-full w-full min-h-0 flex-col">
-  <Split direction="column" defaultFraction={0.4} storageKey="ferrite.split.spectrum-waterfall">
-    {#snippet a()}
-      <section class="flex h-full min-h-0 flex-col bg-[color:var(--color-bg)]">
-        <header class="panel-head">
-          <span class="shrink-0">Spectrum</span>
-          <AppToolbar />
-        </header>
-        <div class="min-h-0 flex-1">
-          <Spectrum {client} />
-        </div>
-      </section>
-    {/snippet}
-    {#snippet b()}
-      <section class="flex h-full min-h-0 flex-col bg-[color:var(--color-bg)]">
-        <header class="panel-head">
-          <span>Waterfall</span>
-        </header>
-        <div class="min-h-0 flex-1">
-          <Waterfall {client} />
-        </div>
-        <DisplayControls />
-      </section>
-    {/snippet}
-  </Split>
+  <header class="toolbar-row">
+    <AppToolbar />
+  </header>
+
+  <div class="flex min-h-0 flex-1">
+    {#if showNarrow}
+      <Split direction="row" defaultFraction={0.65} storageKey="ferrite.split.workspace-columns">
+        {#snippet a()}
+          {@render wideColumn()}
+        {/snippet}
+        {#snippet b()}
+          {@render narrowColumn()}
+        {/snippet}
+      </Split>
+    {:else}
+      {@render wideColumn()}
+    {/if}
+  </div>
+
+  <!-- DisplayControls sits at the bottom of the workspace as a single
+       full-width strip rather than tucked under just the wide
+       waterfall. The fade / maxHold / auto-contrast / display-range /
+       zoom knobs all drive `clientControls.*`, which both the wide
+       and narrow renderers read — so one set of controls steers both
+       panes uniformly. -->
+  <DisplayControls />
 </div>
 
+{#snippet wideColumn()}
+  <div class="flex h-full w-full min-h-0 flex-col">
+    <Split direction="column" defaultFraction={0.4} storageKey="ferrite.split.spectrum-waterfall">
+      {#snippet a()}
+        <section class="flex h-full min-h-0 flex-col bg-[color:var(--color-bg)]">
+          <header class="panel-head">
+            <span>Spectrum</span>
+          </header>
+          <div class="min-h-0 flex-1">
+            <Spectrum {client} />
+          </div>
+        </section>
+      {/snippet}
+      {#snippet b()}
+        <section class="flex h-full min-h-0 flex-col bg-[color:var(--color-bg)]">
+          <header class="panel-head">
+            <span>Waterfall</span>
+          </header>
+          <div class="min-h-0 flex-1">
+            <Waterfall {client} />
+          </div>
+        </section>
+      {/snippet}
+    </Split>
+  </div>
+{/snippet}
+
+{#snippet narrowColumn()}
+  <div class="flex h-full w-full min-h-0 flex-col border-l border-slate-800">
+    <Split direction="column" defaultFraction={0.4} storageKey="ferrite.split.narrow-spec-wf">
+      {#snippet a()}
+        <section class="flex h-full min-h-0 flex-col bg-[color:var(--color-bg)]">
+          <header class="panel-head">
+            <span class="truncate" title={narrowHeaderLabel}>{narrowHeaderLabel}</span>
+            <button
+              type="button"
+              class="rounded border border-slate-700 px-1.5 py-0 text-[10px] hover:border-slate-600"
+              title="Hide channel-detail column"
+              onclick={() => void applyControl('client.workspace.narrowVisible', false)}
+              aria-label="Hide channel detail">×</button
+            >
+          </header>
+          <div class="min-h-0 flex-1">
+            <NarrowSpectrum {client} />
+          </div>
+        </section>
+      {/snippet}
+      {#snippet b()}
+        <section class="flex h-full min-h-0 flex-col bg-[color:var(--color-bg)]">
+          <header class="panel-head">
+            <span>Channel waterfall</span>
+          </header>
+          <div class="min-h-0 flex-1">
+            <NarrowWaterfall {client} />
+          </div>
+        </section>
+      {/snippet}
+    </Split>
+  </div>
+{/snippet}
+
 <style>
+  .toolbar-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 8px;
+    border-bottom: 1px solid rgb(30 41 59);
+    background: var(--color-bg);
+  }
   .panel-head {
     display: flex;
     align-items: center;

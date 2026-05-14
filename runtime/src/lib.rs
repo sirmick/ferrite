@@ -15,6 +15,7 @@ pub mod block_registry;
 pub mod compose;
 pub mod doc;
 pub mod env_split;
+pub mod inject_narrow_fft;
 pub mod instantiate;
 pub mod reconfigure;
 pub mod runtime;
@@ -29,6 +30,7 @@ pub use block_registry::{instantiate_blocks, BlockMap, InventorySpecRegistry};
 pub use compose::{compose_source, ComposeError, SourceConfig, SOURCE_ID, SOURCE_SENTINEL_TYPE};
 pub use doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
 pub use env_split::{split_for_environment, SplitError, CROSS_ENV_STREAM_BASE};
+pub use inject_narrow_fft::inject_narrow_fft_taps;
 pub use instantiate::{instantiate_flowgraph, SpecMap, SpecRegistry};
 pub use reconfigure::{
     diff_presets, ParamChange, ReconfigureError, ReconfigurePlan, StructuralChange,

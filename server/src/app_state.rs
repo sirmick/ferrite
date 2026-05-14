@@ -17,8 +17,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{anyhow, Result};
 use ferrite_blocks::{registry, SoapyReadback};
 use ferrite_runtime::{
-    compose_source, split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry,
-    ReconfigurePlan, SourceConfig, SOURCE_ID,
+    compose_source, inject_narrow_fft_taps, split_for_environment, Environment, FlowgraphDoc,
+    InventorySpecRegistry, ReconfigurePlan, SourceConfig, SOURCE_ID,
 };
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -182,8 +182,9 @@ impl AppState {
     pub async fn ui_sinks(&self) -> Result<Vec<UiSink>> {
         let preset = self.inner.preset_doc.read().await.clone();
         let source = self.inner.source_config.read().await.clone();
-        let composed =
+        let mut composed =
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
+        inject_narrow_fft_taps(&mut composed);
         let node_half = split_for_environment(&composed, Environment::Node, &InventorySpecRegistry)
             .map_err(|e| anyhow!("env_split: {e}"))?;
         let mut out = Vec::new();
@@ -235,8 +236,9 @@ impl AppState {
     pub async fn list_blocks(&self) -> Result<Vec<PipelineBlock>> {
         let preset = self.inner.preset_doc.read().await.clone();
         let source = self.inner.source_config.read().await.clone();
-        let composed =
+        let mut composed =
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
+        inject_narrow_fft_taps(&mut composed);
         let mut out = Vec::with_capacity(composed.blocks.len());
         for (id, decl) in &composed.blocks {
             let Some(entry) = registry::find(&decl.type_name) else {
@@ -423,8 +425,9 @@ impl AppState {
     /// plan; otherwise stores the doc and returns `None`.
     pub async fn patch_flowgraph(&self, new_doc: FlowgraphDoc) -> Result<Option<ReconfigurePlan>> {
         let source = self.inner.source_config.read().await.clone();
-        let composed =
+        let mut composed =
             compose_source(&new_doc, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
+        inject_narrow_fft_taps(&mut composed);
         let mut pipeline = self.inner.pipeline.lock().await;
         let plan = if let Some(mount) = pipeline.as_mut() {
             Some(mount.reconfigure(&composed).await?)
@@ -467,8 +470,9 @@ impl AppState {
         }
 
         let preset = self.inner.preset_doc.read().await.clone();
-        let composed = compose_source(&preset, &new_source)
+        let mut composed = compose_source(&preset, &new_source)
             .map_err(|e| anyhow!("compose preset+source: {e}"))?;
+        inject_narrow_fft_taps(&mut composed);
         let mut pipeline = self.inner.pipeline.lock().await;
         let plan = if let Some(mount) = pipeline.as_mut() {
             Some(mount.reconfigure(&composed).await?)
@@ -488,8 +492,9 @@ impl AppState {
         }
         let preset = self.inner.preset_doc.read().await.clone();
         let source = self.inner.source_config.read().await.clone();
-        let composed =
+        let mut composed =
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
+        inject_narrow_fft_taps(&mut composed);
         let mount = spawn_preset(&composed, self.inner.frames.clone(), self.inner.tick_period)?;
         *guard = Some(mount);
         Ok(())

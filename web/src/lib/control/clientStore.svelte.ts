@@ -58,6 +58,15 @@ export const CLIENT_DEFAULTS = {
   // Audio playback
   'client.audio.volume': 1.0,
   'client.audio.muted': false,
+
+  // Workspace layout — when the active preset has a Channelizer the
+  // runtime auto-injects a `ui:fft_narrow` tap (see
+  // `inject_narrow_fft.rs`), which the workspace renders as a second
+  // Spectrum+Waterfall column to the right of the wide view. The user
+  // can collapse that column to reclaim the screen real estate; the
+  // setting persists. Has no effect on bareband presets — the column
+  // is hidden automatically when no `fft_narrow` sink is present.
+  'client.workspace.narrowVisible': true,
 } as const;
 
 export type ClientPath = keyof typeof CLIENT_DEFAULTS;

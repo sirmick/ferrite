@@ -1,0 +1,142 @@
+<script lang="ts">
+  // Companion to `Waterfall.svelte` that subscribes to the runtime-
+  // injected `ui:fft_narrow` sink (see `inject_narrow_fft.rs`). The
+  // narrow waterfall renders the channelizer's output — a single
+  // channel post-VFO-shift — at much higher per-bin resolution than
+  // the wide source-side waterfall.
+  //
+  // Differences from `Waterfall.svelte`:
+  //
+  //   - No zoom/pan/click. The narrow view IS already zoomed; further
+  //     window math doesn't apply.
+  //   - No VFO marker (the VFO IS the centre).
+  //   - Axes derive from the channelizer's `freq_shift_hz` +
+  //     `output_rate_hz`, not from the source.
+  //   - Renders nothing (hidden) when no `ui:fft_narrow` sink is in
+  //     `pipeline.uiSinks` — i.e. on bareband presets without a
+  //     Channelizer, which is the only case `inject_narrow_fft` skips.
+  import { onMount } from 'svelte';
+  import { LEFT_MARGIN, RIGHT_MARGIN } from './spectrum';
+  import { WaterfallRenderer } from './waterfall';
+  import { waterfallStore } from './waterfallStore.svelte';
+  import type { FrameClient } from '$lib/ws/client';
+  import { PayloadType } from '$lib/ws/frame';
+  import { pipeline, currentAxes } from '$lib/pipeline.svelte';
+  import { clientControls } from '$lib/control/clientStore.svelte';
+
+  interface Props {
+    client: FrameClient;
+    rows?: number;
+  }
+
+  let { client, rows = 320 }: Props = $props();
+
+  // The narrow-FFT sink name matches the runtime convention in
+  // `inject_narrow_fft.rs`. Single-channelizer presets get this exact
+  // key; multi-channelizer presets get `fft_narrow_<chan_id>` — TODO
+  // when that day comes, expose a list. For now the common case is
+  // single.
+  let fftStreamId = $derived(pipeline.uiSinks.fft_narrow?.stream_id);
+
+  // Channelizer-derived axes. Look up by `freq_shift_hz` param
+  // presence, same convention `Spectrum.svelte` and `Waterfall.svelte`
+  // use to find the VFO block. The narrow waterfall's centre frequency
+  // is the source centre + the channelizer's VFO shift (i.e. the
+  // channel the operator is listening to in absolute Hz). Its rate is
+  // the channelizer's `output_rate_hz`.
+  let wideAxes = $derived(currentAxes(pipeline));
+  let vfoBlock = $derived(
+    Object.values(pipeline.blocks).find((b) =>
+      b.spec.params.some((p) => p.key === 'freq_shift_hz'),
+    ),
+  );
+  let vfoValues = $derived(
+    (vfoBlock?.values as Record<string, unknown> | null | undefined) ?? null,
+  );
+  let vfoShiftHz = $derived(
+    typeof vfoValues?.freq_shift_hz === 'number' ? vfoValues.freq_shift_hz : 0,
+  );
+  let narrowCenterHz = $derived(wideAxes ? wideAxes.center_freq_hz + vfoShiftHz : undefined);
+  let narrowRateHz = $derived.by(() => {
+    if (!vfoValues || !wideAxes) return undefined;
+    const outRate = vfoValues.output_rate_hz;
+    if (typeof outRate === 'number' && outRate > 0) return outRate;
+    const factor = vfoValues.factor;
+    if (typeof factor === 'number' && factor > 0) return wideAxes.sample_rate_hz / factor;
+    return undefined;
+  });
+
+  let canvas: HTMLCanvasElement | undefined = $state();
+  let renderer: WaterfallRenderer | undefined;
+
+  // Reuse the same contrast / auto-contrast state the wide waterfall
+  // uses. Different controls would clutter the panel; same controls
+  // mean both views stay visually comparable when an operator drags
+  // the contrast slider.
+  function dbfsToByte01(dbfs: number): number {
+    return Math.max(0, Math.min(1, 1 + dbfs / 100));
+  }
+  let autoContrast = $derived(clientControls.get('client.waterfall.autoContrast'));
+  let floorDbfs = $derived(clientControls.get('client.waterfall.contrastFloorDbfs'));
+  let ceilDbfs = $derived(clientControls.get('client.waterfall.contrastCeilDbfs'));
+
+  onMount(() => {
+    if (!canvas) return;
+    renderer = new WaterfallRenderer(canvas, { rows });
+    renderer.setAutoContrast(autoContrast);
+    renderer.setManualContrast(dbfsToByte01(floorDbfs), dbfsToByte01(ceilDbfs));
+    const ro = new ResizeObserver(() => renderer?.resize());
+    ro.observe(canvas);
+    return () => {
+      ro.disconnect();
+      renderer?.destroy();
+      renderer = undefined;
+    };
+  });
+
+  $effect(() => {
+    if (!renderer) return;
+    renderer.setAutoContrast(autoContrast);
+    renderer.setManualContrast(dbfsToByte01(floorDbfs), dbfsToByte01(ceilDbfs));
+  });
+
+  $effect(() => {
+    const sid = fftStreamId;
+    if (sid === undefined) return;
+    const unsub = client.subscribe(sid, (frame) => {
+      if (frame.header.payloadType !== PayloadType.FftU8) return;
+      if (waterfallStore.paused) return;
+      renderer?.pushRow(frame.payload);
+    });
+    return unsub;
+  });
+</script>
+
+{#if fftStreamId !== undefined}
+  <div class="relative flex h-full w-full flex-col">
+    <div
+      class="relative min-h-0 flex-1"
+      style:padding-left="{LEFT_MARGIN}px"
+      style:padding-right="{RIGHT_MARGIN}px"
+    >
+      <canvas bind:this={canvas} class="block h-full w-full"></canvas>
+    </div>
+    <!-- Axis label band underneath. Min/centre/max in absolute Hz so
+         the operator can read off the channel they're listening to
+         without doing mental arithmetic from the wide view. -->
+    {#if narrowCenterHz !== undefined && narrowRateHz !== undefined && narrowRateHz > 0}
+      {@const minHz = narrowCenterHz - narrowRateHz / 2}
+      {@const maxHz = narrowCenterHz + narrowRateHz / 2}
+      {@const fmt = (hz: number) => `${(hz / 1e6).toFixed(3)} MHz`}
+      <div
+        class="flex items-center justify-between border-t border-slate-800 px-2 py-0.5 font-mono text-[10px] text-slate-400"
+        style:padding-left="{LEFT_MARGIN + 4}px"
+        style:padding-right="{RIGHT_MARGIN + 4}px"
+      >
+        <span>{fmt(minHz)}</span>
+        <span class="text-slate-300">VFO {fmt(narrowCenterHz)}</span>
+        <span>{fmt(maxHz)}</span>
+      </div>
+    {/if}
+  </div>
+{/if}
