@@ -4,9 +4,6 @@
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
-  import { quickRateChoices, bandwidthForRate } from '$lib/controls/optionsModel';
-  import Nixie from '$lib/controls/Nixie.svelte';
-  import LiveControls from '$lib/controls/LiveControls.svelte';
   import { applyControl } from '$lib/control/dispatch';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { bandplanUsa } from '$lib/presets/bandplan';
@@ -92,53 +89,6 @@
     const viewMin = fullMin + Math.max(0, Math.min(1, viewPan)) * headroom;
     return { centerHz: viewMin + span / 2, rateHz: span };
   });
-
-  // Sample-rate dropdown by the nixies: preset-curated short list.
-  // Software sources (sine, file) have no advertised rate ladder, so
-  // the list is empty and the UI collapses to a read-only display.
-  // The current rate is always included even when it's not in the
-  // curated list — the user may have set it explicitly from the
-  // advanced panel in `InputControls`, and leaving the value absent
-  // here would render the `<select>` blank.
-  let rateChoices = $derived.by(() => {
-    const caps = pipeline.sourceCaps;
-    if (!caps || caps.kind !== 'hardware') return [] as number[];
-    const choices = quickRateChoices(caps.capabilities);
-    const rate = axes?.sample_rate_hz;
-    if (rate !== undefined && !choices.some((c) => Math.abs(c - rate) < 1)) {
-      choices.push(rate);
-      choices.sort((a, b) => a - b);
-    }
-    return choices;
-  });
-
-  function fmtRate(hz: number): string {
-    if (hz >= 1e6) return `${(hz / 1e6).toFixed(3)} MS/s`;
-    if (hz >= 1e3) return `${(hz / 1e3).toFixed(1)} kS/s`;
-    return `${hz} S/s`;
-  }
-
-  function onRateChange(ev: Event) {
-    const v = Number((ev.target as HTMLSelectElement).value);
-    if (!Number.isFinite(v) || v === axes?.sample_rate_hz) return;
-    // Atomic two-key write: Fs + BW must land in one patch so the
-    // server sees both in the same reconfigure pass (driver-specific
-    // IF filter ladder on SDRplay etc.). `patchSourceParams` is the
-    // escape hatch from `applyControl` for multi-key flow writes.
-    const caps = pipeline.sourceCaps;
-    const patch: Record<string, unknown> = { sample_rate_hz: v };
-    if (caps?.kind === 'hardware') {
-      const bw = bandwidthForRate(caps.capabilities, v);
-      if (bw !== null) patch.bandwidth_hz = bw;
-    }
-    void pipeline.patchSourceParams(patch);
-  }
-
-  function commitCenter(hz: number) {
-    if (axes && hz !== axes.center_freq_hz) {
-      void applyControl('flow.src.center_freq_hz', hz);
-    }
-  }
 
   // Committing the VFO writes the offset (`freq_shift_hz = target −
   // center`) so the absolute listening frequency matches what the user
@@ -357,40 +307,6 @@
 </script>
 
 <div class="flex h-full w-full flex-col">
-  {#if axes}
-    <div
-      class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-800 bg-[color:var(--color-bg)] px-2 py-1 text-[11px] text-[color:var(--color-muted)]"
-    >
-      {#if vfoBlock}
-        <span class="contents" title="VFO — what you're listening to (orange)">
-          <Nixie hz={vfoAbsHz} onCommit={commitVfo} tone="orange" />
-        </span>
-      {/if}
-
-      <span class="contents" title="SDR centre — the RF tuner LO (green)">
-        <Nixie hz={axes.center_freq_hz} onCommit={commitCenter} tone="green" />
-      </span>
-
-      <label class="flex items-center gap-1" title="sample rate / span">
-        <span>rate</span>
-        {#if rateChoices.length > 1}
-          <select
-            class="rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
-            value={axes.sample_rate_hz}
-            onchange={onRateChange}
-          >
-            {#each rateChoices as r (r)}
-              <option value={r}>{fmtRate(r)}</option>
-            {/each}
-          </select>
-        {:else}
-          <span class="font-mono text-slate-300">{fmtRate(axes.sample_rate_hz)}</span>
-        {/if}
-      </label>
-
-      <LiveControls />
-    </div>
-  {/if}
   <canvas
     bind:this={canvas}
     onclick={onClick}

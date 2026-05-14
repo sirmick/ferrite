@@ -74,6 +74,13 @@
   let wfAuto = $derived(clientControls.get('client.waterfall.autoContrast'));
   let wfFloor = $derived(clientControls.get('client.waterfall.contrastFloorDbfs'));
   let wfCeil = $derived(clientControls.get('client.waterfall.contrastCeilDbfs'));
+
+  // Channel-detail column toggle. Moved here from AppToolbar so the
+  // viz controls strip owns every display knob; only meaningful on
+  // presets with a Channelizer (`ui:fft_narrow` sink injected by
+  // env_split).
+  let hasNarrow = $derived(pipeline.uiSinks.fft_narrow !== undefined);
+  let narrowVisible = $derived(clientControls.get('client.workspace.narrowVisible'));
 </script>
 
 <!-- Layout reads l → r as DSP shaping → display flags → spectrum
@@ -303,4 +310,35 @@
   >
     {waterfallStore.paused ? '▶' : '❚❚'}
   </button>
+
+  <!-- Channel-detail toggle. Right-aligned so it sits with the other
+       display-shape knobs (this controls whether the channel pane is
+       visible at all). Disabled on presets without a Channelizer. -->
+  <button
+    type="button"
+    class="ml-auto rounded border border-slate-700 px-2 py-0.5 text-[11px] hover:border-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+    class:channel-on={hasNarrow && narrowVisible}
+    disabled={!hasNarrow}
+    title={hasNarrow
+      ? narrowVisible
+        ? 'Hide channel-detail column'
+        : 'Show channel-detail column'
+      : 'Active preset has no channelizer — no channel detail available'}
+    onclick={() => void applyControl('client.workspace.narrowVisible', !narrowVisible)}
+  >
+    Channel
+  </button>
 </div>
+
+<style>
+  /* Sky-blue accent matches the VFO marker on the wide spectrum /
+     waterfall — same hue means "you're looking at the channelised
+     slice" everywhere. */
+  .channel-on {
+    border-color: rgb(125 211 252);
+    color: rgb(125 211 252);
+  }
+  .channel-on:hover {
+    border-color: rgb(186 230 253);
+  }
+</style>

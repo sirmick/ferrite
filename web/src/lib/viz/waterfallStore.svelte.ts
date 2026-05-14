@@ -10,6 +10,17 @@
 class WaterfallStore {
   paused = $state(false);
   resetMaxHold: () => void = () => {};
+
+  // Shared auto-contrast bounds published by the wide waterfall and
+  // consumed by the narrow one, so both panes stretch their palette to
+  // the same byte window. Without this, each renderer computes its own
+  // P5/P98 from its own byte stream — the narrow FFT has finer bins
+  // (lower noise per bin) so its noise floor sits at a different byte
+  // value and the colours diverge for the same dB signal. `null` =
+  // no publisher yet (e.g. cold start or autoContrast off);
+  // consumers fall back to their own internal detector.
+  sharedAutoFloor01 = $state<number | null>(null);
+  sharedAutoCeil01 = $state<number | null>(null);
 }
 
 export const waterfallStore = new WaterfallStore();

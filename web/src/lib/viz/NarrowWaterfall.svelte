@@ -70,11 +70,14 @@
   let renderer: WaterfallRenderer | undefined;
 
   // Reuse the same contrast / auto-contrast state the wide waterfall
-  // uses. Different controls would clutter the panel; same controls
-  // mean both views stay visually comparable when an operator drags
-  // the contrast slider.
-  function dbfsToByte01(dbfs: number): number {
-    return Math.max(0, Math.min(1, 1 + dbfs / 100));
+  // uses. Same dBFS-to-byte mapping (LogMagU8 quantises both wide and
+  // narrow streams to the same [-160, 0] dBFS window), so identical
+  // bytes paint identical colours — required for the two panes to
+  // look comparable when the operator drags the manual range slider.
+  const WF_FLOOR_DBFS = -160;
+  const WF_CEIL_DBFS = 0;
+  function dbfsToByte01(d: number): number {
+    return (d - WF_FLOOR_DBFS) / (WF_CEIL_DBFS - WF_FLOOR_DBFS);
   }
   let autoContrast = $derived(clientControls.get('client.waterfall.autoContrast'));
   let floorDbfs = $derived(clientControls.get('client.waterfall.contrastFloorDbfs'));
@@ -98,6 +101,19 @@
     if (!renderer) return;
     renderer.setAutoContrast(autoContrast);
     renderer.setManualContrast(dbfsToByte01(floorDbfs), dbfsToByte01(ceilDbfs));
+  });
+
+  // Mirror the wide waterfall's auto-contrast window. The wide
+  // renderer publishes its computed (smoothed) bounds into
+  // `waterfallStore.sharedAutoFloor01/Ceil01`; when those are set
+  // and auto-contrast is on, we drive our window from them instead
+  // of running our own percentile detector. Same byte window across
+  // both panes → same palette colours for the same dB signal.
+  $effect(() => {
+    if (!renderer) return;
+    const floor = waterfallStore.sharedAutoFloor01;
+    const ceil = waterfallStore.sharedAutoCeil01;
+    renderer.setExternalAutoBounds(floor, ceil);
   });
 
   $effect(() => {

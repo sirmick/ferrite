@@ -33,9 +33,9 @@
   import DisplayControls from '$lib/viz/DisplayControls.svelte';
   import Split from '$lib/layout/Split.svelte';
   import AppToolbar from '$lib/layout/AppToolbar.svelte';
+  import RfQuickBar from '$lib/layout/RfQuickBar.svelte';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
-  import { applyControl } from '$lib/control/dispatch';
   import type { FrameClient } from '$lib/ws/client';
 
   interface Props {
@@ -103,6 +103,12 @@
 
 {#snippet wideColumn()}
   <div class="flex h-full w-full min-h-0 flex-col">
+    <!-- RF quick-control bar lifted from inside Spectrum.svelte so it
+         sits at the top of the wide column — the operator's
+         most-used row (VFO type-in, SDR centre, sample rate, gain /
+         antenna toggles via LiveControls) is right under the column
+         header instead of nested two panes deep. -->
+    <RfQuickBar />
     <Split direction="column" defaultFraction={0.4} storageKey="ferrite.split.spectrum-waterfall">
       {#snippet a()}
         <section class="flex h-full min-h-0 flex-col bg-[color:var(--color-bg)]">
@@ -135,13 +141,6 @@
         <section class="flex h-full min-h-0 flex-col bg-[color:var(--color-bg)]">
           <header class="panel-head">
             <span class="truncate" title={narrowHeaderLabel}>{narrowHeaderLabel}</span>
-            <button
-              type="button"
-              class="rounded border border-slate-700 px-1.5 py-0 text-[10px] hover:border-slate-600"
-              title="Hide channel-detail column"
-              onclick={() => void applyControl('client.workspace.narrowVisible', false)}
-              aria-label="Hide channel detail">×</button
-            >
           </header>
           <div class="min-h-0 flex-1">
             <NarrowSpectrum {client} />

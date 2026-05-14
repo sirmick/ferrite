@@ -12,8 +12,6 @@
   import { defaultsFor, toSourceConfig } from '$lib/controls/optionsModel';
   import type { SourceConfig } from '$lib/api/source';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
-  import { clientControls } from '$lib/control/clientStore.svelte';
-  import { applyControl } from '$lib/control/dispatch';
 
   let frameRate = $state(0);
   let wsBwBps = $state(0);
@@ -82,13 +80,6 @@
     return `${s.type} ${freq}`;
   });
 
-  // Narrow-channel column is only meaningful when the runtime injected
-  // a `ui:fft_narrow` sink — i.e. the active preset has a Channelizer.
-  // Disable the toggle on bareband presets so the button doesn't lie
-  // about what it controls.
-  let hasNarrow = $derived(pipeline.uiSinks.fft_narrow !== undefined);
-  let narrowVisible = $derived(clientControls.get('client.workspace.narrowVisible'));
-
   async function togglePipeline() {
     if (startStopBusy) return;
     startStopBusy = true;
@@ -105,7 +96,7 @@
 </script>
 
 <div
-  class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[color:var(--color-muted)]"
+  class="flex w-full flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[color:var(--color-muted)]"
 >
   <HealthDots />
   <span class="hidden md:inline">
@@ -120,44 +111,35 @@
   {#if pipeline.errorMessage}
     <span class="text-rose-400" title={pipeline.errorMessage}>error</span>
   {/if}
-  <button
-    type="button"
-    class="rounded border px-2 py-0.5 text-[11px] font-semibold disabled:opacity-50"
-    class:running={pipeline.status === 'running'}
-    class:stopped={pipeline.status !== 'running'}
-    disabled={startStopBusy || pipeline.phase === 'loading'}
-    onclick={togglePipeline}
-  >
-    {pipeline.status === 'running' ? 'Stop' : 'Start'}
-  </button>
-  <button
-    type="button"
-    class="rounded border border-slate-700 px-2 py-0.5 text-[11px] hover:border-slate-600"
-    onclick={() => (showSource = true)}
-  >
-    Source…
-  </button>
-  <button
-    type="button"
-    class="rounded border border-slate-700 px-2 py-0.5 text-[11px] hover:border-slate-600"
-    onclick={() => (showFlowgraph = true)}
-  >
-    Flowgraph…
-  </button>
-  <button
-    type="button"
-    class="rounded border border-slate-700 px-2 py-0.5 text-[11px] hover:border-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
-    class:channel-on={hasNarrow && narrowVisible}
-    disabled={!hasNarrow}
-    title={hasNarrow
-      ? narrowVisible
-        ? 'Hide channel-detail column'
-        : 'Show channel-detail column'
-      : 'Active preset has no channelizer — no channel detail available'}
-    onclick={() => void applyControl('client.workspace.narrowVisible', !narrowVisible)}
-  >
-    Channel
-  </button>
+  <!-- Stop/Source/Flowgraph push to the right edge — they're terminal
+       actions (mutate global state), the status chips on the left stay
+       at the natural reading position. -->
+  <div class="ml-auto flex flex-wrap items-center gap-x-2 gap-y-1">
+    <button
+      type="button"
+      class="rounded border px-2 py-0.5 text-[11px] font-semibold disabled:opacity-50"
+      class:running={pipeline.status === 'running'}
+      class:stopped={pipeline.status !== 'running'}
+      disabled={startStopBusy || pipeline.phase === 'loading'}
+      onclick={togglePipeline}
+    >
+      {pipeline.status === 'running' ? 'Stop' : 'Start'}
+    </button>
+    <button
+      type="button"
+      class="rounded border border-slate-700 px-2 py-0.5 text-[11px] hover:border-slate-600"
+      onclick={() => (showSource = true)}
+    >
+      Source…
+    </button>
+    <button
+      type="button"
+      class="rounded border border-slate-700 px-2 py-0.5 text-[11px] hover:border-slate-600"
+      onclick={() => (showFlowgraph = true)}
+    >
+      Flowgraph…
+    </button>
+  </div>
 </div>
 
 <SourceDialog
@@ -189,15 +171,5 @@
   }
   .stopped:hover {
     border-color: rgb(187 247 208);
-  }
-  /* Channel toggle "on" state — sky-blue accent matches the VFO marker
-     colour used on the wide spectrum + waterfall, so the same hue
-     means "you're looking at the channelised slice" everywhere. */
-  .channel-on {
-    border-color: rgb(125 211 252);
-    color: rgb(125 211 252);
-  }
-  .channel-on:hover {
-    border-color: rgb(186 230 253);
   }
 </style>

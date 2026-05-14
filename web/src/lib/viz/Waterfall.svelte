@@ -160,12 +160,24 @@
     // a flash of unstyled palette.
     renderer.setAutoContrast(autoContrast);
     renderer.setManualContrast(dbfsToByte01(floorDbfs), dbfsToByte01(ceilDbfs));
+    // Wide waterfall is the publisher: every internal auto-bounds
+    // update writes to waterfallStore, which the narrow renderer
+    // subscribes to. Keeps both panes painting the same byte value
+    // with the same palette colour.
+    renderer.setOnAutoBoundsChanged((floor, ceil) => {
+      waterfallStore.sharedAutoFloor01 = floor;
+      waterfallStore.sharedAutoCeil01 = ceil;
+    });
     const ro = new ResizeObserver(() => renderer?.resize());
     ro.observe(canvas);
     return () => {
       ro.disconnect();
       renderer?.destroy();
       renderer = undefined;
+      // Release the shared bounds so a stale wide-side window doesn't
+      // outlive the renderer (e.g. on HMR).
+      waterfallStore.sharedAutoFloor01 = null;
+      waterfallStore.sharedAutoCeil01 = null;
     };
   });
 

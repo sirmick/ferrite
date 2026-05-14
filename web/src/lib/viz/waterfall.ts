@@ -153,6 +153,18 @@ export class WaterfallRenderer {
   private autoContrast = true;
   private manualFloor = 0;
   private manualCeil = 1;
+  // External auto-contrast window — used by the narrow waterfall to
+  // share the wide one's auto-stretched bounds, so both panes paint
+  // the same byte value with the same palette colour. `null` = no
+  // external publisher; the renderer falls back to its own
+  // percentile detector. When non-null, the renderer skips its own
+  // detector pass and uses these values directly.
+  private externalFloor: number | null = null;
+  private externalCeil: number | null = null;
+  // Callback fired every time the internal detector updates its
+  // window. Lets one renderer publish its auto-bounds for another to
+  // mirror. Set via `setOnAutoBoundsChanged()`.
+  private onAutoBoundsChanged: ((floor: number, ceil: number) => void) | null = null;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -272,9 +284,17 @@ export class WaterfallRenderer {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.head, this.cols, 1, gl.RED, gl.UNSIGNED_BYTE, row);
     this.head = (this.head + 1) % this.rows;
     this.rowCount += 1;
-    if (this.autoContrast && this.rowCount % this.autoContrastEvery === 0) {
-      this.updateAutoContrast(row);
-    } else if (!this.autoContrast) {
+    if (this.autoContrast) {
+      if (this.externalFloor !== null && this.externalCeil !== null) {
+        // External publisher (the wide waterfall) drives our window.
+        // Smoothing happens in the publisher; we just adopt its
+        // values so the two panes stay locked together.
+        this.displayFloor = this.externalFloor;
+        this.displayCeil = this.externalCeil;
+      } else if (this.rowCount % this.autoContrastEvery === 0) {
+        this.updateAutoContrast(row);
+      }
+    } else {
       // Manual mode: uniforms snap to the user-set window every row
       // (cheap; just two float writes on the JS side, the draw
       // already runs on rAF). Keeps the renderer's display state in
@@ -301,6 +321,30 @@ export class WaterfallRenderer {
     this.manualFloor = Math.max(0, Math.min(1, floor));
     this.manualCeil = Math.max(this.manualFloor + 1 / 256, Math.min(1, ceil));
     if (!this.autoContrast) this.scheduleDraw();
+  }
+
+  /** Drive the auto-contrast window from outside instead of running
+   *  the internal percentile detector. Pass `null, null` to release
+   *  the override and fall back to internal detection. Used by the
+   *  narrow waterfall to mirror the wide waterfall's bounds so the
+   *  two panes stretch their palette to the same byte window. */
+  setExternalAutoBounds(floor: number | null, ceil: number | null): void {
+    if (floor === null || ceil === null) {
+      this.externalFloor = null;
+      this.externalCeil = null;
+    } else {
+      this.externalFloor = Math.max(0, Math.min(1, floor));
+      this.externalCeil = Math.max(this.externalFloor + 1 / 256, Math.min(1, ceil));
+    }
+    if (this.autoContrast) this.scheduleDraw();
+  }
+
+  /** Fires after each internal `updateAutoContrast` pass with the
+   *  fresh (post-EMA) floor/ceil in normalised byte units. The wide
+   *  waterfall hooks this and republishes via `waterfallStore` so the
+   *  narrow renderer can adopt the same window. */
+  setOnAutoBoundsChanged(cb: ((floor: number, ceil: number) => void) | null): void {
+    this.onAutoBoundsChanged = cb;
   }
 
   /** Compute P5 / P98 of the row's byte values via histogram and
@@ -350,6 +394,9 @@ export class WaterfallRenderer {
     const alpha = 0.3;
     this.displayFloor = this.displayFloor * (1 - alpha) + floor * alpha;
     this.displayCeil = this.displayCeil * (1 - alpha) + ceil * alpha;
+    // Publish the smoothed window for any subscribers (e.g. the
+    // narrow waterfall mirroring the wide one's bounds).
+    this.onAutoBoundsChanged?.(this.displayFloor, this.displayCeil);
   }
 
   /** Resize the drawing buffer to the CSS size. Call on resize. */
