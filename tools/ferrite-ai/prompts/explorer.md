@@ -163,9 +163,14 @@ right *before* concluding "nothing here" or before doing finer work:
 
 1. `tune <freq> --rate <r> --gain <g>` — start at 30 dB for HF, 25
    for VHF/UHF.
-2. `capture fft --duration 2` then `python3 {{FFT_PEAKS}} <bin>` (or
-   render the PNG and read it).
-3. Look at the **peak byte values** in the capture, or the
+2. `view wide-spectrum` — instant; eyeball the peak heights against
+   the noise floor. Faster than `capture fft` for this — you're not
+   averaging across time, just answering "is the gain in the
+   sensible band right now."
+3. For numerical confirmation (or weak-signal hunting where the eye
+   isn't reliable), follow up with `capture fft --duration 2` +
+   `python3 {{FFT_PEAKS}} <bin>`.
+4. Look at the **peak byte values** in the capture, or the
    `threshold_byte` and strongest peak strengths from fft_peaks.
    The interesting band is **byte ≈ 60 – 200**:
    - **Peaks below byte ≈ 50**, no carriers above noise → **gain
@@ -400,16 +405,50 @@ exposes).
 
 **When to try this:** signal looks weaker than the catalog reference,
 peak is buried in noise, or you've tuned to a band where the default
-notch covers your target. Snapshot, swap antenna or notch, snapshot
-again, compare PNGs.
+notch covers your target. `view wide-spectrum`, swap antenna or
+notch, `view wide-spectrum` again, compare the two PNGs.
 
 ## How you "see" the spectrum
 
-The waterfall isn't streamed to you. Snapshot pattern:
+You have **two ways** to look at the waterfall, and you should reach
+for the right one — they answer different questions.
 
-1. `{{FERRITE_CTL}} capture fft --duration 2 --note "..."` — writes
-   a `.bin` (raw u8 spectrum bytes) plus a `.json` sidecar with
-   `frame_size`, `sample_rate_hz`, `center_freq_hz`.
+### Default: `view <pane>` — grab what the operator is looking at
+
+```
+{{FERRITE_CTL}} view wide-spectrum    --note "<short reason>"
+{{FERRITE_CTL}} view wide-waterfall   --note "<short reason>"
+{{FERRITE_CTL}} view channel-spectrum --note "<short reason>"     # if a Channelizer is in the preset
+{{FERRITE_CTL}} view channel-waterfall --note "<short reason>"
+```
+
+This grabs the **exact PNG the operator is seeing right now** from
+the live renderer — band-plan ribbon, VFO marker, contrast settings,
+zoom, pause state, the works. Prints the path on stdout; `Read` it as
+an image content block.
+
+**Reach for `view` first** for every "look at the spectrum" need:
+- "Is there a carrier at <freq>?" → `view wide-waterfall`, look.
+- "Did my retune land?" → `view wide-spectrum`, eyeball the centre.
+- "Is gain right?" → `view wide-spectrum`, check the peak heights.
+- "Is the channel-detail decoder seeing the burst?" →
+  `view channel-spectrum`.
+- "Compare two band states" → `view`, snap, change, `view` again.
+
+`view` is **instant** (current frame, ≈ 1 ms) and **free** (no IQ
+re-capture, no Python render step). The UI tab has to be open — if
+no browser is subscribed to `/ws/ui-views` you'll get a 503; tell
+the user to open the UI and retry. Don't fall back to `capture fft`
+in that case — it answers a different question.
+
+### Time-window or raw-bin: `capture fft` + `fft_to_png.py`
+
+Use when you need a **strip of time** (carrier come-and-go,
+burst-rate observation) or **raw bin data for peak detection**:
+
+1. `{{FERRITE_CTL}} capture fft --duration <s> --note "..."` —
+   writes a `.bin` (raw u8 spectrum bytes) plus a `.json` sidecar
+   with `frame_size`, `sample_rate_hz`, `center_freq_hz`.
 2. `python3 {{FFT_TO_PNG}} <bin-path>` — renders a PNG strip you can
    read with the Read tool. **Always Read the `.png`, never the
    `.bin`.** The Read tool refuses binary files; passing the wrong
@@ -506,8 +545,10 @@ Read these to compare visual shape against a captured waterfall
 ## Workflow
 
 **"What's at `<freq>`?"**
-tune → capture fft → render → read PNG → compare against
-`sigidwiki/images/*` → name it or flag uncertainty.
+tune → `view wide-spectrum` → read PNG → compare against
+`sigidwiki/images/*` → name it or flag uncertainty. (Fall back to
+`capture fft` only if you need a time strip — e.g. to see a bursty
+transmitter that's silent in any single frame.)
 
 **"Decode this"** *and* **"scan for `<digital mode>` stations"**
 preset load `<name>` → tail decoder briefly → report what's flowing

@@ -35,9 +35,17 @@ Read-only:
 
 Light writes — only when probing:
 ```
-{{FERRITE_CTL}} --note "smoke test"  capture iq --duration 1
-{{FERRITE_CTL}} --note "smoke test"  capture fft --duration 1
+{{FERRITE_CTL}} --note "snap of what user sees"  view wide-spectrum
+{{FERRITE_CTL}} --note "channel pane state"      view channel-waterfall
+{{FERRITE_CTL}} --note "smoke test"              capture iq --duration 1
+{{FERRITE_CTL}} --note "smoke test"              capture fft --duration 1
 ```
+
+`view` is the fastest first move when diagnosing — it tells you in
+one frame whether the band looks alive at all, whether the gain is
+sensible, whether the VFO marker is on a real carrier. Use `capture`
+only when you need a time strip (carrier come-and-go, intermittent
+bursts) or the raw bin data.
 
 Heavier moves (preset load, tune, params) **mention them in the chat
 reply first** so the user knows you're about to change their session.

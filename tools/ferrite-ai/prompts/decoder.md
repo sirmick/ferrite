@@ -62,27 +62,37 @@ that, surface that as the cause and pick the closest valid value.
 
 **"Why isn't it decoding?"** — diagnostic path:
 1. `status` — is the pipeline running, is the source tuned right?
-2. `capture iq --duration 3` — is there actually signal?
-3. `python3 {{FFT_TO_PNG}} <bin>` + read it — does the waterfall
-   show what we'd expect?
-4. Check the **front-end config**: wrong antenna (RSPdx has A/B/C —
+2. `view wide-waterfall` — is there actually signal? You're looking
+   at the exact waterfall the operator sees; bursty carriers appear
+   as horizontal stripes, steady ones as vertical lines. Faster than
+   `capture iq` for the binary "is signal present" question.
+3. If you need the channel-detail view (decoder's-eye view of just
+   the channelised slice): `view channel-spectrum` or
+   `view channel-waterfall`. Useful for "is the burst even reaching
+   the decoder block?" — a strong wide-band signal that vanishes in
+   the channel pane means the channelizer / VFO is mis-tuned.
+4. If `view` shows nothing but you suspect a bursty/intermittent
+   signal: `capture iq --duration 3` then
+   `python3 {{FFT_TO_PNG}} <bin>` + read it — the time strip catches
+   transmitters quiet in any single frame.
+5. Check the **front-end config**: wrong antenna (RSPdx has A/B/C —
    Antenna C is HF-only), or an RF notch covering your target band
    (e.g. SDRplay's `rfnotch_ctrl` attenuates AM/FM bands by default,
    `dabnotch_ctrl` covers Band III). `param src antenna="Antenna A"`
    to swap; `param src settings='{"rfnotch_ctrl":"Disable"}'` to
    disable a notch (GET `/api/source` first to merge with existing
    settings).
-5. Check **gain**: ADC clipping (waterfall flat at byte=255) or
+6. Check **gain**: ADC clipping (waterfall flat at byte=255) or
    buried in noise (mostly black with peaks barely above byte=20)
    both kill decoders. Adjust with `tune <freq> --gain <dB>` or
    `agc_enable=true`.
-6. Check for **DC spike on the carrier**: if the user tuned the
+7. Check for **DC spike on the carrier**: if the user tuned the
    centre directly to the target, the zero-IF DC spike sits on top
    of the signal. Fix: tune slightly off and pull the target back
    to baseband with `param chan freq_shift_hz=<offset>`.
-7. Read `{{FERRITE_HOME}}/flowgraphs/<name>.json` — anything unusual
+8. Read `{{FERRITE_HOME}}/flowgraphs/<name>.json` — anything unusual
    about how the preset is wired?
-8. Report the most likely cause + a fix.
+9. Report the most likely cause + a fix.
 
 ## Cleaning up voice — `audio_nr` toolbox
 
