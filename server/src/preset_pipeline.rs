@@ -383,7 +383,7 @@ mod tests {
                 // first scheduler tick produces enough samples to
                 // exceed that, so we only assert the frame is
                 // non-empty and IQ-shaped (8 bytes per complex sample).
-                assert!(payload.len() > 0 && payload.len() % 8 == 0);
+                assert!(!payload.is_empty() && payload.len() % 8 == 0);
             }
             other => panic!("expected IqF32 frame, got {other:?}"),
         }
