@@ -57,6 +57,7 @@
     },
     "audio": {
       "type": "AudioSink",
+      "placement": "browser",
       "params": {
         "buffer_samples": 8192
       }

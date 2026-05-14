@@ -19,7 +19,7 @@ import type { FlowgraphDoc } from '../flowgraph.js';
 import { AudioRingWriter } from '../audio/ringBuffer.js';
 import type { FrameClient } from '../ws/client.js';
 import { PayloadType } from '../ws/frame.js';
-import { viewIqF32 } from '../ws/source.js';
+import { viewF32, viewIqF32 } from '../ws/source.js';
 import type { LoadResult, RunnerRequest, RunnerResponse, RuntimeState } from './protocol.js';
 import type { RuntimeHandle } from './rustRuntime.js';
 
@@ -344,6 +344,35 @@ function wireBlocks(
           }
         }
         rt.pushIq(blockId, samples);
+      });
+      subscribers.push(unsub);
+    } else if (block.type === 'WsBridgeRxF32') {
+      // Real-audio bridge — same shape as WsBridgeRx but samples are
+      // mono `f32` (not interleaved pairs), routed to `pushF32` so the
+      // runtime's `WsBridgeRxF32` block fills its `AudioRing`.
+      const streamId = Number(block.params?.stream_id ?? 0);
+      const counter: BridgeCounter = {
+        blockId,
+        streamId,
+        samples: 0,
+        droppedBaseline: 0n,
+        lastRateHz: 0,
+      };
+      bridges.push(counter);
+      const unsub = client.subscribe(streamId, (frame) => {
+        if (frame.header.payloadType !== PayloadType.F32) return;
+        const samples = viewF32(frame.payload);
+        counter.samples += samples.length;
+        const rate = frame.header.sampleRateHz;
+        if (rate > 0 && rate !== counter.lastRateHz) {
+          counter.lastRateHz = rate;
+          try {
+            rt.setBridgeRxRate(blockId, rate);
+          } catch {
+            /* block type/id guaranteed by this code path; swallow */
+          }
+        }
+        rt.pushF32(blockId, samples);
       });
       subscribers.push(unsub);
     } else if (block.type === 'AudioSink') {

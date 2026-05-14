@@ -20,7 +20,9 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use ferrite_blocks::ws_bridge::{BridgeSink, WsBridgeTx, WsBridgeTxEvents, WsBridgeTxFftU8};
+use ferrite_blocks::ws_bridge::{
+    BridgeSink, WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
+};
 use ferrite_blocks::{SoapyReadback, SoapySource};
 use ferrite_runtime::SOURCE_ID;
 use ferrite_runtime::{
@@ -196,6 +198,12 @@ fn attach_bridge_sinks(
             "WsBridgeTx" => {
                 let tx = runtime.block_typed::<WsBridgeTx>(id).ok_or_else(|| {
                     anyhow!("runtime is missing expected WsBridgeTx {id:?} after load")
+                })?;
+                tx.attach_sink(Arc::clone(sink));
+            }
+            "WsBridgeTxF32" => {
+                let tx = runtime.block_typed::<WsBridgeTxF32>(id).ok_or_else(|| {
+                    anyhow!("runtime is missing expected WsBridgeTxF32 {id:?} after load")
                 })?;
                 tx.attach_sink(Arc::clone(sink));
             }

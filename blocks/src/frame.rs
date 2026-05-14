@@ -59,6 +59,16 @@ pub enum Frame {
         sample_rate_hz: u32,
         payload: Vec<u8>,
     },
+    /// Real audio samples. `payload` is little-endian `f32`, 4 bytes per
+    /// sample. `sample_rate_hz` follows the same contract as `IqF32` —
+    /// the producer's declared output rate, `0` for unknown.
+    F32 {
+        stream_id: u16,
+        seq: u32,
+        timestamp_ns: u64,
+        sample_rate_hz: u32,
+        payload: Vec<u8>,
+    },
     /// Log-magnitude FFT bins, one `u8` per bin.
     FftU8 {
         stream_id: u16,
@@ -89,6 +99,7 @@ impl Frame {
     pub const fn stream_id(&self) -> u16 {
         match self {
             Self::IqF32 { stream_id, .. }
+            | Self::F32 { stream_id, .. }
             | Self::FftU8 { stream_id, .. }
             | Self::JsonEvent { stream_id, .. } => *stream_id,
         }
@@ -99,6 +110,9 @@ impl Frame {
     pub const fn set_envelope(&mut self, new_seq: u32, new_ts_ns: u64) {
         match self {
             Self::IqF32 {
+                seq, timestamp_ns, ..
+            }
+            | Self::F32 {
                 seq, timestamp_ns, ..
             }
             | Self::FftU8 {
@@ -164,6 +178,7 @@ mod wasm_bindings {
     /// used, so the existing `PayloadType` lookup table in
     /// `web/src/lib/ws/frame.ts` stays valid.
     const PT_IQ_F32: u8 = 0x11;
+    const PT_F32: u8 = 0x12;
     const PT_FFT_U8: u8 = 0x01;
     const PT_JSON_EVENT: u8 = 0x80;
 
@@ -183,6 +198,20 @@ mod wasm_bindings {
                 payload,
             } => JsFrame {
                 payload_type: PT_IQ_F32,
+                stream_id: *stream_id,
+                seq: *seq,
+                timestamp_ns: *timestamp_ns,
+                sample_rate_hz: *sample_rate_hz,
+                payload,
+            },
+            Frame::F32 {
+                stream_id,
+                seq,
+                timestamp_ns,
+                sample_rate_hz,
+                payload,
+            } => JsFrame {
+                payload_type: PT_F32,
                 stream_id: *stream_id,
                 seq: *seq,
                 timestamp_ns: *timestamp_ns,
@@ -247,6 +276,24 @@ mod tests {
             seq: 0xDEAD_BEEF,
             timestamp_ns: 0x0123_4567_89AB_CDEF,
             sample_rate_hz: 0,
+            payload: bytes,
+        };
+        let wire = f.to_postcard().unwrap();
+        let back = Frame::from_postcard(&wire).unwrap();
+        assert_eq!(back, f);
+    }
+
+    #[test]
+    fn round_trip_f32() {
+        let bytes = {
+            let samples: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+            samples.iter().flat_map(|x| x.to_le_bytes()).collect()
+        };
+        let f = Frame::F32 {
+            stream_id: 1001,
+            seq: 0xDEAD_BEEF,
+            timestamp_ns: 0x0123_4567_89AB_CDEF,
+            sample_rate_hz: 48_000,
             payload: bytes,
         };
         let wire = f.to_postcard().unwrap();

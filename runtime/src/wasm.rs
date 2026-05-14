@@ -10,7 +10,7 @@
 //! it, native builds compile without any wasm-bindgen dependency pulled
 //! in.
 
-use ferrite_blocks::{AudioSink, EventsSink, WsBridgeRx};
+use ferrite_blocks::{AudioSink, EventsSink, WsBridgeRx, WsBridgeRxF32};
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 
@@ -202,8 +202,25 @@ impl RuntimeHandle {
         Ok(())
     }
 
+    /// Push a batch of real `f32` audio samples into the named
+    /// `WsBridgeRxF32` block. Real-audio analog of [`pushIq`]: the
+    /// browser runner forwards each decoded `Frame::F32` payload here,
+    /// the block buffers internally and emits on its `out` port at
+    /// tick time. Errors if the block doesn't exist or isn't a
+    /// `WsBridgeRxF32`.
+    #[wasm_bindgen(js_name = pushF32)]
+    pub fn push_f32(&mut self, block_id: &str, samples: &[f32]) -> Result<(), JsError> {
+        let src = self
+            .rt
+            .block_typed::<WsBridgeRxF32>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no WsBridgeRxF32 block named {block_id:?}")))?;
+        src.push(samples);
+        Ok(())
+    }
+
     /// Record the sample rate advertised by an arriving frame on the
-    /// named `WsBridgeRx`. The browser runner reads
+    /// named bridge-Rx block (either `WsBridgeRx` for IQ or
+    /// `WsBridgeRxF32` for real audio). The browser runner reads
     /// `frame.sample_rate_hz` and calls this whenever it's non-zero so
     /// dynamic source-rate changes cross the WS boundary. Cheap;
     /// actual propagation to downstream blocks happens on the next
@@ -214,12 +231,17 @@ impl RuntimeHandle {
         block_id: &str,
         sample_rate_hz: f64,
     ) -> Result<(), JsError> {
-        let src = self
-            .rt
-            .block_typed::<WsBridgeRx>(block_id)
-            .ok_or_else(|| JsError::new(&format!("no WsBridgeRx block named {block_id:?}")))?;
-        src.set_advertised_rate(sample_rate_hz);
-        Ok(())
+        if let Some(src) = self.rt.block_typed::<WsBridgeRx>(block_id) {
+            src.set_advertised_rate(sample_rate_hz);
+            return Ok(());
+        }
+        if let Some(src) = self.rt.block_typed::<WsBridgeRxF32>(block_id) {
+            src.set_advertised_rate(sample_rate_hz);
+            return Ok(());
+        }
+        Err(JsError::new(&format!(
+            "no WsBridgeRx/WsBridgeRxF32 block named {block_id:?}"
+        )))
     }
 
     /// Re-run the rate-propagation pass across the graph. Intended to

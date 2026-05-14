@@ -115,8 +115,8 @@ pub use stereo_decoder::{StereoDecoder, StereoDecoderParams};
 pub use tee_iq_f32::TeeIqF32;
 pub use tee_real_f32::TeeRealF32;
 pub use ws_bridge::{
-    BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx,
-    WsBridgeTxEvents, WsBridgeTxFftU8,
+    BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxF32, WsBridgeRxParams,
+    WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
 };
 
 /// Marks an `impl Block for T` so `T` is added to [`registry`].
@@ -189,9 +189,11 @@ mod tests {
             "TeeIqF32",
             "TeeRealF32",
             "WsBridgeTx",
+            "WsBridgeTxF32",
             "WsBridgeTxFftU8",
             "WsBridgeTxEvents",
             "WsBridgeRx",
+            "WsBridgeRxF32",
             "AudioSink",
         ] {
             assert!(

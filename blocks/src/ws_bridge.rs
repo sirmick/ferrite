@@ -45,7 +45,7 @@ use crate::{
         Placement, PortSpec, PortType, ReconfigureScope, Work,
     },
     frame::Frame,
-    spsc_ring::IqRing,
+    spsc_ring::{AudioRing, IqRing},
 };
 
 /// One `Frame::JsonEvent` per complete line — see `WsBridgeTxEvents`.
@@ -494,6 +494,252 @@ impl BlockFactory for WsBridgeRx {
 }
 
 // ---------------------------------------------------------------------------
+// Tx (F32) — server-side egress for real audio samples. Mirrors
+// [`WsBridgeTx`] but reads a `RealF32` input port and encodes as plain
+// little-endian `f32` (4 bytes per sample, not interleaved). Native-only;
+// pairs with [`WsBridgeRxF32`] on the browser side.
+// ---------------------------------------------------------------------------
+
+pub struct WsBridgeTxF32 {
+    params: WsBridgeParams,
+    sink: Option<Arc<dyn BridgeSink>>,
+    batch: Vec<f32>,
+    input_rate_hz: f64,
+}
+
+impl WsBridgeTxF32 {
+    #[must_use]
+    pub fn new(params: WsBridgeParams) -> Self {
+        Self {
+            params,
+            sink: None,
+            batch: Vec::with_capacity(params.min_samples_per_frame),
+            input_rate_hz: 0.0,
+        }
+    }
+
+    #[must_use]
+    pub const fn stream_id(&self) -> u32 {
+        self.params.stream_id
+    }
+
+    pub fn attach_sink(&mut self, sink: Arc<dyn BridgeSink>) {
+        self.sink = Some(sink);
+    }
+
+    fn encode_f32(samples: &[f32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(samples.len() * 4);
+        for s in samples {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        out
+    }
+
+    fn flush(&mut self, samples: &[f32]) {
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        if samples.is_empty() {
+            return;
+        }
+        let payload = Self::encode_f32(samples);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let sample_rate_hz = self.input_rate_hz.round().max(0.0) as u32;
+        sink.push(Frame::F32 {
+            stream_id: stream_id_u16(self.params.stream_id),
+            seq: 0,
+            timestamp_ns: 0,
+            sample_rate_hz,
+            payload,
+        });
+    }
+}
+
+#[ferrite_blocks_macros::ferrite_block]
+impl Block for WsBridgeTxF32 {
+    fn spec() -> BlockSpec {
+        BlockSpec {
+            type_name: "WsBridgeTxF32",
+            placement: Placement::NativeOnly,
+            inputs: &[PortSpec {
+                name: "in",
+                port_type: PortType::RealF32,
+            }],
+            outputs: &[],
+            params: &[STREAM_ID_PARAM],
+            ai_notes: "Server-side end of the real-audio WebSocket bridge. Auto-inserted by env_split at node→browser boundaries when the crossing port carries `RealF32` (audio after demod); not authored by hand in presets.",
+        }
+    }
+
+    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 {
+                self.input_rate_hz = rate;
+            }
+        }
+        Ok(())
+    }
+
+    fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 {
+                self.input_rate_hz = rate;
+            }
+        }
+        Ok(())
+    }
+
+    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+        let mut w = Work::new();
+        if let Some(port) = io.inputs.iter().find(|p| p.name == "in") {
+            if let Some(slice) = port.as_real_f32() {
+                if self.params.min_samples_per_frame == 0 {
+                    self.flush(slice);
+                } else {
+                    self.batch.extend_from_slice(slice);
+                    if self.batch.len() >= self.params.min_samples_per_frame {
+                        let drained = std::mem::replace(
+                            &mut self.batch,
+                            Vec::with_capacity(self.params.min_samples_per_frame),
+                        );
+                        self.flush(&drained);
+                    }
+                }
+                w.consumed[0] = slice.len();
+            }
+        }
+        Ok(w)
+    }
+}
+
+impl BlockFactory for WsBridgeTxF32 {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: WsBridgeParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(WsBridgeTxF32::new(p)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rx (F32) — browser-side ingress for real audio samples. Holds an
+// [`AudioRing`] (= `SpscRing<f32>`); the browser runner pushes decoded
+// `Frame::F32` payloads through `pushF32` and `process` drains onto the
+// typed `RealF32` output. WASM-only; pairs with [`WsBridgeTxF32`].
+// ---------------------------------------------------------------------------
+
+pub struct WsBridgeRxF32 {
+    params: WsBridgeRxParams,
+    ring: AudioRing,
+    dropped_samples: u64,
+}
+
+impl WsBridgeRxF32 {
+    #[must_use]
+    pub fn new(params: WsBridgeRxParams) -> Self {
+        let ring = AudioRing::new(params.buffer_samples);
+        Self {
+            params,
+            ring,
+            dropped_samples: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn stream_id(&self) -> u32 {
+        self.params.stream_id
+    }
+
+    #[must_use]
+    pub fn params(&self) -> &WsBridgeRxParams {
+        &self.params
+    }
+
+    #[must_use]
+    pub fn dropped_samples(&self) -> u64 {
+        self.dropped_samples
+    }
+
+    #[must_use]
+    pub fn buffered_samples(&self) -> usize {
+        self.ring.available_read()
+    }
+
+    /// Push a batch of real samples received from the transport. Samples
+    /// that don't fit are counted into `dropped_samples`.
+    pub fn push(&mut self, samples: &[f32]) {
+        let written = self.ring.write(samples);
+        if written < samples.len() {
+            self.dropped_samples += (samples.len() - written) as u64;
+        }
+    }
+
+    /// Record the sample rate advertised by the most recent incoming
+    /// `Frame::F32` — analog of [`WsBridgeRx::set_advertised_rate`].
+    pub fn set_advertised_rate(&mut self, rate_hz: f64) {
+        if rate_hz > 0.0 && rate_hz.is_finite() {
+            self.params.sample_rate_hz = rate_hz;
+        }
+    }
+}
+
+#[ferrite_blocks_macros::ferrite_block]
+impl Block for WsBridgeRxF32 {
+    fn spec() -> BlockSpec {
+        BlockSpec {
+            type_name: "WsBridgeRxF32",
+            placement: Placement::WasmOnly,
+            inputs: &[],
+            outputs: &[PortSpec {
+                name: "out",
+                port_type: PortType::RealF32,
+            }],
+            params: &[STREAM_ID_PARAM, RX_BUFFER_SAMPLES_PARAM],
+            ai_notes: "Browser-side end of the real-audio WebSocket bridge. Auto-inserted by env_split at node→browser boundaries on `RealF32` wires; paired with a `WsBridgeTxF32` by `stream_id`.",
+        }
+    }
+
+    fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
+        self.ring.reset();
+        self.dropped_samples = 0;
+        Ok(())
+    }
+
+    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+        if self.params.sample_rate_hz > 0.0 {
+            Some(self.params.sample_rate_hz)
+        } else {
+            None
+        }
+    }
+
+    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+        let Some(out) = io
+            .outputs
+            .iter_mut()
+            .find(|p| p.name == "out")
+            .and_then(OutputPort::as_real_f32_mut)
+        else {
+            return Ok(Work::new());
+        };
+        let got = self.ring.read(out);
+        let mut w = Work::new();
+        w.produced[0] = got;
+        Ok(w)
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        self.ring.reset();
+        Ok(())
+    }
+}
+
+impl BlockFactory for WsBridgeRxF32 {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: WsBridgeRxParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(WsBridgeRxF32::new(p)))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tx (FftU8) — server-side egress for log-magnitude spectrum bytes.
 // The payload is already `u8` on the wire, so the block just forwards
 // the slice to the same `BridgeSink` wrapped in an `FftU8` frame.
@@ -703,8 +949,9 @@ impl BlockFactory for WsBridgeTxEvents {
 #[cfg(test)]
 mod tests {
     use super::{
-        BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxParams, WsBridgeTx,
-        WsBridgeTxEvents, WsBridgeTxFftU8, DEFAULT_RX_BUFFER_SAMPLES,
+        BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxF32,
+        WsBridgeRxParams, WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
+        DEFAULT_RX_BUFFER_SAMPLES,
     };
     use crate::{
         block::{Block, BlockIo, InBuf, InitCtx, InputPort, OutBuf, OutputPort, PortMeta, Work},
@@ -1220,6 +1467,145 @@ mod tests {
             })
             .unwrap();
         assert_eq!(w.consumed[0], input.len());
+    }
+
+    // -----------------------------------------------------------------
+    // F32 Tx / Rx (real-audio bridge)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn f32_tx_spec_is_native_only_real_f32_in() {
+        let s = WsBridgeTxF32::spec();
+        assert_eq!(s.type_name, "WsBridgeTxF32");
+        assert!(matches!(s.placement, crate::block::Placement::NativeOnly));
+        assert_eq!(s.inputs.len(), 1);
+        assert!(matches!(
+            s.inputs[0].port_type,
+            crate::block::PortType::RealF32
+        ));
+        assert_eq!(s.outputs.len(), 0);
+    }
+
+    #[test]
+    fn f32_rx_spec_is_wasm_only_real_f32_out() {
+        let s = WsBridgeRxF32::spec();
+        assert_eq!(s.type_name, "WsBridgeRxF32");
+        assert!(matches!(s.placement, crate::block::Placement::WasmOnly));
+        assert_eq!(s.inputs.len(), 0);
+        assert_eq!(s.outputs.len(), 1);
+        assert!(matches!(
+            s.outputs[0].port_type,
+            crate::block::PortType::RealF32
+        ));
+    }
+
+    #[test]
+    fn f32_tx_pushes_f32_frame_with_le_floats() {
+        let sink = Arc::new(CapturingSink::default());
+        let mut tx = WsBridgeTxF32::new(WsBridgeParams {
+            stream_id: 4242,
+            ..Default::default()
+        });
+        tx.attach_sink(sink.clone());
+
+        let input = vec![1.0_f32, -0.5, 0.25, 0.0];
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::RealF32(&input),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut [],
+        };
+        let w: Work = tx.process(&mut io).unwrap();
+        assert_eq!(w.consumed[0], 4);
+
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            Frame::F32 {
+                stream_id, payload, ..
+            } => {
+                assert_eq!(*stream_id, 4242);
+                assert_eq!(payload.len(), 16);
+                assert_eq!(&payload[0..4], &1.0_f32.to_le_bytes());
+                assert_eq!(&payload[4..8], &(-0.5_f32).to_le_bytes());
+                assert_eq!(&payload[8..12], &0.25_f32.to_le_bytes());
+                assert_eq!(&payload[12..16], &0.0_f32.to_le_bytes());
+            }
+            other => panic!("expected F32 frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn f32_tx_without_sink_still_drains_upstream() {
+        let mut tx = WsBridgeTxF32::new(WsBridgeParams {
+            stream_id: 9,
+            ..Default::default()
+        });
+        let input = vec![0.5_f32; 32];
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::RealF32(&input),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut [],
+        };
+        let w: Work = tx.process(&mut io).unwrap();
+        assert_eq!(w.consumed[0], 32);
+    }
+
+    #[test]
+    fn f32_rx_pushed_samples_surface_on_output_port() {
+        let mut rx = WsBridgeRxF32::new(WsBridgeRxParams {
+            stream_id: 0,
+            buffer_samples: 8,
+            sample_rate_hz: 0.0,
+        });
+        rx.push(&[1.0, 2.0, 3.0]);
+        assert_eq!(rx.buffered_samples(), 3);
+
+        let mut out_buf = [0.0_f32; 8];
+        let mut outputs = [OutputPort {
+            name: "out",
+            meta: PortMeta::default(),
+            buf: OutBuf::RealF32(&mut out_buf),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut [],
+            outputs: &mut outputs,
+        };
+        let work = rx.process(&mut io).unwrap();
+        assert_eq!(work.produced[0], 3);
+        assert_eq!(out_buf[..3], [1.0, 2.0, 3.0]);
+        assert_eq!(rx.buffered_samples(), 0);
+    }
+
+    #[test]
+    fn f32_rx_push_tallies_overflow_as_dropped_samples() {
+        let mut rx = WsBridgeRxF32::new(WsBridgeRxParams {
+            stream_id: 0,
+            buffer_samples: 2,
+            sample_rate_hz: 0.0,
+        });
+        rx.push(&[1.0, 2.0, 3.0]);
+        assert_eq!(rx.dropped_samples(), 1);
+        assert_eq!(rx.buffered_samples(), 2);
+    }
+
+    #[test]
+    fn f32_rx_output_rate_reflects_advertised_rate() {
+        let mut rx = WsBridgeRxF32::new(WsBridgeRxParams {
+            stream_id: 0,
+            buffer_samples: 4,
+            sample_rate_hz: 0.0,
+        });
+        assert_eq!(rx.output_rate_hz(0), None);
+        rx.set_advertised_rate(48_000.0);
+        assert_eq!(rx.output_rate_hz(0), Some(48_000.0));
     }
 
     #[test]

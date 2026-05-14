@@ -199,11 +199,10 @@ mod tests {
             vec![
                 "audio",
                 "audio_nr",
+                "audio_tee",
                 "chan",
-                "chan_tee",
                 "decim",
                 "demod",
-                "demod_rds",
                 "fft",
                 "logmag",
                 "rds",
@@ -212,7 +211,11 @@ mod tests {
                 "tee"
             ],
         );
-        assert_eq!(doc.wires.len(), 15);
+        // Phase B2 audit: dual demods collapsed into a single node-side
+        // FmDemod + TeeRealF32 (`audio_tee`) feeding both the RDS
+        // decoder and the browser audio chain across a `WsBridgeTxF32`
+        // pair. Removes `chan_tee` and `demod_rds`; adds `audio_tee`.
+        assert_eq!(doc.wires.len(), 14);
         // Spot-check one block's params survived the round-trip. Demod
         // now runs at the 240 kHz channel rate, not the 48 kHz audio
         // rate — the RealF32Decimator handles the final drop.
@@ -221,13 +224,18 @@ mod tests {
         let params = demod.params.as_ref().expect("demod has params");
         assert_eq!(params["sample_rate_hz"].as_f64(), Some(240_000.0));
         assert_eq!(params["max_deviation_hz"].as_f64(), Some(75_000.0));
-        // Spot-check placements: chan pinned to node, audio inherits
-        // browser from its WasmOnly spec (placement omitted in JSON).
+        // Spot-check placements: chan pinned to node; audio explicitly
+        // pinned to browser (audit fix — see Phase A2 in PR audit) so
+        // the JSON is self-documenting rather than leaning on env_split
+        // to infer placement from the WasmOnly spec.
         assert_eq!(
             doc.blocks.get("chan").unwrap().placement,
             Some(Environment::Node)
         );
-        assert_eq!(doc.blocks.get("audio").unwrap().placement, None);
+        assert_eq!(
+            doc.blocks.get("audio").unwrap().placement,
+            Some(Environment::Browser)
+        );
         // UI-terminal FFT wire is the sentinel form.
         assert!(doc
             .wires

@@ -57,31 +57,23 @@
         "emit_interval_ms": 50
       }
     },
-    "chan_tee": {
-      "type": "TeeIqF32",
-      "placement": "node"
-    },
-    "demod_rds": {
+    "demod": {
       "type": "FmDemod",
       "placement": "node",
       "params": {
         "sample_rate_hz": 240000,
         "max_deviation_hz": 75000
       }
+    },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
     },
     "rds": {
       "type": "RdsDemod",
       "placement": "node",
       "params": {
         "sample_rate_hz": 240000.0
-      }
-    },
-    "demod": {
-      "type": "FmDemod",
-      "placement": "browser",
-      "params": {
-        "sample_rate_hz": 240000,
-        "max_deviation_hz": 75000
       }
     },
     "decim": {
@@ -105,6 +97,7 @@
     },
     "audio": {
       "type": "AudioSink",
+      "placement": "browser",
       "params": {
         "buffer_samples": 8192
       }
@@ -114,16 +107,15 @@
     ["src.out", "tee.in"],
     ["tee.out0", "chan.in"],
     ["tee.out1", "fft.in"],
-    ["chan.out", "chan_tee.in"],
-    ["chan_tee.out0", "rssi.in"],
-    ["chan_tee.out1", "demod_rds.in"],
-    ["demod_rds.out", "rds.in"],
-    ["rds.events", "ui:rds"],
+    ["chan.out", "rssi.in"],
     ["rssi.out", "demod.in"],
     ["rssi.events", "ui:rssi"],
+    ["demod.out", "audio_tee.in"],
+    ["audio_tee.out0", "rds.in"],
+    ["rds.events", "ui:rds"],
     ["fft.out", "logmag.in"],
     ["logmag.out", "ui:fft"],
-    ["demod.out", "decim.in"],
+    ["audio_tee.out1", "decim.in"],
     ["decim.out", "audio_nr.in"],
     ["audio_nr.out", "audio.in"]
   ]

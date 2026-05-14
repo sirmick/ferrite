@@ -76,6 +76,10 @@ pub enum SplitError {
         port_type: PortType,
     },
     #[error(
+        "wire {wire:?} crosses env boundary on port type {port_type:?} — no WsBridgeTx/Rx pair exists for it"
+    )]
+    UnsupportedCrossingPortType { wire: Wire, port_type: PortType },
+    #[error(
         "ui:{ui_name:?} wire source {endpoint:?} references an output port that doesn't exist"
     )]
     UnknownSourcePort { ui_name: String, endpoint: String },
@@ -154,21 +158,23 @@ pub fn split_for_environment(
         match (src_env == env, dst_env == env) {
             (true, true) => new_wires.push(wire.clone()),
             (true, false) => {
+                let (tx_type, _rx_type) = bridge_types_for_wire(doc, registry, wire)?;
                 let sid = CROSS_ENV_STREAM_BASE + crossing_index;
                 let bridge_id = format!("__bridge_tx_{sid}");
-                // Batch IQ into ~4 kS chunks before emitting. The
+                // Batch IQ/F32 into ~4 kS chunks before emitting. The
                 // scheduler ticks at ~2.5 kHz; one frame per tick
                 // saturates the WS with ~2500 tiny messages/sec, which
                 // is faster than the browser's postcard decoder can
                 // drain over a dev proxy → subscriber queues fill and
                 // drop. 4096 samples per frame gives ~30 frames/sec
-                // through a 250 kS/s channelizer, 32 kB per message —
-                // comfortable under a localhost proxy.
+                // through a 250 kS/s channelizer (32 kB per message for
+                // IQ; 16 kB for real audio) — comfortable under a
+                // localhost proxy.
                 insert_bridge(
                     &mut new_blocks,
                     doc,
                     bridge_id.clone(),
-                    "WsBridgeTx",
+                    tx_type,
                     env,
                     json!({ "stream_id": sid, "min_samples_per_frame": 4096 }),
                 )?;
@@ -176,6 +182,7 @@ pub fn split_for_environment(
                 crossing_index += 1;
             }
             (false, true) => {
+                let (_tx_type, rx_type) = bridge_types_for_wire(doc, registry, wire)?;
                 let sid = CROSS_ENV_STREAM_BASE + crossing_index;
                 let bridge_id = format!("__bridge_rx_{sid}");
                 // Propagate the producer's declared output rate across
@@ -192,7 +199,7 @@ pub fn split_for_environment(
                     &mut new_blocks,
                     doc,
                     bridge_id.clone(),
-                    "WsBridgeRx",
+                    rx_type,
                     env,
                     params,
                 )?;
@@ -332,11 +339,48 @@ fn pick_ui_tx_type(
             })?;
     match port.port_type {
         PortType::IqF32 => Ok("WsBridgeTx"),
+        PortType::RealF32 => Ok("WsBridgeTxF32"),
         PortType::FftU8 => Ok("WsBridgeTxFftU8"),
         PortType::Events => Ok("WsBridgeTxEvents"),
         other => Err(SplitError::UnsupportedUiPortType {
             ui_name: ui_name.to_string(),
             endpoint: source.to_string(),
+            port_type: other,
+        }),
+    }
+}
+
+/// Pick the matching `(WsBridgeTx*, WsBridgeRx*)` block-type pair for a
+/// cross-env wire, dispatched on the source port's declared `PortType`.
+/// Today: IqF32 → IQ pair, RealF32 → F32 pair. Other port types would
+/// need their own Tx+Rx variants before they can cross the boundary.
+fn bridge_types_for_wire(
+    doc: &FlowgraphDoc,
+    registry: &dyn SpecRegistry,
+    wire: &Wire,
+) -> Result<(&'static str, &'static str), SplitError> {
+    let (block_id, port_name) = split_endpoint(&wire.src);
+    let decl = doc
+        .blocks
+        .get(block_id)
+        .expect("validate_doc caught unknown source blocks before split");
+    let spec = registry
+        .get(&decl.type_name)
+        .expect("resolve_placements caught unknown block types before split");
+    let port_type = spec
+        .outputs
+        .iter()
+        .find(|p| p.name == port_name)
+        .map(|p| p.port_type)
+        .ok_or_else(|| SplitError::UnknownSourcePort {
+            ui_name: String::new(),
+            endpoint: wire.src.clone(),
+        })?;
+    match port_type {
+        PortType::IqF32 => Ok(("WsBridgeTx", "WsBridgeRx")),
+        PortType::RealF32 => Ok(("WsBridgeTxF32", "WsBridgeRxF32")),
+        other => Err(SplitError::UnsupportedCrossingPortType {
+            wire: wire.clone(),
             port_type: other,
         }),
     }
@@ -568,11 +612,35 @@ mod tests {
         name: "out",
         port_type: PortType::RealF32,
     }];
+    const REAL_IN: &[PortSpec] = &[PortSpec {
+        name: "in",
+        port_type: PortType::RealF32,
+    }];
     const REAL_HW_SRC: BlockSpec = BlockSpec {
         type_name: "RealHwSrc",
         placement: Placement::NativeOnly,
         inputs: NO_PORTS,
         outputs: REAL_OUT,
+        params: NO_PARAMS,
+        ai_notes: "",
+    };
+    const WASM_REAL_SINK: BlockSpec = BlockSpec {
+        type_name: "WasmRealSink",
+        placement: Placement::WasmOnly,
+        inputs: REAL_IN,
+        outputs: NO_PORTS,
+        params: NO_PARAMS,
+        ai_notes: "",
+    };
+    const BITS_OUT: &[PortSpec] = &[PortSpec {
+        name: "out",
+        port_type: PortType::Bits,
+    }];
+    const BITS_HW_SRC: BlockSpec = BlockSpec {
+        type_name: "BitsHwSrc",
+        placement: Placement::NativeOnly,
+        inputs: NO_PORTS,
+        outputs: BITS_OUT,
         params: NO_PARAMS,
         ai_notes: "",
     };
@@ -598,6 +666,8 @@ mod tests {
             ("WsBridgeRx", &WS_RX),
             ("FftHwSrc", &FFT_HW_SRC),
             ("RealHwSrc", &REAL_HW_SRC),
+            ("WasmRealSink", &WASM_REAL_SINK),
+            ("BitsHwSrc", &BITS_HW_SRC),
             ("EventsHwSrc", &EVENTS_HW_SRC),
         ])
     }
@@ -1036,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_sink_on_unsupported_port_type_errors() {
+    fn ui_sink_on_real_f32_source_synthesizes_f32_tx() {
         let doc = doc_from(
             r#"{
                 "name": "ui-real",
@@ -1047,8 +1117,88 @@ mod tests {
                 "wires": [["src.out", "ui:audio"]]
             }"#,
         );
+        let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
+        let tx_id = format!("__ui_audio_{CROSS_ENV_STREAM_BASE}");
+        let tx = node.blocks.get(&tx_id).expect("ui-side bridge inserted");
+        assert_eq!(tx.type_name, "WsBridgeTxF32");
+    }
+
+    #[test]
+    fn ui_sink_on_unsupported_port_type_errors() {
+        // Bits has no WsBridgeTx variant — should error cleanly rather
+        // than silently dropping the sentinel.
+        let doc = doc_from(
+            r#"{
+                "name": "ui-bits",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src": {"type": "BitsHwSrc"}
+                },
+                "wires": [["src.out", "ui:bits"]]
+            }"#,
+        );
         let err = split_for_environment(&doc, Environment::Node, &stub()).unwrap_err();
         assert!(matches!(err, SplitError::UnsupportedUiPortType { .. }));
+    }
+
+    // -----------------------------------------------------------------
+    // Cross-env F32 wire (real-audio bridge)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn cross_env_real_f32_wire_synthesizes_f32_bridge_pair() {
+        let doc = doc_from(
+            r#"{
+                "name": "audio-cross",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src":  {"type": "RealHwSrc"},
+                    "sink": {"type": "WasmRealSink"}
+                },
+                "wires": [["src.out", "sink.in"]]
+            }"#,
+        );
+        let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
+        let tx_id = format!("__bridge_tx_{CROSS_ENV_STREAM_BASE}");
+        let tx = node
+            .blocks
+            .get(&tx_id)
+            .expect("F32 tx bridge inserted at crossing");
+        assert_eq!(tx.type_name, "WsBridgeTxF32");
+
+        let browser = split_for_environment(&doc, Environment::Browser, &stub()).unwrap();
+        let rx_id = format!("__bridge_rx_{CROSS_ENV_STREAM_BASE}");
+        let rx = browser
+            .blocks
+            .get(&rx_id)
+            .expect("F32 rx bridge inserted at crossing");
+        assert_eq!(rx.type_name, "WsBridgeRxF32");
+        assert_eq!(
+            rx.params.as_ref().unwrap()["stream_id"].as_u64(),
+            Some(u64::from(CROSS_ENV_STREAM_BASE)),
+        );
+    }
+
+    #[test]
+    fn cross_env_unsupported_port_type_errors() {
+        // Bits crossings have no bridge pair — env_split must refuse
+        // rather than synthesize an IqF32 bridge on the wrong type.
+        let doc = doc_from(
+            r#"{
+                "name": "bits-cross",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src":  {"type": "BitsHwSrc"},
+                    "sink": {"type": "Either", "placement": "browser"}
+                },
+                "wires": [["src.out", "sink.in"]]
+            }"#,
+        );
+        let err = split_for_environment(&doc, Environment::Node, &stub()).unwrap_err();
+        assert!(matches!(
+            err,
+            SplitError::UnsupportedCrossingPortType { .. }
+        ));
     }
 
     #[test]

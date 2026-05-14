@@ -30,10 +30,6 @@
         "output_rate_hz": 12000.0
       }
     },
-    "chan_tee": {
-      "type": "TeeIqF32",
-      "placement": "node"
-    },
     "fft": {
       "type": "FFT",
       "placement": "node",
@@ -60,6 +56,10 @@
         "audio_gain": 30.0
       }
     },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
     "ft8": {
       "type": "Ft8Demod",
       "placement": "node",
@@ -67,15 +67,6 @@
         "mode": "ft8",
         "sample_rate_hz": 12000.0,
         "max_candidates": 40
-      }
-    },
-    "demod_browser": {
-      "type": "SsbDemod",
-      "placement": "browser",
-      "params": {
-        "sample_rate_hz": 12000,
-        "sideband": "usb",
-        "audio_gain": 30.0
       }
     },
     "audio_resamp": {
@@ -91,12 +82,14 @@
       "placement": "browser",
       "params": {
         "sample_rate_hz": 48000.0,
-        "neural_enable": true,
+        "neural_enable": false,
+        "notch_enable": false,
         "neural_attenuation_db": 18.0
       }
     },
     "audio": {
       "type": "AudioSink",
+      "placement": "browser",
       "params": {
         "buffer_samples": 8192
       }
@@ -106,11 +99,10 @@
     ["src.out", "tee.in"],
     ["tee.out0", "chan.in"],
     ["tee.out1", "fft.in"],
-    ["chan.out", "chan_tee.in"],
-    ["chan_tee.out0", "demod.in"],
-    ["demod.out", "ft8.in"],
-    ["chan_tee.out1", "demod_browser.in"],
-    ["demod_browser.out", "audio_resamp.in"],
+    ["chan.out", "demod.in"],
+    ["demod.out", "audio_tee.in"],
+    ["audio_tee.out0", "ft8.in"],
+    ["audio_tee.out1", "audio_resamp.in"],
     ["audio_resamp.out", "audio_nr.in"],
     ["audio_nr.out", "audio.in"],
     ["fft.out", "logmag.in"],

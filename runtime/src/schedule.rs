@@ -160,29 +160,28 @@ mod tests {
         let doc = FlowgraphDoc::from_json(WBFM).unwrap();
         let v = validate_doc(&doc).unwrap();
         let s = Schedule::from_validated(&v).unwrap();
-        // wbfm.json fans the raw source through a tee into two parallel
-        // chains: an FFT tap (fft → logmag → ui:fft) and the audio
-        // chain (chan → demod @ 240 kHz → RealF32Resamp → AudioNrMono
-        // → AudioSink). Demodulating *before* the resampler is what
-        // keeps the ±75 kHz peak deviation away from the audio-rate
-        // Nyquist. Producers land before consumers; sibling ties break
-        // alphabetically.
+        // wbfm.json fans the raw source through a tee into the FFT tap
+        // and the main signal path. After Phase B2's collapse the main
+        // path is a single node-side FmDemod whose MPX output is teed
+        // (TeeRealF32) into the RDS decoder and the browser audio
+        // chain — RealF32Decimator → AudioNrMono → AudioSink across a
+        // WsBridgeTxF32 pair. Producers land before consumers; sibling
+        // ties break alphabetically.
         assert_eq!(
             s.order,
             vec![
                 "src",
                 "tee",
                 "chan",
-                "chan_tee",
-                "demod_rds",
                 "fft",
                 "logmag",
-                "rds",
                 "rssi",
                 "demod",
+                "audio_tee",
                 "decim",
                 "audio_nr",
-                "audio"
+                "audio",
+                "rds"
             ]
         );
     }
@@ -192,30 +191,27 @@ mod tests {
         let doc = FlowgraphDoc::from_json(WBFM).unwrap();
         let v = validate_doc(&doc).unwrap();
         let s = Schedule::from_validated(&v).unwrap();
-        // chan_tee fans the channelizer's IQ to the audio chain
-        // (rssi → browser FmDemod) and to the node-side RDS chain
-        // (demod_rds → rds → ui:rds). Keeping RDS on the node side
-        // is forced by the WsBridgeTxEvents NativeOnly placement —
-        // a browser-placed event source can't currently feed a ui:
-        // sink, so events have to originate node-side.
+        // Post-B2 collapse: one node-side FmDemod feeds a TeeRealF32
+        // (`audio_tee`) that fans out to the node-side RDS decoder
+        // (out0) and the browser audio chain (out1, via auto-inserted
+        // WsBridgeTxF32). Keeping RDS on the node side is forced by
+        // the WsBridgeTxEvents NativeOnly placement — a browser-placed
+        // event source can't currently feed a ui: sink.
         let rds = &s.wire_plan["rds"];
-        assert_eq!(rds["in"].source_block, "demod_rds");
-        assert_eq!(rds["in"].source_port, "out");
-        let demod_rds = &s.wire_plan["demod_rds"];
-        assert_eq!(demod_rds["in"].source_block, "chan_tee");
-        assert_eq!(demod_rds["in"].source_port, "out1");
+        assert_eq!(rds["in"].source_block, "audio_tee");
+        assert_eq!(rds["in"].source_port, "out0");
         let rssi = &s.wire_plan["rssi"];
-        assert_eq!(rssi["in"].source_block, "chan_tee");
-        assert_eq!(rssi["in"].source_port, "out0");
-        let chan_tee = &s.wire_plan["chan_tee"];
-        assert_eq!(chan_tee["in"].source_block, "chan");
-        assert_eq!(chan_tee["in"].source_port, "out");
+        assert_eq!(rssi["in"].source_block, "chan");
+        assert_eq!(rssi["in"].source_port, "out");
         let demod = &s.wire_plan["demod"];
         assert_eq!(demod["in"].source_block, "rssi");
         assert_eq!(demod["in"].source_port, "out");
+        let audio_tee = &s.wire_plan["audio_tee"];
+        assert_eq!(audio_tee["in"].source_block, "demod");
+        assert_eq!(audio_tee["in"].source_port, "out");
         let decim = &s.wire_plan["decim"];
-        assert_eq!(decim["in"].source_block, "demod");
-        assert_eq!(decim["in"].source_port, "out");
+        assert_eq!(decim["in"].source_block, "audio_tee");
+        assert_eq!(decim["in"].source_port, "out1");
         // src has no inputs — still present with an empty map.
         assert!(s.wire_plan["src"].is_empty());
     }

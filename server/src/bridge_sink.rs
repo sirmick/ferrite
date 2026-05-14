@@ -90,6 +90,7 @@ impl BridgeSink for BroadcastSink {
 const fn frame_payload_is_empty(f: &Frame) -> bool {
     match f {
         Frame::IqF32 { payload, .. }
+        | Frame::F32 { payload, .. }
         | Frame::FftU8 { payload, .. }
         | Frame::JsonEvent { payload, .. } => payload.is_empty(),
     }

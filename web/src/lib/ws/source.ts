@@ -62,3 +62,8 @@ export function viewIqF32(p: Uint8Array): Float32Array {
   const copy = new Uint8Array(p);
   return new Float32Array(copy.buffer);
 }
+
+/** Convenience: zero-copy real `Float32Array` view (LE host). Used for
+ * `Frame::F32` audio payloads — same decoding as `viewIqF32` but the
+ * returned samples are mono, not interleaved pairs. */
+export const viewF32 = viewIqF32;

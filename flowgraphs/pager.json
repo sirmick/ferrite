@@ -68,6 +68,35 @@
       "params": {
         "sample_rate_hz": 22050.0
       }
+    },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "blanker_enable": true,
+        "blanker_threshold_db": 20.0,
+        "blanker_hold_ms": 0.5
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "params": {
+        "buffer_samples": 8192
+      }
     }
   },
   "wires": [
@@ -75,9 +104,13 @@
     ["tee.out0", "chan.in"],
     ["tee.out1", "fft.in"],
     ["chan.out", "demod.in"],
+    ["demod.out", "audio_tee.in"],
+    ["audio_tee.out0", "resamp.in"],
     ["fft.out", "logmag.in"],
     ["logmag.out", "ui:fft"],
-    ["demod.out", "resamp.in"],
-    ["resamp.out", "pager.in"]
+    ["resamp.out", "pager.in"],
+    ["audio_tee.out1", "audio_resamp.in"],
+    ["audio_resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"]
   ]
 }

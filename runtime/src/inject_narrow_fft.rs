@@ -294,15 +294,16 @@ mod tests {
             .any(|w| w.src == "__narrow_logmag_chan.out" && w.dst == "ui:fft_narrow");
         assert!(has_narrow_sink, "narrow ui sink not wired");
 
-        // Original `chan.out → chan_tee.in` wire was re-pointed to
-        // `__narrow_tee_chan.out0 → chan_tee.in`.
+        // Original `chan.out → rssi.in` wire was re-pointed to
+        // `__narrow_tee_chan.out0 → rssi.in` (wbfm's first consumer of
+        // chan output is `rssi` after the Phase B2 collapse).
         let has_repoint = doc
             .wires
             .iter()
-            .any(|w| w.src == "__narrow_tee_chan.out0" && w.dst == "chan_tee.in");
-        assert!(has_repoint, "chan_tee.in not re-pointed through narrow tee");
+            .any(|w| w.src == "__narrow_tee_chan.out0" && w.dst == "rssi.in");
+        assert!(has_repoint, "rssi.in not re-pointed through narrow tee");
 
-        // Channelizer now feeds the new tee instead of chan_tee.
+        // Channelizer now feeds the new tee instead of rssi.
         let has_chan_to_narrow_tee = doc
             .wires
             .iter()
@@ -312,11 +313,11 @@ mod tests {
             "chan.out → __narrow_tee_chan.in missing"
         );
 
-        // No leftover direct wire from chan.out to chan_tee.in.
+        // No leftover direct wire from chan.out to rssi.in.
         let still_direct = doc
             .wires
             .iter()
-            .any(|w| w.src == "chan.out" && w.dst == "chan_tee.in");
+            .any(|w| w.src == "chan.out" && w.dst == "rssi.in");
         assert!(
             !still_direct,
             "chan.out → chan_tee.in should have been re-pointed"

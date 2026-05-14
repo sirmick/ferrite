@@ -12,6 +12,7 @@ import initWasm, { decodeFrame as wasmDecodeFrame } from '../wasm/blocks/ferrite
 export const PayloadType = {
   FftU8: 0x01,
   IqF32: 0x11,
+  F32: 0x12,
   JsonEvent: 0x80,
 } as const;
 

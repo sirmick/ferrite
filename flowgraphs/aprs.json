@@ -46,10 +46,6 @@
         "alpha": 0.3
       }
     },
-    "chan_tee": {
-      "type": "TeeIqF32",
-      "placement": "node"
-    },
     "demod": {
       "type": "FmDemod",
       "placement": "node",
@@ -57,6 +53,10 @@
         "sample_rate_hz": 25000,
         "max_deviation_hz": 5000
       }
+    },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
     },
     "resamp": {
       "type": "RealF32Resamp",
@@ -73,14 +73,6 @@
         "sample_rate_hz": 22050.0
       }
     },
-    "demod_browser": {
-      "type": "FmDemod",
-      "placement": "browser",
-      "params": {
-        "sample_rate_hz": 25000,
-        "max_deviation_hz": 5000
-      }
-    },
     "audio_resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
@@ -91,6 +83,7 @@
     },
     "audio": {
       "type": "AudioSink",
+      "placement": "browser",
       "params": {
         "buffer_samples": 8192
       }
@@ -100,14 +93,13 @@
     ["src.out", "tee.in"],
     ["tee.out0", "chan.in"],
     ["tee.out1", "fft.in"],
-    ["chan.out", "chan_tee.in"],
+    ["chan.out", "demod.in"],
     ["fft.out", "logmag.in"],
     ["logmag.out", "ui:fft"],
-    ["chan_tee.out0", "demod.in"],
-    ["demod.out", "resamp.in"],
+    ["demod.out", "audio_tee.in"],
+    ["audio_tee.out0", "resamp.in"],
     ["resamp.out", "packet.in"],
-    ["chan_tee.out1", "demod_browser.in"],
-    ["demod_browser.out", "audio_resamp.in"],
+    ["audio_tee.out1", "audio_resamp.in"],
     ["audio_resamp.out", "audio.in"]
   ]
 }

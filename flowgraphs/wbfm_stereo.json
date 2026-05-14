@@ -112,12 +112,14 @@
     },
     "audio_l": {
       "type": "AudioSink",
+      "placement": "browser",
       "params": {
         "buffer_samples": 8192
       }
     },
     "audio_r": {
       "type": "AudioSink",
+      "placement": "browser",
       "params": {
         "buffer_samples": 8192
       }
