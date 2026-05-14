@@ -1,18 +1,26 @@
 <script lang="ts">
-  // RF quick-control bar — the VFO + SDR-centre nixies, the curated
-  // sample-rate dropdown, and the LiveControls slot (gain / antenna /
-  // toggle settings). Lifted out of `Spectrum.svelte`'s internal header
-  // row so it lives at the top of the wide workspace column rather
-  // than nested inside the spectrum pane. Click-to-tune still happens
-  // on the spectrum canvas — this bar handles type-in tuning and
-  // discrete-step rate selection.
+  // RF quick-control bar — the always-visible "convenience" row that
+  // sits directly under the AppToolbar. Carries:
   //
-  // Reads pipeline state directly; no props. The same shape used to live
-  // inline in Spectrum and pulled the same deriveds.
+  //  - VFO nixie + SDR-centre nixie + sample-rate dropdown + LiveControls
+  //    (gain / antenna / per-driver toggle settings) — left cluster,
+  //    gated on live axes (only meaningful once a pipeline is running).
+  //  - Channel toggle (show/hide the channelised FFT/waterfall pane) —
+  //    right-aligned, always visible. Disabled on presets without a
+  //    Channelizer (no `ui:fft_narrow` sink).
+  //
+  // Action buttons (Start/Stop, Source…, Flowgraph…) live one row up
+  // in AppToolbar so they're always reachable, even with no source
+  // configured. The outer container here renders unconditionally so
+  // the Channel toggle stays in its same spot as Start, status chips,
+  // and the visual knobs (DisplayControls).
+  //
+  // Reads pipeline state directly; no props.
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { quickRateChoices, bandwidthForRate } from '$lib/controls/optionsModel';
   import Nixie from '$lib/controls/Nixie.svelte';
   import LiveControls from '$lib/controls/LiveControls.svelte';
+  import { clientControls } from '$lib/control/clientStore.svelte';
   import { applyControl } from '$lib/control/dispatch';
 
   let axes = $derived(currentAxes(pipeline));
@@ -41,6 +49,13 @@
     }
     return choices;
   });
+
+  // Channel-detail column toggle. Lives here (next to the other
+  // navigational knobs) rather than in DisplayControls — the
+  // visual-shape strip — because show/hide of an entire spectrum pane
+  // is a navigation move, not a visual tweak.
+  let hasNarrow = $derived(pipeline.uiSinks.fft_narrow !== undefined);
+  let narrowVisible = $derived(clientControls.get('client.workspace.narrowVisible'));
 
   function fmtRate(hz: number): string {
     if (hz >= 1e6) return `${(hz / 1e6).toFixed(3)} MS/s`;
@@ -80,10 +95,13 @@
   }
 </script>
 
-{#if axes}
-  <div
-    class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-800 bg-[color:var(--color-bg)] px-2 py-1 text-[11px] text-[color:var(--color-muted)]"
-  >
+<!-- Always renders so the Channel toggle stays anchored to a stable
+     spot. VFO + centre + rate + LiveControls light up once the
+     pipeline has live axes. -->
+<div
+  class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-800 bg-[color:var(--color-bg)] px-2 py-1 text-[11px] text-[color:var(--color-muted)]"
+>
+  {#if axes}
     {#if vfoBlock}
       <span class="contents" title="VFO — what you're listening to (orange)">
         <Nixie hz={vfoAbsHz} onCommit={commitVfo} tone="orange" />
@@ -112,5 +130,36 @@
     </label>
 
     <LiveControls />
-  </div>
-{/if}
+  {/if}
+
+  <!-- Channel-detail toggle — right-aligned, always visible. Disabled
+       when the active preset has no Channelizer (no `ui:fft_narrow`
+       sink injected by env_split). -->
+  <button
+    type="button"
+    class="ml-auto rounded border border-slate-700 px-2 py-0.5 text-[11px] hover:border-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+    class:channel-on={hasNarrow && narrowVisible}
+    disabled={!hasNarrow}
+    title={hasNarrow
+      ? narrowVisible
+        ? 'Hide channel-detail FFT / waterfall'
+        : 'Show channel-detail FFT / waterfall'
+      : 'Active preset has no channelizer — no channel-detail pane available'}
+    onclick={() => void applyControl('client.workspace.narrowVisible', !narrowVisible)}
+  >
+    Channel
+  </button>
+</div>
+
+<style>
+  /* Sky-blue accent matches the VFO marker on the wide spectrum /
+     waterfall — same hue means "you're looking at the channelised
+     slice" everywhere. */
+  .channel-on {
+    border-color: rgb(125 211 252);
+    color: rgb(125 211 252);
+  }
+  .channel-on:hover {
+    border-color: rgb(186 230 253);
+  }
+</style>

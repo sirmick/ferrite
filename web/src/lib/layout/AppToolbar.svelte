@@ -1,10 +1,12 @@
 <script lang="ts">
-  // Self-contained toolbar lifted out of `+page.svelte` and embedded
-  // into the Spectrum panel-head — frees a full row of vertical real
-  // estate, which is at a premium on small displays. Everything the
-  // toolbar shows (wasm/ws/source status, FFT framerate, error chip,
-  // start/stop, Source… and Flowgraph… dialogs) lives here so the page
-  // shell stays empty above the workspace split.
+  // Always-visible top bar. Carries the pipeline action cluster —
+  // Start/Stop, Source…, Flowgraph… — plus the status chips
+  // (HealthDots, ws/fps, source label, error chip). Renders
+  // unconditionally so the operator can always reach Start, even
+  // before the pipeline has any axes to display in RfQuickBar.
+  //
+  // Convenience controls that depend on a running pipeline (VFO,
+  // centre, rate, Channel toggle) live one row down in RfQuickBar.
 
   import HealthDots from './HealthDots.svelte';
   import SourceDialog from '$lib/controls/SourceDialog.svelte';

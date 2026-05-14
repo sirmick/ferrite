@@ -73,9 +73,27 @@
 </script>
 
 <div class="flex h-full w-full min-h-0 flex-col">
+  <!-- Hierarchy reads top → bottom:
+         1. AppToolbar       — status only (HealthDots, ws/fps, source
+                                label, error chip).
+         2. RfQuickBar       — operator-active controls (VFO nixie,
+                                SDR centre, rate, LiveControls,
+                                Start/Source/Flowgraph buttons).
+         3. 2×2 panel grid   — Wide spectrum / Channel spectrum,
+                                Wide waterfall / Channel waterfall.
+                                Both columns start at the same Y so
+                                they line up as a grid; RfQuickBar
+                                lives above the columns rather than
+                                inside the wide one for that reason.
+         4. DisplayControls  — visual knobs (FFT size/window/smooth,
+                                fade/peak/bands, spec + wf range,
+                                zoom, pause, Channel toggle). One
+                                strip below the grid steers both
+                                renderers. -->
   <header class="toolbar-row">
     <AppToolbar />
   </header>
+  <RfQuickBar />
 
   <div class="flex min-h-0 flex-1">
     {#if showNarrow}
@@ -92,23 +110,11 @@
     {/if}
   </div>
 
-  <!-- DisplayControls sits at the bottom of the workspace as a single
-       full-width strip rather than tucked under just the wide
-       waterfall. The fade / maxHold / auto-contrast / display-range /
-       zoom knobs all drive `clientControls.*`, which both the wide
-       and narrow renderers read — so one set of controls steers both
-       panes uniformly. -->
   <DisplayControls />
 </div>
 
 {#snippet wideColumn()}
   <div class="flex h-full w-full min-h-0 flex-col">
-    <!-- RF quick-control bar lifted from inside Spectrum.svelte so it
-         sits at the top of the wide column — the operator's
-         most-used row (VFO type-in, SDR centre, sample rate, gain /
-         antenna toggles via LiveControls) is right under the column
-         header instead of nested two panes deep. -->
-    <RfQuickBar />
     <Split direction="column" defaultFraction={0.4} storageKey="ferrite.split.spectrum-waterfall">
       {#snippet a()}
         <section class="flex h-full min-h-0 flex-col bg-[color:var(--color-bg)]">
