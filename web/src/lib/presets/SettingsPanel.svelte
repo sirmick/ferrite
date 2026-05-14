@@ -3,6 +3,7 @@
   import BlockParams from '$lib/controls/BlockParams.svelte';
   import InputControls from '$lib/controls/InputControls.svelte';
   import AudioPanel from './AudioPanel.svelte';
+  import ProfileChips from './ProfileChips.svelte';
   import RssiMeter from '$lib/rssi/RssiMeter.svelte';
   import RdsReadout from '$lib/rds/RdsReadout.svelte';
 
@@ -49,6 +50,7 @@
           <span class="text-[color:var(--color-muted)]">preset</span>
           <span class="font-mono text-slate-300">{presetLabel}</span>
         </div>
+        <ProfileChips />
         {#if demodBlock}
           <section class="flex flex-col gap-1">
             <header class="flex items-baseline justify-between">

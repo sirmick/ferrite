@@ -50,6 +50,7 @@
     "demod": {
       "type": "SsbDemod",
       "placement": "node",
+      "placement_role": "demod",
       "params": {
         "sample_rate_hz": 12000,
         "sideband": "usb",
@@ -72,6 +73,7 @@
     "audio_resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
+      "when": { "audio": true },
       "params": {
         "output_rate_hz": 48000.0,
         "stopband_db": 60.0
@@ -80,6 +82,7 @@
     "audio_nr": {
       "type": "AudioNrMono",
       "placement": "browser",
+      "when": { "audio": true },
       "params": {
         "sample_rate_hz": 48000.0,
         "neural_enable": false,
@@ -90,6 +93,7 @@
     "audio": {
       "type": "AudioSink",
       "placement": "browser",
+      "when": { "audio": true },
       "params": {
         "buffer_samples": 8192
       }

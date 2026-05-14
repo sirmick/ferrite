@@ -14,7 +14,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use ferrite_runtime::{FlowgraphDoc, SourceConfig};
+use ferrite_runtime::{FlowgraphDoc, Profile, SourceConfig};
 use futures_util::{SinkExt, StreamExt};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -560,6 +560,13 @@ pub async fn list_presets(
 #[derive(serde::Deserialize)]
 pub struct LoadPresetRequest {
     pub name: String,
+    /// Optional profile to apply atomically with the preset load. When
+    /// present, [`AppState::set_profile`] runs before the doc is
+    /// composed so the `apply_profile` pass sees the new value on the
+    /// very first compose. Useful for the UI's "swap preset and
+    /// disable audio in one click" flow.
+    #[serde(default)]
+    pub profile: Option<Profile>,
 }
 
 #[derive(Serialize)]
@@ -578,6 +585,9 @@ pub async fn load_preset(
 ) -> Result<Json<LoadPresetResponse>, (StatusCode, Json<ApiError>)> {
     let started = std::time::Instant::now();
     tracing::info!(name = %req.name, "POST /api/preset");
+    if let Some(profile) = req.profile {
+        state.set_profile(profile).await;
+    }
     let (doc, plan) = state
         .load_preset_by_name(&req.name)
         .await
@@ -604,6 +614,34 @@ pub async fn load_preset(
         name: doc.name,
         reconfigure: reconfigure_response(plan),
     }))
+}
+
+/// `GET /api/profile` — snapshot the active runtime [`Profile`]. Lets
+/// the UI hydrate its chip row from server state without guessing.
+pub async fn get_profile(State(state): State<AppState>) -> Json<Profile> {
+    Json(state.get_profile().await)
+}
+
+/// `PATCH /api/profile` — full replacement of the active runtime
+/// profile, then re-compose the active preset so the new value takes
+/// effect on the running pipeline. Body is a `Profile` JSON object;
+/// missing fields fall back to type defaults (see `serde(default)` on
+/// `Profile`). Returns the new profile so the UI can confirm.
+pub async fn patch_profile(
+    State(state): State<AppState>,
+    Json(profile): Json<Profile>,
+) -> Result<Json<Profile>, (StatusCode, Json<ApiError>)> {
+    state.set_profile(profile.clone()).await;
+    // Re-running the preset's compose pipeline through the same
+    // `patch_flowgraph` path the preset-swap uses applies the new
+    // profile to a live pipeline without a stop/start. When no
+    // pipeline is running, this is a cheap no-op.
+    let current = state.get_flowgraph().await;
+    state
+        .patch_flowgraph(current)
+        .await
+        .map_err(|e| bad_request("PROFILE_APPLY_FAILED", format!("{e:#}")))?;
+    Ok(Json(profile))
 }
 
 /// `GET /ws/preset` — single WebSocket endpoint for preset sample

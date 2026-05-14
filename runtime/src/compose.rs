@@ -95,8 +95,8 @@ pub fn compose_source(
         BlockInstanceDecl {
             type_name: source.type_name.clone(),
             params: Some(merged_params),
-            force_params: None,
             placement: placeholder.placement,
+            ..Default::default()
         },
     );
     Ok(composed)

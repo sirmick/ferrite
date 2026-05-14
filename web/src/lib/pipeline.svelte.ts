@@ -29,6 +29,7 @@ import {
 import { fetchUiSinks, type UiSink } from '$lib/api/uiSinks';
 import { fetchPipelineBlocks, patchBlockParams, type PipelineBlock } from '$lib/api/pipelineBlocks';
 import { fetchPresets, loadPreset, type PresetEntry } from '$lib/api/presets';
+import { DEFAULT_PROFILE, fetchProfile, patchProfile, type Profile } from '$lib/api/profile';
 import { fetchSourceCapabilities, type SourceCapabilitiesResponse } from '$lib/api/sourceCaps';
 import { defaultsFor, toSourceConfig } from '$lib/controls/optionsModel';
 import { catalog } from '$lib/presets/catalog';
@@ -59,6 +60,13 @@ class PipelineStore {
    *  stable for the session (the presets dir isn't watched). */
   presets = $state<PresetEntry[]>([]);
 
+  /** Runtime profile applied before the env-split pass. Today: `audio`
+   *  gates the audio chain, `demod_placement` overrides where the
+   *  `placement_role: "demod"` block lives. Hydrated from server state
+   *  on `init()` (so a reload preserves the user's choice — server is
+   *  the source of truth, not localStorage). */
+  profile = $state<Profile>({ ...DEFAULT_PROFILE });
+
   /** Hardware/software capabilities of the currently-active source.
    *  Refreshed whenever `source` changes. Hardware sources carry the
    *  full `DeviceCapabilities`; software sources just their type_name. */
@@ -79,7 +87,7 @@ class PipelineStore {
     this.errorMessage = null;
     try {
       await initFrameDecoder();
-      const [fg, src, st, sinks, blocks, presets, caps] = await Promise.all([
+      const [fg, src, st, sinks, blocks, presets, caps, profile] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
@@ -87,6 +95,7 @@ class PipelineStore {
         fetchPipelineBlocks(),
         fetchPresets(),
         fetchSourceCapabilities(),
+        fetchProfile(),
       ]);
       this.flowgraph = fg;
       this.source = src;
@@ -95,6 +104,12 @@ class PipelineStore {
       this.blocks = indexById(blocks);
       this.presets = presets;
       this.sourceCaps = caps;
+      this.profile = profile;
+      // Hydrate from URL params if present (`?audio=off` /
+      // `?demod=node|browser`); a one-shot apply on first load so a
+      // shared link lands the user in the right state without an
+      // extra round trip.
+      await this.applyProfileFromUrl();
       this.client = new FrameClient({
         url: wsUrlFor('/ws/preset'),
         onStatus: (s) => {
@@ -277,6 +292,63 @@ class PipelineStore {
     }, `load preset ${name}`);
   }
 
+  /** Replace the active runtime profile and re-compose the current
+   *  preset. The server-side PATCH already runs `patch_flowgraph` so
+   *  the running pipeline picks up the new shape; we re-fetch the
+   *  composed view to keep the local mirror in sync. Also writes the
+   *  non-default fields back to URL params so the address bar reflects
+   *  what's actually running and a refresh / shared link reproduces
+   *  the same state. */
+  async setProfile(profile: Profile): Promise<void> {
+    await this.withBusy(async () => {
+      this.profile = await patchProfile(profile);
+      this.flowgraph = await fetchFlowgraph();
+      await this.refreshComposed();
+      this.writeProfileToUrl();
+    }, 'set profile');
+  }
+
+  /** One-shot: read `?audio=off` / `?demod=node|browser` from the
+   *  current URL on first load and call [`setProfile`] when they
+   *  differ from the server's idea. Lets a shared link land the user
+   *  in the right state without a manual second click. */
+  private async applyProfileFromUrl(): Promise<void> {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const next: Profile = { ...this.profile };
+    let touched = false;
+    if (params.has('audio')) {
+      next.audio = params.get('audio') !== 'off';
+      touched = true;
+    }
+    if (params.has('demod')) {
+      const v = params.get('demod');
+      if (v === 'node' || v === 'browser') {
+        next.demod_placement = v;
+        touched = true;
+      }
+    }
+    if (touched && !profileEquals(this.profile, next)) {
+      await this.setProfile(next);
+    }
+  }
+
+  private writeProfileToUrl(): void {
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    if (this.profile.audio) {
+      url.searchParams.delete('audio');
+    } else {
+      url.searchParams.set('audio', 'off');
+    }
+    if (this.profile.demod_placement) {
+      url.searchParams.set('demod', this.profile.demod_placement);
+    } else {
+      url.searchParams.delete('demod');
+    }
+    window.history.replaceState({}, '', url.toString());
+  }
+
   /** Read the channelizer-style VFO offset from the current `blocks`
    *  mirror. Looks for any block exposing `freq_shift_hz` — today
    *  that's the `Channelizer` block. Returns `null` when no such
@@ -413,6 +485,10 @@ function applyReadback(next: SourceConfig, readback: SoapyReadback | undefined):
     if (v !== undefined) merged[k] = v;
   }
   return { type: next.type, params: merged };
+}
+
+function profileEquals(a: Profile, b: Profile): boolean {
+  return a.audio === b.audio && a.demod_placement === b.demod_placement;
 }
 
 function indexByName(sinks: UiSink[]): Record<string, UiSink> {

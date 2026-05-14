@@ -11,6 +11,15 @@ export interface BlockInstanceDecl {
   readonly type: string;
   readonly placement?: Placement;
   readonly params?: Readonly<Record<string, unknown>>;
+  /** Pre-split gate. When present, `apply_profile` strips this block
+   *  (and wires touching it) unless every (key, expected) pair matches
+   *  the active runtime profile. Unknown keys don't gate
+   *  (forward-compat). Today the only recognized key is `"audio"`. */
+  readonly when?: Readonly<Record<string, unknown>>;
+  /** Pre-split tag the profile rewrites against. Today `"demod"`
+   *  lets `Profile.demod_placement` flip this block's `placement`
+   *  field. */
+  readonly placement_role?: string;
 }
 
 export type Wire = readonly [string, string];

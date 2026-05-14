@@ -421,8 +421,8 @@ fn insert_bridge(
         BlockInstanceDecl {
             type_name: type_name.to_string(),
             params: Some(params),
-            force_params: None,
             placement: Some(env),
+            ..Default::default()
         },
     );
     Ok(())

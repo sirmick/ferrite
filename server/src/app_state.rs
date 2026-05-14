@@ -17,8 +17,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{anyhow, Result};
 use ferrite_blocks::{registry, SoapyReadback};
 use ferrite_runtime::{
-    compose_source, inject_narrow_fft_taps, split_for_environment, Environment, FlowgraphDoc,
-    InventorySpecRegistry, ReconfigurePlan, SourceConfig, SOURCE_ID,
+    apply_profile, compose_source, inject_narrow_fft_taps, split_for_environment, Environment,
+    FlowgraphDoc, InventorySpecRegistry, Profile, ReconfigurePlan, SourceConfig, SOURCE_ID,
 };
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -93,6 +93,11 @@ struct Inner {
     frames: FrameBus,
     preset_doc: RwLock<FlowgraphDoc>,
     source_config: RwLock<SourceConfig>,
+    /// Runtime profile (audio toggle, demod placement override) applied
+    /// to the composed doc before [`split_for_environment`] runs. Lives
+    /// here so every compose call site picks up the current value
+    /// without threading it through the call chain.
+    profile: RwLock<Profile>,
     /// `Some` while the pipeline is running.
     pipeline: Mutex<Option<PresetMount>>,
     tick_period: Duration,
@@ -121,6 +126,7 @@ impl AppState {
                 frames,
                 preset_doc: RwLock::new(preset),
                 source_config: RwLock::new(source),
+                profile: RwLock::new(Profile::default()),
                 pipeline: Mutex::new(None),
                 tick_period,
                 device_cache: DeviceCache::new(),
@@ -175,6 +181,20 @@ impl AppState {
         self.inner.source_config.read().await.clone()
     }
 
+    /// Snapshot of the runtime [`Profile`]. Returned by `GET /api/profile`
+    /// and read every time the pipeline is (re)composed; defaults to
+    /// audio-enabled + no placement override.
+    pub async fn get_profile(&self) -> Profile {
+        self.inner.profile.read().await.clone()
+    }
+
+    /// Replace the profile. Subsequent preset loads / patches /
+    /// reconfigures apply the new value. The currently-running
+    /// pipeline keeps the old doc until a reconfigure or restart.
+    pub async fn set_profile(&self, new_profile: Profile) {
+        *self.inner.profile.write().await = new_profile;
+    }
+
     /// Walk the current preset+source's node-half split and surface every
     /// `ui:<name>` sink with the `stream_id` env_split allocated for it.
     /// The client uses this to subscribe to the right frame streams
@@ -185,12 +205,14 @@ impl AppState {
         let mut composed =
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
+        apply_profile(&mut composed, &*self.inner.profile.read().await);
         let node_half = split_for_environment(&composed, Environment::Node, &InventorySpecRegistry)
             .map_err(|e| anyhow!("env_split: {e}"))?;
         let mut out = Vec::new();
         for decl in node_half.blocks.values() {
             let payload_type = match decl.type_name.as_str() {
                 "WsBridgeTx" => "IqF32",
+                "WsBridgeTxF32" => "F32",
                 "WsBridgeTxFftU8" => "FftU8",
                 "WsBridgeTxEvents" => "JsonEvent",
                 _ => continue,
@@ -239,6 +261,7 @@ impl AppState {
         let mut composed =
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
+        apply_profile(&mut composed, &*self.inner.profile.read().await);
         let mut out = Vec::with_capacity(composed.blocks.len());
         for (id, decl) in &composed.blocks {
             let Some(entry) = registry::find(&decl.type_name) else {
@@ -428,6 +451,7 @@ impl AppState {
         let mut composed =
             compose_source(&new_doc, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
+        apply_profile(&mut composed, &*self.inner.profile.read().await);
         let mut pipeline = self.inner.pipeline.lock().await;
         let plan = if let Some(mount) = pipeline.as_mut() {
             Some(mount.reconfigure(&composed).await?)
@@ -473,6 +497,7 @@ impl AppState {
         let mut composed = compose_source(&preset, &new_source)
             .map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
+        apply_profile(&mut composed, &*self.inner.profile.read().await);
         let mut pipeline = self.inner.pipeline.lock().await;
         let plan = if let Some(mount) = pipeline.as_mut() {
             Some(mount.reconfigure(&composed).await?)
@@ -495,6 +520,7 @@ impl AppState {
         let mut composed =
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
+        apply_profile(&mut composed, &*self.inner.profile.read().await);
         let mount = spawn_preset(&composed, self.inner.frames.clone(), self.inner.tick_period)?;
         *guard = Some(mount);
         Ok(())

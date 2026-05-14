@@ -5,7 +5,7 @@
 
 import { ApiError } from '$lib/api/errors';
 
-export type UiSinkPayload = 'IqF32' | 'FftU8';
+export type UiSinkPayload = 'IqF32' | 'F32' | 'FftU8' | 'JsonEvent';
 
 export interface UiSink {
   name: string;

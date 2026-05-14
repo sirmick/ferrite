@@ -204,9 +204,8 @@ fn inject_for_channelizer(doc: &mut FlowgraphDoc, chan_id: &str, only_one: bool)
         tee_id.clone(),
         BlockInstanceDecl {
             type_name: "TeeIqF32".into(),
-            params: None,
-            force_params: None,
             placement: Some(Environment::Node),
+            ..Default::default()
         },
     );
     let fft_size = narrow_fft_size_for_rate(output_rate_hz);
@@ -226,8 +225,8 @@ fn inject_for_channelizer(doc: &mut FlowgraphDoc, chan_id: &str, only_one: bool)
                 // initialised yet at the moment env_split runs.
                 "sample_rate_hz": output_rate_hz,
             })),
-            force_params: None,
             placement: Some(Environment::Node),
+            ..Default::default()
         },
     );
     doc.blocks.insert(
@@ -240,8 +239,8 @@ fn inject_for_channelizer(doc: &mut FlowgraphDoc, chan_id: &str, only_one: bool)
                 "floor_dbfs": NARROW_LOGMAG_FLOOR_DBFS,
                 "ceil_dbfs": NARROW_LOGMAG_CEIL_DBFS,
             })),
-            force_params: None,
             placement: Some(Environment::Node),
+            ..Default::default()
         },
     );
 }
@@ -366,9 +365,7 @@ mod tests {
             "__narrow_fft_chan".into(),
             BlockInstanceDecl {
                 type_name: "FFT".into(),
-                params: None,
-                force_params: None,
-                placement: None,
+                ..Default::default()
             },
         );
         // Since `__narrow_fft_chan` already exists, the early bail

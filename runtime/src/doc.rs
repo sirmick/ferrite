@@ -35,7 +35,7 @@ pub enum Environment {
 /// One block instance inside a flowgraph doc. `type` names a block type
 /// in the registry; `params` is whatever JSON the block's `ParamSpec`
 /// accepts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlockInstanceDecl {
     /// Type name, matches a `BlockSpec::type_name` in the registry.
     #[serde(rename = "type")]
@@ -61,6 +61,24 @@ pub struct BlockInstanceDecl {
     /// `BlockSpec::placement` already decides).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<Environment>,
+    /// Optional gate for [`apply_profile`](crate::apply_profile). When
+    /// present, every `(key, expected)` pair must match the
+    /// corresponding well-known field on the active `Profile` or this
+    /// block — together with every wire touching it — is dropped from
+    /// the doc before env_split runs. Unknown keys are treated as
+    /// non-gating (forward-compat). Today the only well-known key is
+    /// `"audio"` (bool); tag audio-chain blocks with
+    /// `"when": { "audio": true }` so a profile with `audio: false`
+    /// strips them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    /// Optional semantic tag for [`apply_profile`](crate::apply_profile)
+    /// placement overrides. Today the only well-known role is
+    /// `"demod"` — tagging a block lets a profile's `demod_placement`
+    /// flip it between "node" and "browser" without rewriting the
+    /// preset JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_role: Option<String>,
 }
 
 /// Wire — `src → dst`, each endpoint a `"block_id.port"` string.

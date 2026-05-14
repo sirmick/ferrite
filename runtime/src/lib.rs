@@ -11,6 +11,7 @@
 //! the JSON doc shape is identical by design so one preset file parses
 //! on either side. The TS package will be deleted at milestone M4.
 
+pub mod apply_profile;
 pub mod block_registry;
 pub mod compose;
 pub mod doc;
@@ -26,6 +27,7 @@ pub mod validate;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+pub use apply_profile::{apply_profile, Profile};
 pub use block_registry::{instantiate_blocks, BlockMap, InventorySpecRegistry};
 pub use compose::{compose_source, ComposeError, SourceConfig, SOURCE_ID, SOURCE_SENTINEL_TYPE};
 pub use doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
