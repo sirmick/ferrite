@@ -13,8 +13,8 @@
       "type": "Source",
       "placement": "node",
       "params": {
-        "sample_rate_hz": 2400000.0,
-        "bandwidth_hz": 2000000.0
+        "sample_rate_hz": 2000000.0,
+        "bandwidth_hz": 1536000.0
       }
     },
     "tee_iq_top": {
@@ -42,7 +42,7 @@
       "type": "Channelizer",
       "placement": "node",
       "params": {
-        "input_rate_hz": 2400000.0,
+        "input_rate_hz": 2000000.0,
         "output_rate_hz": 250000.0
       }
     },
