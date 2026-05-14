@@ -52,6 +52,8 @@ pub mod record;
 pub mod registry;
 pub mod render;
 pub mod rssi_probe;
+#[cfg(feature = "rtl_433")]
+pub mod rtl_433;
 pub mod sine;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_retry;
@@ -105,6 +107,8 @@ pub use rds_demod::{RdsDemod, RdsDemodParams};
 pub use real_resamp::{RealF32Resamp, RealF32ResampParams};
 pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hold, SpectrumStats};
 pub use rssi_probe::{RssiProbe, RssiProbeParams};
+#[cfg(feature = "rtl_433")]
+pub use rtl_433::{Rtl433Demod, Rtl433DemodParams};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
 pub use soapy_source::{SoapyReadback, SoapySource, SoapySourceParams};

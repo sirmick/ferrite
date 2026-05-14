@@ -62,6 +62,21 @@ size_t fread(void *buf, size_t size, size_t n, FILE *stream);
 size_t fwrite(const void *buf, size_t size, size_t n, FILE *stream);
 int    fflush(FILE *stream);
 
+/* fgets / ferror — rtl_433's pulse_data.c reads recorded pulse-signature
+ * text files in its analyzer path; we never trigger that path, but the
+ * declarations are needed so the file compiles. Resolved at link time
+ * from wasi-libc's libc.a. */
+char * fgets(char *s, int n, FILE *stream);
+int    ferror(FILE *stream);
+int    feof(FILE *stream);
+long   ftell(FILE *stream);
+int    fseek(FILE *stream, long offset, int whence);
+
+/* fileno — rtl_433's r_api.c uses it on file-output sinks for isatty
+ * detection. The output path we hit never reaches it, but the file
+ * must compile. */
+int    fileno(FILE *stream);
+
 /* sscanf / perror / remove — multimon-ng's vendored C touches these on
  * paths the shim disables (cJSON parsing, error-print sites). Declared
  * here so the C compiles; resolved at link time from wasi-libc's

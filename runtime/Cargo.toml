@@ -21,7 +21,7 @@ default = []
 # multimon variant). Lets presets place those blocks on the browser
 # side, which removes the need for a node↔browser audio bridge in
 # decoder presets that don't otherwise need anything node-only.
-wasm    = ["dep:wasm-bindgen", "ferrite-blocks/multimon"]
+wasm    = ["dep:wasm-bindgen", "ferrite-blocks/multimon", "ferrite-blocks/rtl_433"]
 
 [dependencies]
 anyhow         = "1"

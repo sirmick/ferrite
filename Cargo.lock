@@ -437,6 +437,7 @@ dependencies = [
  "ferrite-ft8",
  "ferrite-liquid-dsp",
  "ferrite-multimon-ng",
+ "ferrite-rtl-433",
  "ferrite-rtl-ais",
  "inventory",
  "js-sys",
@@ -514,6 +515,15 @@ version = "0.9.0"
 dependencies = [
  "bindgen",
  "cc",
+]
+
+[[package]]
+name = "ferrite-rtl-433"
+version = "0.9.0"
+dependencies = [
+ "bindgen",
+ "cc",
+ "num-complex",
 ]
 
 [[package]]

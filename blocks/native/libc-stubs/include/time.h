@@ -37,6 +37,27 @@ struct tm {
 struct tm *gmtime(const time_t *timer);
 struct tm *localtime(const time_t *timer);
 
+/* mktime — rtl_433's geo_minim device decoder parses calendar fields
+ * into a unix timestamp. Same story as gmtime above: declared here so
+ * the device file compiles; the call runs inside the decode path which
+ * fires on a real frame, and wasi-libc's `mktime` is fine. */
+time_t mktime(struct tm *timeptr);
+
+/* strftime — rtl_433's output paths and several device decoders format
+ * timestamps. We never reach the upstream output writers, but the
+ * device-side calls need to compile. */
+size_t strftime(char *s, size_t maxsize, const char *format, const struct tm *timeptr);
+
+/* localtime_r / gmtime_r — thread-safe variants used by rtl_433's
+ * r_util.c for log timestamps. Declared here; same link-time resolution
+ * via wasi-libc as the non-_r variants. */
+struct tm *localtime_r(const time_t *timer, struct tm *result);
+struct tm *gmtime_r(const time_t *timer, struct tm *result);
+
+/* timegm — inverse of gmtime, used by r_util.c when re-encoding parsed
+ * timestamps. POSIX extension, present in wasi-libc. */
+time_t timegm(struct tm *tm);
+
 #ifdef __cplusplus
 }
 #endif

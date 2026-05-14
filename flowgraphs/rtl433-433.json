@@ -1,0 +1,111 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "rtl433-433",
+  "label": "ISM 433 MHz (rtl_433 — ~320 device decoders)",
+  "description": "ISM-band device decoder for the 433.92 MHz band (NA + EU consumer). Wraps vendored rtl_433 with ~320 protocols: weather stations (Acurite, La Crosse, Ambient Weather, Fine Offset), TPMS, garage-door remotes, smoke detectors, soil-moisture probes, security sensors. Plentiful in any suburban RX environment — first decode usually arrives within 60 s of an antenna pointing skyward. Optional NBFM audio tee for listening to the burst envelopes while the decoder runs.",
+  "ai_notes": "rtl_433 ISM-band decoder at 433.92 MHz (also dial in 315 MHz for older NA TPMS / car fobs, or load `rtl433-915.json` once shipped for US smart meters / ERT). 250 kHz channelizer feeds the decoder; the audio tee runs an AM-demod chain (gated on the `audio` toggle) so the operator can hear bursts as click/chirp envelopes. Output: `tail decoder --category rtl_433` — each frame is one JSON record with at minimum a `model` field. Decoder set defaults to `default` (~220 stable protocols); flip to `extended` to also pick up experimental / niche / noisy devices.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/ISM_Band_device",
+  "sample_path": "samples/sigidwiki/ISM_BALDR_Weather_Sound.wav",
+  "signal_wiki_image": "samples/sigidwiki/images/ISM_OOK_Waterfall.png",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee_iq_top": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 250000.0
+      }
+    },
+    "tee_iq_inner": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "rtl433": {
+      "type": "Rtl433Demod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 250000.0,
+        "decoder_set": "default"
+      }
+    },
+    "audio_demod": {
+      "type": "AmDemod",
+      "placement": "node",
+      "when": { "audio": true },
+      "params": {
+        "sample_rate_hz": 250000.0
+      }
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "blanker_enable": true,
+        "blanker_threshold_db": 25.0,
+        "blanker_hold_ms": 0.5
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "buffer_samples": 8192
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee_iq_top.in"],
+    ["tee_iq_top.out0", "chan.in"],
+    ["tee_iq_top.out1", "fft.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["chan.out", "tee_iq_inner.in"],
+    ["tee_iq_inner.out0", "rtl433.in"],
+    ["tee_iq_inner.out1", "audio_demod.in"],
+    ["audio_demod.out", "audio_resamp.in"],
+    ["audio_resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"]
+  ]
+}

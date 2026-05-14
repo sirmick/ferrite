@@ -28,6 +28,18 @@ extern "C" {
 typedef long ssize_t;
 typedef int  pid_t;
 
+/* access() — rtl_433's samp_grab.c checks for existing capture files
+ * before opening. The capture path is never invoked in Ferrite, but the
+ * file has to compile. F_OK is the only mode the vendor reaches for;
+ * the others are declared for completeness against future vendors.
+ * Resolves to wasi-libc's `access` at link time (returns -1 on most
+ * paths under wasm32-wasi anyway, which is fine). */
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
+int access(const char *path, int mode);
+
 #ifdef __cplusplus
 }
 #endif

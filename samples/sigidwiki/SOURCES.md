@@ -40,6 +40,7 @@ Run `convert.py` to (re-)generate `22050_mono/*.wav` — 22 050 Hz mono
 | `AIS_IQ_5s.wav` | [AIS](https://www.sigidwiki.com/wiki/Automatic_Identification_System_(AIS)) — first 5 s of `AIS IQ.zip` (sigidwiki/Cartoonman, 2016-01-04). 48 kHz stereo s16; despite the upstream filename, this is I/Q (left = I, right = Q) of a single AIS channel, *not* post-FmDemod audio. The `ais_e2e` test FmDemods it before feeding `AisDemod.ch_a`. Trimmed to 5 s (≈940 KB) so the repo doesn't carry the full 8 MB original; the window contains one decodable AIVDM frame. |
 | `FT8_websdr_test.wav` | [FT8](https://www.sigidwiki.com/wiki/FT8) — 12 kHz mono s16 from [kgoba/ft8_lib's MIT-licensed test corpus](https://github.com/kgoba/ft8_lib/tree/master/test/wav) (`websdr_test7.wav`). One full 15-second slot of real off-air HF FT8, captured via WebSDR. The `ft8_e2e` test feeds it through `ferrite_ft8::Monitor`; ~30 messages decode reliably (callsigns from across Europe — DL / SP / EA / ON / OM / RA / etc.), making it a solid end-to-end fixture. |
 | `AM_IQ_5s.wav` | [AM](https://www.sigidwiki.com/wiki/Amplitude_Modulation_(AM)) — first 5 s of `AM_IQ.zip` (sigidwiki). 64 kHz stereo u8; left = I, right = Q. Trimmed from the 61 s / 7.8 MB original to 5 s / 640 KB. Drives `am_e2e`. |
+| `ISM_BALDR_Weather_Sound.wav` | [BALDR Weather Sensor Telemetry](https://sigidwiki.com/wiki/BALDR_Weather_Sensor_Telemetry) — first 4 seconds of the page's `SDRSharp_20170218_155836Z_434675400Hz_AF.wav` (12-second 62.5 kHz stereo original), downmixed to mono and resampled to 22 050 Hz s16 PCM via `scipy.signal.resample_poly`. Used in the `rtl433-433` preset as a representative ISM-band OOK-chirp audio preview. The BALDR sensor itself is a 434.675 MHz weather telemetry transmitter; its chirp-then-silence pattern is broadly typical of every 433 MHz device the `rtl_433` decoder block ships against. |
 
 ## Waterfall images (`images/`)
 
@@ -61,6 +62,7 @@ keep provenance obvious.
 | `AM_Waterfall.jpg` | Amplitude Modulation | `wbam` |
 | `Broadcast_FM.jpg` | FM Broadcast Radio | `wbfm` |
 | `Stereo_left_right_fmbroadcast.jpg` | FM Broadcast Radio | `wbfm_stereo` |
+| `ISM_OOK_Waterfall.png` | [Denso 4EA Key Fob](https://sigidwiki.com/wiki/Denso_4EA_Key_Fob) — `OOK_SDR_Sharp.PNG`, 225×379. Iconic OOK burst-train in an SDR# waterfall view — visually representative of every device the `rtl_433` block decodes (weather sensors, TPMS, garage remotes, smart meters: the on-off-keyed family). | `rtl433-433` |
 
 ## License
 
