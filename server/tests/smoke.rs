@@ -313,15 +313,15 @@ async fn patch_flowgraph_invalid_returns_error_and_preserves_state() {
 }
 
 #[tokio::test]
-async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
+async fn wbfm_preset_e2e_emits_audio_and_fft_streams() {
     // End-to-end smoke: load the shipped wbfm preset, feed it a
     // SineSource (no hardware required), connect to /ws/preset, and
-    // confirm the crossings light up. env_split allocates stream_ids
-    // from 1000+ in doc-traversal (wire) order; for wbfm that is:
-    //   - stream 1000: JsonEvent tap on `rds.events → ui:rds`
-    //   - stream 1001: IQ crossing on `rssi.out → demod.in`
-    //   - stream 1002: JsonEvent tap on `rssi.events → ui:rssi`
-    //   - stream 1003: FFT tap on `logmag.out → ui:fft`
+    // confirm both crossings light up. After the dual-demod collapse
+    // (commit 1888a37) wbfm has a single node-side FmDemod feeding a
+    // TeeRealF32 — the browser audio chain crosses on a `WsBridgeTxF32`
+    // (real audio, not IQ). We assert by frame variant rather than by
+    // stream id because the id allocation shifts whenever the preset's
+    // wire order changes.
     // This exercises the full pipeline compose → env_split → runtime
     // → frame bus → WS path against the same preset the web UI ships.
     let preset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -358,16 +358,17 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
         .await
         .expect("ws connect");
 
-    // Collect frames for up to 2s, tagging each with its stream id.
-    // wbfm's FFT runs on the raw 2.4 MS/s source at size 16384, so it
-    // fires every ~6.8 ms; IQ crossings fire every runtime tick. Both
-    // stream ids should appear well within the window.
-    let mut saw_iq = false;
-    let mut saw_fft = false;
+    // Collect frames for up to 2s, tagging each with its variant +
+    // stream id. wbfm's wide FFT runs on the raw 2.4 MS/s source at
+    // size 16384 (fires every ~6.8 ms); the F32 audio bridge fires
+    // every batch flush. Both variants should appear well within the
+    // window.
+    let mut saw_audio = false;
+    let mut saw_wide_fft = false;
     let mut counts: std::collections::BTreeMap<(u16, &'static str), usize> =
         std::collections::BTreeMap::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while tokio::time::Instant::now() < deadline && (!saw_iq || !saw_fft) {
+    while tokio::time::Instant::now() < deadline && (!saw_audio || !saw_wide_fft) {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let msg = match tokio::time::timeout(remaining, ws.next()).await {
             Ok(Some(Ok(m))) => m,
@@ -377,26 +378,30 @@ async fn wbfm_preset_e2e_emits_iq_and_fft_streams() {
             continue;
         };
         match Frame::from_postcard(&bytes).expect("decode") {
-            Frame::IqF32 { stream_id, .. } => {
-                *counts.entry((stream_id, "IqF32")).or_default() += 1;
-                if stream_id == 1001 {
-                    saw_iq = true;
-                }
+            Frame::F32 { stream_id, .. } => {
+                *counts.entry((stream_id, "F32")).or_default() += 1;
+                saw_audio = true;
             }
             Frame::FftU8 {
                 stream_id, payload, ..
             } => {
                 *counts.entry((stream_id, "FftU8")).or_default() += 1;
-                if stream_id == 1003 {
-                    assert_eq!(payload.len(), 16384, "expected 16384 FFT bins");
-                    saw_fft = true;
+                // The wide FFT carries `size: 16384`; the narrow tap
+                // injected by `inject_narrow_fft` runs smaller. Tag
+                // the wide one explicitly so the test isn't satisfied
+                // by the narrow tap alone.
+                if payload.len() == 16384 {
+                    saw_wide_fft = true;
                 }
             }
             _ => {}
         }
     }
-    assert!(saw_iq, "no IqF32 on stream 1001 within 2s; saw {counts:?}");
-    assert!(saw_fft, "no FftU8 on stream 1003 within 2s; saw {counts:?}");
+    assert!(saw_audio, "no F32 audio frames within 2s; saw {counts:?}");
+    assert!(
+        saw_wide_fft,
+        "no 16384-bin FftU8 frame within 2s; saw {counts:?}",
+    );
 }
 
 #[tokio::test]
