@@ -6,7 +6,7 @@
   "ai_notes": "FT8 (HF weak-signal digital, 15 s UTC-aligned slots). Standard dial frequencies (USB demod, listen +1500 Hz audio offset): 1.840 / 3.573 / 7.074 / 10.136 / 14.074 / 18.100 / 21.074 / 24.915 / 28.074 / 50.313 MHz. Decodes appear every 15 s \u2014 wait \u226530 s before declaring \"no traffic.\" Output: `tail decoder --category ft8` (or `ft4` if you switch the demod mode). Mode switch via `param ft8 mode=ft4`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/FT8",
   "sample_path": "samples/sigidwiki/FT8_websdr_test.wav",
-  "signal_wiki_image": "samples/sigidwiki/images/FT8_Waterfall.png",
+  "signal_wiki_image": "samples/sigidwiki/images/FT8_signal.png",
   "environments": ["node", "browser"],
   "blocks": {
     "src": {

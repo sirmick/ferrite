@@ -9,7 +9,7 @@
 //! ### Stage order
 //!
 //! ```text
-//! input → deemph → blanker → notch → spectral → neural → output
+//! input → deemph → blanker → notch → spectral → neural → agc → output
 //! ```
 //!
 //! The ordering is load-bearing. Pre-emphasis inversion first
@@ -18,8 +18,11 @@
 //! runs *before* the spectral noise-tracker so big transients don't
 //! inflate the learned noise floor. Adaptive notch runs before
 //! spectral subtraction so heterodynes aren't smeared across bins by
-//! the FFT. Neural sits last — it's trained on post-conventional-NR
-//! audio in most recipes.
+//! the FFT. Neural sits before AGC so the gain stage adapts to
+//! denoised levels rather than raw noisy ones. AGC is last —
+//! whatever the upstream stages do, the output stays at a predictable
+//! loudness regardless of input amplitude, which matters most for AM
+//! broadcast where station strengths span 30+ dB.
 //!
 //! ### Mono vs. stereo
 //!
@@ -43,6 +46,7 @@ use crate::block::{
     Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
+pub mod agc;
 pub mod blanker;
 pub mod deemph;
 pub mod neural;
@@ -94,6 +98,21 @@ pub struct AudioNrParams {
     /// Maximum suppression depth (dB). Lets the user cap how much
     /// the neural stage attenuates, for a more natural sound.
     pub neural_attenuation_db: f32,
+
+    // -- AGC --------------------------------------------------------
+    pub agc_enable: bool,
+    /// Target peak output level in dBFS (relative to ±1.0). The AGC
+    /// adapts gain to keep the running envelope near this. −6 dBFS
+    /// leaves 6 dB of headroom before the AudioWorklet clips on
+    /// the brief transient before the peak-detector update fires.
+    pub agc_target_dbfs: f32,
+    /// Envelope release time-constant. The attack is instantaneous
+    /// (peak hold) — larger release = no pumping on speech pauses,
+    /// smaller = faster recovery on dynamic music.
+    pub agc_release_ms: f32,
+    /// Maximum upward gain (dB) on quiet signals. Caps how much the
+    /// AGC will amplify silence/noise during transmission gaps.
+    pub agc_max_gain_db: f32,
 }
 
 impl Default for AudioNrParams {
@@ -122,6 +141,11 @@ impl Default for AudioNrParams {
 
             neural_enable: false,
             neural_attenuation_db: 18.0,
+
+            agc_enable: false,
+            agc_target_dbfs: -6.0,
+            agc_release_ms: 500.0,
+            agc_max_gain_db: 20.0,
         }
     }
 }
@@ -147,6 +171,17 @@ impl AudioNrParams {
             }
             if self.notch_delay < 1 {
                 bail!("audio_nr: notch_delay must be ≥ 1");
+            }
+        }
+        if self.agc_enable {
+            if !(self.agc_target_dbfs.is_finite() && self.agc_target_dbfs <= 0.0) {
+                bail!("audio_nr: agc_target_dbfs must be ≤ 0 dBFS");
+            }
+            if !(self.agc_release_ms.is_finite() && self.agc_release_ms > 0.0) {
+                bail!("audio_nr: agc_release_ms must be > 0");
+            }
+            if !(self.agc_max_gain_db.is_finite() && self.agc_max_gain_db >= 0.0) {
+                bail!("audio_nr: agc_max_gain_db must be ≥ 0");
             }
         }
         if self.spectral_enable {
@@ -369,6 +404,52 @@ const COMMON_PARAMS: &[ParamSpec] = &[
         reconfig_scope: ReconfigureScope::SelfBlock,
         ai_notes: "Cap on suppression depth. 12 = subtle, 18 = default, 24 = strong (HF SSB), 30+ = aggressive (artifacts on music).",
     },
+    ParamSpec {
+        key: "agc_enable",
+        label: "Audio AGC",
+        kind: ParamKind::Toggle { default: false },
+        reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "Stage 6 (final). Adapts gain so output peaks track a target level — keeps loud AM stations from clipping and weak DX from being inaudible. Always-on default on wbam; useful on any voice mode where station strengths vary widely.",
+    },
+    ParamSpec {
+        key: "agc_target_dbfs",
+        label: "AGC target",
+        kind: ParamKind::Range {
+            min: -24.0,
+            max: 0.0,
+            step: 0.5,
+            default: -6.0,
+            unit: "dBFS",
+        },
+        reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "Peak output level the AGC tracks toward. −6 dBFS leaves 6 dB of headroom before the AudioWorklet clips on transients. Lower = quieter overall, more headroom.",
+    },
+    ParamSpec {
+        key: "agc_release_ms",
+        label: "AGC release τ",
+        kind: ParamKind::Range {
+            min: 50.0,
+            max: 2000.0,
+            step: 10.0,
+            default: 500.0,
+            unit: "ms",
+        },
+        reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "How fast the AGC raises gain when the input gets quieter. 300–800 ms avoids pumping on speech pauses; faster brings up the noise floor between syllables.",
+    },
+    ParamSpec {
+        key: "agc_max_gain_db",
+        label: "AGC max gain",
+        kind: ParamKind::Range {
+            min: 0.0,
+            max: 60.0,
+            step: 1.0,
+            default: 20.0,
+            unit: "dB",
+        },
+        reconfig_scope: ReconfigureScope::SelfBlock,
+        ai_notes: "Upper bound on the AGC's boost. 20 dB covers strong-vs-DX on AM broadcast; higher amplifies background hiss when the channel is empty.",
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -384,6 +465,7 @@ struct Chain {
     notch: Option<notch::NotchStage>,
     spectral: spectral::SpectralStage,
     neural: neural::NeuralStage,
+    agc: agc::AgcStage,
 }
 
 impl Chain {
@@ -407,12 +489,14 @@ impl Chain {
             p.spectral_noise_alpha,
         );
         let neural = neural::NeuralStage::new(p.neural_attenuation_db, rate);
+        let agc = agc::AgcStage::new(p.agc_target_dbfs, p.agc_release_ms, p.agc_max_gain_db, rate);
         Ok(Self {
             deemph,
             blanker,
             notch,
             spectral,
             neural,
+            agc,
         })
     }
 
@@ -421,6 +505,12 @@ impl Chain {
         self.blanker
             .recompute(p.blanker_threshold_db, p.blanker_hold_ms, rate_hz);
         self.neural.set_input_rate(rate_hz);
+        self.agc.recompute(
+            p.agc_target_dbfs,
+            p.agc_release_ms,
+            p.agc_max_gain_db,
+            rate_hz,
+        );
     }
 
     fn run(&mut self, p: &AudioNrParams, buf: &mut [f32]) {
@@ -440,6 +530,9 @@ impl Chain {
         }
         if p.neural_enable {
             self.neural.run(buf);
+        }
+        if p.agc_enable {
+            self.agc.run(buf);
         }
     }
 }
@@ -476,7 +569,7 @@ impl Block for AudioNrMono {
                 port_type: PortType::RealF32,
             }],
             params: COMMON_PARAMS,
-            ai_notes: "Mono audio noise-reduction chain: deemph → blanker → notch → spectral → neural, each independently toggleable. All params are live-tunable. Default profiles per mode are wired by the preset; tweak from `wbam` baseline (full stack + neural@18dB) or disable stages individually.",
+            ai_notes: "Mono audio noise-reduction chain: deemph → blanker → notch → spectral → neural → agc, each independently toggleable. All params are live-tunable. Default profiles per mode are wired by the preset; tweak from `wbam` baseline (full stack + neural@18dB + agc@−6dBFS) or disable stages individually.",
         }
     }
 

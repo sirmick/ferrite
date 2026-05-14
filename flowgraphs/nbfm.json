@@ -6,7 +6,7 @@
   "ai_notes": "Narrowband FM voice, 25 kHz channels. Use for 2 m / 70 cm amateur repeaters, marine VHF (156\u2013162 MHz), public-safety, FRS/GMRS (462\u2013467 MHz). \u00b15 kHz deviation default \u2014 fine for most NBFM channels. Audio NR: `blanker@20dB` + `neural@18dB`; bump the blanker if there's electrical / ignition noise.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/NFM_Voice",
   "sample_path": "samples/sigidwiki/Nfm_voice.mp3",
-  "signal_wiki_image": "samples/sigidwiki/images/Nfm.jpg",
+  "signal_wiki_image": "samples/sigidwiki/images/Sintitulo.png",
   "environments": ["node", "browser"],
   "blocks": {
     "src": {

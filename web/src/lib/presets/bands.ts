@@ -29,4 +29,19 @@ interface BandsFile {
   groups: BandGroup[];
 }
 
-export const bands: BandGroup[] = (raw as BandsFile).groups;
+// Groups sorted by their minimum entry frequency (low → high) so the
+// panel reads bottom-band-first regardless of the order the JSON
+// declares them in. Entries within each group keep their authored
+// order so curated labels like "(band low)" / "(band high)" stay in
+// place. User edits to bands.json reapply on the next reload.
+function minHz(group: BandGroup): number {
+  let m = Number.POSITIVE_INFINITY;
+  for (const e of group.entries) {
+    if (e.hz < m) m = e.hz;
+  }
+  return m;
+}
+
+export const bands: BandGroup[] = (raw as BandsFile).groups
+  .slice()
+  .sort((a, b) => minHz(a) - minHz(b));

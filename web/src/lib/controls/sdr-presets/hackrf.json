@@ -4,5 +4,9 @@
   "sample_rate_hz": 8000000,
   "sample_rate_choices_hz": [2000000, 4000000, 8000000, 10000000, 16000000, 20000000],
   "max_sample_rate_hz": 20000000,
-  "notes": "8 MS/s is comfortable on USB 2.0 and gives a useful wideband view; HackRF runs cleanly up to 20 MS/s on USB 3.0 if you want to push it. AMP off by default — flip it for weak HF/VHF signals only. Advanced panel exposes 1–20 MS/s in 1 MS/s steps via the device probe."
+  "if_filter_ladder_hz": [
+    1750000, 2500000, 3500000, 5000000, 5500000, 6000000, 7000000, 8000000, 9000000, 10000000,
+    12000000, 14000000, 15000000, 20000000, 24000000
+  ],
+  "notes": "8 MS/s is comfortable on USB 2.0 and gives a useful wideband view; HackRF runs cleanly up to 20 MS/s on USB 3.0 if you want to push it. AMP off by default — flip it for weak HF/VHF signals only. Advanced panel exposes 1–20 MS/s in 1 MS/s steps via the device probe. Baseband-filter ladder (1.75–24 MHz, discrete steps from libhackrf) is used to auto-pick the closest ≤ Fs entry when the user changes the sample rate — the HackRF driver does NOT autoselect; without an explicit `setBandwidth` the filter stays at whatever was last set and aliases everything outside it."
 }

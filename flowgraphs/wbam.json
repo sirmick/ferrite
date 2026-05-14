@@ -96,7 +96,11 @@
         "spectral_oversub": 1.8,
         "spectral_floor": 0.1,
         "neural_enable": true,
-        "neural_attenuation_db": 18.0
+        "neural_attenuation_db": 18.0,
+        "agc_enable": true,
+        "agc_target_dbfs": -6.0,
+        "agc_release_ms": 500.0,
+        "agc_max_gain_db": 20.0
       }
     }
   },

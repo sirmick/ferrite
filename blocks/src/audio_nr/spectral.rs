@@ -69,10 +69,14 @@ pub struct SpectralStage {
     scratch: Vec<Complex<f32>>,
 
     noise_mag2: Vec<f32>,
-    noise_initialised: bool,
     /// MMSE-LSA decision-directed a-priori SNR memory, per bin.
     prior_snr: Vec<f32>,
 }
+
+/// Starting noise-magnitude estimate per bin. Small enough that cold-
+/// start audio passes through with gain ≈ 1, large enough not to
+/// trigger numerical issues in the gain math.
+const COLD_START_NOISE_MAG2: f32 = 1e-10;
 
 impl SpectralStage {
     #[must_use]
@@ -113,8 +117,17 @@ impl SpectralStage {
             ola: vec![0.0; n],
             ola_read: 0,
             scratch: vec![Complex::new(0.0, 0.0); n],
-            noise_mag2: vec![0.0; n],
-            noise_initialised: false,
+            // Seed the noise floor to a tiny absolute value rather than
+            // 0 or the first frame's data. Cold-start audio then sees a
+            // huge a-posteriori SNR (gamma = mag²/eps) and the gain is
+            // ≈ 1 (passthrough). As natural pauses in voice/music
+            // arrive, the leaky-min snaps the floor down to real noise
+            // levels and subtraction starts working. The previous
+            // approach pinned the noise floor to whatever the first
+            // frame happened to contain, so a sustained loud signal at
+            // start-up trapped the gain at the floor → silence until
+            // the channel had a quiet moment.
+            noise_mag2: vec![COLD_START_NOISE_MAG2; n],
             prior_snr: vec![1.0; n],
         }
     }
@@ -128,9 +141,8 @@ impl SpectralStage {
             *v = 0.0;
         }
         self.ola_read = 0;
-        self.noise_initialised = false;
         for v in &mut self.noise_mag2 {
-            *v = 0.0;
+            *v = COLD_START_NOISE_MAG2;
         }
         for v in &mut self.prior_snr {
             *v = 1.0;
@@ -199,8 +211,10 @@ impl SpectralStage {
 
             // Leaky-min noise tracker: instant when mag² dips below
             // the estimate, slow creep upward otherwise. Keeps the
-            // floor from running away on loud voice frames.
-            if !self.noise_initialised || mag2 < self.noise_mag2[k] {
+            // floor from running away on loud voice frames. Starts
+            // from `COLD_START_NOISE_MAG2`; the first quiet patch
+            // snaps it down to the real noise level.
+            if mag2 < self.noise_mag2[k] {
                 self.noise_mag2[k] = mag2;
             } else {
                 self.noise_mag2[k] += alpha_noise * (mag2 - self.noise_mag2[k]);
@@ -248,8 +262,6 @@ impl SpectralStage {
                 self.scratch[mirror] *= gain;
             }
         }
-        self.noise_initialised = true;
-
         // iFFT + overlap-add into `ola`. rustfft doesn't normalise
         // the inverse; fold `1/n` into the synthesis step.
         self.fft_inv.process(&mut self.scratch);
