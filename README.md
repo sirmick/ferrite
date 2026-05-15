@@ -4,222 +4,194 @@
 
 Point a small Rust daemon at your radio, open the URL on any machine on the
 LAN, and you get a fluent spectrum/waterfall UI, twenty-one ready-to-go
-listening and decoder presets, and an optional Claude sidecar that can find
-signals, tune the rig, capture clips, and explain what it's hearing — all
-without leaving the page.
+listening and decoder presets, and an optional Claude sidecar that finds
+signals, tunes the rig, captures clips, and explains what it's hearing —
+all without leaving the page.
 
 ![Ferrite spectrum and waterfall](docs/images/spectrum-waterfall.png)
 
-## What makes it different
+## Vision
 
-- **AI operator that drives the radio.** The optional `ferrite-ai` sidecar
-  hands a chat panel a real SoapySDR rig: it can tune, swap presets, change
-  gain/AGC/antenna, take spectrum captures, run a peak finder, and read PNG
-  renders of what it just heard. Auth is your local Claude Code subscription
-  — no API key in a config file. See [the AI operator](#the-ai-operator).
-- **One block crate, two compile targets.** Every DSP unit (channelizer, FM
-  demod, EAS / POCSAG / RDS / ADS-B / AIS / FT8 decoders, …) is one Rust
-  source file that builds native into `ferrited` *and* into a WASM bundle
-  the browser worker loads. No second implementation, no drift.
-- **JSON-authored flowgraphs.** Adding a new mode is a flowgraph file
-  ([`flowgraphs/`](flowgraphs/)) plus optional blocks. No UI work, no
-  recompiling the server. Twenty-one ship in the box (see
-  [decoders](#what-it-decodes)).
-- **Live captures that don't disrupt your session.** Tee the FFT bin stream
-  or the demodulated audio to a `.bin` + JSON sidecar mid-session; render
-  them to PNG strips with `tools/fft_to_png.py`; pull peaks out with
-  `tools/fft_peaks.py`. The AI uses the same tools the human does.
-- **Auto-contrast waterfall.** P5/P98 of recent FFT rows is tracked
-  client-side and stretched into the palette so noise sits at dark blue and
-  carriers reach white regardless of band level. Manual contrast slider for
+One app, in the browser, out of the box:
+
+- **One binary, one URL.** A single Rust daemon serves the whole UI. No
+  client install, no companion desktop app, no per-mode tool zoo — open
+  the page and listen.
+- **Every common mode built in.** Analog voice/music and the digital
+  decoders people actually reach for (ADS-B, AIS, APRS/packet, POCSAG/FLEX,
+  FT8, RDS, EAS/SAME, CW, DTMF) ship as presets — no recompiling, no
+  external decoders running as subprocesses.
+- **An AI operator that drives the radio.** Optional, local-auth, and it
+  uses the *same* control surface you do — it can find a signal, tune,
+  swap presets, capture, and show you the spectrum it just looked at.
+- **SoapySDR-native.** Any Soapy-supported radio works; device knobs are
+  generated from the driver's own capability schema — adding a radio is
+  zero frontend work.
+- **Clean and mean on low-power hardware.** Tight Rust DSP, one block
+  crate compiled native *and* to WASM (no second implementation), built
+  to run on a Pi-class box driving a dongle, not a workstation.
+
+## Screenshots
+
+| | |
+|---|---|
+| Normal receive — busy HF, auto-contrast waterfall, band ribbon | The AI operator scanning AM/SW and reporting back inline |
+| ![HF receive](docs/images/screenshots/hf-busy-bands.png) | ![AI scan](docs/images/screenshots/ai-amsw-scan.png) |
+| Per-device source dialog (auto-generated from Soapy schema) | Digital mode — AI-driven POCSAG/FLEX pager decode |
+| ![Source settings](docs/images/screenshots/fm-settings.png) | ![Pager decode](docs/images/screenshots/ai-pager-decode.png) |
+
+## Features
+
+- **AI operator that drives the radio.** The `ferrite-ai` sidecar hands
+  Claude a real SoapySDR rig via `ferrite-ctl`: tune, swap presets, change
+  gain/AGC/antenna/DC-mode, capture FFT or audio, run a peak finder, and
+  read PNG renders of what it just heard. Auth is your local Claude Code
+  subscription — no API key in a file. Every command it runs surfaces in
+  the activity panel.
+- **One block crate, two compile targets.** Every DSP unit (channelizer,
+  FM/AM/SSB demod, audio shaper, EAS/POCSAG/RDS/ADS-B/AIS/FT8 decoders, …)
+  is one Rust source file that builds native into `ferrited` *and* into
+  the browser's WASM worker. No second implementation, no drift.
+- **JSON-authored flowgraphs.** A mode is a flowgraph file in
+  [`flowgraphs/`](flowgraphs/) plus optional blocks — no UI work, no
+  server recompile. Twenty-one ship in the box.
+- **World-class analog chain.** Envelope AM (offset-immune), limiter +
+  discriminator FM, post-demod `AudioShaper` (DC block + brick-wall LPF:
+  15 kHz WBFM mono / 3.4 kHz NBFM / 5 kHz AM), pilot-PLL stereo with
+  blend, and a tunable 5-stage NR (deemph → blanker → notch → spectral
+  MMSE-LSA → DFN3 neural), lean by default.
+- **Band-plan-aware tuning.** Step/snap derived from a US allocation
+  overlay + the active demod; ↑/↓ step, ←/→ pan, wheel zoom-at-cursor,
+  click-to-tune; phase-continuous VFO retune (no click).
+- **Auto-contrast waterfall.** P5/P98 of recent FFT rows tracked
+  client-side and stretched to the palette; manual slider for
   pixel-peeping.
-- **5-stage audio noise reduction.** De-emphasis → impulse blanker →
-  adaptive notch → spectral subtraction (MMSE-LSA / Wiener) → DFN3 neural
-  denoiser. Per-preset tuning so AM doesn't get the WBFM stack.
-- **Signal catalog with thumbnails.** Sigidwiki-derived metadata, searchable,
-  one-click tune. Plus a US band-allocation ribbon under the spectrum.
+- **Live captures that don't disrupt the session.** Side-tee the FFT or
+  demod audio mid-session; render PNG strips with `tools/fft_to_png.py`;
+  pull peaks with `tools/fft_peaks.py`. The AI uses the same tools.
+- **Signal catalog + band ribbon.** Sigidwiki-derived metadata,
+  searchable, one-click tune; US band-allocation ribbon under the
+  spectrum.
 - **Replay is a first-class source.** `--source-type FileIqSource
-  --source-path foo.iq` is a drop-in for an RTL-SDR. Every E2E test runs
+  --source-path foo.iq` is a drop-in for a dongle. Every E2E test runs
   this way; so can you.
 
 ## Install
 
 Binary packages for Debian 12 / 13, Ubuntu 24.04, and Fedora 40 across
-amd64 / arm64 / riscv64 are built from a single matrix script
-(`packaging/run_matrix.sh`). Pick the row that matches your machine:
+amd64 / arm64 / riscv64 (`packaging/run_matrix.sh`):
 
 ```bash
 # Debian / Ubuntu
 sudo apt install ./ferrite_0.9.0_amd64.deb
-
 # Fedora
 sudo dnf install ./ferrite-0.9.0-1.fc40.x86_64.rpm
-```
 
-The package wires `/usr/bin/ferrited` to launch with the bundled SoapySDR +
-driver plugins and the static web bundle pre-configured — no env exports
-needed. Then:
-
-```bash
 sudo systemctl enable --now ferrited
 xdg-open http://localhost:10001
 ```
 
-The `ferrited` unit listens on `0.0.0.0:10001` (REST + WS, plain HTTP on
-loopback). Remote access is your tunnel problem — same posture as KiwiSDR
-or OpenWebRX on personal hardware. See
-[docs/07-deploy.md](docs/07-deploy.md) for systemd, reverse-proxy, and
-HTTPS notes.
+The package wires `/usr/bin/ferrited` to launch with the bundled SoapySDR
++ driver plugins and the static web bundle — no env exports. `ferrited`
+listens on `0.0.0.0:10001` (REST + WS, plain HTTP on loopback); remote
+access is your tunnel problem (same posture as KiwiSDR / OpenWebRX). See
+[docs/07-deploy.md](docs/07-deploy.md).
 
-### SDRplay extra step
-
-The SDRplay Soapy plugin needs sdrplay.com's closed-source API daemon
-installed first:
-
-```bash
-# Download the .run installer from sdrplay.com, then:
-sudo systemctl enable --now sdrplay
-```
-
-The Ferrite package picks the plugin up automatically once the daemon is
-running.
-
-### RTL-SDR udev + blacklist
-
-Ship-installed but worth knowing — the package drops a udev rule and a
-DVB-driver blacklist into `/etc/`. If a freshly-plugged dongle isn't seen,
-unplug/replug or `sudo modprobe -r dvb_usb_rtl28xxu`.
+**SDRplay** needs sdrplay.com's closed-source API daemon installed and
+`systemctl enable --now sdrplay` before the plugin is picked up.
+**RTL-SDR**: the package drops a udev rule + DVB-driver blacklist; if a
+fresh dongle isn't seen, replug or `sudo modprobe -r dvb_usb_rtl28xxu`.
 
 ## First five minutes
 
 1. Open `http://localhost:10001`.
-2. Click the **SDR** picker in the top bar, pick your device, choose an
-   antenna and sample rate. The dialog is auto-generated from the device's
-   Soapy capability schema, so SDRplay-specific notches and RTL-SDR
-   direct-sample switches both show up.
-3. Click the **catalog** in the left sidebar. Pick something — *NOAA
-   Weather Radio* and *FM Broadcast* are the cheapest first listens. The
-   right thumbnail tells you what the waterfall should look like when you
-   hit a real signal.
-4. **Listen.** Audio routes through an AudioWorklet, no buffering issues.
-5. Click anywhere on the spectrum to retune. Drag the orange line on the
-   waterfall to set a per-VFO offset inside the wideband window.
+2. Click **SDR** in the top bar, pick your device, antenna, sample rate.
+   The dialog is auto-generated from the device's Soapy schema.
+3. Open the **catalog** (left sidebar). *NOAA Weather Radio* and *FM
+   Broadcast* are the cheapest first listens; the thumbnail shows what the
+   waterfall should look like on a real signal.
+4. **Listen** — audio routes through an AudioWorklet.
+5. Click the spectrum to retune; ↑/↓ to step, wheel to zoom at the cursor.
+6. Or open the **AI** tab and ask: *"find a strong FM station and identify
+   it"*, *"scan 144–148 MHz for activity"*, *"capture 10 s of 162.475 MHz
+   and render the FFT"*.
 
-If you want the AI to drive instead of you: open the **AI** tab on the
-right and tell it what you want. *"find a strong FM station and identify
-it"*, *"scan 144-148 MHz for activity"*, *"capture 10 s of 162.475 MHz
-and render the FFT to PNG"* all work.
+## Modes & test maturity
 
-## The AI operator
+Twenty-one shipped flowgraph presets. **Coverage** legend: **fixture** =
+e2e replays a real/known IQ or audio capture and asserts decoded output;
+**loopback** = synthetic modulate→demod→analyze e2e; **contract** =
+compose/split/instantiate + chunk-invariance/glitch/rate-drift guards.
 
-`ferrite-ai` is a small Node sidecar that wraps the
-[Claude Agent SDK](https://docs.anthropic.com/claude/docs/agent-sdk) and
-gives Claude one tool: a Bash shell with `ferrite-ctl` on the PATH.
-`ferrite-ctl` is a thin Rust CLI that drives `ferrited` via its REST API —
-list devices, set source, change preset, tune, change gain, capture FFT,
-capture audio. The AI also gets `fft_to_png.py` and `fft_peaks.py` so it
-can *see* what it just captured.
+| Mode | Preset(s) | Kind | Coverage |
+|---|---|---|---|
+| WBFM broadcast (+RDS) | `wbfm` | analog | fixture (`wbfm_e2e`, `rds_e2e`) + loopback + contract |
+| WBFM stereo | `wbfm_stereo` | analog | loopback (`analog_audio_nr_e2e`) + contract |
+| AM broadcast / SW / air | `wbam` | analog | fixture (`am_e2e`, real sigidwiki IQ) + loopback + contract |
+| NBFM voice | `nbfm` | analog | loopback (`audio_modes_e2e`) + contract |
+| SSB (USB / LSB) | `usb`, `lsb` | analog | loopback (`audio_modes_e2e`) |
+| CW / Morse | `cw` | analog | fixture (`morse_e2e`) |
+| ADS-B / Mode S | `adsb` | digital | fixture (`adsb_e2e`, dump1090) |
+| AIS | `ais` | digital | fixture (`ais_e2e`, rtl-ais) |
+| AX.25 packet / APRS | `packet`, `packet-debug` | digital | fixture (`packet_e2e`) |
+| POCSAG / FLEX paging | `pager` | digital | fixture (`pager_e2e`, multimon-ng) |
+| FT8 | `ft8` | digital | fixture (`ft8_e2e`, ft8_lib) |
+| NOAA WX + EAS/SAME | `nwr` | hazard | fixture (`eas_e2e`) |
+| DTMF | `dtmf-e2e` | tones | fixture (`dtmf_e2e`, `dtmf_cross_env`) |
+| rtl_433 ISM | `rtl433-433` | digital | fixture (`rtl433_e2e`, real Acurite CU8) |
+| Capture / record | `capture_fm`, `capture-aprs`, `capture-pager`, `fm-audio-record`, `am-audio-record` | utility | smoke (`record_smoke`) |
 
-**What the operator gets out of it.** A radio that knows what it is. The
-prompt is briefed on antennas (per-device, per-band, from a per-driver
-operator-notes JSON the user can edit), AGC quirks, frequency conventions
-(centre-tune vs offset), and the full block roster. Ask *"is anything
-interesting on HF right now"* and it'll pick an antenna, set a sample
-rate, scan in chunks, render PNGs, and tell you what it found — with the
-spectrum strips inline in chat.
+Cross-cutting audio correctness is gated by `chunk_invariance_e2e`
+(no per-tick clicks), `glitch_e2e` (no discontinuities through the
+demod→shaper→resamp chain), and `shipped_audio_presets` (every audio
+preset composes/splits + is rate-drift-free). See
+[docs/05-testing.md](docs/05-testing.md).
 
-**Auth.** No API key in a config file. The sidecar inherits the local
-Claude Code login from your `claude` CLI session — subscription billing.
-Run `claude` once on the server to sign in, and `ferrite-ai` picks it up.
+## Vendored libraries
 
-**Reverse-log.** Every command the AI runs is tagged with an
-`X-Ferrite-Command` header and surfaces in the activity panel under
-`ai::activity`, so you can watch what it's doing in real time.
+Heavy decoders are wrapped as native Rust crates (regression-tested, not
+subprocesses) under [`blocks/native/`](blocks/native/). Each builds native
+*and* to WASM from the same vendored sources; per-crate `VENDOR.md` records
+the pinned commit + resync steps.
 
-**Setup textbox.** A free-form "describe your radio setup" field in the
-AI panel gets merged into every prompt. Use it to tell the AI *"Antenna A
-is a 40 m end-fed, Antenna B is a discone for VHF"* — it'll route around
-your physical layout.
+| Library | Upstream | License | What we modified |
+|---|---|---|---|
+| liquid-dsp | [jgaeddert/liquid-dsp](https://github.com/jgaeddert/liquid-dsp) | MIT | Vendored `include/` + `src/` minus `*.test.c`, `*.benchmark.c`, and all SIMD variants (portable C only). Our `build.rs` is the authoritative source list (replaces upstream CMake). |
+| multimon-ng | [EliasOenal/multimon-ng](https://github.com/EliasOenal/multimon-ng) | GPL-2.0-or-later | Dropped `unixinput.c` (`main()`/stdio — replaced by `shim/multimon_shim.c`), `gen_*.c` modulators, SDL scope. Trimmed `test/demo/example/unsupported`. Library-ized for in-process decode. |
+| dump1090 (antirez classic) | [antirez/dump1090](https://github.com/antirez/dump1090) | BSD-2-Clause | None trimmed; single-file `dump1090.c` + `anet.c` wrapped via a shim against the one global `Modes` struct (chose classic over FlightAware for a tractable wrap). |
+| ft8_lib | [kgoba/ft8_lib](https://github.com/kgoba/ft8_lib) | MIT | Streaming-decoder subset only (`ft8/` coding + `common/monitor` + bundled `kiss_fft`); upstream CLI demo kept as reference, not compiled. |
+| aisdecoder (rtl-ais) | [dgiardini/rtl-ais](https://github.com/dgiardini/rtl-ais) | GPL-2.0-or-later | Only the `aisdecoder/` subdir vendored; upstream's `rtl_ais.c` RF pipeline + TCP/UDP NMEA bridge dropped (Ferrite's own Channelizer/FmDemod/Resamp feed it). |
+| rtl_433 | [merbanan/rtl_433](https://github.com/merbanan/rtl_433) | GPL-2.0-or-later | Dropped `rtl_433.c` (`main()`/CLI) and `sdr.c` (device I/O) for a `shim/` that wires the C decoder to the `Block` interface. Trimmed `tests/examples/docs/man/cmake/conf/debian/getopt`. |
 
-The sidecar is **optional**. Disable it in the systemd dropin and the UI
-hides the chat tab.
-
-## What it decodes
-
-Twenty-one shipped flowgraph presets, grouped by use:
-
-| Group | Presets | Notes |
-| --- | --- | --- |
-| Voice / music | `wbfm`, `wbfm_stereo`, `wbam`, `nbfm`, `lsb`, `usb`, `cw` | Full audio NR stack (deemph / blanker / notch / spectral / DFN3 neural), per-preset tuned |
-| Digital — telemetry | `adsb`, `ais`, `packet`, `packet-debug` | dump1090 Mode S + rtl-ais NMEA + AX.25 packet (APRS, BBS, AMSAT digipeaters) |
-| Digital — paging | `pager` | multimon-ng POCSAG (512/1200/2400) + FLEX |
-| Digital — weak-signal | `ft8` | kgoba ft8_lib, runs through the same channelizer/decimator chain |
-| Digital — tones | `dtmf-e2e`, `morse-e2e`, `cw` | End-to-end canaries used by CI; also useful as live decoders |
-| Weather / hazard | `nwr` | NOAA Weather Radio + EAS / SAME header decode |
-| RDS | (in `wbfm` / `wbfm_stereo`) | Station name, alt-freq, programme type, full PI/PS/RT |
-| Capture / record | `capture_fm`, `capture-aprs`, `capture-pager`, `fm-audio-record`, `am-audio-record` | Side-tee the IQ or audio without disrupting the live demod. `capture-aprs` tunes the packet chain at 144.39 MHz for APRS-fixture work. |
-
-Every preset is a JSON file in [`flowgraphs/`](flowgraphs/) referencing
-blocks from [`blocks/src/`](blocks/src/). Adding a new mode is a flowgraph
-plus, if needed, a new block — no UI work.
-
-Native vendor crates wrap the heavy decoders so they're regression-tested
-and not subprocesses: `liquid-dsp` (FIR / NCO / FEC), `multimon-ng`
-(POCSAG / FLEX / AFSK / EAS / Morse / DTMF — eleven decoder variants),
-`dump1090` (Mode S / ADS-B), `rtl-ais`, `ft8_lib`. They all build native
-into `ferrited` *and* into the browser WASM bundle from the same sources.
+Vendored data: the spectrum band-allocation overlay
+(`web/src/lib/presets/bandplan-usa.json`) is Arrin Clark (KN1E)'s
+[SDR-Band-Plans](https://github.com/Arrin-KN1E/SDR-Band-Plans), **CC0**,
+imported verbatim (one-file copy; the alpha channel is stripped at load).
+WSPR (`blocks/native/wsprd`) is in progress and not yet a shipped preset.
 
 ## Hardware
 
 Anything SoapySDR supports works in principle. Tested:
 
 | Driver | Hardware | Notes |
-| --- | --- | --- |
+|---|---|---|
 | `rtlsdr` | RTL2832U dongles | Most common starter SDR |
-| `sdrplay` | RSPduo, RSPdx | Closed-source API daemon required (see install) |
-| `hackrf` | HackRF One | RX only — TX is out of scope |
+| `sdrplay` | RSPduo, RSPdx | Closed-source API daemon required |
+| `hackrf` | HackRF One | RX only (no TX) |
 | `airspy` | Airspy R2, Airspy HF+ | |
 | `bladerf` | BladeRF | |
 | `plutosdr` | ADALM-PLUTO | |
-| `uhd` | USRP | Install `libuhd-dev` and rebuild SoapySDR plugins |
-| `file` | IQ replay | Built-in `FileIqSource` — point at any captured `.iq` |
+| `uhd` | USRP | `libuhd-dev` + rebuilt Soapy plugins |
+| `file` | IQ replay | Built-in `FileIqSource` — any captured `.iq` |
 
 Per-device knobs (RTL-SDR bias-tee / offset-tune, SDRplay notches /
-LNAstate / IFGR, RSPduo tuner selection) surface in the source dialog
-straight from each driver's Soapy `getSettingInfo` — adding a new driver
-needs zero frontend work.
-
-## Status
-
-**0.9.0 — pre-release.** The user-facing surface is feature-complete and
-stable enough for daily listening. Outstanding before 1.0:
-
-- Decoder UI panels for ADS-B (aircraft table + map) and APRS (station
-  list + map). The block-side state (`AdsbDemod` already maintains
-  `Modes.aircrafts`) is in place; the UI is greenfield.
-- `rtl_433` ISM-device decoder bundle (200+ device flavours).
-- `Mode A/C` follow-up to dump1090.
-
-Out of scope for 1.0, by design:
-
-- Multi-listener / multi-device per server (single listener, last-connect
-  wins).
-- Authentication (LAN-trust; remote access via the user's tunnel).
-- Transmit.
-- Mobile-first UI (desktop is the primary target).
-- DMR / DSD (AMBE patent encumbrance).
-
-See [docs/08-roadmap.md](docs/08-roadmap.md) for the live tally,
-[docs/12-shipped-vs-planned.md](docs/12-shipped-vs-planned.md) for what
-changed against the original master plan, and
-[docs/11-browsdr-inspired-plan.md](docs/11-browsdr-inspired-plan.md) for
-parked feature ideas (bookmarks, live STT, multi-VFO).
+LNAstate / IFGR, RSPduo tuner select) surface in the source dialog
+straight from each driver's Soapy `getSettingInfo` — new driver, zero
+frontend work.
 
 ## Build from source
 
-See [docs/06-build.md](docs/06-build.md) for the full from-source
-sequence — Rust toolchain, Node 20 from NodeSource, the local SoapySDR
-prefix, and the dual cargo / pnpm workspace. The short version, on a
+Full sequence in [docs/06-build.md](docs/06-build.md). Short version on a
 clean Ubuntu 24.04:
 
 ```bash
@@ -230,70 +202,153 @@ sudo apt install -y build-essential pkg-config curl git cmake clang lld \
 
 # 2. toolchains
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup target add wasm32-unknown-unknown
-cargo install wasm-pack
-
+rustup target add wasm32-unknown-unknown && cargo install wasm-pack
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-sudo corepack enable
+sudo apt install -y nodejs && sudo corepack enable
 corepack prepare pnpm@10.33.0 --activate
 
 # 3. SoapySDR local prefix
-./scripts/build-soapysdr.sh
-source soapysdr/env.sh
+./scripts/build-soapysdr.sh && source soapysdr/env.sh
 
-# 4. build everything
-pnpm install
-./build.sh           # runs cargo build --release + pnpm web build + WASM
+# 4. build everything (cargo release + WASM + web bundle)
+pnpm install && ./build.sh
 
-# 5. dev loop
-./run.sh             # ferrited + vite dev + ferrite-ai, all in foreground
+# 5. dev loop (ferrited + vite HMR + ferrite-ai)
+./run.sh
 ```
 
-Open <http://localhost:10000> for the vite-served dev UI (HMR), or
-<http://localhost:10001> for the production bundle served by `ferrited`.
+Dev UI with HMR at <http://localhost:10000>; production bundle served by
+`ferrited` at <http://localhost:10001>. Any change to a `blocks/` or
+`runtime/` crate needs **both** `cargo build` *and* `pnpm wasm:build`
+(`./build.sh` does both) — a native-only rebuild leaves the browser half
+stale.
 
-To rebuild only the packages: `packaging/run_matrix.sh` (Docker required;
-QEMU+binfmt for cross-arch rows).
+## Running the components
+
+### Scripts (the normal path)
+
+| Script | Does |
+|---|---|
+| `./build.sh` | Sources `soapysdr/env.sh`; `cargo build --release` (workspace) + `pnpm install --frozen-lockfile` + `pnpm --filter @ferrite/web build` (WASM + web bundle). Refuses if `ferrited` is running (`BUILD_FORCE=1` overrides). Outputs `target/release/ferrited`, `web/build/`, `web/src/lib/wasm/`. |
+| `./run.sh` | Foreground dev stack: `ferrited` on `0.0.0.0:10001`, `ferrite-ai` on `:10002`, vite (HTTPS) on `0.0.0.0:10000`. Sources `soapysdr/env.sh`; needs `./build.sh` first. Ctrl-C stops all three. |
+| `./stop.sh [--no-sdr]` | Kills `ferrited` / `ferrite-ai` / vite by port and restarts the SDRplay API service (`--no-sdr` skips the SDR recycle). Run before `build.sh`/`run.sh` if a previous `ferrited` is holding the radio. |
+
+### Standalone (run a piece by hand)
+
+```bash
+# ferrited — REST+WS daemon. `--flowgraph` is required; source is a
+# harmless SineSource until set via the UI / ferrite-ctl.
+source soapysdr/env.sh
+cargo run -p ferrited --release -- \
+  --flowgraph flowgraphs/wbfm.json --bind 0.0.0.0:10001 --start
+# (or the built binary: ./target/release/ferrited --flowgraph … )
+
+# vite dev server — proxies /api and /ws to ferrited; needs WASM built
+# once (`pnpm wasm:build`, or ./build.sh).
+cd web && FERRITE_HTTPS=1 pnpm dev --host 0.0.0.0 --port 10000
+
+# AI sidecar — ferrited reverse-proxies /ws/chat to it. Needs `claude`
+# logged in once on this host (subscription auth, no API key).
+cd tools/ferrite-ai && npm install && FERRITE_AI_PORT=10002 npm start
+```
+
+### `ferrited` CLI args
+
+`--bind <ADDR>` (default `0.0.0.0:8088`) · `--flowgraph <PATH>`
+(required) · `--source <PATH>` (SourceConfig JSON) **or** inline
+`--source-type` (default `SineSource`) `--source-args` `--antenna`
+`--gain-db` `--agc` `--source-bandwidth-hz` `--source-path` `--loop` ·
+`--start` (spawn pipeline immediately) · `--presets-dir <PATH>` ·
+`--tick-period-us <N>` (default 400) · `--run-for-secs <SECS>`
+(headless, implies `--start`). Diagnostics that exit without serving:
+`--list-devices`, `--probe-device <ARGS>`, `--probe-all`, `--read-all`
+(`--read-secs`, `--read-device`, `--read-rate-hz`).
+
+### `ferrite-ctl` — drive a running `ferrited`
+
+Global: `--connect <BASE>` (default `http://127.0.0.1:10001`) · `--json`
+(machine output; the AI uses this) · `--timeout <S>` · `--note "<text>"`
+(tags the request `X-Ferrite-Note`, shown in the UI activity log).
+
+Subcommands: `device …` · `preset …` · `tune <freq> [--bw --rate
+--gain]` (accepts `99.5M`/`915k`) · `param <block> key=value…` ·
+`start` · `stop` · `status` · `capture {iq|audio|fft} …` ·
+`tail [--category]` · `decoder {recent|tail}` · `view <pane>` (snapshot
+a live spectrum/waterfall canvas to PNG).
+
+```bash
+cargo run -p ferrite-ctl -- status
+cargo run -p ferrite-ctl -- --note "find FM" tune 99.5M --gain 30
+```
+
+### Packaging
+
+`packaging/run_matrix.sh` builds the `.deb`/`.rpm` matrix via Docker
+buildx (`Dockerfile.deb` / `Dockerfile.rpm`); the web bundle is built
+once on the host and tarballed in. Cross-arch rows (arm64, riscv64) need
+`qemu-user-static` + `binfmt_misc`:
+
+```bash
+sudo apt install qemu-user-static binfmt-support docker-buildx
+docker run --privileged --rm tonistiigi/binfmt --install all
+packaging/run_matrix.sh
+```
+
+The installed `/usr/bin/ferrited` is the `packaging/ferrited` wrapper —
+it exports `LD_LIBRARY_PATH` / `SOAPY_SDR_PLUGIN_PATH` /
+`FERRITE_STATIC_ROOT` for the bundled SoapySDR + web assets, then execs
+`/usr/lib/ferrite/ferrited "$@"` (so all the CLI args above still apply
+under systemd).
 
 ## Tests
 
 ```bash
-cargo test --workspace            # native: server + runtime + blocks
+cargo test --workspace            # server + runtime + blocks (real fixtures, no mocks)
 pnpm --filter @ferrite/web test   # web unit tests
 pnpm --filter @ferrite/web check  # type-check
 cargo clippy --workspace -- -D warnings
 pnpm -r lint
 ```
 
-The integration suite (`server/tests/`, `runtime/tests/`, `blocks/tests/`)
-boots a real `ferrited`, replays known IQ fixtures, and asserts the
-expected decoder output — same binary as production, no mocks. See
-[docs/05-testing.md](docs/05-testing.md).
+The integration suite boots a real `ferrited`, replays known IQ fixtures,
+and asserts decoder output — same binary as production. Pre-commit
+(lefthook, installed by `pnpm install`) runs fmt/lint/check on staged
+files. Details in [docs/05-testing.md](docs/05-testing.md).
 
-Pre-commit (lefthook, installed by `pnpm install`) runs `cargo fmt
---check`, `pnpm -r lint`, and `pnpm -r check` on staged files.
+## Status
+
+**0.9.0 — pre-release.** User-facing surface is feature-complete and
+stable for daily listening. Before 1.0: decoder UI panels for ADS-B
+(aircraft table + map) and APRS (station list + map) — block-side state
+exists, UI is greenfield; broader `rtl_433` device coverage; `Mode A/C`.
+Out of scope for 1.0 by design: multi-listener/multi-device, auth
+(LAN-trust), transmit, mobile-first UI, DMR/DSD (AMBE patent).
+
+Live tally in [docs/08-roadmap.md](docs/08-roadmap.md);
+[docs/12-shipped-vs-planned.md](docs/12-shipped-vs-planned.md) tracks
+deltas against the master plan.
 
 ## Documentation
 
-Design + protocol docs in [docs/](docs/):
-
 - [00 — Context and goals](docs/00-context.md)
 - [01 — Architecture](docs/01-architecture.md)
-- [02 — Control API and WS frame format](docs/02-protocol.md)
+- [02 — Control API & WS frame format](docs/02-protocol.md)
 - [03 — Block system](docs/03-blocks.md)
 - [04 — Flowgraph JSON schema](docs/04-flowgraphs.md)
 - [05 — Testing strategy](docs/05-testing.md)
-- [06 — Build and dev setup](docs/06-build.md)
+- [06 — Build & dev setup](docs/06-build.md)
 - [07 — Deployment](docs/07-deploy.md)
 - [08 — Roadmap](docs/08-roadmap.md)
 - [09 — Decision log](docs/09-decisions.md)
-- [10 — Commit-level implementation history](docs/10-commits.md)
+- [10 — Commit-level history](docs/10-commits.md)
 - [11 — BrowSDR-inspired follow-ups](docs/11-browsdr-inspired-plan.md)
 - [12 — Shipped vs. planned](docs/12-shipped-vs-planned.md)
+- [Decoder roadmap](docs/decoder-roadmap/README.md) — phased decoder plan
+- [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE). Vendored decoders under
-[`blocks/native/`](blocks/native/) retain their upstream licenses
-(dump1090, multimon-ng, ft8_lib, rtl-ais, liquid-dsp).
+[`blocks/native/`](blocks/native/) retain their upstream licenses (see
+the [vendored libraries](#vendored-libraries) table); all are
+GPL-3.0-compatible.
