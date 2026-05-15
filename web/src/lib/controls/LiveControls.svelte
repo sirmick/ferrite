@@ -1,10 +1,10 @@
 <script lang="ts">
-  // Curated "quick" source controls — gain, antenna, AGC. Mounted next
-  // to the nixies in the spectrum header. Every commit goes through
-  // `pipeline.patchSourceParams`; the server decides whether the delta
-  // is live-applicable (whitelist: `gain_db`, `antenna`, `agc`,
-  // `center_freq_hz`) or needs a rebuild. Same wire path as the advanced
-  // panel, just a curated subset of controls.
+  // Curated "quick" source controls — gain, antenna, AGC, DC tracking.
+  // Mounted next to the nixies in the spectrum header. Every commit goes
+  // through `pipeline.patchSourceParams`; the server decides whether the
+  // delta is live-applicable (whitelist: `gain_db`, `antenna`, `agc`,
+  // `dc_offset_correction`, `center_freq_hz`) or needs a rebuild. Same
+  // wire path as the advanced panel, just a curated subset of controls.
 
   import { pipeline } from '$lib/pipeline.svelte';
   import { applyControl } from '$lib/control/dispatch';
@@ -25,6 +25,7 @@
   let overallRange = $derived(channel?.overall_gain_range_db ?? null);
   let antennas = $derived(channel?.antennas ?? []);
   let hasAgc = $derived(channel?.has_agc ?? false);
+  let hasDcOffset = $derived(channel?.has_dc_offset_mode ?? false);
   // Driver-specific master-gain label/tooltip — see optionsModel.ts.
   // The toolbar label is short ("IF gain" minus the unit suffix) so it
   // doesn't crowd the row; the tooltip carries the full description.
@@ -36,6 +37,8 @@
   let gainDb = $derived(numberOr(params.gain_db, overallRange?.min ?? 0));
   let antenna = $derived(typeof params.antenna === 'string' ? (params.antenna as string) : '');
   let agc = $derived(params.agc === true);
+  // Default-on: only an explicit `false` disables the driver tracker.
+  let dcOffset = $derived(params.dc_offset_correction !== false);
 
   // Master-slider semantics — see optionsModel.ts. SDRplay-style
   // drivers report gain reduction; we invert the displayed value so
@@ -45,7 +48,9 @@
     overallRange ? gainDisplayValue(gainDb, overallRange, gainInverted) : gainDb,
   );
 
-  let visible = $derived(!!channel && (overallRange !== null || antennas.length > 1 || hasAgc));
+  let visible = $derived(
+    !!channel && (overallRange !== null || antennas.length > 1 || hasAgc || hasDcOffset),
+  );
 
   function numberOr(v: unknown, fallback: number): number {
     const n = typeof v === 'number' ? v : Number(v);
@@ -95,6 +100,10 @@
     if (v === agc) return;
     void applyControl('flow.src.agc', v);
   }
+  function commitDcOffset(v: boolean) {
+    if (v === dcOffset) return;
+    void applyControl('flow.src.dc_offset_correction', v);
+  }
 </script>
 
 {#if visible}
@@ -140,6 +149,17 @@
         onchange={(e) => commitAgc((e.currentTarget as HTMLInputElement).checked)}
       />
       <span>agc</span>
+    </label>
+  {/if}
+
+  {#if hasDcOffset}
+    <label class="flex items-center gap-1" title="driver DC-offset (LO-leakage) tracking">
+      <input
+        type="checkbox"
+        checked={dcOffset}
+        onchange={(e) => commitDcOffset((e.currentTarget as HTMLInputElement).checked)}
+      />
+      <span>dc</span>
     </label>
   {/if}
 {/if}

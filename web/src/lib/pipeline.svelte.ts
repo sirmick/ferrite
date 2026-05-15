@@ -244,16 +244,33 @@ class PipelineStore {
     }, `set ${id}.${key}`);
   }
 
-  /** Patch just the source's `params` object, preserving `type`. Shape
-   *  merges over the current `params`. */
+  /** Apply a partial source-params delta.
+   *
+   *  Sends ONLY the changed keys to the `src` block-params route; the
+   *  server merges them against its own authoritative `SourceConfig`.
+   *  This is deliberately *not* a client-side `{ ...this.source.params,
+   *  ...params }` merge + full `PATCH /api/source`: when the AI (or any
+   *  other writer) mutates the source concurrently, the browser's
+   *  `this.source` snapshot goes stale, and a client-merged full blob
+   *  would silently re-assert stale unrelated keys (e.g. flipping `agc`
+   *  / resetting `gain_db` while the user only toggled `dc`). Sending
+   *  the minimal delta keeps each control isolated.
+   *
+   *  After the write we re-read the authoritative config from the server
+   *  and overlay the driver readback, so the local mirror reflects real
+   *  state (including concurrent changes) rather than an optimistic
+   *  guess. SourceDialog's whole-config replace still uses
+   *  `patchSource`. */
   async patchSourceParams(params: Record<string, unknown>): Promise<ReconfigureResponse | null> {
-    const current = this.source;
-    if (!current) return null;
-    const next: SourceConfig = {
-      type: current.type,
-      params: { ...current.params, ...params },
-    };
-    return this.patchSource(next);
+    if (!this.source) return null;
+    return this.withBusy(async () => {
+      const resp = await patchBlockParams('src', params);
+      const server = await fetchSource();
+      this.source = applyReadback(server, resp.source_readback);
+      await this.refreshComposed();
+      this.sourceCaps = await fetchSourceCapabilities();
+      return resp;
+    }, 'patch source params');
   }
 
   async patchFlowgraph(doc: FlowgraphDoc): Promise<ReconfigureResponse | null> {

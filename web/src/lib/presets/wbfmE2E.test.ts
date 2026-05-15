@@ -174,6 +174,12 @@ function installFetch(state: ServerState) {
     if (method === 'POST' && blockParamsMatch) {
       const id = decodeURIComponent(blockParamsMatch[1]);
       Object.assign(state.blockValues[id] ?? (state.blockValues[id] = {}), body ?? {});
+      // Mirror the real server: an `src` block-params write is merged
+      // into the authoritative SourceConfig (merge_into_params), so a
+      // subsequent GET /api/source reflects it.
+      if (id === 'src') {
+        Object.assign(state.source.params, body ?? {});
+      }
       return okJson({
         applied: true,
         overall: 'downstream',
@@ -227,16 +233,21 @@ describe('WBFM preset — pipeline store end-to-end', () => {
     expect(pipeline.uiSinks.fft?.stream_id).toBe(1001);
   });
 
-  test('patchSourceParams routes a centre-frequency tune through /api/source', async () => {
+  test('patchSourceParams sends a minimal delta through the src block-params route', async () => {
     await pipeline.patchSourceParams({ center_freq_hz: 101_000_000 });
 
-    const patch = state.calls.find((c) => c.method === 'PATCH' && c.path === '/api/source');
-    expect(patch).toBeDefined();
-    expect((patch!.body as SourceConfig).params.center_freq_hz).toBe(101_000_000);
+    // The fix: a single-key tune must NOT client-merge the stale
+    // snapshot and PATCH the whole config — it sends just the delta to
+    // the src block-params route, and the server merges authoritatively.
+    const post = state.calls.find(
+      (c) => c.method === 'POST' && c.path === '/api/pipeline/blocks/src/params',
+    );
+    expect(post).toBeDefined();
+    expect(post!.body).toEqual({ center_freq_hz: 101_000_000 });
+    expect(state.calls.some((c) => c.method === 'PATCH' && c.path === '/api/source')).toBe(false);
 
     expect(pipeline.source?.params.center_freq_hz).toBe(101_000_000);
-    // refreshComposed pulls fresh blocks — the src mirror follows the
-    // server's new value.
+    // Mirror re-synced from the authoritative GET /api/source + blocks.
     expect(pipeline.blocks.src.values?.center_freq_hz).toBe(101_000_000);
   });
 
@@ -266,7 +277,7 @@ describe('WBFM preset — pipeline store end-to-end', () => {
 
     const methods = state.calls.map((c) => `${c.method} ${c.path}`);
     expect(methods).toContain('POST /api/preset');
-    expect(methods).toContain('PATCH /api/source');
+    expect(methods).toContain('POST /api/pipeline/blocks/src/params');
     expect(methods).toContain('POST /api/pipeline/blocks/demod/params');
   });
 });

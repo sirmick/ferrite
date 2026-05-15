@@ -44,6 +44,7 @@ export const RTLSDR_CAPS: DeviceCapabilities = {
       gains: [{ name: 'TUNER', range_db: { min: 0, max: 49.6, step: 0.1 } }],
       overall_gain_range_db: { min: 0, max: 49.6, step: 0.1 },
       has_agc: true,
+      has_dc_offset_mode: false,
     },
   ],
   settings: [
@@ -102,6 +103,7 @@ export const SDRPLAY_CAPS: DeviceCapabilities = {
       ],
       overall_gain_range_db: { min: 0, max: 68, step: 1 },
       has_agc: true,
+      has_dc_offset_mode: true,
     },
   ],
   settings: [

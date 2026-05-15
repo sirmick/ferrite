@@ -55,6 +55,8 @@ export interface OptionsState {
   antenna_choices: string[];
   agc: boolean;
   has_agc: boolean;
+  dc_offset_correction: boolean;
+  has_dc_offset_mode: boolean;
   gains: GainState[];
 }
 
@@ -381,6 +383,8 @@ export function defaultsFor(caps: DeviceCapabilities): OptionsState | null {
     antenna_choices: ch.antennas,
     agc: false,
     has_agc: ch.has_agc,
+    dc_offset_correction: true,
+    has_dc_offset_mode: ch.has_dc_offset_mode,
     gains,
   };
 }
@@ -621,6 +625,7 @@ export function toSourceConfig(caps: DeviceCapabilities, state: OptionsState): S
   if (state.bandwidth_hz !== null) params.bandwidth_hz = state.bandwidth_hz;
   if (state.antenna) params.antenna = state.antenna;
   if (state.has_agc) params.agc = state.agc;
+  if (state.has_dc_offset_mode) params.dc_offset_correction = state.dc_offset_correction;
   const gain = summarisedGain(state);
   if (gain !== null) params.gain_db = gain;
   return { type: 'SoapySource', params };

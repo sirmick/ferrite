@@ -116,6 +116,13 @@ pub struct SoapySourceParams {
     pub gain_db: Option<f64>,
     /// Optional AGC toggle. Drivers lacking AGC silently ignore the call.
     pub agc: Option<bool>,
+    /// Driver-level automatic DC-offset tracking. Suppresses the LO
+    /// leakage spike at the tuned centre on zero-IF SDRs (SDRplay
+    /// above ~30 MHz). HackRF's driver doesn't expose this — there
+    /// it's a no-op. Default `true`: leave on unless you have a
+    /// specific reason (diagnostic A/B, a signal sitting exactly at
+    /// carrier that the DC tracker is fighting, or a driver bug).
+    pub dc_offset_correction: bool,
     /// Rx channel index. Most drivers only have channel 0.
     pub channel: usize,
     /// Driver-specific settings (`SoapySDRDevice_writeSetting`) — keys
@@ -136,6 +143,7 @@ impl Default for SoapySourceParams {
             antenna: None,
             gain_db: None,
             agc: None,
+            dc_offset_correction: true,
             channel: 0,
             settings: BTreeMap::new(),
         }
@@ -323,38 +331,43 @@ impl SoapySource {
             .set_frequency(dir, ch, params.center_freq_hz, ())
             .with_context(|| format!("set center_freq={}", params.center_freq_hz))?;
 
-        // Enable the driver's automatic DC-offset tracking when
-        // supported. Zero-IF SDRs (HackRF everywhere, SDRplay above
-        // ~30 MHz) leak LO energy onto the ADC as a bright spike at
-        // the tuned centre. Drivers that implement Soapy's DC-offset-
-        // mode interface (SDRplay does; SoapyHackRF does not) handle
-        // this in the analog / early-DSP path — no IIR pole in our
-        // chain, no few-Hz notch at carrier, just a clean signal
-        // post-correction. Soft failure: if the driver reports
-        // support but the actual call fails (rare), log and continue;
-        // the spike's an annoyance, not a blocker.
+        // Driver-level automatic DC-offset tracking. Zero-IF SDRs
+        // (HackRF everywhere, SDRplay above ~30 MHz) leak LO energy
+        // onto the ADC as a bright spike at the tuned centre. Drivers
+        // that implement Soapy's DC-offset-mode interface (SDRplay
+        // does; SoapyHackRF does not) handle this in the analog /
+        // early-DSP path. Gated by `params.dc_offset_correction` so
+        // the operator can A/B or work around a buggy driver
+        // implementation. Soft failure: if the driver reports support
+        // but the actual call fails (rare), log and continue.
         match device.has_dc_offset_mode(dir, ch) {
             Ok(true) => {
-                if let Err(err) = device.set_dc_offset_mode(dir, ch, true) {
+                if let Err(err) = device.set_dc_offset_mode(dir, ch, params.dc_offset_correction) {
                     tracing::warn!(
                         ?err,
-                        "set_dc_offset_mode(true) failed despite has_dc_offset_mode=true \
-                         — driver may be buggy; leaving DC tracking off"
+                        enable = params.dc_offset_correction,
+                        "set_dc_offset_mode failed despite has_dc_offset_mode=true \
+                         — driver may be buggy; leaving as-is"
                     );
                 } else {
                     tracing::info!(
                         target: "driver",
-                        "DC-offset tracking enabled (driver-level)"
+                        enable = params.dc_offset_correction,
+                        "DC-offset tracking {}",
+                        if params.dc_offset_correction { "enabled" } else { "disabled" }
                     );
                 }
             }
             Ok(false) => {
                 // No driver-side correction available (HackRF, some RTL-SDR
                 // backends). The off-tune-and-VFO-shift dance remains the
-                // operational workaround on these.
+                // operational workaround on these. The `dc_offset_correction`
+                // param has no effect — log a debug breadcrumb for parity.
                 tracing::debug!(
                     target: "driver",
-                    "driver has no DC-offset-mode support; LO spike not auto-suppressed"
+                    "driver has no DC-offset-mode support; \
+                     `dc_offset_correction={}` is a no-op",
+                    params.dc_offset_correction
                 );
             }
             Err(err) => {
@@ -608,14 +621,14 @@ impl Block for SoapySource {
                     ai_notes: "Receive channel index. 0 for single-tuner SDRs (most common case).",
                 },
             ],
-            ai_notes: "Hardware IQ source via SoapySDR. The actual radio. Live-tunable params: centre, gain, antenna, AGC. Driver-specific gain stages, antenna ports, and notches are documented in the driver-specific operator notes appended to the system prompt.",
+            ai_notes: "Hardware IQ source via SoapySDR. The actual radio. Live-tunable params: centre, gain, antenna, AGC, dc_offset_correction. `dc_offset_correction` (bool, default true) drives the driver's automatic DC-offset tracking — suppresses the LO-leakage spike at the tuned centre on zero-IF SDRs (SDRplay honours it; HackRF's driver doesn't expose DC-offset mode, so there it's a no-op — use the off-tune-and-VFO-shift dance). Leave on unless A/B-testing or working around a buggy tracker. Driver-specific gain stages, antenna ports, and notches are documented in the driver-specific operator notes appended to the system prompt.",
         }
     }
 
     /// Apply the live-tunable params (`center_freq_hz`, `gain_db`,
-    /// `antenna`, `agc`) directly against the open device, no stream
-    /// restart. Anything outside that whitelist defers to a rebuild by
-    /// returning `Ok(false)`.
+    /// `antenna`, `agc`, `dc_offset_correction`) directly against the
+    /// open device, no stream restart. Anything outside that whitelist
+    /// defers to a rebuild by returning `Ok(false)`.
     ///
     /// Most Soapy drivers serialise device-side calls internally, so
     /// concurrent `setFrequency`/`setGain` against an active `RxStream`
@@ -626,7 +639,13 @@ impl Block for SoapySource {
         let Some(obj) = delta.as_object() else {
             return Ok(false);
         };
-        const LIVE_KEYS: &[&str] = &["center_freq_hz", "gain_db", "antenna", "agc"];
+        const LIVE_KEYS: &[&str] = &[
+            "center_freq_hz",
+            "gain_db",
+            "antenna",
+            "agc",
+            "dc_offset_correction",
+        ];
         if !obj.keys().all(|k| LIVE_KEYS.contains(&k.as_str())) {
             return Ok(false);
         }
@@ -654,6 +673,13 @@ impl Block for SoapySource {
             // rather than killing the live path.
             if let Err(err) = self.device.set_gain_mode(dir, ch, v) {
                 tracing::warn!(?err, agc = v, "live set_gain_mode failed (ignored)");
+            }
+        }
+        if let Some(v) = obj.get("dc_offset_correction").and_then(|v| v.as_bool()) {
+            // Drivers without DC-offset mode (HackRF) return Err — soft-fail
+            // exactly like AGC so the live path stays alive.
+            if let Err(err) = self.device.set_dc_offset_mode(dir, ch, v) {
+                tracing::warn!(?err, enable = v, "live set_dc_offset_mode failed (ignored)");
             }
         }
         Ok(true)

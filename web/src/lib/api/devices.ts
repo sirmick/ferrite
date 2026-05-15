@@ -31,6 +31,8 @@ export interface RxChannelCapabilities {
   gains: GainElement[];
   overall_gain_range_db: RangeSpec | null;
   has_agc: boolean;
+  /** Driver implements Soapy DC-offset-correction mode (SDRplay yes, HackRF no). */
+  has_dc_offset_mode: boolean;
 }
 
 export interface DeviceInfo {

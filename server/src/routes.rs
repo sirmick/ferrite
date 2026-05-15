@@ -485,11 +485,19 @@ pub async fn patch_pipeline_block(
     Path(id): Path<String>,
     Json(delta): Json<serde_json::Value>,
 ) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
+    let is_src = id == ferrite_runtime::SOURCE_ID;
     let plan = state
         .apply_block_params(&id, delta)
         .await
         .map_err(|e| bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
-    Ok(Json(reconfigure_response(plan)))
+    let mut resp = reconfigure_response(plan);
+    // Source goes through `patch_source` internally; mirror the
+    // `/api/source` handler so a single-key `src` write still gets the
+    // driver readback for optimistic-state reconciliation.
+    if is_src {
+        resp.source_readback = state.source_readback().await;
+    }
+    Ok(Json(resp))
 }
 
 /// `GET /api/source/capabilities` — probe the currently-active source

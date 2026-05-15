@@ -242,6 +242,7 @@ mod tests {
                 gains: vec![],
                 overall_gain_range_db: None,
                 has_agc: false,
+                has_dc_offset_mode: false,
             }],
             settings: vec![],
         }

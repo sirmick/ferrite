@@ -63,6 +63,7 @@
   let overallGainRange = $derived(channel?.overall_gain_range_db ?? null);
   let antennas = $derived(channel?.antennas ?? []);
   let hasAgc = $derived(channel?.has_agc ?? false);
+  let hasDcOffset = $derived(channel?.has_dc_offset_mode ?? false);
   // Driver-specific master-gain label/tooltip — see gainLabelFor /
   // gainDescriptionFor in optionsModel.ts. SDRplay's "overall" gain
   // only spans IFGR; we relabel to "IF gain (dB)" so users don't expect
@@ -87,6 +88,9 @@
     typeof params.antenna === 'string' ? (params.antenna as string) : (antennas[0] ?? ''),
   );
   let currentAgc = $derived(params.agc === true);
+  // Default-on: absent param means the driver tracker is engaged (the
+  // SoapySource default). Only an explicit `false` turns it off.
+  let currentDcOffset = $derived(params.dc_offset_correction !== false);
 
   function numberOr(v: unknown, fallback: number): number {
     const n = typeof v === 'number' ? v : Number(v);
@@ -265,6 +269,21 @@
             checked={currentAgc}
             disabled={busy || pending !== null}
             onchange={(e) => commit('agc', (e.currentTarget as HTMLInputElement).checked)}
+          />
+        </label>
+      {/if}
+      {#if hasDcOffset}
+        <label
+          class="row"
+          title="set_dc_offset_mode — driver's automatic DC-offset (LO-leakage) tracking"
+        >
+          <span class="label">DC tracking</span>
+          <input
+            type="checkbox"
+            checked={currentDcOffset}
+            disabled={busy || pending !== null}
+            onchange={(e) =>
+              commit('dc_offset_correction', (e.currentTarget as HTMLInputElement).checked)}
           />
         </label>
       {/if}

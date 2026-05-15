@@ -168,6 +168,10 @@ pub struct RxChannelCapabilities {
     pub gains: Vec<GainElement>,
     pub overall_gain_range_db: Option<RangeSpec>,
     pub has_agc: bool,
+    /// Driver implements Soapy's automatic DC-offset-correction mode
+    /// (`hasDCOffsetMode`). SDRplay does; SoapyHackRF does not. Drives
+    /// whether the UI shows the DC-tracking toggle.
+    pub has_dc_offset_mode: bool,
 }
 
 /// One driver-specific setting exposed via `SoapySDRDevice_getSettingInfo`.
@@ -561,6 +565,12 @@ fn probe_rx_channel(device: *mut SoapySDRDevice, channel: usize) -> Result<RxCha
     // that, mirroring the previous `unwrap_or(false)`.
     let has_agc = check_last_status().is_ok() && has_agc;
 
+    // SAFETY: device is open. Same status-swallow pattern as has_agc —
+    // drivers lacking the interface set the error flag.
+    let has_dc_offset_mode =
+        unsafe { soapysdr_sys::SoapySDRDevice_hasDCOffsetMode(device, SOAPY_RX, channel) };
+    let has_dc_offset_mode = check_last_status().is_ok() && has_dc_offset_mode;
+
     Ok(RxChannelCapabilities {
         index: channel,
         antennas,
@@ -571,6 +581,7 @@ fn probe_rx_channel(device: *mut SoapySDRDevice, channel: usize) -> Result<RxCha
         gains,
         overall_gain_range_db,
         has_agc,
+        has_dc_offset_mode,
     })
 }
 
@@ -719,6 +730,7 @@ pub fn print_capabilities(caps: &DeviceCapabilities) {
             println!("    gain_total_db: {}", format_range(r));
         }
         println!("    has_agc: {}", ch.has_agc);
+        println!("    has_dc_offset_mode: {}", ch.has_dc_offset_mode);
         for g in &ch.gains {
             println!("    gain.{}_db: {}", g.name, format_range(g.range_db));
         }
@@ -1188,6 +1200,7 @@ mod tests {
                     step: Some(0.1),
                 }),
                 has_agc: true,
+                has_dc_offset_mode: true,
             }],
         };
         let json = serde_json::to_value(&caps).expect("serialize");
@@ -1218,6 +1231,7 @@ mod tests {
             "gains",
             "overall_gain_range_db",
             "has_agc",
+            "has_dc_offset_mode",
         ] {
             assert!(chan.get(key).is_some(), "missing channel key: {key}");
         }
@@ -1225,5 +1239,6 @@ mod tests {
         assert!(chan["sample_rate_ranges_hz"][0]["step"].is_null());
         assert_eq!(chan["gains"][0]["range_db"]["step"].as_f64(), Some(0.1));
         assert_eq!(chan["has_agc"], true);
+        assert_eq!(chan["has_dc_offset_mode"], true);
     }
 }
