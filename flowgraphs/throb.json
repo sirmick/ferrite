@@ -1,0 +1,156 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "throb",
+  "label": "Throb (slow MFSK QRP)",
+  "description": "Throb is a slow, narrow MFSK keyboard mode for weak-signal QRP work \u2014 a small set of dual-tone symbols at a few baud. THROB4 sends 4 symbols/sec in ~72 Hz. On the waterfall it's a sparse pattern of short tone pairs. Very rare on the air. Decoded text streams under decoder::fldigi (vendored fldigi throb core). Tune so the signal sits ~1500 Hz in the USB audio (dial \u2248 signal \u2212 1.5 kHz).",
+  "ai_notes": "Throb (slow dual-tone MFSK, vendored fldigi throb core). THROB4 default; variants via FldigiDemod mode: throb1/2/4, throbx1/2/4. Very low activity \u2014 niche QRP. Tune dial \u2248 signal \u2212 1500 Hz. Output: `tail decoder --category fldigi`.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/THROB",
+  "sample_path": "samples/sigidwiki/THROB4.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/THROB4.png",
+  "environments": [
+    "node",
+    "browser"
+  ],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 14083500.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 8000.0
+      }
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 8000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
+    },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "neural_enable": false,
+        "notch_enable": false,
+        "neural_attenuation_db": 18.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "buffer_samples": 8192
+      }
+    },
+    "throb": {
+      "type": "FldigiDemod",
+      "placement": "node",
+      "params": {
+        "mode": "throb4",
+        "sample_rate_hz": 8000.0,
+        "afc": true
+      }
+    }
+  },
+  "wires": [
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "throb.in"
+    ],
+    [
+      "audio_tee.out1",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ]
+  ]
+}

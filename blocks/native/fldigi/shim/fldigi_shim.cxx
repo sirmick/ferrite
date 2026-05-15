@@ -21,6 +21,8 @@
 #include "cw.h"              // vendored: class cw
 #include "psk.h"             // vendored: class psk
 #include "mt63.h"            // vendored: class mt63
+#include "throb.h"           // vendored: class throb
+#include "dominoex.h"        // vendored: class dominoex
 #include "ptt.h"             // shim
 #include "winkeyer.h"        // shim
 #include "nanoIO.h"          // shim
@@ -163,6 +165,8 @@ _shim_window *dlgViewer = &s_dlgViewer;  // rtty.cxx derefs unconditionally
 bool mailserver = false;
 bool mailclient = false;
 void set_phase(double, double, bool) {}
+void set_video(double *, int, bool) {}
+void put_sec_char(char) {}  // secondary channel — primary decode via put_rx_char
 void put_Bandwidth(int) {}
 void center_rxfilt_at_track() {}
 void pskmail_notify_s2n(double, double, double) {}
@@ -262,6 +266,18 @@ static modem *make_modem(const std::string &id) {
 	if (id == "mt63-1000L") return new mt63(MODE_MT63_1000L);
 	if (id == "mt63-2000S") return new mt63(MODE_MT63_2000S);
 	if (id == "mt63-2000L") return new mt63(MODE_MT63_2000L);
+	if (id == "throb1")  return new throb(MODE_THROB1);
+	if (id == "throb2")  return new throb(MODE_THROB2);
+	if (id == "throb4")  return new throb(MODE_THROB4);
+	if (id == "throbx1") return new throb(MODE_THROBX1);
+	if (id == "throbx2") return new throb(MODE_THROBX2);
+	if (id == "throbx4") return new throb(MODE_THROBX4);
+	if (id == "dominoex4")  return new dominoex(MODE_DOMINOEX4);
+	if (id == "dominoex8")  return new dominoex(MODE_DOMINOEX8);
+	if (id == "dominoex11") return new dominoex(MODE_DOMINOEX11);
+	if (id == "dominoex16") return new dominoex(MODE_DOMINOEX16);
+	if (id == "dominoex22") return new dominoex(MODE_DOMINOEX22);
+	if (id == "dominoex44") return new dominoex(MODE_DOMINOEX44);
 	return 0;
 }
 

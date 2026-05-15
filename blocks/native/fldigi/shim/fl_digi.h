@@ -88,6 +88,8 @@ extern _shim_window *dlgViewer;
 extern bool mailserver;
 extern bool mailclient;
 extern void set_phase(double phase, double quality, bool highlight);
+extern void set_video(double *, int, bool highlight);
+extern void put_sec_char(char chr);
 extern void put_Bandwidth(int bw);
 extern void center_rxfilt_at_track();
 extern void pskmail_notify_s2n(double, double, double);

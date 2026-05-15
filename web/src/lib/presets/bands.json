@@ -360,6 +360,16 @@
           "mode": "USB"
         },
         {
+          "label": "THROB",
+          "hz": 7088500,
+          "mode": "USB"
+        },
+        {
+          "label": "DominoEX",
+          "hz": 7073500,
+          "mode": "USB"
+        },
+        {
           "label": "SSB",
           "hz": 7200000,
           "mode": "LSB"
@@ -402,6 +412,16 @@
         {
           "label": "MT63",
           "hz": 14107500,
+          "mode": "USB"
+        },
+        {
+          "label": "THROB",
+          "hz": 14083500,
+          "mode": "USB"
+        },
+        {
+          "label": "DominoEX",
+          "hz": 14075500,
           "mode": "USB"
         },
         {
