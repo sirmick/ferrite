@@ -322,6 +322,45 @@ impl SoapySource {
         device
             .set_frequency(dir, ch, params.center_freq_hz, ())
             .with_context(|| format!("set center_freq={}", params.center_freq_hz))?;
+
+        // Enable the driver's automatic DC-offset tracking when
+        // supported. Zero-IF SDRs (HackRF everywhere, SDRplay above
+        // ~30 MHz) leak LO energy onto the ADC as a bright spike at
+        // the tuned centre. Drivers that implement Soapy's DC-offset-
+        // mode interface (SDRplay does; SoapyHackRF does not) handle
+        // this in the analog / early-DSP path — no IIR pole in our
+        // chain, no few-Hz notch at carrier, just a clean signal
+        // post-correction. Soft failure: if the driver reports
+        // support but the actual call fails (rare), log and continue;
+        // the spike's an annoyance, not a blocker.
+        match device.has_dc_offset_mode(dir, ch) {
+            Ok(true) => {
+                if let Err(err) = device.set_dc_offset_mode(dir, ch, true) {
+                    tracing::warn!(
+                        ?err,
+                        "set_dc_offset_mode(true) failed despite has_dc_offset_mode=true \
+                         — driver may be buggy; leaving DC tracking off"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "driver",
+                        "DC-offset tracking enabled (driver-level)"
+                    );
+                }
+            }
+            Ok(false) => {
+                // No driver-side correction available (HackRF, some RTL-SDR
+                // backends). The off-tune-and-VFO-shift dance remains the
+                // operational workaround on these.
+                tracing::debug!(
+                    target: "driver",
+                    "driver has no DC-offset-mode support; LO spike not auto-suppressed"
+                );
+            }
+            Err(err) => {
+                tracing::debug!(?err, "has_dc_offset_mode query failed (ignored)");
+            }
+        }
         if let Some(bw) = params.bandwidth_hz {
             device
                 .set_bandwidth(dir, ch, bw)
