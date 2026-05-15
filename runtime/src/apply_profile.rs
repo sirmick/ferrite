@@ -43,6 +43,15 @@ pub struct Profile {
     /// decode — frees WS bandwidth and stops the browser AudioWorklet
     /// from being fed silence.
     pub audio: bool,
+    /// When false, blocks tagged `"when": { "dc_block": true }` are
+    /// removed. The intended use is the DC-blocker IIR that sits
+    /// between source and channelizer to kill the zero-IF LO spike
+    /// when the operator tunes directly on-target. Default on — the
+    /// spike's a constant annoyance on HackRF (zero-IF everywhere)
+    /// and SDRplay (zero-IF above 30 MHz), and the few-Hz notch the
+    /// blocker carves out is invisible to every signal except CW
+    /// directly at carrier.
+    pub dc_block: bool,
     /// Override placement for blocks tagged `"placement_role": "demod"`.
     /// `None` leaves the preset's authored placement in effect; on
     /// flip, the bridge crossing relocates automatically because the
@@ -54,6 +63,7 @@ impl Default for Profile {
     fn default() -> Self {
         Self {
             audio: true,
+            dc_block: true,
             demod_placement: None,
         }
     }
@@ -67,6 +77,7 @@ impl Profile {
     fn value(&self, key: &str) -> Option<Value> {
         match key {
             "audio" => Some(Value::Bool(self.audio)),
+            "dc_block" => Some(Value::Bool(self.dc_block)),
             _ => None,
         }
     }
@@ -151,6 +162,7 @@ mod tests {
             &mut doc,
             &Profile {
                 audio: false,
+                dc_block: true,
                 demod_placement: None,
             },
         );
@@ -196,6 +208,7 @@ mod tests {
             &mut doc,
             &Profile {
                 audio: false,
+                dc_block: true,
                 demod_placement: None,
             },
         );
@@ -221,6 +234,7 @@ mod tests {
             &mut doc,
             &Profile {
                 audio: true,
+                dc_block: true,
                 demod_placement: Some(Environment::Browser),
             },
         );
@@ -271,6 +285,7 @@ mod tests {
             &mut doc,
             &Profile {
                 audio: false,
+                dc_block: true,
                 demod_placement: None,
             },
         );
@@ -307,6 +322,7 @@ mod tests {
     fn profile_round_trips_through_json() {
         let p = Profile {
             audio: false,
+            dc_block: true,
             demod_placement: Some(Environment::Browser),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -356,6 +372,7 @@ mod tests {
         );
         let profile = Profile {
             audio: false,
+            dc_block: true,
             demod_placement: None,
         };
         apply_profile(&mut doc, &profile);

@@ -431,6 +431,15 @@ async fn ai_activity_layer(
     let path = request.uri().path().to_string();
     let should_log = (note.is_some() || command.is_some()) && method != axum::http::Method::GET;
 
+    // Run the handler first, log after — so the `ai::activity` event
+    // reflects a *completed* mutation. The UI's refresh-on-activity
+    // path (`pipeline.refreshFromServer()` in the chat store) reads
+    // server state immediately on every activity log line; if the log
+    // fires before the handler commits, the UI reads pre-mutation
+    // state and the Nixie / source label show stale values until the
+    // next activity event eventually catches up. Order matters.
+    let response = next.run(request).await;
+
     if should_log {
         // Pick the cleanest summary the headers gave us. The structured
         // `command` / `note` fields ride along so a UI can render them
@@ -445,13 +454,14 @@ async fn ai_activity_layer(
             target: "ai::activity",
             method = %method,
             path = %path,
+            status = %response.status().as_u16(),
             command = command.as_deref().unwrap_or(""),
             note = note.as_deref().unwrap_or(""),
             "{summary}",
         );
     }
 
-    next.run(request).await
+    response
 }
 
 /// Headless recording mode: start the pipeline, sleep `secs` (or until

@@ -24,6 +24,7 @@ pub mod audio_nr;
 pub mod audio_sink;
 pub mod block;
 pub mod channelizer;
+pub mod dc_blocker;
 pub mod decimator;
 pub mod dtmf_audio_source;
 pub mod dtmf_decoder;
@@ -81,6 +82,7 @@ pub use block::{
     MAX_PORTS,
 };
 pub use channelizer::{Channelizer, ChannelizerParams};
+pub use dc_blocker::{DcBlocker, DcBlockerParams};
 pub use decimator::{Decimator, DecimatorParams};
 pub use dtmf_audio_source::{DtmfAudioSource, DtmfAudioSourceParams};
 pub use dtmf_decoder::{DtmfDecoder, DtmfDecoderParams};
