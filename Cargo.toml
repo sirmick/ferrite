@@ -11,6 +11,7 @@ members = [
     "blocks/native/rtl-ais",
     "blocks/native/rtl_433",
     "blocks/native/ft8",
+    "blocks/native/wsprd",
     "runtime",
     "tools/ferrite-ctl",
 ]

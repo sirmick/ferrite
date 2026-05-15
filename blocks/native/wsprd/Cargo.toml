@@ -1,0 +1,30 @@
+[package]
+name        = "ferrite-wsprd"
+version     = "0.9.0"
+edition.workspace      = true
+rust-version.workspace = true
+# Vendored wsprd (rtlsdr-wsprd extraction of WSJT-X's WSPR decoder) is
+# GPL-3.0 — same posture as the vendored multimon-ng. The workspace
+# consumer is GPL anyway.
+license     = "GPL-3.0-or-later"
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+description = "Vendored wsprd (WSPR detector/decoder, GPL-3.0) with FFTW→kiss_fft swap + safe Rust wrappers. Builds for native and wasm32 (Placement::Either)."
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
+
+[build-dependencies]
+cc = "1"
+
+# Diagnostic CLI — point at a 120 s window of interleaved f32 I/Q at
+# 375 Hz (e.g. the vendored reference signal) and dump every decoded
+# WSPR spot. Offline triage + the smoke target for the e2e suite.
+[[bin]]
+name = "decode-wspr-iq"
+path = "src/bin/decode_wspr_iq.rs"
+required-features = []

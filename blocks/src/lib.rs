@@ -67,6 +67,8 @@ pub mod stereo_decoder;
 pub mod tee_iq_f32;
 pub mod tee_real_f32;
 pub mod ws_bridge;
+#[cfg(feature = "wspr")]
+pub mod wspr;
 
 #[cfg(feature = "adsb")]
 pub use adsb::{AdsbDemod, AdsbDemodParams};
@@ -124,6 +126,8 @@ pub use ws_bridge::{
     BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxF32, WsBridgeRxParams,
     WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
 };
+#[cfg(feature = "wspr")]
+pub use wspr::{WsprDemod, WsprDemodParams};
 
 /// Marks an `impl Block for T` so `T` is added to [`registry`].
 ///
@@ -224,6 +228,11 @@ mod tests {
         assert!(
             names.contains("Ft8Demod"),
             "Ft8Demod missing from registry under `ft8` feature (found: {names:?})",
+        );
+        #[cfg(feature = "wspr")]
+        assert!(
+            names.contains("WsprDemod"),
+            "WsprDemod missing from registry under `wspr` feature (found: {names:?})",
         );
     }
 
