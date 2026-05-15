@@ -3,7 +3,7 @@
   "name": "wbfm_stereo",
   "label": "FM broadcast (stereo)",
   "description": "Wideband FM broadcast with pilot-locked stereo decoding \u2014 87.9\u2013107.9 MHz. Falls back to L+R when the station isn't stereo.",
-  "ai_notes": "Wideband FM broadcast with stereo decoding. Adds StereoDecoder + AudioNrStereo to the wbfm chain. Falls back to mono when the 19 kHz pilot is below `lock_threshold`. Watch the events port for stereo-lock status; if the AI is asked \"why is this in mono?\" check the pilot amplitude before retuning.",
+  "ai_notes": "Wideband FM broadcast, pilot-decoded stereo. Falls back to mono when the 19 kHz pilot is below `lock_threshold`; the events port carries stereo-lock status. If asked \"why is this mono?\" check pilot amplitude before retuning.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/FM_Broadcast_Radio",
   "sample_path": "samples/sigidwiki/WFM.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Stereo_left_right_fmbroadcast.jpg",
@@ -105,9 +105,7 @@
       "params": {
         "sample_rate_hz": 48000.0,
         "deemph_enable": true,
-        "deemph_tau_us": 75.0,
-        "neural_enable": true,
-        "neural_attenuation_db": 18.0
+        "deemph_tau_us": 75.0
       }
     },
     "audio_l": {

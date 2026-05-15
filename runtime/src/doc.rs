@@ -225,6 +225,7 @@ mod tests {
                 "logmag",
                 "rds",
                 "rssi",
+                "shaper",
                 "src",
                 "tee"
             ],
@@ -233,7 +234,9 @@ mod tests {
         // FmDemod + TeeRealF32 (`audio_tee`) feeding both the RDS
         // decoder and the browser audio chain across a `WsBridgeTxF32`
         // pair. Removes `chan_tee` and `demod_rds`; adds `audio_tee`.
-        assert_eq!(doc.wires.len(), 14);
+        // +1 wire vs. B2: the `AudioShaper` (15 kHz LPF + DC block) now
+        // sits on the audio branch — `audio_tee.out1 → shaper → decim`.
+        assert_eq!(doc.wires.len(), 15);
         // Spot-check one block's params survived the round-trip. Demod
         // now runs at the 240 kHz channel rate, not the 48 kHz audio
         // rate — the RealF32Decimator handles the final drop.
@@ -274,7 +277,10 @@ mod tests {
         );
         assert_eq!(
             doc.blocks.keys().cloned().collect::<Vec<_>>(),
-            vec!["audio", "audio_nr", "chan", "demod", "fft", "logmag", "resamp", "src", "tee",],
+            vec![
+                "audio", "audio_nr", "chan", "demod", "fft", "logmag", "resamp", "shaper", "src",
+                "tee",
+            ],
         );
         let demod = doc.blocks.get("demod").expect("demod block present");
         assert_eq!(demod.type_name, "AmDemod");

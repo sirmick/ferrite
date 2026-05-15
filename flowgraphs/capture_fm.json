@@ -3,7 +3,7 @@
   "name": "capture_fm",
   "label": "FM-band capture",
   "description": "Writes a wideband slice of the FM broadcast band to /tmp/ferrite-fm-100.100mhz_iq-s16.wav (plus sidecar) for offline diagnosis. All-native graph: Source placeholder \u2192 FileIqSink, no browser side. Run via `ferrited --flowgraph capture_fm.json --source-type SoapySource --source-args \"driver=sdrplay\" --agc true --source-bandwidth-hz 1536000 --start`. Stop ferrited after ~10s \u2014 FileIqSink's max_seconds cap also truncates the write.",
-  "ai_notes": "[REVIEW: prefer `capture iq` live] Headless wideband IQ recording of the FM broadcast band. Writes IQ to disk; no UI fft_ports \u2014 switching to this preset freezes the user's waterfall. The live `capture iq` command on a running pipeline is the modern path; this preset survives for backward-compat scripts.",
+  "ai_notes": "Headless wideband IQ recording of the FM broadcast band; writes IQ to disk. No UI fft_ports, so loading this preset freezes the waterfall. For a live capture on a running pipeline use `capture iq`.",
   "environments": ["node"],
   "blocks": {
     "src": {

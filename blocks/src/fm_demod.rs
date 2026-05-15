@@ -17,6 +17,18 @@
 //! the ±π phase wrap, DC offset, and transient noise more gracefully.
 //! Same 1:1 rate contract; the block surface is unchanged.
 //!
+//! ### Amplitude limiter
+//!
+//! Every sample is normalised to unit magnitude before the
+//! discriminator (a hard limiter, as in a hardware FM IF strip). FM
+//! carries information in phase only, so this strips AM noise, impulse
+//! crackle, and fading without altering the recovered frequency. It is
+//! safe for *all* downstream consumers — voice presets and the
+//! AIS / AX.25-packet / POCSAG-FLEX data decoders alike — because it
+//! touches amplitude only. (Audio band-limiting and de-emphasis, which
+//! would break those data decoders, live in the separate `AudioShaper`
+//! / `AudioNr` blocks, wired only onto audio presets.)
+//!
 //! `freqdem_create` wants `kf ∈ (0, 0.5)` (fraction of sample rate).
 //! Broadcast FM at 240 kS/s with ±75 kHz peak is `kf = 0.3125`; NBFM
 //! at 50 kS/s with ±5 kHz is `kf = 0.1`. The constructor validates the
@@ -150,7 +162,7 @@ impl Block for FmDemod {
                     ai_notes: "Maximum expected FM peak deviation. WBFM broadcast = 75 kHz, NBFM voice = 2.5–5 kHz, NWR weather = 5 kHz. Too low = clipping at peaks; too high = lower audio output.",
                 },
             ],
-            ai_notes: "FM demodulator (atan2 discriminator). Outputs the instantaneous frequency as real-valued audio. Use for WBFM broadcast, NBFM voice (ham 2m/70cm, marine VHF, weather), and any other FM mode — `max_deviation_hz` is the discriminator.",
+            ai_notes: "FM demodulator (limiter + phase discriminator). Hard-limits the envelope (FM is constant-envelope) then outputs instantaneous frequency as real audio. Raw, flat, DC-coupled output — feeds voice presets AND the AIS/packet/pager data decoders. Audio band-limiting/de-emphasis is NOT here (would break the data decoders); use the `AudioShaper` + `AudioNr` blocks on audio presets. `max_deviation_hz`: WBFM 75 kHz, NBFM voice 2.5–5 kHz.",
         }
     }
 
@@ -196,12 +208,28 @@ impl Block for FmDemod {
         let n = src.len().min(dst.len());
         for i in 0..n {
             let x = src[i];
+            // Hard amplitude limiter ahead of the discriminator. FM is
+            // constant-envelope: information is in the *phase*, not the
+            // magnitude. Normalising |x|→1 removes AM noise, impulse
+            // crackle, and fading-induced amplitude swings without
+            // touching the instantaneous frequency — exactly what a
+            // hardware FM IF limiter does. Safe for every consumer
+            // (voice *and* the AIS/packet/pager data decoders): it
+            // changes amplitude only, never frequency. The ε floor
+            // keeps a near-zero sample (no signal) from exploding into
+            // full-scale noise.
+            let mag = x.re.hypot(x.im);
+            let (re, im) = if mag > 1e-6 {
+                (x.re / mag, x.im / mag)
+            } else {
+                (0.0, 0.0)
+            };
             // Clamp to ±1 — anything past max_deviation is noise (random
             // phase ramps up to ±π → output ±fs/(2·max_dev) which can be
             // many ×). Letting that through saturates downstream listeners
             // (FileAudioSink → i16 clip) and obscures real bursts of
             // narrowband signal that *do* sit inside ±max_dev.
-            dst[i] = inner.demodulate(x.re, x.im).clamp(-1.0, 1.0);
+            dst[i] = inner.demodulate(re, im).clamp(-1.0, 1.0);
         }
 
         let mut w = Work::new();
@@ -325,6 +353,48 @@ mod tests {
         let warm = 64;
         let mean: f32 = out[warm..].iter().sum::<f32>() / (n - warm) as f32;
         assert!((mean + 0.5).abs() < 0.02, "expected ~-0.5, got mean {mean}");
+    }
+
+    #[test]
+    fn limiter_rejects_amplitude_modulation_keeps_frequency() {
+        // Same FM tone, once clean and once with heavy (0.05–1.0)
+        // amplitude modulation riding on it. The limiter must make the
+        // recovered frequency identical — proving it strips AM without
+        // touching phase (this is also what keeps the data decoders
+        // safe: amplitude-only change, frequency preserved).
+        let params = FmDemodParams {
+            sample_rate_hz: 240_000.0,
+            max_deviation_hz: 75_000.0,
+        };
+        let f_test = params.max_deviation_hz / 3.0;
+        let step = TAU * f_test / params.sample_rate_hz;
+        let n = 1024;
+        let clean: Vec<Complex<f32>> = (0..n)
+            .map(|i| {
+                let t = step * i as f32;
+                Complex::new(t.cos(), t.sin())
+            })
+            .collect();
+        let am: Vec<Complex<f32>> = (0..n)
+            .map(|i| {
+                let t = step * i as f32;
+                // Envelope swings wildly; phase identical to `clean`.
+                let env = 0.05 + 0.95 * (0.5 + 0.5 * (0.01 * i as f32).sin());
+                Complex::new(env * t.cos(), env * t.sin())
+            })
+            .collect();
+        let mut d1 = FmDemod::new(params).unwrap();
+        let mut d2 = FmDemod::new(params).unwrap();
+        let a = run(&mut d1, &clean);
+        let b = run(&mut d2, &am);
+        let warm = 64;
+        let mean_a: f32 = a[warm..].iter().sum::<f32>() / (n - warm) as f32;
+        let mean_b: f32 = b[warm..].iter().sum::<f32>() / (n - warm) as f32;
+        assert!(
+            (mean_a - mean_b).abs() < 0.01,
+            "limiter failed: clean mean {mean_a} vs AM mean {mean_b}"
+        );
+        assert!((mean_a - 1.0 / 3.0).abs() < 0.02, "freq off: {mean_a}");
     }
 
     #[test]

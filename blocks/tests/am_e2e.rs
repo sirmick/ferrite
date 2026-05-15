@@ -1,19 +1,24 @@
-//! End-to-end AM round-trip against the sigidwiki AM_IQ recording.
+//! End-to-end AM regression test.
 //!
-//! Loads `samples/sigidwiki/AM_IQ_5s.wav` — a 5-second slice of the
-//! upstream `AM_IQ.zip` (sigidwiki/Amplitude_Modulation_(AM)). Format
-//! is 64 kHz stereo u8 (left = I, right = Q), offset binary
-//! (128 = zero). Runs the IQ through `AmDemod` (liquid-dsp `ampmodem`
-//! coherent DSB-with-carrier mode) and asserts the output audio is
-//! finite and has substantive RMS once the PLL has locked.
+//! Two guards:
 //!
-//! What this test does NOT assert: a specific tone or recovered
-//! audio content. The recording is real off-air AM (the wiki's
-//! sample) and we don't know what's in it; the bar is "the demod
-//! produced *something* reasonable", which is enough to catch
-//! regressions like all-zero output, NaN-poisoned chains, or a PLL
-//! that never locks.
+//! 1. **Offset immunity (synthetic).** A clean 1 kHz-tone DSB-AM signal
+//!    is demodulated with the carrier placed at a sweep of offsets from
+//!    DC (0 → 5 kHz). Envelope detection must recover the tone at full
+//!    SINAD *regardless* of carrier offset — that immunity is the whole
+//!    reason large-carrier broadcast AM uses it. This is the gate that
+//!    would have caught the coherent-`ampmodem` regression: that demod's
+//!    PLL pulled in only ~±500 Hz, so beyond it the output was the
+//!    carrier *beat note*, not the audio (SINAD went negative).
+//!
+//! 2. **Real off-air loudness/finiteness.** `AM_IQ_5s.wav` (5 s slice of
+//!    sigidwiki's `AM_IQ.zip`, 64 kHz stereo u8, L=I R=Q, offset binary)
+//!    must demodulate to finite audio whose post-settle RMS clears a
+//!    floor tied to the known-good reference recording (~-27 dBFS at
+//!    unity gain). The coherent version sat ~7 dB under this even
+//!    perfectly tuned; the floor catches that.
 
+use std::f32::consts::TAU;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
@@ -25,9 +30,53 @@ use num_complex::Complex;
 const SAMPLE_RATE_HZ: u32 = 64_000;
 const DURATION_SAMPLES: usize = 5 * SAMPLE_RATE_HZ as usize;
 
-/// Read `AM_IQ_5s.wav`. Stereo u8 PCM, left/right interleaved, offset
-/// binary so 128 maps to zero. Returns I + jQ as `Complex<f32>` in
-/// the [-1, 1] range.
+fn demod(iq: &[Complex<f32>], fs: f32) -> Vec<f32> {
+    let mut d = AmDemod::new(AmDemodParams {
+        sample_rate_hz: fs,
+        audio_gain: 1.0,
+    })
+    .expect("am demod");
+    let mut out = vec![0.0_f32; iq.len()];
+    let mut inputs = [InputPort {
+        name: "in",
+        meta: PortMeta::default(),
+        buf: InBuf::IqF32(iq),
+    }];
+    let mut outputs = [OutputPort {
+        name: "out",
+        meta: PortMeta::default(),
+        buf: OutBuf::RealF32(&mut out),
+    }];
+    let mut io = BlockIo {
+        inputs: &mut inputs,
+        outputs: &mut outputs,
+    };
+    d.process(&mut io).unwrap();
+    out
+}
+
+fn rms(xs: &[f32]) -> f32 {
+    let s: f64 = xs.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        (s / xs.len() as f64).sqrt() as f32
+    }
+}
+
+fn bin_mag(xs: &[f32], freq: f32, fs: f32) -> f32 {
+    let w = f64::from(TAU) * f64::from(freq) / f64::from(fs);
+    let (mut re, mut im) = (0.0f64, 0.0f64);
+    for (n, &x) in xs.iter().enumerate() {
+        let p = w * n as f64;
+        re += f64::from(x) * p.cos();
+        im -= f64::from(x) * p.sin();
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        ((re * re + im * im).sqrt() / xs.len() as f64) as f32
+    }
+}
+
 fn read_am_iq_wav() -> Vec<Complex<f32>> {
     let path: PathBuf = [
         env!("CARGO_MANIFEST_DIR"),
@@ -54,78 +103,79 @@ fn read_am_iq_wav() -> Vec<Complex<f32>> {
     assert!(pos < bytes.len(), "no data chunk in AM_IQ_5s.wav");
     let pcm = &bytes[pos..];
     let n = pcm.len() / 2;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let i_byte = pcm[i * 2];
-        let q_byte = pcm[i * 2 + 1];
-        out.push(Complex::new(
-            (f32::from(i_byte) - 128.0) / 128.0,
-            (f32::from(q_byte) - 128.0) / 128.0,
-        ));
-    }
-    out
-}
-
-fn run_am_demod(iq: &[Complex<f32>]) -> Vec<f32> {
-    #[allow(clippy::cast_precision_loss)]
-    let params = AmDemodParams {
-        sample_rate_hz: SAMPLE_RATE_HZ as f32,
-        ..AmDemodParams::default()
-    };
-    let mut demod = AmDemod::new(params).expect("am demod");
-    let mut out = vec![0.0_f32; iq.len()];
-    let mut inputs = [InputPort {
-        name: "in",
-        meta: PortMeta::default(),
-        buf: InBuf::IqF32(iq),
-    }];
-    let mut outputs = [OutputPort {
-        name: "out",
-        meta: PortMeta::default(),
-        buf: OutBuf::RealF32(&mut out),
-    }];
-    let mut io = BlockIo {
-        inputs: &mut inputs,
-        outputs: &mut outputs,
-    };
-    demod.process(&mut io).unwrap();
-    out
-}
-
-fn rms(xs: &[f32]) -> f32 {
-    #[allow(clippy::cast_precision_loss)]
-    let n = xs.len() as f64;
-    let s: f64 = xs.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
-    #[allow(clippy::cast_possible_truncation)]
-    let r = (s / n).sqrt() as f32;
-    r
+    (0..n)
+        .map(|i| {
+            Complex::new(
+                (f32::from(pcm[i * 2]) - 128.0) / 128.0,
+                (f32::from(pcm[i * 2 + 1]) - 128.0) / 128.0,
+            )
+        })
+        .collect()
 }
 
 #[test]
-fn sigidwiki_am_iq_demods_to_finite_audio_with_rms() {
+fn envelope_demod_is_carrier_offset_immune() {
+    // wbam ships the demod at 12 kHz; probe at that rate.
+    let fs = 12_000.0_f32;
+    let f_m = 800.0_f32;
+    let m = 0.7_f32;
+    let n = 24_000;
+
+    // Offsets deliberately chosen to never coincide with f_m (800) or
+    // its 2nd harmonic (1600), so the off-tone leak probe stays valid.
+    for off in [0.0_f32, 50.0, 250.0, 600.0, 1_500.0, 3_000.0, 5_000.0] {
+        let iq: Vec<Complex<f32>> = (0..n)
+            .map(|i| {
+                let t = i as f32 / fs;
+                let env = 1.0 + m * (TAU * f_m * t).cos();
+                let ph = TAU * off * t;
+                Complex::new(env * ph.cos(), env * ph.sin())
+            })
+            .collect();
+        let audio = demod(&iq, fs);
+        let body = &audio[n / 4..]; // skip DC-tracker settle
+
+        for &x in body {
+            assert!(x.is_finite(), "non-finite at offset {off} Hz");
+        }
+        let tone = bin_mag(body, f_m, fs);
+        // Worst-case off-tone leakage proxies: the carrier-offset beat
+        // (where the broken coherent demod dumped its energy) and the
+        // 2nd harmonic.
+        let leak = bin_mag(body, off.max(1.0), fs).max(bin_mag(body, 2.0 * f_m, fs));
+        let sinad_db = 20.0 * (tone / (leak + 1e-9)).log10();
+        assert!(
+            sinad_db > 30.0,
+            "carrier offset {off} Hz: tone must dominate (got SINAD {sinad_db:.1} dB, \
+             tone={tone:.4} leak={leak:.4}) — a narrow-pull-in coherent demod fails here",
+        );
+    }
+}
+
+#[test]
+fn sigidwiki_am_iq_demods_to_reference_loudness() {
     let iq = read_am_iq_wav();
     assert_eq!(iq.len(), DURATION_SAMPLES, "expected 5 s @ 64 kHz");
 
-    let audio = run_am_demod(&iq);
+    let audio = demod(&iq, SAMPLE_RATE_HZ as f32);
 
-    // Drop the first 0.5 s — the coherent PLL inside `ampmodem` needs
-    // a beat to find the residual carrier. Without warmup the head
-    // can squeal while lock is acquired, which would inflate RMS for
-    // the wrong reason.
+    // Skip the DC-tracker settle.
     let warmup = SAMPLE_RATE_HZ as usize / 2;
     let body = &audio[warmup..];
-
     for &x in body {
         assert!(x.is_finite(), "non-finite sample in AmDemod audio output");
     }
 
+    // The known-good reference recording (samples/audio/am_0.810mhz…
+    // .json) lands ~-23.6 dBFS *with* its 20× post-demod gain + DC
+    // blocker; this fixture decodes to ~-27 dBFS at unity gain. Floor
+    // at -32 dBFS (rms 0.025): the working envelope demod clears it
+    // comfortably (~0.042); the regressed coherent demod sat at ~0.018
+    // (-34.9 dBFS) and would fail here.
     let r = rms(body);
-    // Permissive threshold: we want to catch all-zero output / NaN
-    // poisoning / total PLL failure, not tune for a specific
-    // recording amplitude. The sigidwiki sample is loud enough that
-    // a working coherent demod produces well above 1e-3 RMS.
     assert!(
-        r > 1e-3,
-        "expected non-trivial audio RMS post-warmup, got {r}",
+        r > 0.025,
+        "AM audio RMS {r:.5} ({:.1} dBFS) below reference floor — demod too quiet",
+        20.0 * r.max(1e-12).log10(),
     );
 }

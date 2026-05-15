@@ -161,12 +161,13 @@ mod tests {
         let v = validate_doc(&doc).unwrap();
         let s = Schedule::from_validated(&v).unwrap();
         // wbfm.json fans the raw source through a tee into the FFT tap
-        // and the main signal path. After Phase B2's collapse the main
-        // path is a single node-side FmDemod whose MPX output is teed
-        // (TeeRealF32) into the RDS decoder and the browser audio
-        // chain — RealF32Decimator → AudioNrMono → AudioSink across a
-        // WsBridgeTxF32 pair. Producers land before consumers; sibling
-        // ties break alphabetically.
+        // and the main signal path. The main path is a single node-side
+        // FmDemod whose MPX output is teed (TeeRealF32) into the RDS
+        // decoder (out0) and the browser audio chain (out1): AudioShaper
+        // (15 kHz LPF + DC block) → RealF32Decimator → AudioNrMono →
+        // AudioSink across a WsBridgeTxF32 pair. Producers land before
+        // consumers; when `audio_tee` frees both `rds` and `shaper`,
+        // the alphabetical tie-break schedules `rds` first.
         assert_eq!(
             s.order,
             vec![
@@ -178,10 +179,11 @@ mod tests {
                 "rssi",
                 "demod",
                 "audio_tee",
+                "rds",
+                "shaper",
                 "decim",
                 "audio_nr",
-                "audio",
-                "rds"
+                "audio"
             ]
         );
     }
@@ -209,9 +211,13 @@ mod tests {
         let audio_tee = &s.wire_plan["audio_tee"];
         assert_eq!(audio_tee["in"].source_block, "demod");
         assert_eq!(audio_tee["in"].source_port, "out");
+        // `audio_tee.out1` now feeds the AudioShaper, which feeds decim.
+        let shaper = &s.wire_plan["shaper"];
+        assert_eq!(shaper["in"].source_block, "audio_tee");
+        assert_eq!(shaper["in"].source_port, "out1");
         let decim = &s.wire_plan["decim"];
-        assert_eq!(decim["in"].source_block, "audio_tee");
-        assert_eq!(decim["in"].source_port, "out1");
+        assert_eq!(decim["in"].source_block, "shaper");
+        assert_eq!(decim["in"].source_port, "out");
         // src has no inputs — still present with an empty map.
         assert!(s.wire_plan["src"].is_empty());
     }

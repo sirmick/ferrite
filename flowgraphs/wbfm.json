@@ -3,7 +3,7 @@
   "name": "wbfm",
   "label": "FM broadcast (mono)",
   "description": "Wideband FM broadcast \u2014 commercial radio, 87.9\u2013107.9 MHz. Mono playback; pick the stereo preset if you want pilot-locked L/R.",
-  "ai_notes": "Wideband FM broadcast, mono. Pick for commercial radio (87.9\u2013107.9 MHz). Includes RdsDemod, so RDS station name + program type appear in the UI's RdsReadout. Audio NR profile: `deemph` + `neural@18dB` \u2014 music wants minimal NR. For pilot-locked stereo use `wbfm_stereo` instead.",
+  "ai_notes": "Wideband FM broadcast, mono. Pick for commercial radio (87.9\u2013107.9 MHz). Includes RdsDemod \u2014 RDS station name + program type show in the UI RdsReadout. Audio chain: 15 kHz LPF, 75 \u00b5s de-emphasis. `wbfm_stereo` for pilot-locked stereo.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/FM_Broadcast_Radio",
   "sample_path": "samples/sigidwiki/WFM.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Broadcast_FM.jpg",
@@ -76,6 +76,16 @@
         "sample_rate_hz": 240000.0
       }
     },
+    "shaper": {
+      "type": "AudioShaper",
+      "placement": "node",
+      "when": { "audio": true },
+      "params": {
+        "sample_rate_hz": 240000.0,
+        "lpf_hz": 15000.0,
+        "dc_block": true
+      }
+    },
     "decim": {
       "type": "RealF32Resamp",
       "placement": "browser",
@@ -92,9 +102,7 @@
       "params": {
         "sample_rate_hz": 48000.0,
         "deemph_enable": true,
-        "deemph_tau_us": 75.0,
-        "neural_enable": true,
-        "neural_attenuation_db": 18.0
+        "deemph_tau_us": 75.0
       }
     },
     "audio": {
@@ -118,7 +126,8 @@
     ["rds.events", "ui:rds"],
     ["fft.out", "logmag.in"],
     ["logmag.out", "ui:fft"],
-    ["audio_tee.out1", "decim.in"],
+    ["audio_tee.out1", "shaper.in"],
+    ["shaper.out", "decim.in"],
     ["decim.out", "audio_nr.in"],
     ["audio_nr.out", "audio.in"]
   ]

@@ -3,7 +3,7 @@
   "name": "capture-aprs",
   "label": "APRS capture (headless)",
   "description": "Headless 22050 Hz mono WAV capture for offline APRS / packet diagnosis. Tunes 144.39 MHz, channelises to 50 kHz, NBFM-demods, resamples to multimon's native 22050 Hz, writes to /tmp/ferrite-aprs.wav. Run via `ferrited --flowgraph capture-aprs.json --source-type SoapySource --source-args 'driver=sdrplay' --source-antenna 'Antenna A' --source-gain 53 --agc true --run-for-secs 60 --start`, then feed the wav to `multimon-ng -t wav -a AFSK1200 /tmp/ferrite-aprs.wav` to compare.",
-  "ai_notes": "[REVIEW: prefer `capture iq` live] Headless 22050 Hz mono WAV capture for offline APRS diagnosis. Same caveat as `capture_fm` \u2014 no UI fft_ports, so switching to this preset freezes the waterfall. Use `capture iq` against the running `packet` preset instead unless you specifically need a headless record.",
+  "ai_notes": "Headless 22050 Hz mono WAV capture for offline APRS diagnosis. No UI fft_ports, so loading this preset freezes the waterfall. For a live capture against the running `packet` preset use `capture iq`.",
   "environments": ["node"],
   "blocks": {
     "src": {

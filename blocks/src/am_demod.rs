@@ -1,43 +1,53 @@
-//! AM demodulator — complex IQ → real audio, backed by liquid-dsp's
-//! `ampmodem` in DSB mode with carrier-present recovery.
+//! AM demodulator — complex IQ → real audio via envelope detection
+//! with a DC blocker.
 //!
-//! One IQ-in, one Real-out, same sample rate. Input IQ baseband centred
-//! on the AM carrier (i.e. upstream mixer has already pulled the carrier
-//! to DC); output a real audio signal.
+//! One IQ-in, one Real-out, same sample rate. Input IQ baseband roughly
+//! centred on the AM carrier; output a real audio signal.
 //!
-//! ### Coherent vs envelope detection
+//! ### Why envelope detection
 //!
-//! The previous hand-rolled version was a classic envelope detector:
-//! take `|x|` and subtract a tracking DC bias to remove the unmodulated
-//! carrier. Worked, but was vulnerable to AGC pumping and noise —
-//! every out-of-band spur contributed to `|x|` and leaked into audio
-//! proportionally.
+//! Broadcast AM transmits a large unmodulated carrier *specifically* so
+//! that a non-coherent envelope detector — `|x|` minus the carrier DC —
+//! recovers the audio regardless of carrier frequency offset or phase.
+//! That offset-immunity is the whole point of the modulation scheme.
 //!
-//! Liquid's `ampmodem` DSB-with-carrier mode is *coherent*: it runs a
-//! PLL on the residual carrier, uses that as a reference to multiply
-//! the signal back down to audio, and low-pass filters. Because the
-//! PLL rejects off-carrier energy, out-of-band noise doesn't fold into
-//! audio, and there's no DC baseline to subtract — the audio term
-//! drops out of the math directly. Tradeoff: when the PLL can't lock
-//! (very weak carrier, deep selective fade), the output squeals
-//! briefly until lock recovers. For normal broadcast AM that's a net
-//! improvement.
+//! A previous rewrite swapped this for liquid-dsp's coherent `ampmodem`
+//! PLL. Measured against the shipped reference recording it regressed
+//! badly: the PLL pulls in only ~±500 Hz (at 12 kHz Fs), so any
+//! residual channelizer mistuning made it demodulate the carrier *beat
+//! note* instead of the audio; and even perfectly tuned it ran ~11 dB
+//! quieter, forcing the downstream AGC to max gain (noise/pumping).
+//! Envelope detection holds full SINAD at *every* offset — see
+//! `blocks/tests/am_quality_probe.rs`. Coherent detection's only edge
+//! (off-carrier noise rejection) isn't worth the real-world fragility
+//! for large-carrier broadcast AM.
+//!
+//! ### DC blocker
+//!
+//! `|x|` carries the audio riding on a large DC pedestal (the carrier
+//! amplitude). A one-pole DC tracker (`tau ≈ 100 ms`) estimates that
+//! pedestal and subtracts it, leaving the modulation. The tracker is
+//! slow enough that programme material below a few Hz isn't touched but
+//! fast enough that gain/fade drift doesn't leak a thump.
 //!
 //! ### Rate contract
 //!
 //! Rate-aware: reads `ctx.input_rate("in")` at init / update_rates and
-//! rebuilds the liquid modem instance if the rate changes. The PLL
-//! bandwidth is sized internally by liquid relative to sample rate, so
-//! no preset-level knob is needed.
+//! re-derives the DC-tracker coefficient if the rate changes.
 
 use anyhow::{bail, Result};
-use ferrite_liquid_dsp::{AmType, Ampmodem};
 use serde::Deserialize;
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
     Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
+
+/// DC-tracker time constant. Slow enough not to nibble programme
+/// material below a few Hz, fast enough that fade/AGC drift doesn't
+/// leak a thump. Matches the shipped reference recording's "100 ms DC
+/// blocker". Internal, not user-facing — keeps the param surface small.
+const DC_TRACK_TAU_MS: f64 = 100.0;
 
 /// Construction-time params.
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -46,10 +56,6 @@ pub struct AmDemodParams {
     /// Input IQ sample rate (Hz). Construction-time hint; init's
     /// `ctx.input_rate("in")` wins once the runtime populates it.
     pub sample_rate_hz: f32,
-    /// Modulation index hint passed to liquid. Broadcast AM runs
-    /// 0.5–0.9 typically; the demod is not hyper-sensitive to the
-    /// exact value, but a reasonable hint helps the PLL lock.
-    pub mod_index: f32,
     /// Linear gain applied after the demod. Default 1.0. Useful when
     /// a station's audio is quiet and you want to goose the output
     /// before the audio sink.
@@ -60,7 +66,6 @@ impl Default for AmDemodParams {
     fn default() -> Self {
         Self {
             sample_rate_hz: 48_000.0,
-            mod_index: 0.8,
             audio_gain: 1.0,
         }
     }
@@ -68,12 +73,18 @@ impl Default for AmDemodParams {
 
 pub struct AmDemod {
     params: AmDemodParams,
-    /// Liquid `ampmodem` handle, lazily realized. `None` between
-    /// construction and first init when the input rate can't be
-    /// resolved from the construction-time hint.
-    inner: Option<Ampmodem>,
+    /// One-pole DC-tracker state — the running estimate of the carrier
+    /// pedestal that the envelope rides on.
+    dc: f32,
+    /// DC-tracker EMA coefficient, derived from the input rate and
+    /// [`DC_TRACK_TAU_MS`].
+    dc_alpha: f32,
+    /// Seeded-DC flag. Before the first sample `dc` is zero and the
+    /// first output would be a full-amplitude pedestal thump; seed
+    /// from the first envelope so the tracker starts converged.
+    primed: bool,
     /// Last-applied input sample rate. Tracked so `update_rates` can
-    /// skip the rebuild when the scheduler reports the same rate.
+    /// skip recomputation when the scheduler reports the same rate.
     input_rate_hz: f64,
 }
 
@@ -85,9 +96,6 @@ impl AmDemod {
                 params.sample_rate_hz
             );
         }
-        if !(params.mod_index.is_finite() && params.mod_index > 0.0) {
-            bail!("am_demod mod_index must be > 0 (got {})", params.mod_index);
-        }
         if !(params.audio_gain.is_finite() && params.audio_gain > 0.0) {
             bail!(
                 "am_demod audio_gain must be > 0 (got {})",
@@ -96,28 +104,27 @@ impl AmDemod {
         }
         let mut s = Self {
             params,
-            inner: None,
+            dc: 0.0,
+            dc_alpha: 1.0,
+            primed: false,
             input_rate_hz: 0.0,
         };
-        s.rebuild_for_input_rate(f64::from(params.sample_rate_hz))?;
+        s.set_input_rate(f64::from(params.sample_rate_hz))?;
         Ok(s)
     }
 
-    fn rebuild_for_input_rate(&mut self, input_rate_hz: f64) -> Result<()> {
+    fn set_input_rate(&mut self, input_rate_hz: f64) -> Result<()> {
         if !(input_rate_hz > 0.0) {
             bail!("am_demod: need positive input rate, got {input_rate_hz}");
         }
-        // DSB + carrier-present = coherent broadcast AM recovery. The
-        // PLL internally sizes its loop filter from the sample rate
-        // (liquid drives it off its `ampmodem_s::fc` — scaled fraction
-        // of Fs), so just rebuild the handle whenever rate shifts.
-        let modem = Ampmodem::new(
-            self.params.mod_index,
-            AmType::Dsb,
-            /*suppressed_carrier=*/ false,
-        )
-        .map_err(|e| anyhow::anyhow!("ampmodem create: {e}"))?;
-        self.inner = Some(modem);
+        // One-pole EMA coefficient for a `tau`-millisecond tracker:
+        // alpha = dt / (tau + dt).
+        let dt = 1.0 / input_rate_hz;
+        let tau_s = DC_TRACK_TAU_MS * 1e-3;
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.dc_alpha = (dt / (tau_s + dt)) as f32;
+        }
         self.input_rate_hz = input_rate_hz;
         Ok(())
     }
@@ -152,19 +159,6 @@ impl Block for AmDemod {
                     ai_notes: "Demod input rate (typically the channelizer's output).",
                 },
                 ParamSpec {
-                    key: "mod_index",
-                    label: "Modulation index",
-                    kind: ParamKind::Range {
-                        min: 0.01,
-                        max: 1.5,
-                        step: 0.01,
-                        default: 0.8,
-                        unit: "",
-                    },
-                    reconfig_scope: ReconfigureScope::Downstream,
-                    ai_notes: "AM modulation index used in envelope normalisation. 0.8 matches commercial broadcast; lower for under-modulated stations.",
-                },
-                ParamSpec {
                     key: "audio_gain",
                     label: "Post-demod gain",
                     kind: ParamKind::Range {
@@ -178,14 +172,14 @@ impl Block for AmDemod {
                     ai_notes: "Linear post-demod gain. Bump if the audio sounds quiet after NR; drop if it clips.",
                 },
             ],
-            ai_notes: "AM envelope demodulator. Use for AM broadcast (540 kHz – 1.7 MHz), shortwave broadcast, aviation AM. NB: AM modulation chases the envelope — pair with the `wbam` preset's `agc_enable=false` force_param to avoid AGC pumping on sustained speech.",
+            ai_notes: "AM envelope demodulator (offset-immune — large-carrier broadcast AM is designed for it). Use for AM broadcast (540 kHz – 1.7 MHz), shortwave broadcast, aviation AM. NB: AM carries info in amplitude — pair with the `wbam` preset's `agc=false` force_param so the *hardware* AGC doesn't fight the envelope.",
         }
     }
 
     fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
         if let Some(rate) = ctx.input_rate("in") {
             if rate > 0.0 && (rate - self.input_rate_hz).abs() > f64::EPSILON {
-                self.rebuild_for_input_rate(rate)?;
+                self.set_input_rate(rate)?;
             }
         }
         Ok(())
@@ -194,16 +188,13 @@ impl Block for AmDemod {
     fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
         if let Some(rate) = ctx.input_rate("in") {
             if rate > 0.0 && (rate - self.input_rate_hz).abs() > f64::EPSILON {
-                self.rebuild_for_input_rate(rate)?;
+                self.set_input_rate(rate)?;
             }
         }
         Ok(())
     }
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Ok(Work::new());
-        };
         let Some(src) = io
             .inputs
             .iter()
@@ -225,7 +216,16 @@ impl Block for AmDemod {
         let g = self.params.audio_gain;
         for i in 0..n {
             let x = src[i];
-            dst[i] = inner.demodulate(x.re, x.im) * g;
+            // Envelope = carrier-DC pedestal + audio. Offset/phase
+            // independent: |x| ignores where the carrier sits.
+            let env = x.re.hypot(x.im);
+            if !self.primed {
+                self.dc = env;
+                self.primed = true;
+            }
+            // Slow one-pole DC tracker; subtract to leave the audio.
+            self.dc += self.dc_alpha * (env - self.dc);
+            dst[i] = (env - self.dc) * g;
         }
 
         let mut w = Work::new();
@@ -280,11 +280,6 @@ mod tests {
         })
         .is_err());
         assert!(AmDemod::new(AmDemodParams {
-            mod_index: 0.0,
-            ..Default::default()
-        })
-        .is_err());
-        assert!(AmDemod::new(AmDemodParams {
             audio_gain: 0.0,
             ..Default::default()
         })
@@ -293,43 +288,56 @@ mod tests {
 
     #[test]
     fn amplitude_modulated_carrier_recovers_tone() {
-        // DSB-AM with carrier at baseband: x(t) = (1 + m·cos(2π·f_m·t))·1
-        // The coherent demod locks to the residual DC carrier and
-        // recovers the modulation term. Output level depends on the
-        // demod's internal normalization — we check for the modulation
-        // frequency's presence via RMS above the pre-settle noise
-        // floor, not a precise scale factor.
+        // DSB-AM with carrier OFFSET from baseband: x(t) =
+        // (1 + m·cos(2π·f_m·t))·e^{j2π·f_c·t}. Envelope detection must
+        // recover the f_m tone regardless of the f_c carrier offset —
+        // that offset-immunity is the whole reason to prefer it for
+        // large-carrier broadcast AM.
         let fs = 48_000.0_f32;
         let f_m = 1_000.0_f32;
+        let f_c = 7_000.0_f32; // deliberately way off centre
         let m = 0.5_f32;
         let n = 8192;
         let input: Vec<Complex<f32>> = (0..n)
             .map(|i| {
                 let t = i as f32 / fs;
                 let env = 1.0 + m * (TAU * f_m * t).cos();
-                Complex::new(env, 0.0)
+                let ph = TAU * f_c * t;
+                Complex::new(env * ph.cos(), env * ph.sin())
             })
             .collect();
         let mut demod = AmDemod::new(AmDemodParams {
             sample_rate_hz: fs,
-            mod_index: m,
             audio_gain: 1.0,
         })
         .unwrap();
         let out = run(&mut demod, &input);
 
-        // Skip PLL lock transient (~first half of the block).
-        let tail = &out[n / 2..];
+        // Skip the DC-tracker settle (~first quarter).
+        let tail = &out[n / 4..];
+        // Recovered audio is m·cos(2π·f_m·t); RMS ≈ m/√2 ≈ 0.354.
         let rms: f32 = (tail.iter().map(|y| y * y).sum::<f32>() / tail.len() as f32).sqrt();
-        // Expected scale is not nailed down by spec; just confirm the
-        // modulation is present (≫ noise floor) and bounded.
+        assert!(rms > 0.2, "envelope demod gave no audio energy (rms={rms})");
         assert!(
-            rms > 0.05,
-            "coherent demod gave no audio energy (rms={rms})"
+            rms < 1.0,
+            "envelope demod output unreasonably large (rms={rms})"
         );
+        // Tone must land at f_m, not at the carrier offset f_c.
+        let mag_at = |f: f32| -> f32 {
+            let w = TAU * f / fs;
+            let (mut re, mut im) = (0.0f32, 0.0f32);
+            for (k, &y) in tail.iter().enumerate() {
+                let p = w * k as f32;
+                re += y * p.cos();
+                im -= y * p.sin();
+            }
+            (re * re + im * im).sqrt() / tail.len() as f32
+        };
+        let tone = mag_at(f_m);
+        let leak = mag_at(f_c).max(mag_at(2.0 * f_m));
         assert!(
-            rms < 10.0,
-            "coherent demod output unreasonably large (rms={rms})"
+            tone > 10.0 * leak,
+            "f_m tone ({tone}) should dominate carrier-offset/harmonic leak ({leak})"
         );
     }
 
@@ -349,7 +357,6 @@ mod tests {
         let mk = |g| {
             AmDemod::new(AmDemodParams {
                 sample_rate_hz: fs,
-                mod_index: m,
                 audio_gain: g,
             })
             .unwrap()

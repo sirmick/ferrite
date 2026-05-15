@@ -3,7 +3,7 @@
   "name": "nbfm",
   "label": "Narrowband FM (voice)",
   "description": "Narrowband FM voice \u2014 25 kHz channels: NOAA weather, marine VHF, public-safety, FRS/GMRS, 2 m / 70 cm amateur. \u00b15 kHz deviation.",
-  "ai_notes": "Narrowband FM voice, 25 kHz channels. Use for 2 m / 70 cm amateur repeaters, marine VHF (156\u2013162 MHz), public-safety, FRS/GMRS (462\u2013467 MHz). \u00b15 kHz deviation default \u2014 fine for most NBFM channels. Audio NR: `blanker@20dB` + `neural@18dB`; bump the blanker if there's electrical / ignition noise.",
+  "ai_notes": "Narrowband FM voice, 25 kHz channels: 2 m / 70 cm repeaters, marine VHF (156-162 MHz), public-safety, FRS/GMRS (462-467 MHz). +-5 kHz deviation. Squelch, 3.4 kHz voice LPF, 75 us de-emphasis, impulse blanker. `neural`/`spectral` selectable in the UI for weak/hissy channels.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/NFM_Voice",
   "sample_path": "samples/sigidwiki/Nfm_voice.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Sintitulo.png",
@@ -23,6 +23,16 @@
       "params": {
         "input_rate_hz": 2400000.0,
         "output_rate_hz": 25000.0
+      }
+    },
+    "squelch": {
+      "type": "Squelch",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 25000.0,
+        "threshold_db": -50.0,
+        "hysteresis_db": 3.0,
+        "fade_tau_ms": 20.0
       }
     },
     "tee": {
@@ -63,6 +73,16 @@
         "buffer_samples": 8192
       }
     },
+    "shaper": {
+      "type": "AudioShaper",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "sample_rate_hz": 25000.0,
+        "lpf_hz": 3400.0,
+        "dc_block": true
+      }
+    },
     "resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
@@ -78,11 +98,11 @@
       "when": { "audio": true },
       "params": {
         "sample_rate_hz": 48000.0,
+        "deemph_enable": true,
+        "deemph_tau_us": 75.0,
         "blanker_enable": true,
         "blanker_threshold_db": 20.0,
-        "blanker_hold_ms": 0.5,
-        "neural_enable": true,
-        "neural_attenuation_db": 18.0
+        "blanker_hold_ms": 0.5
       }
     }
   },
@@ -90,10 +110,12 @@
     ["src.out", "tee.in"],
     ["tee.out0", "chan.in"],
     ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
+    ["chan.out", "squelch.in"],
+    ["squelch.out", "demod.in"],
     ["fft.out", "logmag.in"],
     ["logmag.out", "ui:fft"],
-    ["demod.out", "resamp.in"],
+    ["demod.out", "shaper.in"],
+    ["shaper.out", "resamp.in"],
     ["resamp.out", "audio_nr.in"],
     ["audio_nr.out", "audio.in"]
   ]
