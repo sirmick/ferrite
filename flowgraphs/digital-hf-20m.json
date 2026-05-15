@@ -1,0 +1,135 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "digital-hf-20m",
+  "label": "Digital HF 20 m (FT8 + FT4 + WSPR at once)",
+  "description": "Decodes all three 20 m weak-signal digital modes simultaneously from one wideband capture — FT8 (14.074), FT4 (14.080) and WSPR (14.0956 MHz). A single SDR slice is fanned out to three independent channelizer→USB-demod→decoder branches, one per dial. This is the thing WSJT-X needs three separate instances + three virtual audio cables to do; here it's one preset. Decodes stream under decoder::ft8, decoder::ft4 and decoder::wspr respectively (filter the log/decoder panel by category). Audio is the FT8 branch so you can listen to one mode while all three decode. Cost: ~3× the per-mode CPU; one SDR still means one band.",
+  "ai_notes": "Simultaneous 20 m FT8 + FT4 + WSPR off one wideband capture (centre 14.085 MHz). Each branch = Channelizer(freq_shift = dial − centre) → SsbDemod(usb) → decoder, identical to the standalone ft8/ft4/wspr presets. Decodes: `tail decoder --category ft8|ft4|wspr`. FT8/FT4 every 15/7.5 s, WSPR every 2 min — wait ≥4 min before declaring a dead band. Audio follows the FT8 branch. Per-band only (one SDR): for another band, load that band's variant.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/FT8",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 14085000.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee1": { "type": "TeeIqF32", "placement": "node" },
+    "tee2": { "type": "TeeIqF32", "placement": "node" },
+    "tee3": { "type": "TeeIqF32", "placement": "node" },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": { "size": 16384, "window": "hann", "max_frames_per_second": 30 }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": { "size": 16384, "alpha": 0.3 }
+    },
+    "chan_ft8": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 12000.0,
+        "freq_shift_hz": -11000.0
+      }
+    },
+    "chan_ft4": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 12000.0,
+        "freq_shift_hz": -5000.0
+      }
+    },
+    "chan_wspr": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 12000.0,
+        "freq_shift_hz": 10600.0
+      }
+    },
+    "demod_ft8": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": { "sample_rate_hz": 12000, "sideband": "usb", "audio_gain": 30.0 }
+    },
+    "demod_ft4": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": { "sample_rate_hz": 12000, "sideband": "usb", "audio_gain": 30.0 }
+    },
+    "demod_wspr": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": { "sample_rate_hz": 12000, "sideband": "usb", "audio_gain": 30.0 }
+    },
+    "audio_tee": { "type": "TeeRealF32", "placement": "node" },
+    "ft8": {
+      "type": "Ft8Demod",
+      "placement": "node",
+      "params": { "mode": "ft8", "sample_rate_hz": 12000.0, "max_candidates": 40 }
+    },
+    "ft4": {
+      "type": "Ft8Demod",
+      "placement": "node",
+      "params": { "mode": "ft4", "sample_rate_hz": 12000.0, "max_candidates": 40 }
+    },
+    "wspr": {
+      "type": "WsprDemod",
+      "placement": "node",
+      "params": { "sample_rate_hz": 12000.0, "dial_freq_hz": 14095600 }
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": { "output_rate_hz": 48000.0, "stopband_db": 60.0 }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "neural_enable": false,
+        "notch_enable": false,
+        "neural_attenuation_db": 18.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": { "buffer_samples": 8192 }
+    }
+  },
+  "wires": [
+    ["src.out", "tee1.in"],
+    ["tee1.out0", "tee2.in"],
+    ["tee1.out1", "fft.in"],
+    ["tee2.out0", "tee3.in"],
+    ["tee2.out1", "chan_wspr.in"],
+    ["tee3.out0", "chan_ft8.in"],
+    ["tee3.out1", "chan_ft4.in"],
+    ["chan_ft8.out", "demod_ft8.in"],
+    ["demod_ft8.out", "audio_tee.in"],
+    ["audio_tee.out0", "ft8.in"],
+    ["audio_tee.out1", "audio_resamp.in"],
+    ["chan_ft4.out", "demod_ft4.in"],
+    ["demod_ft4.out", "ft4.in"],
+    ["chan_wspr.out", "demod_wspr.in"],
+    ["demod_wspr.out", "wspr.in"],
+    ["audio_resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"]
+  ]
+}

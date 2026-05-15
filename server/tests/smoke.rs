@@ -46,6 +46,14 @@ mod device_cache;
 #[allow(dead_code)]
 mod block_schema;
 
+// `app_state` + `routes` reference `crate::view_bridge::…`; this
+// #[path] re-include has to mirror every src module they touch or the
+// test binary won't resolve them. view_bridge.rs is self-contained
+// (std + serde + tokio, no crate:: deps), so the shim is a plain mod.
+#[path = "../src/view_bridge.rs"]
+#[allow(dead_code)]
+mod view_bridge;
+
 #[path = "../src/routes.rs"]
 #[allow(dead_code, clippy::unused_async)]
 mod routes;
@@ -499,4 +507,45 @@ async fn raw_request_with_status(url: &str, method: &str, body: &str) -> (u16, S
         .split_once("\r\n\r\n")
         .map_or(text.clone(), |(_, b)| b.to_string());
     (status, body)
+}
+
+/// Structural smoke for the combined FT8+FT4+WSPR preset. A successful
+/// `start()` *is* the validation: it runs compose → env_split → block
+/// instantiation over the 3-tee IQ fan-out and every decoder branch
+/// (2× Ft8Demod, WsprDemod, 3× Channelizer with per-branch
+/// `freq_shift_hz`, 3× SsbDemod). A SineSource won't produce real
+/// decodes — that's fine; this guards the wiring/port/feature surface
+/// (the per-branch DSP is proven by the standalone ft8/ft4/wspr
+/// presets), so a broken tee chain or an unregistered block fails CI
+/// instead of silently shipping.
+#[tokio::test]
+async fn digital_hf_20m_preset_builds_and_runs() {
+    let preset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("flowgraphs/digital-hf-20m.json");
+    let preset: FlowgraphDoc = serde_json::from_str(
+        &std::fs::read_to_string(&preset_path).expect("digital-hf-20m.json readable"),
+    )
+    .expect("digital-hf-20m.json parses");
+
+    // Match the preset's 2.4 MS/s source hint so every Channelizer
+    // runs at its authored input rate.
+    let source = SourceConfig {
+        type_name: "SineSource".into(),
+        params: json!({
+            "rate_hz": 2_400_000.0,
+            "tone_freq_abs_hz": 14_080_000.0,
+            "amplitude": 0.5,
+        }),
+    };
+    let state = app_state::AppState::new(preset, source, Duration::from_millis(5));
+    state
+        .start()
+        .await
+        .expect("digital-hf-20m compose/env_split/instantiate");
+    // Let it tick so any per-block process()/init panic (e.g. a
+    // channelizer rate mismatch or a decoder front-end bug) surfaces.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(state.stop().await, "pipeline should have been running");
 }
