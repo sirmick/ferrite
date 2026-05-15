@@ -86,6 +86,8 @@ extern _shim_window *dlgViewer;
  * the TX / pskmail / noise-test paths, never reached RX-only. ---- */
 #define PERFORM_CPS_TEST false
 extern bool mailserver;
+extern bool mailclient;
+extern void set_phase(double phase, double quality, bool highlight);
 extern void put_Bandwidth(int bw);
 extern void center_rxfilt_at_track();
 extern void pskmail_notify_s2n(double, double, double);

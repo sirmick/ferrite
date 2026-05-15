@@ -4,6 +4,8 @@
 #ifndef FERRITE_FLDIGI_SHIM_TEST_SIGNAL_H
 #define FERRITE_FLDIGI_SHIM_TEST_SIGNAL_H
 
+#include "testsigs.h"   /* btn_imd_on / xmtimd (psk.cxx reads via here) */
+
 class test_signal_dialog {
 public:
 	int visible() { return 0; }

@@ -19,6 +19,7 @@
 #include "modem.h"           // vendored: class modem (+ static members)
 #include "rtty.h"            // vendored: class rtty
 #include "cw.h"              // vendored: class cw
+#include "psk.h"             // vendored: class psk
 #include "ptt.h"             // shim
 #include "winkeyer.h"        // shim
 #include "nanoIO.h"          // shim
@@ -159,6 +160,8 @@ Cserial rigio;
 static _shim_window s_dlgViewer;
 _shim_window *dlgViewer = &s_dlgViewer;  // rtty.cxx derefs unconditionally
 bool mailserver = false;
+bool mailclient = false;
+void set_phase(double, double, bool) {}
 void put_Bandwidth(int) {}
 void center_rxfilt_at_track() {}
 void pskmail_notify_s2n(double, double, double) {}
@@ -237,6 +240,8 @@ _shim_valuator *out_CATkeying_test_result = &s_cwwid;
 _shim_valuator *cntCW_WPM = &s_cwwid;
 _shim_valuator *sldrCWxmtWPM = &s_cwwid;
 _shim_valuator *cntr_nanoCW_WPM = &s_cwwid;
+_shim_valuator *btn_imd_on = &s_cwwid;
+_shim_valuator *xmtimd = &s_cwwid;
 
 // ---------------------------------------------------------------------
 // Mode registry: id string -> constructed modem.
@@ -247,6 +252,9 @@ static modem *make_modem(const std::string &id) {
 		return new rtty(MODE_RTTY);
 	if (id == "cw" || id == "morse")
 		return new cw();
+	if (id == "psk31")  return new psk(MODE_PSK31);
+	if (id == "psk63")  return new psk(MODE_PSK63);
+	if (id == "psk125") return new psk(MODE_PSK125);
 	return 0;
 }
 

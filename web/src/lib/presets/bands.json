@@ -305,6 +305,11 @@
           "mode": "USB"
         },
         {
+          "label": "PSK31",
+          "hz": 3578500,
+          "mode": "USB"
+        },
+        {
           "label": "SSB",
           "hz": 3800000,
           "mode": "LSB"
@@ -340,6 +345,11 @@
           "mode": "USB"
         },
         {
+          "label": "PSK31",
+          "hz": 7068500,
+          "mode": "USB"
+        },
+        {
           "label": "SSB",
           "hz": 7200000,
           "mode": "LSB"
@@ -372,6 +382,11 @@
         {
           "label": "RTTY",
           "hz": 14083500,
+          "mode": "USB"
+        },
+        {
+          "label": "PSK31",
+          "hz": 14068500,
           "mode": "USB"
         },
         {
@@ -430,6 +445,11 @@
           "mode": "USB"
         },
         {
+          "label": "PSK31",
+          "hz": 21068500,
+          "mode": "USB"
+        },
+        {
           "label": "SSB",
           "hz": 21300000,
           "mode": "USB"
@@ -457,6 +477,11 @@
         {
           "label": "RTTY",
           "hz": 28088500,
+          "mode": "USB"
+        },
+        {
+          "label": "PSK31",
+          "hz": 28118500,
           "mode": "USB"
         },
         {
