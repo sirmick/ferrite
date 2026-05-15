@@ -170,7 +170,20 @@ export class WaterfallRenderer {
     private readonly canvas: HTMLCanvasElement,
     opts: WaterfallOptions = {},
   ) {
-    const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: false });
+    // `preserveDrawingBuffer: true` keeps the painted framebuffer
+    // around between composites — without it, `canvas.toDataURL()`
+    // reads the post-clear buffer (uniformly transparent) instead of
+    // the waterfall the user is looking at, and the
+    // `ferrite-ctl view wide-waterfall` / `view channel-waterfall`
+    // round-trip surfaces an empty-blue PNG to the AI. Small per-frame
+    // cost (the GPU can't discard the buffer aggressively) — well
+    // worth it for the view feature to actually work. The 2D-context
+    // spectrum doesn't need this; only WebGL has the discard behaviour.
+    const gl = canvas.getContext('webgl2', {
+      antialias: false,
+      premultipliedAlpha: false,
+      preserveDrawingBuffer: true,
+    });
     if (!gl) throw new Error('WebGL2 not available');
     this.gl = gl;
     this.rows = Math.max(1, Math.floor(opts.rows ?? 512));
