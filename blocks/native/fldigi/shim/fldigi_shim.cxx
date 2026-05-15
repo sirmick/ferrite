@@ -23,6 +23,8 @@
 #include "mt63.h"            // vendored: class mt63
 #include "throb.h"           // vendored: class throb
 #include "dominoex.h"        // vendored: class dominoex
+#include "olivia.h"          // vendored: class olivia
+#include "contestia.h"       // vendored: class contestia
 #include "ptt.h"             // shim
 #include "winkeyer.h"        // shim
 #include "nanoIO.h"          // shim
@@ -278,6 +280,14 @@ static modem *make_modem(const std::string &id) {
 	if (id == "dominoex16") return new dominoex(MODE_DOMINOEX16);
 	if (id == "dominoex22") return new dominoex(MODE_DOMINOEX22);
 	if (id == "dominoex44") return new dominoex(MODE_DOMINOEX44);
+	if (id == "olivia")        return new olivia(MODE_OLIVIA);
+	if (id == "olivia-8-500")  return new olivia(MODE_OLIVIA_8_500);
+	if (id == "olivia-16-500") return new olivia(MODE_OLIVIA_16_500);
+	if (id == "olivia-32-1000") return new olivia(MODE_OLIVIA_32_1000);
+	if (id == "contestia")        return new contestia(MODE_CONTESTIA);
+	if (id == "contestia-8-250")  return new contestia(MODE_CONTESTIA_8_250);
+	if (id == "contestia-8-500")  return new contestia(MODE_CONTESTIA_8_500);
+	if (id == "contestia-16-500") return new contestia(MODE_CONTESTIA_16_500);
 	return 0;
 }
 

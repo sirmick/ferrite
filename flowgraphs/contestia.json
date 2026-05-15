@@ -1,0 +1,156 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "contestia",
+  "label": "Contestia 8/500 (robust MFSK)",
+  "description": "Contestia is an Olivia derivative \u2014 robust MFSK with FEC and a compact alphabet, decoding under conditions that defeat PSK/RTTY but a bit faster/narrower than Olivia. The 8/500 variant uses 8 tones in 500 Hz. On the waterfall it's a clean block of hopping tones. Decoded text streams under decoder::fldigi (vendored fldigi contestia core, Ja\u0142ocha MFSK engine). Like Olivia it's very tolerant of mistuning \u2014 get it roughly into the USB passband and it locks; expect a couple seconds of latency from the FEC interleaver.",
+  "ai_notes": "Contestia 8/500 (Olivia-derivative MFSK+FEC, vendored fldigi contestia core). Variants via FldigiDemod mode: contestia, contestia-8-250, contestia-8-500, contestia-16-500. Tolerant of mistuning; tune dial \u2248 signal \u2212 1500 Hz. ~2 s decode latency (interleaver). Activity: 20 m ~14.072\u201314.078 and on nets. Output: `tail decoder --category fldigi`.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Contestia",
+  "sample_path": "samples/sigidwiki/Contestia_8-500.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/Contestia.png",
+  "environments": [
+    "node",
+    "browser"
+  ],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 14073500.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 8000.0
+      }
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 8000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
+    },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "neural_enable": false,
+        "notch_enable": false,
+        "neural_attenuation_db": 18.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "buffer_samples": 8192
+      }
+    },
+    "contestia": {
+      "type": "FldigiDemod",
+      "placement": "node",
+      "params": {
+        "mode": "contestia-8-500",
+        "sample_rate_hz": 8000.0,
+        "afc": true
+      }
+    }
+  },
+  "wires": [
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "contestia.in"
+    ],
+    [
+      "audio_tee.out1",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ]
+  ]
+}

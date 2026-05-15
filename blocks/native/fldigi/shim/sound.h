@@ -6,6 +6,8 @@
 #ifndef FERRITE_FLDIGI_SHIM_SOUND_H
 #define FERRITE_FLDIGI_SHIM_SOUND_H
 
+#define SCBLOCKSIZE 512
+
 #include <string>
 #include <cstring>
 #include <cstddef>

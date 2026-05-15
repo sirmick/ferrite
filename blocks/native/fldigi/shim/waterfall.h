@@ -68,6 +68,7 @@ public:
 	double powerDensity(double, double) { return 0.0; }
 	double powerDensityMaximum(int, const int (*)[2]) const { return 0.0; }
 	int  peakFreq(int, int) { return 0; }
+	double Pwr(int) { return 0.0; }
 	void redraw_marker() {}
 	void movetocenter() {}
 	void UI_select(bool) {}

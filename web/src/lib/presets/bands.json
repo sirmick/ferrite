@@ -370,6 +370,11 @@
           "mode": "USB"
         },
         {
+          "label": "Contestia",
+          "hz": 7073500,
+          "mode": "USB"
+        },
+        {
           "label": "SSB",
           "hz": 7200000,
           "mode": "LSB"
@@ -422,6 +427,11 @@
         {
           "label": "DominoEX",
           "hz": 14075500,
+          "mode": "USB"
+        },
+        {
+          "label": "Contestia",
+          "hz": 14073500,
           "mode": "USB"
         },
         {
