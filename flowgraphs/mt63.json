@@ -1,0 +1,85 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "mt63",
+  "label": "MT63-1000L (robust HF data / EmComm)",
+  "description": "MT63 is a highly robust HF data mode — 64 parallel DBPSK tones with heavy interleaving and FEC, designed to punch through fading, interference and poor copy where RTTY/PSK fail. The 1000L variant (1 kHz wide, long interleave) is the EmComm/MARS workhorse for net traffic and bulletins. On the waterfall it's an unmistakable solid rectangular block of energy. Decoded text streams under decoder::fldigi (vendored fldigi MT63 core). Long interleave means it takes several seconds to start producing text and to flush at the end — that latency is the price of its robustness. Tune so the 1 kHz block is centred ~1500 Hz in the USB audio (dial ≈ centre − 1.5 kHz). Audio is teed alongside so you can listen.",
+  "ai_notes": "MT63-1000L (64-tone DBPSK, 1 kHz, long interleave; vendored fldigi mt63 core). EmComm/MARS/net mode — no fixed amateur watering hole; commonly 14.109 / 7.073 / 3.588 MHz on nets, plus MARS channels. Tune dial ≈ centre − 1500 Hz. Several-second decode latency by design (interleaver fill). Output: `tail decoder --category fldigi`. Variants via FldigiDemod `mode`: mt63-500S/L, mt63-1000S/L, mt63-2000S/L.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/MT63",
+  "sample_path": "samples/sigidwiki/MT63-1000L.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/MT63.png",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 14107500.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee": { "type": "TeeIqF32", "placement": "node" },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": { "input_rate_hz": 2400000.0, "output_rate_hz": 8000.0 }
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": { "size": 16384, "window": "hann", "max_frames_per_second": 30 }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": { "size": 16384, "alpha": 0.3 }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": { "sample_rate_hz": 8000, "sideband": "usb", "audio_gain": 30.0 }
+    },
+    "audio_tee": { "type": "TeeRealF32", "placement": "node" },
+    "mt63": {
+      "type": "FldigiDemod",
+      "placement": "node",
+      "params": { "mode": "mt63-1000L", "sample_rate_hz": 8000.0, "afc": true }
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": { "output_rate_hz": 48000.0, "stopband_db": 60.0 }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "neural_enable": false,
+        "notch_enable": false,
+        "neural_attenuation_db": 18.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": { "buffer_samples": 8192 }
+    }
+  },
+  "wires": [
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["demod.out", "audio_tee.in"],
+    ["audio_tee.out0", "mt63.in"],
+    ["audio_tee.out1", "audio_resamp.in"],
+    ["audio_resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"]
+  ]
+}

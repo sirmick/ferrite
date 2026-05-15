@@ -20,6 +20,7 @@
 #include "rtty.h"            // vendored: class rtty
 #include "cw.h"              // vendored: class cw
 #include "psk.h"             // vendored: class psk
+#include "mt63.h"            // vendored: class mt63
 #include "ptt.h"             // shim
 #include "winkeyer.h"        // shim
 #include "nanoIO.h"          // shim
@@ -255,6 +256,12 @@ static modem *make_modem(const std::string &id) {
 	if (id == "psk31")  return new psk(MODE_PSK31);
 	if (id == "psk63")  return new psk(MODE_PSK63);
 	if (id == "psk125") return new psk(MODE_PSK125);
+	if (id == "mt63-500S")  return new mt63(MODE_MT63_500S);
+	if (id == "mt63-500L")  return new mt63(MODE_MT63_500L);
+	if (id == "mt63-1000S") return new mt63(MODE_MT63_1000S);
+	if (id == "mt63-1000L") return new mt63(MODE_MT63_1000L);
+	if (id == "mt63-2000S") return new mt63(MODE_MT63_2000S);
+	if (id == "mt63-2000L") return new mt63(MODE_MT63_2000L);
 	return 0;
 }
 

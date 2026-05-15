@@ -310,6 +310,11 @@
           "mode": "USB"
         },
         {
+          "label": "MT63",
+          "hz": 3586500,
+          "mode": "USB"
+        },
+        {
           "label": "SSB",
           "hz": 3800000,
           "mode": "LSB"
@@ -350,6 +355,11 @@
           "mode": "USB"
         },
         {
+          "label": "MT63",
+          "hz": 7071500,
+          "mode": "USB"
+        },
+        {
           "label": "SSB",
           "hz": 7200000,
           "mode": "LSB"
@@ -387,6 +397,11 @@
         {
           "label": "PSK31",
           "hz": 14068500,
+          "mode": "USB"
+        },
+        {
+          "label": "MT63",
+          "hz": 14107500,
           "mode": "USB"
         },
         {
