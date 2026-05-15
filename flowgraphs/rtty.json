@@ -1,0 +1,85 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "rtty",
+  "label": "RTTY (Baudot radioteletype)",
+  "description": "RTTY (radioteletype) is the classic HF keyboard-to-keyboard mode: the 5-bit Baudot/ITA2 alphabet sent as 2-tone FSK. Amateur RTTY is almost universally 170 Hz shift at 45.45 baud — on the waterfall it's an unmistakable pair of parallel lines 170 Hz apart, flickering between mark and space. Decoded text streams under the decoder::fldigi log target (vendored fldigi RTTY core). Tune so the two tones straddle ~1500 Hz in the USB audio (dial ≈ signal − 1.5 kHz); AFC pulls in the rest. 20 m activity clusters 14.080–14.099 MHz; also 7.080–7.100, 21.080–21.100, 28.080–28.100, and 3.580–3.600 MHz. Weather/utility RTTY (e.g. DWD) runs 50 baud / 450 Hz shift — a different mode variant. Audio is teed alongside so you can listen.",
+  "ai_notes": "RTTY (Baudot radioteletype, vendored fldigi core). Default rtty45 = 170 Hz shift / 45.45 baud / 5-bit Baudot — the amateur standard. Tune dial ≈ signal − 1500 Hz so the pair lands on fldigi's 1500 Hz sweetspot; AFC tracks. Amateur watering holes (USB): 3.590 / 7.090 / 14.085 / 21.090 / 28.090 MHz. Output: `tail decoder --category fldigi`. Weak/noisy copy is often the antenna/AGC, not the decoder — fixed gain + AGC off helps on quiet bands. Output is continuous (no slots): wait for a transmission, RTTY is bursty QSO/contest traffic.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/RTTY",
+  "sample_path": "samples/sigidwiki/RTTY_170Hz_45.45bd.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/RTTY_170Hz_45.45bd.jpg",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 14083500.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee": { "type": "TeeIqF32", "placement": "node" },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": { "input_rate_hz": 2400000.0, "output_rate_hz": 8000.0 }
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": { "size": 16384, "window": "hann", "max_frames_per_second": 30 }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": { "size": 16384, "alpha": 0.3 }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": { "sample_rate_hz": 8000, "sideband": "usb", "audio_gain": 30.0 }
+    },
+    "audio_tee": { "type": "TeeRealF32", "placement": "node" },
+    "rtty": {
+      "type": "FldigiDemod",
+      "placement": "node",
+      "params": { "mode": "rtty45", "sample_rate_hz": 8000.0, "afc": true }
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": { "output_rate_hz": 48000.0, "stopband_db": 60.0 }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "neural_enable": false,
+        "notch_enable": false,
+        "neural_attenuation_db": 18.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": { "buffer_samples": 8192 }
+    }
+  },
+  "wires": [
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["demod.out", "audio_tee.in"],
+    ["audio_tee.out0", "rtty.in"],
+    ["audio_tee.out1", "audio_resamp.in"],
+    ["audio_resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"]
+  ]
+}
