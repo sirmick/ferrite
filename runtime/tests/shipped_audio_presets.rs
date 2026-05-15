@@ -144,3 +144,48 @@ fn wbfm_node_browser_bridge_ids_pair_up() {
         "browser RX ids {rxs:?} not all in node TX ids {txs:?}"
     );
 }
+
+/// Drift guard: the channelizer integer-decimates, so the source rate
+/// must be an exact multiple of the channel rate. A non-integer ratio
+/// (e.g. the old 2.4 MS/s → 250 kHz = 9.6) makes the actual output
+/// rate differ from what downstream assumes — a slow producer/consumer
+/// drift that surfaces as a periodic underrun blip in the audio.
+#[test]
+fn audio_preset_rates_are_drift_free() {
+    fn f64_param(p: Option<&serde_json::Value>, key: &str) -> Option<f64> {
+        p.and_then(|v| v.get(key))
+            .and_then(serde_json::Value::as_f64)
+    }
+
+    for name in ["wbfm", "wbfm_stereo", "nbfm", "wbam"] {
+        let doc = load(name);
+        let src = doc.blocks.get("src").expect("src block");
+        let src_rate = f64_param(src.params.as_ref(), "sample_rate_hz")
+            .unwrap_or_else(|| panic!("{name}: src has no sample_rate_hz"));
+
+        let chan = doc
+            .blocks
+            .values()
+            .find(|b| b.type_name == "Channelizer")
+            .unwrap_or_else(|| panic!("{name}: no Channelizer"));
+        let chan_in = f64_param(chan.params.as_ref(), "input_rate_hz")
+            .unwrap_or_else(|| panic!("{name}: chan has no input_rate_hz"));
+        let chan_out = f64_param(chan.params.as_ref(), "output_rate_hz")
+            .unwrap_or_else(|| panic!("{name}: chan has no output_rate_hz"));
+
+        assert_eq!(
+            chan_in, src_rate,
+            "{name}: channelizer input_rate_hz ({chan_in}) must match the source \
+             sample_rate_hz hint ({src_rate}) — a mismatch hides the real ratio",
+        );
+
+        let factor = (src_rate / chan_out).round();
+        let actual_out = src_rate / factor;
+        assert!(
+            (actual_out - chan_out).abs() < 1e-6,
+            "{name}: {src_rate} / {chan_out} is non-integer (factor {factor} -> actual \
+             {actual_out} Hz). Pick a source rate that integer-divides to the channel \
+             rate, else the chain drifts and blips periodically.",
+        );
+    }
+}
