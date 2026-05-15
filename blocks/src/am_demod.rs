@@ -172,7 +172,7 @@ impl Block for AmDemod {
                         max: 1_000.0,
                         step: 0.01,
                         default: 1.0,
-                        unit: "×",
+                        unit: "",
                     },
                     reconfig_scope: ReconfigureScope::Downstream,
                     ai_notes: "Linear post-demod gain. Bump if the audio sounds quiet after NR; drop if it clips.",
