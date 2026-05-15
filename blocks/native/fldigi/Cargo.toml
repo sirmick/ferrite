@@ -1,0 +1,28 @@
+[package]
+name        = "ferrite-fldigi"
+version     = "0.9.0"
+edition.workspace      = true
+rust-version.workspace = true
+# Vendored fldigi modem cores are GPL-3.0 — same posture as the
+# vendored wsprd / multimon-ng. The workspace consumer is GPL anyway.
+license     = "GPL-3.0-or-later"
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+description = "Curated fldigi digital-modem RX cores behind a narrow C ABI + safe Rust wrappers. Native: static C++ link. wasm32: ABI declared as imports, satisfied by a sibling Emscripten module (link-vs-bridge — see build.rs)."
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
+
+[build-dependencies]
+cc = "1"
+
+# wasm32 only: the bridge backend declares the fldigi ABI as
+# wasm-bindgen module imports (JS-native marshalling — no raw-pointer
+# env imports, no wasm-memory access from JS). Native links the C++
+# statically and never pulls this.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"

@@ -434,6 +434,7 @@ dependencies = [
  "anyhow",
  "ferrite-blocks-macros",
  "ferrite-dump1090",
+ "ferrite-fldigi",
  "ferrite-ft8",
  "ferrite-liquid-dsp",
  "ferrite-multimon-ng",
@@ -484,6 +485,14 @@ dependencies = [
  "bindgen",
  "cc",
  "num-complex",
+]
+
+[[package]]
+name = "ferrite-fldigi"
+version = "0.9.0"
+dependencies = [
+ "cc",
+ "wasm-bindgen",
 ]
 
 [[package]]

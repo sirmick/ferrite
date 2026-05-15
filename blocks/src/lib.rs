@@ -35,6 +35,8 @@ pub mod fft;
 pub mod file_audio_sink;
 pub mod file_sink;
 pub mod file_source;
+#[cfg(feature = "fldigi")]
+pub mod fldigi;
 pub mod fm_demod;
 pub mod frame;
 #[cfg(feature = "ft8")]
@@ -95,6 +97,8 @@ pub use fft::{FftBlock, FftBlockParams, FftWindow};
 pub use file_audio_sink::{FileAudioSink, FileAudioSinkParams};
 pub use file_sink::{FileIqSink, FileIqSinkParams, IqSinkFormat, WriteSeek};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
+#[cfg(feature = "fldigi")]
+pub use fldigi::{FldigiDemod, FldigiDemodParams};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 #[cfg(feature = "ft8")]

@@ -5,6 +5,7 @@
 // `RunnerCore` directly (this file is a thin adapter with no branching
 // worth covering).
 
+import { initFldigiBridge } from '../wasm/fldigi/fldigiBridge.js';
 import { FrameClient } from '../ws/client.js';
 import { initFrameDecoder } from '../ws/frame.js';
 import type { RunnerRequest } from './protocol.js';
@@ -18,6 +19,14 @@ import { createRuntime, splitFlowgraphForEnv } from './rustRuntime.js';
 // it resolves. (The core's unit tests construct `RunnerCore` directly
 // without going through this glue, so they stay WASM-free.)
 void initFrameDecoder();
+
+// Warm the fldigi Emscripten bridge at worker startup (link-vs-bridge:
+// the wasm32 ferrite-fldigi backend's synchronous snippet calls need
+// the Emscripten module live before any browser-placed FldigiDemod is
+// constructed). `onmessage` awaits it before dispatching so runtime
+// build never races the load. Resolves false (inert) if fldigi.wasm
+// wasn't built — browser fldigi presets unavailable, nothing throws.
+void initFldigiBridge();
 
 const core = new RunnerCore({
   createFrameClient: (wsUrl) =>
@@ -51,6 +60,10 @@ const core = new RunnerCore({
 });
 
 self.onmessage = async (ev: MessageEvent<RunnerRequest>) => {
+  // Idempotent + cached: ~0 cost after the first await, but guarantees
+  // the Emscripten module is ready before a runtime containing a
+  // browser-side FldigiDemod is built (its snippet calls are sync).
+  await initFldigiBridge();
   const resp = await core.handle(ev.data);
   (self as unknown as Worker).postMessage(resp);
 };

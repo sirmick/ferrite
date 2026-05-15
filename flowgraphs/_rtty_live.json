@@ -1,0 +1,41 @@
+{
+  "name": "_rtty_live",
+  "label": "RTTY live decode (ad-hoc, not shipped)",
+  "ai_notes": "Ad-hoc bring-up flowgraph proving the fldigi RTTY decoder on real off-air HF. SDRplay RSPdx, Antenna C (long wire). Tune the DIAL (USB suppressed carrier) ~1.5 kHz below the RTTY mark/space centre so the signal lands near fldigi's 1500 Hz RTTYsweetspot; AFC pulls in the rest. Headless: decode -> tracing target decoder::fldigi. Not in the catalog (catalog_visible:false) and gated out of the ship path.",
+  "catalog_visible": false,
+  "environments": ["node"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "args": "driver=sdrplay,serial=224001D748",
+        "antenna": "Antenna C",
+        "center_freq_hz": 14078500.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0,
+        "agc": true
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": { "input_rate_hz": 2400000.0, "output_rate_hz": 8000.0 }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": { "sample_rate_hz": 8000, "sideband": "usb", "audio_gain": 30.0 }
+    },
+    "rtty": {
+      "type": "FldigiDemod",
+      "placement": "node",
+      "params": { "mode": "rtty45", "sample_rate_hz": 8000.0, "afc": true }
+    }
+  },
+  "wires": [
+    ["src.out", "chan.in"],
+    ["chan.out", "demod.in"],
+    ["demod.out", "rtty.in"]
+  ]
+}

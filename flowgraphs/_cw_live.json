@@ -1,0 +1,64 @@
+{
+  "name": "_cw_live",
+  "label": "CW live decode \u2014 NCDXF W6WX beacon (ad-hoc, not shipped)",
+  "ai_notes": "Ad-hoc bring-up flowgraph proving the fldigi CW (Morse) decoder on the NCDXF/IARU beacon W6WX, 14.100 MHz, Mt Umunhum (~15 mi from San Jose) \u2014 24/7, every 3 min: 'W6WX' @ 22 WPM + dashes, 100 W. SDRplay RSPdx, Antenna C long wire. Dial set ~700 Hz below 14.100 MHz so the beacon tone lands in fldigi's CW capture range. Headless: decode -> tracing decoder::fldigi. Not shipped (catalog_visible:false).",
+  "catalog_visible": false,
+  "environments": [
+    "node"
+  ],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "args": "driver=sdrplay,serial=224001D748",
+        "antenna": "Antenna C",
+        "center_freq_hz": 10118500.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0,
+        "agc": false,
+        "gain_db": 40.0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 8000.0
+      }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 8000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
+    },
+    "cw": {
+      "type": "FldigiDemod",
+      "placement": "node",
+      "params": {
+        "mode": "cw",
+        "sample_rate_hz": 8000.0,
+        "afc": true
+      }
+    }
+  },
+  "wires": [
+    [
+      "src.out",
+      "chan.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "cw.in"
+    ]
+  ]
+}

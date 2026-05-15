@@ -37,6 +37,14 @@ export default ts.config(
     },
   },
   {
-    ignores: ['build/', '.svelte-kit/', 'dist/', 'src/lib/wasm/blocks/', 'src/lib/wasm/runtime/'],
+    ignores: [
+      'build/',
+      '.svelte-kit/',
+      'dist/',
+      'src/lib/wasm/blocks/',
+      'src/lib/wasm/runtime/',
+      // Generated Emscripten module; fldigiBridge.ts stays linted.
+      'src/lib/wasm/fldigi/fldigi.mjs',
+    ],
   },
 );

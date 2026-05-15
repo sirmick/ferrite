@@ -12,6 +12,7 @@ members = [
     "blocks/native/rtl_433",
     "blocks/native/ft8",
     "blocks/native/wsprd",
+    "blocks/native/fldigi",
     "runtime",
     "tools/ferrite-ctl",
 ]
