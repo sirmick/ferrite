@@ -70,6 +70,52 @@ extern "C" {
     ) -> c_int;
 }
 
+/// Run the C decoder over a prepared window. `wsprd.c` has multi-MB
+/// stack frames (`float ps[512][~347]` + per-pass candidate scratch),
+/// so on a default 2 MB worker/test thread it overflows. Off-wasm we
+/// run it on a thread with a roomy explicit stack — that also keeps a
+/// ~100 ms decode off the DSP scheduler thread. On wasm there are no
+/// threads; the stack budget is a link-time setting owned by the
+/// runtime, so call straight through.
+fn run_decode(
+    mut idat: Vec<f32>,
+    mut qdat: Vec<f32>,
+    options: DecoderOptions,
+) -> (Vec<DecoderResults>, c_int) {
+    let work = move || {
+        let mut results = vec![DecoderResults::default(); MAX_UNIQUES];
+        let mut n_results: c_int = 0;
+        // SAFETY: idat/qdat are exactly WSPR_WINDOW_SAMPLES long;
+        // results holds MAX_UNIQUES rows; n_results is a valid slot.
+        unsafe {
+            wspr_decode(
+                idat.as_mut_ptr(),
+                qdat.as_mut_ptr(),
+                WSPR_WINDOW_SAMPLES as c_int,
+                options,
+                results.as_mut_ptr(),
+                &mut n_results,
+            );
+        }
+        (results, n_results)
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::Builder::new()
+            .name("wsprd-decode".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(work)
+            .expect("spawn wsprd-decode thread")
+            .join()
+            .expect("wsprd-decode thread panicked")
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        work()
+    }
+}
+
 /// One decoded WSPR spot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WsprDecode {
@@ -129,18 +175,7 @@ pub fn decode_window(i: &[f32], q: &[f32], dial_freq_hz: i32) -> Vec<WsprDecode>
         subtraction: 1,
     };
 
-    let mut results = vec![DecoderResults::default(); MAX_UNIQUES];
-    let mut n_results: c_int = 0;
-    unsafe {
-        wspr_decode(
-            idat.as_mut_ptr(),
-            qdat.as_mut_ptr(),
-            WSPR_WINDOW_SAMPLES as c_int,
-            options,
-            results.as_mut_ptr(),
-            &mut n_results,
-        );
-    }
+    let (results, n_results) = run_decode(idat, qdat, options);
 
     let count = (n_results.max(0) as usize).min(MAX_UNIQUES);
     results[..count]

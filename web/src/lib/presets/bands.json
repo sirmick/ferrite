@@ -94,6 +94,7 @@
         { "label": "CW DX", "hz": 3535000, "mode": "CW" },
         { "label": "FT8", "hz": 3573000, "mode": "USB" },
         { "label": "FT4", "hz": 3575000, "mode": "USB" },
+        { "label": "WSPR", "hz": 3568600, "mode": "USB" },
         { "label": "SSB", "hz": 3800000, "mode": "LSB" }
       ]
     },
@@ -103,6 +104,7 @@
         { "label": "CW", "hz": 7035000, "mode": "CW" },
         { "label": "FT8", "hz": 7074000, "mode": "USB" },
         { "label": "FT4", "hz": 7047500, "mode": "USB" },
+        { "label": "WSPR", "hz": 7038600, "mode": "USB" },
         { "label": "SSB", "hz": 7200000, "mode": "LSB" }
       ]
     },
@@ -112,6 +114,7 @@
         { "label": "CW", "hz": 14025000, "mode": "CW" },
         { "label": "FT8", "hz": 14074000, "mode": "USB" },
         { "label": "FT4", "hz": 14080000, "mode": "USB" },
+        { "label": "WSPR", "hz": 14095600, "mode": "USB" },
         { "label": "SSB DX", "hz": 14200000, "mode": "USB" }
       ]
     },
@@ -120,6 +123,7 @@
       "entries": [
         { "label": "FT8", "hz": 18100000, "mode": "USB" },
         { "label": "FT4", "hz": 18104000, "mode": "USB" },
+        { "label": "WSPR", "hz": 18104600, "mode": "USB" },
         { "label": "SSB", "hz": 18130000, "mode": "USB" }
       ]
     },
@@ -128,6 +132,7 @@
       "entries": [
         { "label": "FT8", "hz": 21074000, "mode": "USB" },
         { "label": "FT4", "hz": 21140000, "mode": "USB" },
+        { "label": "WSPR", "hz": 21094600, "mode": "USB" },
         { "label": "SSB", "hz": 21300000, "mode": "USB" }
       ]
     },
@@ -136,6 +141,7 @@
       "entries": [
         { "label": "FT8", "hz": 28074000, "mode": "USB" },
         { "label": "FT4", "hz": 28180000, "mode": "USB" },
+        { "label": "WSPR", "hz": 28124600, "mode": "USB" },
         { "label": "SSB calling", "hz": 28400000, "mode": "USB" },
         { "label": "FM simplex", "hz": 29600000, "mode": "NBFM" }
       ]
@@ -146,6 +152,7 @@
         { "label": "SSB calling", "hz": 50125000, "mode": "USB" },
         { "label": "FT8", "hz": 50313000, "mode": "USB" },
         { "label": "FT4", "hz": 50318000, "mode": "USB" },
+        { "label": "WSPR", "hz": 50293000, "mode": "USB" },
         { "label": "FM simplex calling", "hz": 52525000, "mode": "NBFM" }
       ]
     },

@@ -1,0 +1,111 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "wspr",
+  "label": "WSPR (HF propagation beacons)",
+  "description": "WSPR (Weak Signal Propagation Reporter) is the de-facto HF propagation-sounding mode — 2-minute UTC-aligned slots, 4-FSK at 1.4648 baud in a ~6 Hz occupied bandwidth, K=32 r=½ convolutional FEC carrying a compressed callsign + 4-char Maidenhead grid + power in dBm. Beacons run a fraction of a watt and are heard worldwide. On the waterfall it's a barely-visible thin line drifting slowly inside a 200 Hz sub-band. Common dial frequencies (USB demod, 1500 Hz audio centre): 0.4742 / 1.8366 / 3.5686 / 7.0386 / 10.1387 / 14.0956 / 18.1046 / 21.0946 / 28.1246 MHz. Tune slightly off the dial (DC-spike rule); the channelizer's freq_shift_hz recovers the carrier offset. Decoded spots stream under the decoder::wspr log target every 2 minutes. Audio is teed alongside so the user can listen.",
+  "ai_notes": "WSPR (HF weak-signal propagation beacons, 2 min UTC-aligned slots). Standard dial frequencies (USB demod, listen ~1500 Hz audio): 0.4742 / 1.8366 / 3.5686 / 7.0386 / 10.1387 / 14.0956 / 18.1046 / 21.0946 / 28.1246 MHz. Decodes appear every 2 min — wait ≥4 min before declaring \"no traffic.\" Output: `tail decoder --category wspr`. Set the WsprDemod `dial_freq_hz` param to the RF dial so logged spots show the band.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/WSPR",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 14095600.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 12000.0
+      }
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 12000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
+    },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
+    "wspr": {
+      "type": "WsprDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 12000.0,
+        "dial_freq_hz": 14095600
+      }
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "neural_enable": false,
+        "notch_enable": false,
+        "neural_attenuation_db": 18.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "buffer_samples": 8192
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["demod.out", "audio_tee.in"],
+    ["audio_tee.out0", "wspr.in"],
+    ["audio_tee.out1", "audio_resamp.in"],
+    ["audio_resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "audio.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"]
+  ]
+}
