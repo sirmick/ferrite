@@ -46,6 +46,12 @@ pub struct RealF32Resamp {
     /// is known. Kept in an `Option` so reconfigure can rebuild without
     /// losing the surrounding block instance.
     inner: Option<MsResamp>,
+    /// Input rate the current `inner` was built against. `update_rates`
+    /// is polled every second by the diag loop's `refresh_rates`; we
+    /// only rebuild + log when this actually moves, so a rate-stable
+    /// graph neither reallocates `MsResamp` nor spams a per-second line.
+    /// `0.0` until the first build.
+    input_rate_hz: f64,
     /// Scratch for one `execute` call. Sized to
     /// `MsResamp::max_output_for(input_len)`.
     scratch: Vec<f32>,
@@ -68,6 +74,7 @@ impl RealF32Resamp {
         Ok(Self {
             params,
             inner: None,
+            input_rate_hz: 0.0,
             scratch: Vec::new(),
         })
     }
@@ -81,6 +88,7 @@ impl RealF32Resamp {
         let inner = MsResamp::new(rate, self.params.stopband_db)
             .map_err(|e| anyhow::anyhow!("msresamp_rrrf: {e}"))?;
         self.inner = Some(inner);
+        self.input_rate_hz = input_rate_hz;
         self.scratch.clear();
         Ok(())
     }
@@ -155,6 +163,12 @@ impl Block for RealF32Resamp {
             .input_rate("in")
             .filter(|r| *r > 0.0)
             .ok_or_else(|| anyhow::anyhow!("RealF32Resamp update_rates: input rate unknown"))?;
+        // Polled every second by the diag loop. Skip the rebuild (a
+        // fresh `MsResamp` alloc) and the log line entirely when the
+        // input rate is unchanged — only a real rate move is an event.
+        if (input_rate - self.input_rate_hz).abs() <= f64::EPSILON {
+            return Ok(());
+        }
         self.rebuild_for_input_rate(input_rate)?;
         let ratio = self.params.output_rate_hz / input_rate;
         tracing::info!(

@@ -72,21 +72,42 @@ pub async fn ws_logs(ws: WebSocketUpgrade, State(state): State<AppState>) -> imp
 
 async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroadcast) {
     let mut rx = logs.subscribe();
+    // An idle log stream (no events for a while) used to sit silent
+    // until the Vite dev proxy / browser killed it on its ~60 s idle
+    // timeout, and the client reconnected — logging "server logs
+    // connected" every minute. A periodic ping keeps the connection
+    // hot so a quiet runtime doesn't churn the socket.
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(25));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        match rx.recv().await {
-            Ok(line) => {
-                if socket.send(Message::Text(line)).await.is_err() {
+        tokio::select! {
+            recv = rx.recv() => match recv {
+                Ok(line) => {
+                    if socket.send(Message::Text(line)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    let _ = socket
+                        .send(Message::Text(format!(
+                            "[WARN] log stream lagged by {n} lines"
+                        )))
+                        .await;
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            _ = keepalive.tick() => {
+                if socket.send(Message::Ping(Vec::new())).await.is_err() {
                     return;
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                let _ = socket
-                    .send(Message::Text(format!(
-                        "[WARN] log stream lagged by {n} lines"
-                    )))
-                    .await;
-            }
-            Err(broadcast::error::RecvError::Closed) => return,
+            // Drain client-side frames so a Close (or the read half
+            // erroring) tears the task down promptly instead of only
+            // being noticed on the next send.
+            client = socket.recv() => match client {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => {}
+            },
         }
     }
 }

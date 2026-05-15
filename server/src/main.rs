@@ -234,7 +234,15 @@ fn build_source_config(args: &Args) -> Result<SourceConfig> {
 async fn main() -> Result<()> {
     let log_broadcast = log_stream::LogBroadcast::new();
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        // Default filter mutes the 1 Hz flow telemetry — `flowdiag`
+        // (rate-change lines), `flowdiag::node` (server snapshot +
+        // flowcpu) and `flowdiag::browser` (browser snapshot). They're
+        // ~4 lines/sec of self-similar JSON that drown real events in
+        // log files and the UI stream. Operators opt back in with
+        // `RUST_LOG=flowdiag=info` (or per-side) when diagnosing flow.
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("info,flowdiag=warn,flowdiag::node=warn,flowdiag::browser=warn")
+        }))
         // Show the tracing target on stdout (e.g. `decoder::packet`,
         // `decoder::flex`, `flowdiag`) so log files and run.sh tails
         // are self-describing — same view the UI broadcast layer

@@ -365,27 +365,39 @@ impl Channelizer {
     /// [`Self::rebuild_for_input_rate`] and emit one `flowdiag` line
     /// tagged with `phase` so operators can distinguish first-build
     /// from live adaptation.
+    ///
+    /// `always_log` forces the line even when nothing changed (init,
+    /// where the snapshot is genuinely informative). `update_rates`
+    /// passes `false`: it's polled every second by the diag loop's
+    /// `refresh_rates`, so logging unconditionally there spams an
+    /// identical line per second. Only a real rate rebuild is worth a
+    /// line on the live path.
     fn sync_to_ctx_rate(
         &mut self,
         ctx: &crate::block::InitCtx<'_>,
         phase: &'static str,
+        always_log: bool,
     ) -> Result<()> {
+        let mut rebuilt = false;
         if let Some(rate) = ctx.input_rate("in") {
             if rate > 0.0 && (rate - self.input_rate_hz).abs() > f64::EPSILON {
                 self.rebuild_for_input_rate(rate)?;
+                rebuilt = true;
             }
         }
-        #[allow(clippy::cast_precision_loss)]
-        let actual_out = self.input_rate_hz / self.factor as f64;
-        tracing::info!(
-            target: "flowdiag",
-            block = "Channelizer",
-            input_rate_hz = self.input_rate_hz,
-            factor = self.factor,
-            target_output_rate_hz = self.target_output_rate_hz,
-            actual_output_rate_hz = actual_out,
-            "{phase}",
-        );
+        if always_log || rebuilt {
+            #[allow(clippy::cast_precision_loss)]
+            let actual_out = self.input_rate_hz / self.factor as f64;
+            tracing::info!(
+                target: "flowdiag",
+                block = "Channelizer",
+                input_rate_hz = self.input_rate_hz,
+                factor = self.factor,
+                target_output_rate_hz = self.target_output_rate_hz,
+                actual_output_rate_hz = actual_out,
+                "{phase}",
+            );
+        }
         Ok(())
     }
 }
@@ -478,7 +490,7 @@ impl Block for Channelizer {
             .find(|(n, _)| *n == "in")
             .map(|(_, m)| m.center_freq_hz)
             .unwrap_or(0.0);
-        self.sync_to_ctx_rate(ctx, "channelizer init")?;
+        self.sync_to_ctx_rate(ctx, "channelizer init", true)?;
         // Honour a construction-time `record_path` — apply_live_params
         // doesn't fire for params set in the preset itself, so an
         // authored "record on load" preset would otherwise drop the path.
@@ -521,7 +533,7 @@ impl Block for Channelizer {
             .find(|(n, _)| *n == "in")
             .map(|(_, m)| m.center_freq_hz)
             .unwrap_or(self.input_center_freq_hz);
-        self.sync_to_ctx_rate(ctx, "channelizer rate update")
+        self.sync_to_ctx_rate(ctx, "channelizer rate update", false)
     }
 
     /// Live-tunable: `freq_shift_hz` (VFO retune — the original reason

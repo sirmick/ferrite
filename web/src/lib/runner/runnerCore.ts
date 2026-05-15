@@ -249,11 +249,29 @@ export class RunnerCore {
       // leading category prefix doesn't break ingestion. Browser-
       // side flowdiag uses its own `flowdiag::browser` category so
       // it can be muted separately from server-side `flowdiag::node`.
-      const text = `runner: runner 1s: ticks=${state.ticks} rx[${bridgeSummary}] audio[${audioSummary}]`;
-      postDiag(text);
+      // When the graph is entirely node-side (the common case) there
+      // are no browser bridges/audio, so this line is a constant
+      // `rx[] audio[]` once a second — pure noise. Only emit it when
+      // there's something bound on the browser side to report on.
+      if (state.bridges.length > 0 || state.audio.length > 0) {
+        const text = `runner: runner 1s: ticks=${state.ticks} rx[${bridgeSummary}] audio[${audioSummary}]`;
+        postDiag(text);
+      }
       try {
         const json = state.rt.diagSnapshot();
-        postDiag(`flowdiag::browser: flowdiag side=browser ${json}`);
+        // Skip the empty `{"blocks":[]}` snapshot a node-only graph
+        // produces every tick — the Flow tab has nothing to show for
+        // it and it just floods the log stream.
+        let hasBlocks = false;
+        try {
+          hasBlocks = (JSON.parse(json) as { blocks?: unknown[] }).blocks?.length ? true : false;
+        } catch {
+          // Unparseable snapshot — forward it so the anomaly is visible.
+          hasBlocks = true;
+        }
+        if (hasBlocks) {
+          postDiag(`flowdiag::browser: flowdiag side=browser ${json}`);
+        }
       } catch {
         /* best-effort */
       }
