@@ -1,0 +1,156 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "olivia",
+  "label": "Olivia 8/500 (very robust MFSK)",
+  "description": "Olivia is the go-to weak-signal MFSK mode for HF: 8 tones in 500 Hz with strong FEC + interleaving, readable well below the noise floor where RTTY/PSK are hopeless \u2014 at the cost of speed (slow text, multi-second latency). 8/500 is the most common amateur variant. On the waterfall it's a clean rectangular block of hopping tones. Decoded text streams under decoder::fldigi (vendored fldigi olivia core, Ja\u0142ocha MFSK engine). Famously tolerant of mistuning \u2014 get the block anywhere in the USB passband and it locks; just expect a few seconds before text appears (interleaver fill).",
+  "ai_notes": "Olivia 8/500 (8-tone MFSK + FEC, vendored fldigi olivia core, Ja\u0142ocha engine). Variants via FldigiDemod mode: olivia, olivia-8-500, olivia-16-500, olivia-32-1000. Very mistuning-tolerant; tune dial \u2248 signal \u2212 1500 Hz. Multi-second decode latency by design (FEC interleaver). Calling freqs ~14.0729 / 7.0729 / 10.142 MHz + nets. Output: `tail decoder --category fldigi`.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Olivia",
+  "sample_path": "samples/sigidwiki/Olivia_8-500.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/Olivia_8-500.jpg",
+  "environments": [
+    "node",
+    "browser"
+  ],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 14071400.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 8000.0
+      }
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 8000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
+    },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "neural_enable": false,
+        "notch_enable": false,
+        "neural_attenuation_db": 18.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "buffer_samples": 8192
+      }
+    },
+    "olivia": {
+      "type": "FldigiDemod",
+      "placement": "node",
+      "params": {
+        "mode": "olivia-8-500",
+        "sample_rate_hz": 8000.0,
+        "afc": true
+      }
+    }
+  },
+  "wires": [
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "olivia.in"
+    ],
+    [
+      "audio_tee.out1",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ]
+  ]
+}

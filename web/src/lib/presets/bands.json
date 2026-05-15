@@ -375,6 +375,11 @@
           "mode": "USB"
         },
         {
+          "label": "Olivia",
+          "hz": 7071400,
+          "mode": "USB"
+        },
+        {
           "label": "SSB",
           "hz": 7200000,
           "mode": "LSB"
@@ -432,6 +437,11 @@
         {
           "label": "Contestia",
           "hz": 14073500,
+          "mode": "USB"
+        },
+        {
+          "label": "Olivia",
+          "hz": 14071400,
           "mode": "USB"
         },
         {
