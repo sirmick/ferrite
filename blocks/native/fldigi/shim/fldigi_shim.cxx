@@ -25,6 +25,7 @@
 #include "dominoex.h"        // vendored: class dominoex
 #include "olivia.h"          // vendored: class olivia
 #include "contestia.h"       // vendored: class contestia
+#include "navtex.h"          // vendored: class navtex
 #include "ptt.h"             // shim
 #include "winkeyer.h"        // shim
 #include "nanoIO.h"          // shim
@@ -169,6 +170,7 @@ bool mailclient = false;
 void set_phase(double, double, bool) {}
 void set_video(double *, int, bool) {}
 void put_sec_char(char) {}  // secondary channel — primary decode via put_rx_char
+void start_tx() {}          // navtex TX path — never reached RX-only
 void put_Bandwidth(int) {}
 void center_rxfilt_at_track() {}
 void pskmail_notify_s2n(double, double, double) {}
@@ -288,6 +290,8 @@ static modem *make_modem(const std::string &id) {
 	if (id == "contestia-8-250")  return new contestia(MODE_CONTESTIA_8_250);
 	if (id == "contestia-8-500")  return new contestia(MODE_CONTESTIA_8_500);
 	if (id == "contestia-16-500") return new contestia(MODE_CONTESTIA_16_500);
+	if (id == "navtex") return new navtex(MODE_NAVTEX);
+	if (id == "sitorb") return new navtex(MODE_SITORB);
 	return 0;
 }
 

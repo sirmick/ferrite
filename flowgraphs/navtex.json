@@ -1,0 +1,156 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "navtex",
+  "label": "NAVTEX (518 kHz maritime safety)",
+  "description": "NAVTEX is the international maritime safety broadcast on 518 kHz \u2014 navigational warnings, weather and SAR bulletins from coast stations on a fixed schedule. The mode is SITOR-B / NBDP: CCIR-476, 100 baud FSK, 170 Hz shift, forward-error-corrected (each char sent twice, time-diversity). High ERP MF groundwave: from the US west coast, Point Reyes (NMC) is the dominant station. On the waterfall it's two crisp lines 170 Hz apart, keying in the FEC pattern, appearing for ~10 min in NMC's scheduled slots (several/day). Decoded text streams under decoder::fldigi (vendored fldigi navtex core). MF: this preset runs the source at a low sample rate; tune dial \u2248 518 kHz \u2212 1.5 kHz so the pair lands on the 1500 Hz sweetspot.",
+  "ai_notes": "NAVTEX / SITOR-B (CCIR-476 FEC, 100 bd / 170 shift, vendored fldigi navtex core). 518 kHz international (also 490 kHz local, 4209.5 kHz). US Pacific = Point Reyes NMC, scheduled ~4-6 slots/day (not continuous \u2014 watch the waterfall for the burst). MF: source sample_rate 384 kHz, dial \u2248 516.5 kHz. mode=navtex; sitorb variant available. Strong groundwave \u2014 the realistic decodable signal on a long-wire. Output: `tail decoder --category fldigi`.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/NAVTEX",
+  "sample_path": "samples/sigidwiki/NAVTEX_SITOR-B.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/NAVTEX.jpg",
+  "environments": [
+    "node",
+    "browser"
+  ],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 516500.0,
+        "sample_rate_hz": 384000.0,
+        "bandwidth_hz": 300000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 384000.0,
+        "output_rate_hz": 8000.0
+      }
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 8000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
+    },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "neural_enable": false,
+        "notch_enable": false,
+        "neural_attenuation_db": 18.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "buffer_samples": 8192
+      }
+    },
+    "navtex": {
+      "type": "FldigiDemod",
+      "placement": "node",
+      "params": {
+        "mode": "navtex",
+        "sample_rate_hz": 8000.0,
+        "afc": true
+      }
+    }
+  },
+  "wires": [
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "navtex.in"
+    ],
+    [
+      "audio_tee.out1",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ]
+  ]
+}

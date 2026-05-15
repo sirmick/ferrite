@@ -277,6 +277,26 @@
       ]
     },
     {
+      "name": "Maritime NAVTEX (MF/HF)",
+      "entries": [
+        {
+          "label": "NAVTEX 518 (intl)",
+          "hz": 516500,
+          "mode": "USB"
+        },
+        {
+          "label": "NAVTEX 490 (local)",
+          "hz": 488500,
+          "mode": "USB"
+        },
+        {
+          "label": "NAVTEX 4209.5 (trop)",
+          "hz": 4208000,
+          "mode": "USB"
+        }
+      ]
+    },
+    {
       "name": "Ham 80m (3.5\u20134.0 MHz)",
       "entries": [
         {
