@@ -4,14 +4,15 @@
   // injected `ui:fft_narrow` sink (see `inject_narrow_fft.rs`), derives
   // axes from `source_center + freq_shift_hz ± channelizer.output_rate_hz/2`,
   // and reuses the same `SpectrumRenderer` as the wide pane. No VFO
-  // marker (the narrow view IS centred on the VFO), no zoom/pan/click
-  // controls — read-only at this stage.
+  // marker (the narrow view IS centred on the VFO). Click inside the
+  // pane fine-tunes the VFO to the clicked offset (snap-aware).
   import { onMount } from 'svelte';
   import { SpectrumRenderer } from './spectrum';
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
+  import { tuneVfoTo } from '$lib/control/tuning.svelte';
   import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
 
   interface Props {
@@ -59,6 +60,17 @@
 
   const SERVER_FLOOR_DBFS = -160;
   const SERVER_CEIL_DBFS = 0;
+
+  // Click inside the channel view → fine-tune the VFO to that
+  // frequency. The narrow renderer's axes are the channel window, so
+  // `pixelToFreq` already returns an absolute Hz; the central path
+  // handles snap + the abs→freq_shift split.
+  function onClick(ev: MouseEvent) {
+    if (!renderer || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const f = renderer.pixelToFreq(ev.clientX - rect.left);
+    if (f !== undefined && Number.isFinite(f)) tuneVfoTo(f);
+  }
 
   onMount(() => {
     if (!canvas) return;
@@ -115,7 +127,12 @@
 </script>
 
 {#if fftStreamId !== undefined}
-  <canvas bind:this={canvas} class="block h-full w-full"></canvas>
+  <canvas
+    bind:this={canvas}
+    onclick={onClick}
+    class="block h-full w-full cursor-crosshair"
+    title="click to fine-tune the VFO within the channel"
+  ></canvas>
 {:else}
   <div
     class="flex h-full w-full items-center justify-center text-[11px] text-[color:var(--color-muted)]"

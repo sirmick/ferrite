@@ -55,6 +55,13 @@ export const CLIENT_DEFAULTS = {
   'client.waterfall.contrastFloorDbfs': -110,
   'client.waterfall.contrastCeilDbfs': -30,
 
+  // Tuning step / snap, one control. `'off'` = free tuning (arrows
+  // still step by the band-natural amount, but no grid snap); `'auto'`
+  // = band-plan-derived step + snap; a fixed step in Hz as a string
+  // ('1000', '12500', '200000', …) = that raster + snap. String-typed
+  // so the one-blob type-guard on load stays simple.
+  'client.tuning.stepMode': 'auto',
+
   // Audio playback
   'client.audio.volume': 1.0,
   'client.audio.muted': false,

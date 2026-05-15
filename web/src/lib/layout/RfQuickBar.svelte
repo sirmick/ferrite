@@ -2,28 +2,47 @@
   // RF quick-control bar — the always-visible "convenience" row that
   // sits directly under the AppToolbar. Carries:
   //
-  //  - VFO nixie + SDR-centre nixie + sample-rate dropdown + LiveControls
-  //    (gain / antenna / per-driver toggle settings) — left cluster,
-  //    gated on live axes (only meaningful once a pipeline is running).
-  //  - Channel toggle (show/hide the channelised FFT/waterfall pane) —
-  //    right-aligned, always visible. Disabled on presets without a
-  //    Channelizer (no `ui:fft_narrow` sink).
+  //  - VFO nixie + step/snap control + SDR-centre nixie + sample-rate
+  //    dropdown + LiveControls (gain / antenna / per-driver settings)
+  //    — left cluster, gated on live axes.
+  //  - Display-zoom control — right-aligned.
   //
-  // Action buttons (Start/Stop, Source…, Flowgraph…) live one row up
-  // in AppToolbar so they're always reachable, even with no source
-  // configured. The outer container here renders unconditionally so
-  // the Channel toggle stays in its same spot as Start, status chips,
-  // and the visual knobs (DisplayControls).
-  //
-  // Reads pipeline state directly; no props.
+  // Action buttons (Start/Stop, Source…, Flowgraph…, Channel) live one
+  // row up in AppToolbar so they're always reachable. Reads pipeline
+  // state directly; no props.
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { quickRateChoices, bandwidthForRate } from '$lib/controls/optionsModel';
   import Nixie from '$lib/controls/Nixie.svelte';
   import LiveControls from '$lib/controls/LiveControls.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { applyControl } from '$lib/control/dispatch';
+  import { tuneVfoTo, stepVfo, currentTuning } from '$lib/control/tuning.svelte';
 
   let axes = $derived(currentAxes(pipeline));
+
+  // Tuning step / snap (band-plan aware via tuningModel). The dropdown
+  // is the single control: 'off' = free tune (no snap), 'auto' =
+  // band-derived step + snap, a fixed Hz = that raster + snap.
+  let stepMode = $derived(clientControls.get('client.tuning.stepMode'));
+  let tuning = $derived(currentTuning());
+  const STEP_CHOICES: { v: string; label: string }[] = [
+    { v: 'off', label: 'Off' },
+    { v: 'auto', label: 'Auto' },
+    { v: '100', label: '100 Hz' },
+    { v: '1000', label: '1 kHz' },
+    { v: '5000', label: '5 kHz' },
+    { v: '9000', label: '9 kHz' },
+    { v: '10000', label: '10 kHz' },
+    { v: '12500', label: '12.5 kHz' },
+    { v: '25000', label: '25 kHz' },
+    { v: '100000', label: '100 kHz' },
+    { v: '200000', label: '200 kHz' },
+  ];
+  function fmtStep(hz: number): string {
+    if (hz >= 1e6) return `${(hz / 1e6).toFixed(hz % 1e6 ? 3 : 0)} MHz`;
+    if (hz >= 1e3) return `${(hz / 1e3).toFixed(hz % 1e3 ? 1 : 0)} kHz`;
+    return `${hz} Hz`;
+  }
 
   let vfoBlock = $derived(
     Object.values(pipeline.blocks).find((b) =>
@@ -50,12 +69,7 @@
     return choices;
   });
 
-  // Channel-detail column toggle. Lives here (next to the other
-  // navigational knobs) rather than in DisplayControls — the
-  // visual-shape strip — because show/hide of an entire spectrum pane
-  // is a navigation move, not a visual tweak.
-  let hasNarrow = $derived(pipeline.uiSinks.fft_narrow !== undefined);
-  let narrowVisible = $derived(clientControls.get('client.workspace.narrowVisible'));
+  let viewZoom = $derived(clientControls.get('client.spectrum.viewZoom'));
 
   function fmtRate(hz: number): string {
     if (hz >= 1e6) return `${(hz / 1e6).toFixed(3)} MS/s`;
@@ -84,20 +98,12 @@
     }
   }
 
+  // VFO commit routes through the central snap-aware path.
   function commitVfo(hz: number) {
-    if (!axes || !vfoBlock) return;
-    const shift = hz - axes.center_freq_hz;
-    const half = axes.sample_rate_hz / 2;
-    const clamped = Math.max(-half, Math.min(half, shift));
-    if (clamped !== vfoShiftHz) {
-      void applyControl(`flow.${vfoBlock.id}.freq_shift_hz`, clamped);
-    }
+    tuneVfoTo(hz);
   }
 </script>
 
-<!-- Always renders so the Channel toggle stays anchored to a stable
-     spot. VFO + centre + rate + LiveControls light up once the
-     pipeline has live axes. -->
 <div
   class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-800 bg-[color:var(--color-bg)] px-2 py-1 text-[11px] text-[color:var(--color-muted)]"
 >
@@ -105,6 +111,39 @@
     {#if vfoBlock}
       <span class="contents" title="VFO — what you're listening to (orange)">
         <Nixie hz={vfoAbsHz} onCommit={commitVfo} tone="orange" />
+      </span>
+
+      <span
+        class="flex items-center gap-1"
+        title="Tuning step (Up/Down keys or ▲▼). Off = free tune, no snap."
+      >
+        <button
+          type="button"
+          class="rounded border border-slate-700 px-1.5 py-0.5 hover:border-slate-600"
+          aria-label="step down"
+          onclick={() => stepVfo(-1)}>▼</button
+        >
+        <select
+          class="rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
+          value={stepMode}
+          onchange={(e) =>
+            void applyControl(
+              'client.tuning.stepMode',
+              (e.currentTarget as HTMLSelectElement).value,
+            )}
+        >
+          {#each STEP_CHOICES as c (c.v)}
+            <option value={c.v}>
+              {c.v === 'auto' ? `Auto (${fmtStep(tuning.stepHz)})` : c.label}
+            </option>
+          {/each}
+        </select>
+        <button
+          type="button"
+          class="rounded border border-slate-700 px-1.5 py-0.5 hover:border-slate-600"
+          aria-label="step up"
+          onclick={() => stepVfo(1)}>▲</button
+        >
       </span>
     {/if}
 
@@ -130,36 +169,41 @@
     </label>
 
     <LiveControls />
+
+    <!-- Display-zoom — right-aligned. Crops the FFT/waterfall view;
+         the SDR sample rate is unchanged. -->
+    <label
+      class="ml-auto flex items-center gap-1"
+      title="display zoom — crops the FFT view; SDR sample rate is unchanged"
+    >
+      <span>zoom</span>
+      <input
+        type="range"
+        class="w-20"
+        min={1}
+        max={16}
+        step={0.5}
+        value={viewZoom}
+        oninput={(e) =>
+          void applyControl(
+            'client.spectrum.viewZoom',
+            Number((e.currentTarget as HTMLInputElement).value),
+          )}
+      />
+      <span class="w-7 text-right font-mono text-slate-300">{viewZoom.toFixed(1)}×</span>
+      {#if viewZoom > 1}
+        <button
+          type="button"
+          class="rounded border border-slate-700 px-1 py-0 text-[10px] leading-none hover:border-slate-500"
+          title="reset zoom + pan"
+          onclick={() => {
+            void applyControl('client.spectrum.viewZoom', 1);
+            void applyControl('client.spectrum.viewPan', 0.5);
+          }}
+        >
+          ⟲
+        </button>
+      {/if}
+    </label>
   {/if}
-
-  <!-- Channel-detail toggle — right-aligned, always visible. Disabled
-       when the active preset has no Channelizer (no `ui:fft_narrow`
-       sink injected by env_split). -->
-  <button
-    type="button"
-    class="ml-auto rounded border border-slate-700 px-2 py-0.5 text-[11px] hover:border-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
-    class:channel-on={hasNarrow && narrowVisible}
-    disabled={!hasNarrow}
-    title={hasNarrow
-      ? narrowVisible
-        ? 'Hide channel-detail FFT / waterfall'
-        : 'Show channel-detail FFT / waterfall'
-      : 'Active preset has no channelizer — no channel-detail pane available'}
-    onclick={() => void applyControl('client.workspace.narrowVisible', !narrowVisible)}
-  >
-    Channel
-  </button>
 </div>
-
-<style>
-  /* Sky-blue accent matches the VFO marker on the wide spectrum /
-     waterfall — same hue means "you're looking at the channelised
-     slice" everywhere. */
-  .channel-on {
-    border-color: rgb(125 211 252);
-    color: rgb(125 211 252);
-  }
-  .channel-on:hover {
-    border-color: rgb(186 230 253);
-  }
-</style>

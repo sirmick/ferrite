@@ -67,7 +67,6 @@
   let autoScale = $derived(clientControls.get('client.spectrum.autoScale'));
   let manualFloorDbfs = $derived(clientControls.get('client.spectrum.displayFloorDbfs'));
   let manualCeilDbfs = $derived(clientControls.get('client.spectrum.displayCeilDbfs'));
-  let viewZoom = $derived(clientControls.get('client.spectrum.viewZoom'));
   // Waterfall contrast (separate from the spectrum trace's display
   // range — the waterfall is byte-quantised and uses its own
   // percentile-based auto-track by default).
@@ -255,42 +254,6 @@
       }}
     />
   </span>
-
-  <div class="mx-1 h-4 border-l border-slate-800"></div>
-
-  <label
-    class="flex items-center gap-1"
-    title="display zoom — crops the FFT view; SDR sample rate is unchanged"
-  >
-    <span>zoom</span>
-    <input
-      type="range"
-      class="w-16"
-      min={1}
-      max={16}
-      step={0.5}
-      value={viewZoom}
-      oninput={(e) =>
-        void applyControl(
-          'client.spectrum.viewZoom',
-          Number((e.currentTarget as HTMLInputElement).value),
-        )}
-    />
-    <span class="w-7 text-right font-mono text-slate-300">{viewZoom.toFixed(1)}×</span>
-    {#if viewZoom > 1}
-      <button
-        type="button"
-        class="rounded border border-slate-700 px-1 py-0 text-[10px] leading-none hover:border-slate-500"
-        title="reset zoom + pan"
-        onclick={() => {
-          void applyControl('client.spectrum.viewZoom', 1);
-          void applyControl('client.spectrum.viewPan', 0.5);
-        }}
-      >
-        ⟲
-      </button>
-    {/if}
-  </label>
 
   <div class="mx-1 h-4 border-l border-slate-800"></div>
 

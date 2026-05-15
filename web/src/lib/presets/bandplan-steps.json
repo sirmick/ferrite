@@ -1,0 +1,87 @@
+{
+  "$comment": "Channelization grid for the tuning step/snap model. Frequency-range keyed (NOT keyed to the vendored bandplan-usa.json names, which are too inconsistent to match on). `from`/`to` are inclusive Hz bounds; `step` is the Auto tuning increment; `snap` true means Auto also rounds the VFO to this grid; `grid_offset_hz` (optional, default 0) phases the grid so e.g. US FM lands on 87.9/88.1/... rather than 88.0/88.2. `mode` is a hint chip. US/region-2 values for now; a region selector + non-US tables come later. First matching range wins (ordered low->high, non-overlapping). Bands with no rule fall back to the default step and never snap.",
+  "default_step_hz": 1000,
+  "continuous_step_hz": 100,
+  "ranges": [
+    {
+      "from": 148500,
+      "to": 283500,
+      "step": 1000,
+      "snap": false,
+      "mode": "LW"
+    },
+    {
+      "from": 530000,
+      "to": 1710000,
+      "step": 10000,
+      "snap": true,
+      "mode": "AM",
+      "$note": "MW AM broadcast, Americas 10 kHz channels (ITU-R1/R3 use 9 kHz - region selector TBD)."
+    },
+    {
+      "from": 2300000,
+      "to": 26100000,
+      "step": 5000,
+      "snap": true,
+      "mode": "SWBC",
+      "$note": "HF broadcast 5 kHz raster. Ham SSB/CW segments fall in here too but the active SSB/CW demod forces snap off, so this stays safe."
+    },
+    {
+      "from": 87900000,
+      "to": 108000000,
+      "step": 200000,
+      "snap": true,
+      "grid_offset_hz": 100000,
+      "mode": "WFM",
+      "$note": "US FM 200 kHz spacing on the odd-tenth grid (87.9, 88.1, ...)."
+    },
+    {
+      "from": 108000000,
+      "to": 137000000,
+      "step": 25000,
+      "snap": true,
+      "mode": "AM",
+      "$note": "VHF airband AM, 25 kHz (8.33 kHz spacing not modelled yet)."
+    },
+    {
+      "from": 144000000,
+      "to": 148000000,
+      "step": 25000,
+      "snap": true,
+      "mode": "NBFM",
+      "$note": "2 m. FM repeater grid; the SSB/CW sub-band is handled by the demod-forces-continuous override."
+    },
+    {
+      "from": 156000000,
+      "to": 162025000,
+      "step": 25000,
+      "snap": true,
+      "mode": "NBFM",
+      "$note": "Marine VHF channelised."
+    },
+    {
+      "from": 162400000,
+      "to": 162550000,
+      "step": 25000,
+      "snap": true,
+      "mode": "NBFM",
+      "$note": "NOAA weather radio, 7 channels."
+    },
+    {
+      "from": 420000000,
+      "to": 450000000,
+      "step": 25000,
+      "snap": true,
+      "mode": "NBFM",
+      "$note": "70 cm FM grid."
+    },
+    {
+      "from": 462000000,
+      "to": 467725000,
+      "step": 12500,
+      "snap": true,
+      "mode": "NBFM",
+      "$note": "FRS/GMRS 12.5 kHz."
+    }
+  ]
+}

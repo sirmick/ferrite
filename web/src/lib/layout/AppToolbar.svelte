@@ -6,7 +6,7 @@
   // before the pipeline has any axes to display in RfQuickBar.
   //
   // Convenience controls that depend on a running pipeline (VFO,
-  // centre, rate, Channel toggle) live one row down in RfQuickBar.
+  // centre, rate, zoom) live one row down in RfQuickBar.
 
   import HealthDots from './HealthDots.svelte';
   import SourceDialog from '$lib/controls/SourceDialog.svelte';
@@ -14,6 +14,13 @@
   import { defaultsFor, toSourceConfig } from '$lib/controls/optionsModel';
   import type { SourceConfig } from '$lib/api/source';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
+  import { clientControls } from '$lib/control/clientStore.svelte';
+  import { applyControl } from '$lib/control/dispatch';
+
+  // Channel-detail pane toggle. Disabled when the active preset has no
+  // Channelizer (no runtime-injected `ui:fft_narrow` sink).
+  let hasNarrow = $derived(pipeline.uiSinks.fft_narrow !== undefined);
+  let narrowVisible = $derived(clientControls.get('client.workspace.narrowVisible'));
 
   let frameRate = $state(0);
   let wsBwBps = $state(0);
@@ -119,6 +126,21 @@
   <div class="ml-auto flex flex-wrap items-center gap-x-2 gap-y-1">
     <button
       type="button"
+      class="rounded border px-2 py-0.5 text-[11px] hover:border-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+      class:channel-on={hasNarrow && narrowVisible}
+      class:border-slate-700={!(hasNarrow && narrowVisible)}
+      disabled={!hasNarrow}
+      title={hasNarrow
+        ? narrowVisible
+          ? 'Hide channel-detail FFT / waterfall'
+          : 'Show channel-detail FFT / waterfall'
+        : 'Active preset has no channelizer — no channel-detail pane available'}
+      onclick={() => void applyControl('client.workspace.narrowVisible', !narrowVisible)}
+    >
+      Channel
+    </button>
+    <button
+      type="button"
       class="rounded border px-2 py-0.5 text-[11px] font-semibold disabled:opacity-50"
       class:running={pipeline.status === 'running'}
       class:stopped={pipeline.status !== 'running'}
@@ -173,5 +195,13 @@
   }
   .stopped:hover {
     border-color: rgb(187 247 208);
+  }
+  /* Sky-blue accent matches the VFO/channel marker on the spectrum. */
+  .channel-on {
+    border-color: rgb(125 211 252);
+    color: rgb(125 211 252);
+  }
+  .channel-on:hover {
+    border-color: rgb(186 230 253);
   }
 </style>

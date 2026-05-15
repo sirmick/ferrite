@@ -5,6 +5,7 @@
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { applyControl } from '$lib/control/dispatch';
+  import { tuneVfoTo, stepVfo } from '$lib/control/tuning.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { bandplanUsa } from '$lib/presets/bandplan';
   import { waterfallStore } from './waterfallStore.svelte';
@@ -91,32 +92,71 @@
     return { centerHz: viewMin + span / 2, rateHz: span };
   });
 
-  // Committing the VFO writes the offset (`freq_shift_hz = target −
-  // center`) so the absolute listening frequency matches what the user
-  // typed. Clamp to the source span so the UI doesn't silently tune
-  // outside what the channelizer can reach.
-  function commitVfo(hz: number) {
-    if (!axes || !vfoBlock) return;
-    const shift = hz - axes.center_freq_hz;
-    const half = axes.sample_rate_hz / 2;
-    const clamped = Math.max(-half, Math.min(half, shift));
-    if (clamped !== vfoShiftHz) {
-      void applyControl(`flow.${vfoBlock.id}.freq_shift_hz`, clamped);
-    }
+  // VFO commit routes through the central snap-aware path (which owns
+  // the abs→freq_shift split + span clamp + DC-dodge composition).
+
+  const ZOOM_STEP = 1.3;
+  const MAX_ZOOM = 64;
+  const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+
+  // Wheel = zoom about the cursor: the frequency under the pointer
+  // stays under the pointer as the span grows/shrinks (so it's a
+  // combined zoom + view shift, not a separate pan gesture).
+  function onWheel(ev: WheelEvent) {
+    if (!axes || !renderer || !canvas) return;
+    ev.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const fAnchorRaw = renderer.pixelToFreq(ev.clientX - rect.left);
+
+    const rate = axes.sample_rate_hz;
+    const fullMin = axes.center_freq_hz - rate / 2;
+    const zOld = Math.max(1, viewZoom);
+    const zNew = Math.max(
+      1,
+      Math.min(MAX_ZOOM, zOld * (ev.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP)),
+    );
+    if (zNew === zOld) return;
+
+    const spanOld = rate / zOld;
+    const headOld = rate - spanOld;
+    const viewMinOld = fullMin + clamp01(viewPan) * headOld;
+    const fAnchor =
+      fAnchorRaw !== undefined && Number.isFinite(fAnchorRaw)
+        ? fAnchorRaw
+        : viewMinOld + spanOld / 2;
+    const frac = spanOld > 0 ? (fAnchor - viewMinOld) / spanOld : 0.5;
+
+    const spanNew = rate / zNew;
+    const headNew = rate - spanNew;
+    const panNew = headNew > 0 ? clamp01((fAnchor - frac * spanNew - fullMin) / headNew) : 0.5;
+
+    if (zNew !== viewZoom) void applyControl('client.spectrum.viewZoom', zNew);
+    if (panNew !== viewPan) void applyControl('client.spectrum.viewPan', panNew);
   }
 
-  function onWheel(ev: WheelEvent) {
-    // Wheel down/right → pan view right (increase viewPan).
-    // No-op when zoom is 1× because there's no headroom to pan into.
-    if (viewZoom <= 1) return;
-    ev.preventDefault();
-    const dy = ev.deltaY;
-    const dx = ev.deltaX;
-    const delta = Math.abs(dx) > Math.abs(dy) ? dx : dy;
-    if (delta === 0) return;
-    const sign = delta > 0 ? 1 : -1;
-    const next = Math.max(0, Math.min(1, viewPan + sign * WHEEL_PAN_FRACTION));
-    if (next !== viewPan) void applyControl('client.spectrum.viewPan', next);
+  // Up/Down step the VFO; Left/Right pan the zoomed view. Bound to the
+  // canvas (focusable) so it never collides with the Nixie's
+  // per-digit arrow handling.
+  function onKeydown(ev: KeyboardEvent) {
+    switch (ev.key) {
+      case 'ArrowUp':
+        ev.preventDefault();
+        stepVfo(1);
+        return;
+      case 'ArrowDown':
+        ev.preventDefault();
+        stepVfo(-1);
+        return;
+      case 'ArrowLeft':
+      case 'ArrowRight': {
+        if (viewZoom <= 1) return;
+        ev.preventDefault();
+        const sign = ev.key === 'ArrowLeft' ? -1 : 1;
+        const next = clamp01(viewPan + sign * WHEEL_PAN_FRACTION);
+        if (next !== viewPan) void applyControl('client.spectrum.viewPan', next);
+        return;
+      }
+    }
   }
 
   // Click = VFO; double-click = SDR centre. Native `click` fires twice
@@ -145,7 +185,7 @@
     if (pendingSingle !== undefined) clearTimeout(pendingSingle);
     pendingSingle = setTimeout(() => {
       pendingSingle = undefined;
-      commitVfo(Math.round(f));
+      tuneVfoTo(f); // snap-aware central path
     }, DBLCLICK_MS);
   }
 
@@ -317,11 +357,14 @@
 <div class="flex h-full w-full flex-col">
   <canvas
     bind:this={canvas}
+    tabindex="0"
     onclick={onClick}
     ondblclick={onDblClick}
     onwheel={onWheel}
-    class="block min-h-0 w-full flex-1 cursor-crosshair"
-    title="click to tune VFO · double-click to re-centre SDR · wheel to pan zoomed view"
+    onkeydown={onKeydown}
+    onpointerdown={() => canvas?.focus()}
+    class="block min-h-0 w-full flex-1 cursor-crosshair outline-none"
+    title="click: tune VFO · dbl-click: re-centre SDR · wheel: zoom at cursor · ↑↓: step · ←→: pan"
   ></canvas>
   {#if viewZoom > 1}
     <!-- Horizontal scrollbar for the zoomed FFT/waterfall view. Sized
