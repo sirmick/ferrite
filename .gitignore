@@ -40,8 +40,8 @@ dist/
 
 # Scratch material that isn't part of the curated `samples/sigidwiki/`
 # corpus — audio captures, screenshots, notes, vendor installers.
+# `samples/uhf/` is now curated (drives nbfm_ctcss_e2e) — tracked.
 /samples/audio1/
-/samples/uhf/
 /notes
 /notes/
 /Screenshot*.png

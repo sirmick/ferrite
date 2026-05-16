@@ -1,0 +1,27 @@
+{
+  "name": "NBFM voice with CTCSS — 482.768 MHz UHF IQ capture",
+  "file": "ctcss_482.768mhz_iq-s16.wav",
+  "format": "wav-pcm-s16-stereo-iq",
+  "sample_rate_hz": 156250,
+  "center_freq_hz": 482768000,
+  "duration_s": 30.99,
+  "modulation": "narrowband FM voice (≈±5 kHz deviation) with a continuous 173.8 Hz CTCSS sub-audible tone; signal sits at DC (capture tuned on it)",
+  "signal_chain": "FileIqSource (156.25 kS/s) → Channelizer (÷8 → 19.531 kHz, freq_shift 0) → FmDemod (max_dev 5 kHz) → audio",
+  "decoded": {
+    "ctcss_tone_hz": 173.8,
+    "ctcss_tone_standard": "EIA RS-220 standard tone",
+    "ctcss_dominance_x": 34.1,
+    "audio_rms": 0.31
+  },
+  "verified_by": "blocks/tests/nbfm_ctcss_e2e.rs",
+  "source": {
+    "origin": "off-air capture, included as a Ferrite pipeline regression fixture",
+    "hardware": "SDR capture",
+    "note": "UHF land-mobile NBFM. The technical fields are measured directly from the WAV by the e2e test; identity/location of the transmitter intentionally not recorded."
+  },
+  "license": {
+    "name": "CC0",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "note": "Short capture redistributed only as a DSP-chain regression fixture. Any underlying voice traffic belongs to its operators — do not redistribute as content."
+  }
+}

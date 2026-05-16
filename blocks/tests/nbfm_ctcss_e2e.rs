@@ -13,13 +13,6 @@
 //!
 //! This is the "Channelizer tune-back with a real capture" path the
 //! `modulated_source_e2e` header flagged as the natural next step.
-//!
-//! **Fixture caveat:** `/samples/uhf/` is `.gitignore`d scratch (no
-//! established licence — `samples/README.md` forbids committing such
-//! captures). So this test *skips* (passes, with a notice) when the
-//! WAV is absent — CI stays green; anyone with the local capture gets
-//! the full real-RF gate. If the capture is ever curated + licensed,
-//! drop the skip guard to make it mandatory.
 
 #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 
@@ -136,13 +129,6 @@ const EXPECTED_TONE_HZ: f32 = 173.8;
 
 #[test]
 fn real_nbfm_capture_carries_a_standard_ctcss_tone() {
-    if !sample_path(CAPTURE).exists() {
-        eprintln!(
-            "SKIP: {CAPTURE} absent (gitignored scratch). \
-             Place the capture there to run the real-RF NBFM/CTCSS gate."
-        );
-        return;
-    }
     let iq = load_iq();
     assert!(iq.len() > 1_000_000, "capture unexpectedly short");
 
