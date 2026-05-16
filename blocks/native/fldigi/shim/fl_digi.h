@@ -124,4 +124,12 @@ struct Fl {
 	static void awake(void (*)(void *), void * = 0) {}
 };
 
+// Headless RSID capture hook. fldigi's RSID acts on a detection via
+// REQ(init_modem, mbin, …) / REQ(notify_rsid, …); REQ() is a no-op in
+// this shim (qrunner.h) — and we *don't* want fldigi swapping the
+// active modem in-process (our design: detection → control plane →
+// per-mode block switch). rsid.cxx calls this one hook with the
+// detected trx_mode index; the shim queues it for the C ABI to drain.
+extern void ferrite_rsid_detected(int trx_mode_idx, double freq_hz);
+
 #endif /* FERRITE_FLDIGI_SHIM_FL_DIGI_H */

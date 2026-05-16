@@ -26,6 +26,7 @@
 #include "olivia.h"          // vendored: class olivia
 #include "contestia.h"       // vendored: class contestia
 #include "navtex.h"          // vendored: class navtex
+#include "rsid.h"            // vendored: class cRsId (auto mode-ID)
 #include "ptt.h"             // shim
 #include "winkeyer.h"        // shim
 #include "nanoIO.h"          // shim
@@ -135,6 +136,8 @@ struct Bridge {
 	std::string status;          // status lines, '\n'-joined
 	std::vector<float> scope;    // most recent scope frame
 	int scope_mode = 0;          // fldigi Digiscope::scope_mode
+	cRsId *rsid_det = 0;         // RSID detector, when progdefaults.rsid
+	std::string rsid;            // detected mode ids, '\n'-joined
 };
 Bridge *g_active = 0;
 std::vector<double> g_rxbuf;
@@ -287,6 +290,66 @@ _shim_valuator *cntr_nanoCW_WPM = &s_cwwid;
 _shim_valuator *btn_imd_on = &s_cwwid;
 _shim_valuator *xmtimd = &s_cwwid;
 
+// RSID's KISS/data-io branch is dead headless — stub the two symbols
+// it references directly (the rest of that path is REQ()-nooped).
+int data_io_enabled = 0; // DISABLED_IO (data_io.h enum)
+bool bcast_rsid_kiss_frame(int, int, int, int, int) { return false; }
+
+// ---------------------------------------------------------------------
+// RSID detected trx_mode -> our make_modem id string (the inverse of
+// make_modem, restricted to the modes we ship blocks for). Returns 0
+// for modes we don't support, so an out-of-scope RSID is ignored.
+// ---------------------------------------------------------------------
+static const char *mode_to_shim_id(int m) {
+	switch (m) {
+	case MODE_RTTY:           return "rtty45";
+	case MODE_CW:             return "cw";
+	case MODE_PSK31:          return "psk31";
+	case MODE_PSK63:          return "psk63";
+	case MODE_PSK125:         return "psk125";
+	case MODE_MT63_500S:      return "mt63-500S";
+	case MODE_MT63_500L:      return "mt63-500L";
+	case MODE_MT63_1000S:     return "mt63-1000S";
+	case MODE_MT63_1000L:     return "mt63-1000L";
+	case MODE_MT63_2000S:     return "mt63-2000S";
+	case MODE_MT63_2000L:     return "mt63-2000L";
+	case MODE_THROB1:         return "throb1";
+	case MODE_THROB2:         return "throb2";
+	case MODE_THROB4:         return "throb4";
+	case MODE_THROBX1:        return "throbx1";
+	case MODE_THROBX2:        return "throbx2";
+	case MODE_THROBX4:        return "throbx4";
+	case MODE_DOMINOEX4:      return "dominoex4";
+	case MODE_DOMINOEX8:      return "dominoex8";
+	case MODE_DOMINOEX11:     return "dominoex11";
+	case MODE_DOMINOEX16:     return "dominoex16";
+	case MODE_DOMINOEX22:     return "dominoex22";
+	case MODE_DOMINOEX44:     return "dominoex44";
+	case MODE_OLIVIA:         return "olivia";
+	case MODE_OLIVIA_8_500:   return "olivia-8-500";
+	case MODE_OLIVIA_16_500:  return "olivia-16-500";
+	case MODE_OLIVIA_32_1000: return "olivia-32-1000";
+	case MODE_CONTESTIA:      return "contestia";
+	case MODE_CONTESTIA_8_250: return "contestia-8-250";
+	case MODE_CONTESTIA_8_500: return "contestia-8-500";
+	case MODE_CONTESTIA_16_500: return "contestia-16-500";
+	case MODE_NAVTEX:         return "navtex";
+	case MODE_SITORB:         return "sitorb";
+	default:                  return 0;
+	}
+}
+
+// Called from rsid.cxx::apply() (the one FERRITE patch there) when a
+// valid RSID is decoded. Queue the mapped id for the C ABI to drain;
+// the control plane does the actual per-mode-block switch.
+void ferrite_rsid_detected(int trx_mode_idx, double /*freq_hz*/) {
+	if (!g_active) return;
+	const char *id = mode_to_shim_id(trx_mode_idx);
+	if (!id) return; // RSID for a mode we don't ship — ignore
+	g_active->rsid.append(id);
+	g_active->rsid.push_back('\n');
+}
+
 // ---------------------------------------------------------------------
 // Mode registry: id string -> constructed modem.
 // ---------------------------------------------------------------------
@@ -355,6 +418,11 @@ fldigi_modem *fldigi_modem_create(const char *mode, int sample_rate) {
 	m->set_samplerate(sample_rate);
 	m->init();
 	m->rx_init();
+	// RSID detector runs alongside the active modem (auto mode-ID).
+	// Enabled via the generic config passthrough (set_param
+	// "RECEIVERSID"); read here at construct time.
+	if (progdefaults.rsid)
+		h->br.rsid_det = new cRsId();
 	return h;
 }
 
@@ -363,7 +431,12 @@ int fldigi_modem_rx(fldigi_modem *h, const float *audio, int n) {
 	g_active = &h->br;
 	active_modem = h->br.m;
 	g_rxbuf.assign(audio, audio + n);
-	return h->br.m->rx_process(g_rxbuf.data(), n);
+	int rc = h->br.m->rx_process(g_rxbuf.data(), n);
+	// Feed the same audio to RSID; on a hit it calls
+	// ferrite_rsid_detected() → h->br.rsid (drained via the ABI).
+	if (h->br.rsid_det)
+		h->br.rsid_det->receive(audio, (size_t)n);
+	return rc;
 }
 
 // Drain accumulated decoded text into `out` (up to `cap` bytes);
@@ -453,10 +526,25 @@ void fldigi_modem_set_param(fldigi_modem *h, const char *key, double v) {
 	if (h->br.m) h->br.m->restart();
 }
 
+// Drain detected RSID mode ids ('\n'-joined make_modem id strings),
+// same contract as fldigi_modem_drain_text. Empty until RSID fires.
+int fldigi_modem_drain_rsid(fldigi_modem *h, char *out, int cap) {
+	if (!h || !out || cap <= 0) return 0;
+	std::string &s = h->br.rsid;
+	int n = (int)s.size();
+	if (n > cap) n = cap;
+	if (n > 0) {
+		std::memcpy(out, s.data(), (size_t)n);
+		s.erase(0, (size_t)n);
+	}
+	return n;
+}
+
 void fldigi_modem_destroy(fldigi_modem *h) {
 	if (!h) return;
 	if (g_active == &h->br) g_active = 0;
 	if (active_modem == h->br.m) active_modem = 0;
+	delete h->br.rsid_det;
 	delete h->br.m;
 	delete h;
 }

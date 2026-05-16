@@ -626,6 +626,15 @@ void cRsId::apply(int iBin, int iSymbol, int extended)
 		LOG_VERBOSE("%s", msg);
 		return;
 	}
+
+	// FERRITE: the only patch to this vendored file. REQ() is a no-op
+	// in our headless shim, so RSID's REQ(init_modem,mbin,…) /
+	// REQ(notify_rsid,…) never fire. Surface the detected trx_mode to
+	// the shim here (valid mbin); the shim queues it for the C ABI and
+	// our control plane does the per-mode-block switch. Side-effect-
+	// free capture — fldigi's own in-process modem swap stays disabled.
+	ferrite_rsid_detected(mbin, rsidfreq);
+
 /*
 std::cout <<
   "\n---------------------------------\nRsID configuration:" <<
