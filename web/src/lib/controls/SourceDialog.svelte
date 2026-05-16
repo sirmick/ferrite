@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Dialog } from 'bits-ui';
   import DevicePicker from './DevicePicker.svelte';
+  import SamplePicker from './SamplePicker.svelte';
   import PresetJsonView from './PresetJsonView.svelte';
   import type { SourceConfig } from '$lib/api/source';
   import type { DeviceCapabilities } from '$lib/api/devices';
@@ -191,12 +192,17 @@
               </div>
             </form>
           {:else if tab === 'file'}
-            <div class="flex flex-col gap-3 text-xs text-[color:var(--color-muted)]">
-              <p>IQ file replay is wired as a CLI option today:</p>
-              <pre
-                class="rounded border border-slate-800 bg-slate-900/60 p-2 font-mono text-[11px] text-slate-300">cargo run -p ferrited -- --flowgraph flowgraphs/wbfm.json --source-type FileSource --source-path /path/to/capture.cf32</pre>
-              <p>REST-side file browsing lands in a later pass.</p>
-            </div>
+            <SamplePicker
+              onApply={(cfg) => {
+                onApply(cfg);
+                open = false;
+                onClose();
+              }}
+              onCancel={() => {
+                open = false;
+                onClose();
+              }}
+            />
           {:else if tab === 'json'}
             <PresetJsonView refreshKey={open} />
           {/if}
