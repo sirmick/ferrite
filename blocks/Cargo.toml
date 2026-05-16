@@ -20,7 +20,7 @@ default  = []
 # Pulling them through here lets wasm-pack on this crate compile the
 # decoder blocks into the browser bundle the same way the runtime
 # crate does.
-wasm     = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_bytes", "dep:js-sys", "multimon", "ft8", "wspr", "rtl_433", "fldigi"]
+wasm     = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_bytes", "dep:js-sys", "multimon", "ft8", "wspr", "rtl_433"]
 # Links libSoapySDR; enables the `SoapySource` block. Native only —
 # blocks with this feature panic at monomorphization on wasm32.
 soapysdr = ["dep:soapysdr"]

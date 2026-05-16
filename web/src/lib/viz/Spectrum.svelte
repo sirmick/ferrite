@@ -82,13 +82,18 @@
   // span. The renderer clamps internally too — this just keeps the UI
   // and the click-to-tune projection in sync without a round-trip.
   let viewWindow = $derived.by(() => {
-    if (!axes) return undefined;
-    const z = Math.max(1, viewZoom);
+    if (!axes || !Number.isFinite(axes.sample_rate_hz) || axes.sample_rate_hz <= 0)
+      return undefined;
+    // Sanitise persisted view params: a non-finite zoom/pan must never
+    // reach the renderer (a NaN span makes its grid loop never
+    // terminate — frozen tab).
+    const z = Number.isFinite(viewZoom) ? Math.max(1, viewZoom) : 1;
     if (z <= 1) return undefined;
+    const pan = Number.isFinite(viewPan) ? Math.max(0, Math.min(1, viewPan)) : 0.5;
     const span = axes.sample_rate_hz / z;
     const headroom = axes.sample_rate_hz - span;
     const fullMin = axes.center_freq_hz - axes.sample_rate_hz / 2;
-    const viewMin = fullMin + Math.max(0, Math.min(1, viewPan)) * headroom;
+    const viewMin = fullMin + pan * headroom;
     return { centerHz: viewMin + span / 2, rateHz: span };
   });
 

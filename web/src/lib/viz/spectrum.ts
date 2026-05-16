@@ -351,15 +351,20 @@ export class SpectrumRenderer {
       const minor = step / MINOR_PER_MAJOR;
       ctx.strokeStyle = this.minorGridColor;
       const start = Math.ceil(floor / minor) * minor;
-      for (let v = start; v <= ceil; v += minor) {
-        if (yTicks.some((mt) => Math.abs(v - mt) < minor / 2)) continue;
-        const frac = (v - floor) / (ceil - floor);
-        if (!(frac >= 0 && frac <= 1)) continue;
-        const y = plot.y + plot.h - frac * plot.h;
-        ctx.beginPath();
-        ctx.moveTo(plot.x, y + 0.5);
-        ctx.lineTo(plot.x + plot.w, y + 0.5);
-        ctx.stroke();
+      // A degenerate axis (zero/NaN span → equal ticks → minor ≤ 0 or
+      // non-finite) would make `v += minor` never terminate: a frozen
+      // tab. The renderer must never infinite-loop on bad input.
+      if (Number.isFinite(minor) && minor > 0 && Number.isFinite(start)) {
+        for (let v = start; v <= ceil; v += minor) {
+          if (yTicks.some((mt) => Math.abs(v - mt) < minor / 2)) continue;
+          const frac = (v - floor) / (ceil - floor);
+          if (!(frac >= 0 && frac <= 1)) continue;
+          const y = plot.y + plot.h - frac * plot.h;
+          ctx.beginPath();
+          ctx.moveTo(plot.x, y + 0.5);
+          ctx.lineTo(plot.x + plot.w, y + 0.5);
+          ctx.stroke();
+        }
       }
     }
 
@@ -396,15 +401,19 @@ export class SpectrumRenderer {
         const minor = step / MINOR_PER_MAJOR;
         ctx.strokeStyle = this.minorGridColor;
         const start = Math.ceil(fMin / minor) * minor;
-        for (let f = start; f <= fMax; f += minor) {
-          if (xTicks.some((mt) => Math.abs(f - mt) < minor / 2)) continue;
-          const frac = (f - fMin) / (fMax - fMin);
-          if (!(frac >= 0 && frac <= 1)) continue;
-          const x = plot.x + frac * plot.w;
-          ctx.beginPath();
-          ctx.moveTo(x + 0.5, plot.y);
-          ctx.lineTo(x + 0.5, plot.y + plot.h);
-          ctx.stroke();
+        // Same infinite-loop guard as the y-axis: a degenerate
+        // (NaN/zero-span) view must not lock the render thread.
+        if (Number.isFinite(minor) && minor > 0 && Number.isFinite(start)) {
+          for (let f = start; f <= fMax; f += minor) {
+            if (xTicks.some((mt) => Math.abs(f - mt) < minor / 2)) continue;
+            const frac = (f - fMin) / (fMax - fMin);
+            if (!(frac >= 0 && frac <= 1)) continue;
+            const x = plot.x + frac * plot.w;
+            ctx.beginPath();
+            ctx.moveTo(x + 0.5, plot.y);
+            ctx.lineTo(x + 0.5, plot.y + plot.h);
+            ctx.stroke();
+          }
         }
       }
 

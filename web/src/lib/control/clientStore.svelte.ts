@@ -96,7 +96,14 @@ class ClientControlStore {
         // on stored state from an older build.
         if (!(k in CLIENT_DEFAULTS)) continue;
         const def = CLIENT_DEFAULTS[k as ClientPath];
-        if (typeof v === typeof def) this.state[k] = v;
+        if (typeof v !== typeof def) continue;
+        // `typeof NaN === 'number'`, so a poisoned non-finite number
+        // (e.g. a bad viewZoom from a division-by-zero) would pass the
+        // type check and persist across reloads — and downstream it can
+        // make the spectrum renderer's grid loop never terminate
+        // (frozen tab). Drop non-finite numbers; fall back to default.
+        if (typeof v === 'number' && !Number.isFinite(v)) continue;
+        this.state[k] = v;
       }
     } catch {
       /* corrupt blob; fall back to defaults */
@@ -110,6 +117,9 @@ class ClientControlStore {
 
   /** Write and persist. No-op when the value is unchanged. */
   set<P extends ClientPath>(path: P, value: ClientValue<P>): void {
+    // Never let a non-finite number into the store (would persist and
+    // can wedge the spectrum renderer). Drop the write silently.
+    if (typeof value === 'number' && !Number.isFinite(value)) return;
     if (this.state[path] === value) return;
     this.state[path] = value;
     this.persist();

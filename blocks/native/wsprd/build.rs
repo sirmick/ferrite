@@ -65,6 +65,20 @@ fn main() {
         build.file(src);
     }
 
+    // wasm-only: override `fopen`→NULL so the linker never pulls
+    // wasi-libc's preopen-discovery object, whose populate-preopens
+    // loop never terminates under wasm32-unknown-unknown (no WASI
+    // host) and hard-freezes the browser tab. Native keeps real fopen.
+    let wsprd_shim = shim.join("wsprd_shim.c");
+    if target.starts_with("wasm32") {
+        assert!(
+            wsprd_shim.exists(),
+            "wsprd wasm shim missing: {}",
+            wsprd_shim.display()
+        );
+        build.file(&wsprd_shim);
+    }
+
     build.compile("ferrite_wsprd");
 
     if target.starts_with("wasm32") {
@@ -79,6 +93,7 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={}", wsprd_shim.display());
     println!("cargo:rerun-if-changed={}", shim.join("fftw3.h").display());
     for path in c_sources(&vendor) {
         println!("cargo:rerun-if-changed={}", path.display());
