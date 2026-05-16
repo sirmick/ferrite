@@ -14,6 +14,9 @@
 //! AFSK1200 is the one that should hit.
 
 #![cfg(feature = "multimon")]
+#![allow(clippy::doc_markdown)]
+
+mod common;
 
 use std::fs::File;
 use std::io::Read;
@@ -124,10 +127,14 @@ fn with_packet_capture<F: FnOnce()>(f: F) -> Vec<String> {
 
 #[test]
 fn afsk1200_decodes_at_least_one_frame() {
+    // Full RX flowgraph: AFSK1200 is Bell-202 over NBFM, so FM-modulate
+    // the fixture, channelize, FM-demod, resample — the production path
+    // — then decode (mirrors aprs_iq_e2e's real-IQ variant from audio).
     let audio = read_22050_mono_wav("AFSK1200_Sound.wav");
+    let audio = common::full_chain_fm(&audio, 22_050.0);
     let lines = decode_packet(&audio);
     assert!(
         !lines.is_empty(),
-        "expected ≥1 decoder::packet line from AFSK1200_Sound.wav, got 0",
+        "expected ≥1 decoder::packet line from AFSK1200_Sound.wav through the full RX chain, got 0",
     );
 }

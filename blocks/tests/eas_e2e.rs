@@ -15,6 +15,8 @@
 
 #![cfg(feature = "multimon")]
 
+mod common;
+
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
@@ -124,7 +126,9 @@ fn with_eas_capture<F: FnOnce()>(f: F) -> Vec<String> {
 
 #[test]
 fn tornado_warning_decodes_at_least_one_same_header() {
+    // Full RX flowgraph: SAME/EAS is AFSK over (broadcast) FM.
     let audio = read_22050_mono_wav("EAS_Alert_Tornado_Warning.wav");
+    let audio = common::full_chain_fm(&audio, 22_050.0);
     let lines = decode_eas(&audio);
     assert!(
         !lines.is_empty(),

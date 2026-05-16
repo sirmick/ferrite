@@ -18,6 +18,9 @@
 //! shared category.
 
 #![cfg(feature = "multimon")]
+#![allow(clippy::doc_markdown)]
+
+mod common;
 
 use std::fs::File;
 use std::io::Read;
@@ -130,7 +133,9 @@ fn with_pocsag_capture<F: FnOnce()>(f: F) -> Vec<String> {
 
 #[test]
 fn pocsag_1200_decodes_at_least_one_message() {
+    // Full RX flowgraph: POCSAG is FSK received as NBFM.
     let audio = read_22050_mono_wav("POCSAG_1200.wav");
+    let audio = common::full_chain_fm(&audio, 22_050.0);
     let lines = decode_pager(&audio);
     assert!(
         !lines.is_empty(),
@@ -141,6 +146,7 @@ fn pocsag_1200_decodes_at_least_one_message() {
 #[test]
 fn pocsag_512_decodes_at_least_one_message() {
     let audio = read_22050_mono_wav("POCSAG_512.wav");
+    let audio = common::full_chain_fm(&audio, 22_050.0);
     let lines = decode_pager(&audio);
     assert!(
         !lines.is_empty(),

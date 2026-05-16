@@ -25,11 +25,16 @@
 #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
 #![allow(clippy::similar_names, clippy::many_single_char_names)]
+#![allow(clippy::doc_markdown)]
 
 use ferrite_blocks::block::{
     Block, BlockIo, InBuf, InitCtx, InputPort, OutBuf, OutputPort, PortMeta,
 };
-use ferrite_blocks::{FileAudioSource, FileAudioSourceParams};
+use ferrite_blocks::{
+    Channelizer, ChannelizerParams, FileAudioSource, FileAudioSourceParams, FmDemod, FmDemodParams,
+    FmModulator, FmModulatorParams, RealF32Resamp, RealF32ResampParams, SsbDemod, SsbDemodParams,
+    SsbModulator, SsbModulatorParams,
+};
 use num_complex::Complex;
 use std::path::PathBuf;
 
@@ -336,4 +341,78 @@ pub fn synthetic_message(rate_hz: f64, secs: f64, peak: f32) -> Vec<f32> {
         *x *= g;
     }
     v
+}
+
+/// Round-trip an audio fixture through the **production RX flowgraph**
+/// so a decoder test exercises the modulator/tuner/demod/resampler,
+/// not just the bare decoder. `iq_rate = rate·4` → the `Channelizer`
+/// decimates by exactly 4 back to `rate`; shift = the modulator
+/// offset (transparent — multimon decoders are self-acquiring, so no
+/// per-mode audio bias is needed, unlike fldigi). `RealF32Resamp` is
+/// kept (≈ no-op here) to match the live chain shape.
+fn full_chain(audio: &[f32], rate: f64, ssb: bool) -> Vec<f32> {
+    let iq_rate = rate * 4.0;
+    let offset = rate; // < iq_rate/2, clear of DC
+    let dev = 5_000.0_f32;
+
+    let iq = if ssb {
+        let mut m = SsbModulator::new(SsbModulatorParams {
+            input_rate_hz: rate as f32,
+            output_rate_hz: iq_rate as f32,
+            offset_hz: offset as f32,
+            sideband: ferrite_blocks::ssb_modulator::Sideband::Usb,
+        })
+        .expect("ssb modulator");
+        pump_real_to_iq(&mut m, audio)
+    } else {
+        let mut m = FmModulator::new(FmModulatorParams {
+            input_rate_hz: rate as f32,
+            output_rate_hz: iq_rate as f32,
+            offset_hz: offset as f32,
+            deviation_hz: dev,
+        })
+        .expect("fm modulator");
+        pump_real_to_iq(&mut m, audio)
+    };
+
+    let mut ch = Channelizer::new(ChannelizerParams::new(iq_rate, offset, rate)).unwrap();
+    init_at(&mut ch, iq_rate);
+    let chan = pump_iq_to_iq(&mut ch, &iq);
+
+    let demod_audio = if ssb {
+        let mut d = SsbDemod::new(SsbDemodParams {
+            sample_rate_hz: rate as f32,
+            sideband: ferrite_blocks::Sideband::Usb,
+            audio_gain: 6.0,
+        })
+        .unwrap();
+        init_at(&mut d, rate);
+        pump_iq_to_real(&mut d, &chan)
+    } else {
+        let mut d = FmDemod::new(FmDemodParams {
+            sample_rate_hz: rate as f32,
+            max_deviation_hz: dev,
+        })
+        .unwrap();
+        init_at(&mut d, rate);
+        pump_iq_to_real(&mut d, &chan)
+    };
+
+    let mut rs = RealF32Resamp::new(RealF32ResampParams {
+        output_rate_hz: rate,
+        stopband_db: 60.0,
+    })
+    .unwrap();
+    init_at(&mut rs, rate);
+    pump_real_to_real(&mut rs, &demod_audio)
+}
+
+/// FM-borne fixture (AFSK1200/POCSAG/SAME) through the RX chain.
+pub fn full_chain_fm(audio: &[f32], rate: f64) -> Vec<f32> {
+    full_chain(audio, rate, false)
+}
+
+/// SSB-borne fixture (FT8/CW) through the RX chain.
+pub fn full_chain_ssb(audio: &[f32], rate: f64) -> Vec<f32> {
+    full_chain(audio, rate, true)
 }
