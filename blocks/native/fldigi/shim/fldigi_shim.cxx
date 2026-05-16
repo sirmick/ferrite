@@ -44,6 +44,7 @@
 #include <string>
 #include <vector>
 #include <cstdarg>
+#include <cstring>
 
 // ---------------------------------------------------------------------
 // progdefaults, initialised with fldigi's own defaults. This is the
@@ -54,6 +55,40 @@
 #undef  ELEM_
 #define ELEM_ ELEM_PROGDEFAULTS
 configuration progdefaults = { CONFIG_LIST };
+
+// ---------------------------------------------------------------------
+// Generic config passthrough. Instead of a hand-maintained allowlist of
+// "this key sets that progdefaults field", re-expand the same
+// CONFIG_LIST X-macro to dispatch a fldigi TAG string ("RTTYSHIFT",
+// "OLIVIATONES", "PSKSWEETSPOT", …) straight into its progdefaults
+// field. Numeric fields (bool/int/double/…) take the value; non-scalar
+// fields (std::string, RGB, containers) are not host-tunable from a
+// double and no-op via the template fallback. This is the single seam
+// the per-mode blocks forward their typed params through — no second
+// list to keep in sync.
+// ---------------------------------------------------------------------
+template <class T> static inline void cfg_assign(T &, double) {} // string/RGB/… : ignore
+static inline void cfg_assign(bool &f, double v) { f = (v != 0.0); }
+static inline void cfg_assign(int &f, double v) { f = (int)v; }
+static inline void cfg_assign(unsigned &f, double v) { f = (unsigned)v; }
+static inline void cfg_assign(short &f, double v) { f = (short)v; }
+static inline void cfg_assign(long &f, double v) { f = (long)v; }
+static inline void cfg_assign(float &f, double v) { f = (float)v; }
+static inline void cfg_assign(double &f, double v) { f = v; }
+
+// Returns true if `tag` matched a known fldigi config field.
+static bool shim_set_config(const char *tag, double v) {
+#define ELEM_SETCFG(type_, var_, tag_, doc_, ...)                                                  \
+	if (std::strcmp(tag, tag_) == 0) {                                                             \
+		cfg_assign(progdefaults.var_, v);                                                          \
+		return true;                                                                              \
+	}
+#undef ELEM_
+#define ELEM_ ELEM_SETCFG
+	CONFIG_LIST
+#undef ELEM_
+	return false;
+}
 
 // ---------------------------------------------------------------------
 // Globals fldigi links against. progStatus value-inited (zeros PODs,
@@ -384,13 +419,10 @@ int fldigi_modem_drain_image(fldigi_modem *, unsigned char *, int,
 void fldigi_modem_set_param(fldigi_modem *h, const char *key, double v) {
 	if (!h || !key) return;
 	std::string k(key);
-	// Operational RTTY knobs; index conventions match fldigi's config.
-	if      (k == "rtty_baud")    progdefaults.rtty_baud   = (int)v;
-	else if (k == "rtty_bits")    progdefaults.rtty_bits   = (int)v;
-	else if (k == "rtty_shift")   progdefaults.rtty_shift  = (int)v;
-	else if (k == "rtty_parity")  progdefaults.rtty_parity = (int)v;
-	else if (k == "rtty_stop")    progdefaults.rtty_stop   = (int)v;
-	else if (k == "rtty_reverse") {
+	// Three keys are NOT plain progdefaults fields — they are runtime /
+	// waterfall seams the e2e sample tests proved out. Everything else
+	// is a fldigi config TAG and goes through the generic passthrough.
+	if (k == "rtty_reverse") {
 		// RTTY RX polarity is the waterfall "Rev" toggle, not a
 		// progdefault: rtty::rx_process re-derives
 		//   reverse = wf->Reverse() ^ !wf->USB()
@@ -413,6 +445,10 @@ void fldigi_modem_set_param(fldigi_modem *h, const char *key, double v) {
 			h->br.m->set_freq(v);
 			if (wf) wf->Carrier((int)v);
 		}
+	}
+	else {
+		// Generic: `key` is a fldigi config TAG (e.g. "RTTYSHIFT").
+		shim_set_config(key, v);
 	}
 	if (h->br.m) h->br.m->restart();
 }
