@@ -1,0 +1,18 @@
+{
+  "name": "AM broadcast — complex baseband IQ (5 s)",
+  "file": "AM_IQ_5s_iq-s16.wav",
+  "format": "wav-pcm-s16-stereo-iq",
+  "sample_rate_hz": 64000,
+  "center_freq_hz": 0,
+  "duration_s": 5.0,
+  "modulation": "am",
+  "signal_chain": "FileIqSource (64 kS/s) → Channelizer → AmDemod → audio",
+  "source": {
+    "origin": "sigidwiki AM IQ demo clip, transcoded 8-bit→s16 for FileIqSource (which requires s16 stereo WAV or raw cf32)",
+    "note": "Original AM_IQ_5s.wav was unsigned 8-bit PCM; this is the bit-depth-converted copy, sample-for-sample identical signal."
+  },
+  "license": {
+    "name": "CC0",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+  }
+}
