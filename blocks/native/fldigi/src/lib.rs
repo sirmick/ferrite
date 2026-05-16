@@ -65,6 +65,7 @@ mod backend {
         fn fldigi_modem_set_param(m: Handle, key: *const c_char, value: f64);
         fn fldigi_modem_drain_text(m: Handle, out: *mut c_char, cap: c_int) -> c_int;
         fn fldigi_modem_drain_status(m: Handle, out: *mut c_char, cap: c_int) -> c_int;
+        fn fldigi_modem_drain_rsid(m: Handle, out: *mut c_char, cap: c_int) -> c_int;
         fn fldigi_modem_drain_scope(
             m: Handle,
             out: *mut f32,
@@ -124,6 +125,12 @@ mod backend {
     }
     pub fn drain_status(h: Handle) -> Vec<String> {
         String::from_utf8_lossy(&drain_bytes(h, fldigi_modem_drain_status))
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+    pub fn drain_rsid(h: Handle) -> Vec<String> {
+        String::from_utf8_lossy(&drain_bytes(h, fldigi_modem_drain_rsid))
             .lines()
             .map(str::to_string)
             .collect()
@@ -211,6 +218,12 @@ mod backend {
     pub fn drain_status(h: Handle) -> Vec<String> {
         fldigi_drain_status(h).lines().map(str::to_string).collect()
     }
+    pub fn drain_rsid(_h: Handle) -> Vec<String> {
+        // RSID auto-mode-detect closes through the *server* control
+        // plane (like AFC); the browser-half fldigi never self-switches,
+        // so no bridge ABI is added here.
+        Vec::new()
+    }
     pub fn drain_scope(h: Handle) -> Option<ScopeFrame> {
         let data = fldigi_drain_scope(h);
         if data.is_empty() {
@@ -274,6 +287,13 @@ impl FldigiModem {
     /// Drain status lines accumulated since the last call.
     pub fn take_status(&mut self) -> Vec<String> {
         backend::drain_status(self.h)
+    }
+
+    /// Drain RSID detections (make_modem id strings) since the last
+    /// call. Non-empty only when RSID is enabled (set_param
+    /// "RECEIVERSID") and a Reed-Solomon mode-ID was decoded.
+    pub fn take_rsid(&mut self) -> Vec<String> {
+        backend::drain_rsid(self.h)
     }
 
     /// Drain the most recent scope frame, if any (0 or 1 — coalesced
