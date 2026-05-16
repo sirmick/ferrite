@@ -1,0 +1,18 @@
+{
+  "name": "AIS \u2014 complex baseband IQ \u2014 IQ capture",
+  "file": "AIS_IQ_5s.wav",
+  "kind": "iq",
+  "mode": "ais",
+  "format": "wav-pcm-s16-stereo-iq",
+  "sample_rate_hz": 48000,
+  "center_freq_hz": 0,
+  "modulation": "n/a",
+  "sigwiki_url": "https://www.sigidwiki.com/wiki/Automatic_Identification_System_(AIS)",
+  "source": {
+    "origin": "sigidwiki demo clip, transcoded for Ferrite e2e + picker"
+  },
+  "license": {
+    "name": "CC0",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+  }
+}

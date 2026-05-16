@@ -1,0 +1,18 @@
+{
+  "name": "Morse code (CW) \u2014 sigidwiki audio fixture",
+  "file": "Cw_morse.wav",
+  "kind": "audio",
+  "mode": "morse",
+  "format": "wav-pcm-s16-mono",
+  "sample_rate_hz": 22050,
+  "center_freq_hz": 0,
+  "modulation": "ssb",
+  "sigwiki_url": "https://www.sigidwiki.com/wiki/Morse_Code_(CW)",
+  "source": {
+    "origin": "sigidwiki demo clip, transcoded for Ferrite e2e + picker"
+  },
+  "license": {
+    "name": "CC0",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+  }
+}

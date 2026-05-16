@@ -1,10 +1,11 @@
 {
-  "description": "WSPR reference signal — one 120 s slot of complex baseband I/Q at 375 Hz, interleaved little-endian f32 (I, Q, …). wsprsim-synthesized at 0 dB SNR; decodes to the canonical message \"K1JT FN20 20\". Used by blocks/tests/wspr_e2e.rs to validate the vendored wsprd decode core + FFTW→kiss_fft swap.",
+  "description": "WSPR reference signal \u2014 one 120 s slot of complex baseband I/Q at 375 Hz, interleaved little-endian f32 (I, Q, \u2026). wsprsim-synthesized at 0 dB SNR; decodes to the canonical message \"K1JT FN20 20\". Used by blocks/tests/wspr_e2e.rs to validate the vendored wsprd decode core + FFTW\u2192kiss_fft swap.",
   "format": "f32",
-  "layout": "interleaved I,Q (Q uses the wsprsim sign convention — negate on read)",
+  "layout": "interleaved I,Q (Q uses the wsprsim sign convention \u2014 negate on read)",
   "sample_rate_hz": 375,
   "duration_s": 120,
   "expected_decode": "K1JT FN20 20",
   "license": "GPL-3.0",
-  "upstream_source": "https://github.com/Guenael/rtlsdr-wsprd (signals/refSignalSnr0dB.iq, commit 1ca9b83dd2562ce9ef2453aacdd5bc3aab982c7d)"
+  "upstream_source": "https://github.com/Guenael/rtlsdr-wsprd (signals/refSignalSnr0dB.iq, commit 1ca9b83dd2562ce9ef2453aacdd5bc3aab982c7d)",
+  "name": "WSPR reference signal \u2014 one 120 s slot of complex baseband I/Q at 375 Hz, interleaved little-endian f32 (I, Q, \u2026). wsprsim-synthesized at 0 dB SNR; decodes to the canonical message \"K1JT FN20 20\". Used by blocks/tests/wspr_e2e.rs to validate the vendored wsprd decode core + FFTW\u2192kiss_fft swap."
 }

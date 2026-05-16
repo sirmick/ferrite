@@ -1,0 +1,18 @@
+{
+  "name": "FT8 (websdr capture) \u2014 sigidwiki audio fixture",
+  "file": "FT8_websdr_test.wav",
+  "kind": "audio",
+  "mode": "ft8",
+  "format": "wav-pcm-s16-mono",
+  "sample_rate_hz": 12000,
+  "center_freq_hz": 0,
+  "modulation": "ssb",
+  "sigwiki_url": "https://www.sigidwiki.com/wiki/FT8",
+  "source": {
+    "origin": "sigidwiki demo clip, transcoded for Ferrite e2e + picker"
+  },
+  "license": {
+    "name": "CC0",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+  }
+}

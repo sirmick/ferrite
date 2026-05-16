@@ -1,0 +1,18 @@
+{
+  "name": "ISM 433 \u2014 BALDR weather station \u2014 sigidwiki audio fixture",
+  "file": "ISM_BALDR_Weather_Sound.wav",
+  "kind": "audio",
+  "mode": "rtl_433",
+  "format": "wav-pcm-s16-mono",
+  "sample_rate_hz": 22050,
+  "center_freq_hz": 0,
+  "modulation": "am",
+  "sigwiki_url": "https://www.sigidwiki.com/wiki/ISM_Band_device",
+  "source": {
+    "origin": "sigidwiki demo clip, transcoded for Ferrite e2e + picker"
+  },
+  "license": {
+    "name": "CC0",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+  }
+}
