@@ -23,8 +23,10 @@ use common::{
 };
 use ferrite_blocks::block::{Block, BlockIo, InBuf, InputPort, OutputPort, PortMeta};
 use ferrite_blocks::{
-    estimate_center_hz, Channelizer, ChannelizerParams, NavtexDemod, NavtexDemodParams, RttyDemod,
-    RttyDemodParams, SsbDemod, SsbDemodParams, SsbModulator, SsbModulatorParams,
+    estimate_center_hz, Channelizer, ChannelizerParams, ContestiaDemod, ContestiaDemodParams,
+    DominoexDemod, DominoexDemodParams, Mt63Demod, Mt63DemodParams, NavtexDemod, NavtexDemodParams,
+    OliviaDemod, OliviaDemodParams, Psk31Demod, Psk31DemodParams, RttyDemod, RttyDemodParams,
+    SsbDemod, SsbDemodParams, SsbModulator, SsbModulatorParams, ThrobDemod, ThrobDemodParams,
 };
 use num_complex::Complex;
 use std::sync::{Mutex, OnceLock};
@@ -155,16 +157,11 @@ fn sweep(label: &str, fixture: &str, mk: &dyn Fn() -> Box<dyn Block>) {
     let (audio, _r) = load_audio(fixture);
     let (iq, est) = modulate(&audio);
     println!("\n=== {label}: AutoTune estimate {est:.0} Hz (offset {OFFSET}) ===");
-    // Sweep channelizer shift around the SSB carrier (= offset) and the
-    // energy estimate; carrier-vs-centroid gap ≈ half the audio BW.
-    for shift in [
-        f64::from(OFFSET),
-        f64::from(OFFSET) + 500.0,
-        f64::from(OFFSET) + 1_000.0,
-        f64::from(est),
-        f64::from(est) - 500.0,
-        f64::from(OFFSET) - 500.0,
-    ] {
+    let _ = est;
+    // Sweep channelizer shift around the SSB carrier (= offset). The
+    // working point is offset − (per-mode audio-sweet-spot bias).
+    for d in [-1500.0, -1000.0, -750.0, -500.0, -250.0, 0.0, 250.0, 500.0] {
+        let shift = f64::from(OFFSET) + d;
         let mut b = mk();
         let txt = run(&iq, shift, b.as_mut());
         let printable: String = txt.chars().filter(|c| !c.is_control()).collect();
@@ -181,14 +178,41 @@ fn sweep(label: &str, fixture: &str, mk: &dyn Fn() -> Box<dyn Block>) {
 }
 
 #[test]
-fn probe_fullchain_rtty_and_navtex() {
+fn probe_fullchain_all_modes() {
     let _g = guard();
+    let dir = "sigidwiki/8000_mono";
+    sweep("rtty45", &format!("{dir}/RTTY_170Hz_45.45bd.wav"), &|| {
+        Box::new(RttyDemod::new(RttyDemodParams::default()).unwrap())
+    });
+    sweep("psk31", &format!("{dir}/BPSK31.wav"), &|| {
+        Box::new(Psk31Demod::new(Psk31DemodParams::default()).unwrap())
+    });
+    sweep("olivia-8-500", &format!("{dir}/Olivia_8-500.wav"), &|| {
+        Box::new(OliviaDemod::new(OliviaDemodParams::default()).unwrap())
+    });
     sweep(
-        "rtty45",
-        "sigidwiki/8000_mono/RTTY_170Hz_45.45bd.wav",
-        &|| Box::new(RttyDemod::new(RttyDemodParams::default()).unwrap()),
+        "contestia-8-500",
+        &format!("{dir}/Contestia_8-500.wav"),
+        &|| Box::new(ContestiaDemod::new(ContestiaDemodParams::default()).unwrap()),
     );
-    sweep("navtex", "sigidwiki/8000_mono/NAVTEX_SITOR-B.wav", &|| {
+    sweep("throb4", &format!("{dir}/THROB4.wav"), &|| {
+        Box::new(ThrobDemod::new(ThrobDemodParams::default()).unwrap())
+    });
+    sweep("mt63-1000L", &format!("{dir}/MT63-1000L.wav"), &|| {
+        Box::new(Mt63Demod::new(Mt63DemodParams::default()).unwrap())
+    });
+    sweep("dominoex16", &format!("{dir}/DominoEX_16Bd.wav"), &|| {
+        Box::new(
+            DominoexDemod::new(DominoexDemodParams {
+                variant: "dominoex16".to_string(),
+                afc: true,
+                rx_freq_hz: 0.0,
+                reverse: true,
+            })
+            .unwrap(),
+        )
+    });
+    sweep("navtex", &format!("{dir}/NAVTEX_SITOR-B.wav"), &|| {
         Box::new(NavtexDemod::new(NavtexDemodParams::default()).unwrap())
     });
 }
