@@ -21,7 +21,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::protocol::Message as TungMessage;
 
-use crate::app_state::{AppState, PipelineBlock, PipelineStatus, PresetEntry, UiSink};
+use crate::app_state::{
+    AppState, CaptureEntry, PipelineBlock, PipelineStatus, PresetEntry, UiSink,
+};
 
 #[derive(Serialize)]
 pub struct Hello {
@@ -584,6 +586,19 @@ pub async fn list_presets(
         .await
         .map(Json)
         .map_err(|e| bad_request("LIST_PRESETS_FAILED", format!("{e:#}")))
+}
+
+/// `GET /api/captures` — enumerate replayable IQ/audio fixtures under
+/// the `samples/` tree (with `*.json` sidecar metadata) so the File
+/// source tab can list them instead of asking for a server path.
+pub async fn list_captures(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<CaptureEntry>>, (StatusCode, Json<ApiError>)> {
+    state
+        .list_captures()
+        .await
+        .map(Json)
+        .map_err(|e| bad_request("LIST_CAPTURES_FAILED", format!("{e:#}")))
 }
 
 #[derive(serde::Deserialize)]

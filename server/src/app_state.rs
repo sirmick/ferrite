@@ -56,6 +56,30 @@ pub struct PresetEntry {
     pub description: Option<String>,
 }
 
+/// One replayable capture under the `samples/` tree, surfaced by
+/// `GET /api/captures` so the UI's File source tab can list fixtures
+/// instead of making the user type a server path. `path` is the
+/// absolute server path to hand back in `PATCH /api/source`; `kind`
+/// chooses the source block (`iq` → `FileIqSource`, `audio` →
+/// `FileAudioSource`). Rate/centre/modulation come from the `*.json`
+/// sidecar when present (absent for raw clips with no sidecar — the
+/// UI then prompts for `rate_hz_hint`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CaptureEntry {
+    /// Absolute server filesystem path (what the source block opens).
+    pub path: String,
+    /// `samples/`-relative path — the human-friendly label.
+    pub rel: String,
+    /// Sidecar `name`, if any.
+    pub name: Option<String>,
+    /// `"iq"` or `"audio"` — picks `FileIqSource` / `FileAudioSource`.
+    pub kind: &'static str,
+    pub sample_rate_hz: Option<f64>,
+    pub center_freq_hz: Option<f64>,
+    pub format: Option<String>,
+    pub modulation: Option<String>,
+}
+
 /// One block in the currently-loaded preset (post-compose, pre-split).
 /// Surfaced by `GET /api/pipeline/blocks` so the UI can render controls
 /// for every param on every block without reading preset files directly.
@@ -115,6 +139,10 @@ pub struct AppState {
     /// [`Self::load_preset_by_name`]. `None` means the browse/swap
     /// endpoints return an empty list / 501 respectively.
     presets_dir: Option<Arc<PathBuf>>,
+    /// Root scanned by [`Self::list_captures`] (`GET /api/captures`) —
+    /// the curated `samples/` tree of replayable IQ/audio fixtures.
+    /// `None` means the captures browser returns an empty list.
+    captures_dir: Option<Arc<PathBuf>>,
     /// Bridge between `GET /api/ui-views/:pane` (the ferrite-ctl
     /// surface) and the browser's `ViewBridge.svelte` (the canvas
     /// snapshotter). Lives in `AppState` so the two route handlers
@@ -138,6 +166,7 @@ impl AppState {
             }),
             logs: None,
             presets_dir: None,
+            captures_dir: None,
             view_bridge: crate::view_bridge::ViewBridge::default(),
         }
     }
@@ -161,6 +190,13 @@ impl AppState {
 
     /// Point the browse/swap endpoints at a filesystem directory of
     /// preset JSON files.
+    /// Point `GET /api/captures` at the curated `samples/` tree.
+    #[must_use]
+    pub fn with_captures_dir(mut self, dir: PathBuf) -> Self {
+        self.captures_dir = Some(Arc::new(dir));
+        self
+    }
+
     #[must_use]
     pub fn with_presets_dir(mut self, dir: PathBuf) -> Self {
         self.presets_dir = Some(Arc::new(dir));
@@ -427,6 +463,18 @@ impl AppState {
         Ok(entries)
     }
 
+    /// Enumerate replayable captures under [`Self::captures_dir`].
+    /// Empty when no captures dir is configured.
+    pub async fn list_captures(&self) -> Result<Vec<CaptureEntry>> {
+        let Some(dir) = self.captures_dir.as_ref().map(|a| a.as_ref().clone()) else {
+            return Ok(Vec::new());
+        };
+        let entries = tokio::task::spawn_blocking(move || scan_captures(&dir))
+            .await
+            .map_err(|e| anyhow!("captures scan task panicked: {e}"))??;
+        Ok(entries)
+    }
+
     /// Load preset `name` from [`Self::presets_dir`] and swap it in via
     /// [`Self::patch_flowgraph`]. Rejects names that aren't plain
     /// basenames (anything containing path separators or `..`).
@@ -670,6 +718,116 @@ fn scan_presets(dir: &std::path::Path) -> Result<Vec<PresetEntry>> {
     Ok(out)
 }
 
+/// `iq` (→ `FileIqSource`) / `audio` (→ `FileAudioSource`) / `None`
+/// (not replayable by either — skip). Sidecar `format` wins; else the
+/// filename convention (`…_iq-…` / `…_audio-…`) / extension.
+fn capture_kind(file_name: &str, ext: &str, fmt: Option<&str>) -> Option<&'static str> {
+    let f = fmt.unwrap_or("").to_ascii_lowercase();
+    let n = file_name.to_ascii_lowercase();
+    match ext {
+        // Headerless raw float IQ — always FileIqSource.
+        "cf32" | "iq" => Some("iq"),
+        "wav" => {
+            if f.contains("iq") || n.contains("_iq-") || n.contains("-iq") {
+                Some("iq")
+            } else {
+                // mono audio is the common case (the fldigi / audio
+                // fixtures); FileAudioSource rejects stereo cleanly if
+                // a convention slips through.
+                Some("audio")
+            }
+        }
+        // cu8 / bin / mp3 / json / images: not FileIq/AudioSource-able.
+        _ => None,
+    }
+}
+
+/// Look for `<file>.json` then `<stem>.json` beside a capture and pull
+/// the few fields the picker shows. Missing/!json → all `None`.
+fn read_sidecar(
+    path: &std::path::Path,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<f64>,
+    Option<String>,
+) {
+    let stem_json = path.with_extension("json");
+    let full_json = {
+        let mut s = path.as_os_str().to_owned();
+        s.push(".json");
+        std::path::PathBuf::from(s)
+    };
+    let bytes = std::fs::read(&full_json)
+        .or_else(|_| std::fs::read(&stem_json))
+        .ok();
+    let Some(v) = bytes.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else {
+        return (None, None, None, None, None);
+    };
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let n = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
+    (
+        s("name"),
+        s("format"),
+        n("sample_rate_hz"),
+        n("center_freq_hz"),
+        s("modulation"),
+    )
+}
+
+/// Recursively enumerate replayable captures under `root`.
+fn scan_captures(root: &std::path::Path) -> Result<Vec<CaptureEntry>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let read = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(anyhow!("read captures dir {}: {e}", dir.display())),
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let file_name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let (name, format, sample_rate_hz, center_freq_hz, modulation) = read_sidecar(&path);
+            let Some(kind) = capture_kind(&file_name, &ext, format.as_deref()) else {
+                continue;
+            };
+            let abs = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            out.push(CaptureEntry {
+                path: abs.to_string_lossy().into_owned(),
+                rel,
+                name,
+                kind,
+                sample_rate_hz,
+                center_freq_hz,
+                format,
+                modulation,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.rel.cmp(&b.rel));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,6 +862,73 @@ mod tests {
                 "amplitude": 0.5,
             }),
         }
+    }
+
+    #[test]
+    fn capture_kind_classifies() {
+        // sidecar format wins
+        assert_eq!(
+            capture_kind("x.wav", "wav", Some("wav-pcm-s16-stereo-iq")),
+            Some("iq")
+        );
+        assert_eq!(
+            capture_kind("x.wav", "wav", Some("wav-pcm-s16-mono-audio")),
+            Some("audio")
+        );
+        // raw float is always IQ; filename convention as fallback
+        assert_eq!(capture_kind("a.cf32", "cf32", None), Some("iq"));
+        assert_eq!(capture_kind("aprs_145_iq-s16.wav", "wav", None), Some("iq"));
+        assert_eq!(capture_kind("Olivia_8-500.wav", "wav", None), Some("audio"));
+        // non-replayable extensions are skipped
+        assert_eq!(capture_kind("x.cu8", "cu8", None), None);
+        assert_eq!(capture_kind("x.mp3", "mp3", None), None);
+    }
+
+    #[test]
+    fn scan_captures_reads_sidecars_and_recurses() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("vhf")).unwrap();
+        // IQ wav + stem.json sidecar in a subdir
+        std::fs::write(dir.path().join("vhf/cap_iq-s16.wav"), b"RIFFfake").unwrap();
+        std::fs::write(
+            dir.path().join("vhf/cap_iq-s16.json"),
+            br#"{"name":"Cap","format":"wav-pcm-s16-stereo-iq",
+                 "sample_rate_hz":39062,"center_freq_hz":145070000,
+                 "modulation":"AFSK"}"#,
+        )
+        .unwrap();
+        // raw .iq + full-name `.iq.json` sidecar at the root
+        std::fs::write(dir.path().join("ref.iq"), b"\0\0\0\0").unwrap();
+        std::fs::write(
+            dir.path().join("ref.iq.json"),
+            br#"{"format":"f32","sample_rate_hz":375}"#,
+        )
+        .unwrap();
+        // a sidecar-less audio wav + a non-replayable file (ignored)
+        std::fs::write(dir.path().join("Olivia_8-500.wav"), b"RIFFfake").unwrap();
+        std::fs::write(dir.path().join("notes.md"), b"x").unwrap();
+
+        let mut got = scan_captures(dir.path()).unwrap();
+        got.sort_by(|a, b| a.rel.cmp(&b.rel));
+        assert_eq!(got.len(), 3, "got {got:?}");
+
+        let olivia = got.iter().find(|c| c.rel == "Olivia_8-500.wav").unwrap();
+        assert_eq!(olivia.kind, "audio");
+        assert!(olivia.sample_rate_hz.is_none()); // no sidecar
+
+        let refiq = got.iter().find(|c| c.rel == "ref.iq").unwrap();
+        assert_eq!(refiq.kind, "iq");
+        assert_eq!(refiq.sample_rate_hz, Some(375.0)); // `<file>.iq.json`
+
+        let cap = got
+            .iter()
+            .find(|c| c.rel.ends_with("cap_iq-s16.wav"))
+            .unwrap();
+        assert_eq!(cap.kind, "iq");
+        assert_eq!(cap.name.as_deref(), Some("Cap"));
+        assert_eq!(cap.sample_rate_hz, Some(39062.0));
+        assert_eq!(cap.center_freq_hz, Some(145_070_000.0));
+        assert!(cap.path.ends_with("cap_iq-s16.wav") && cap.path.starts_with('/'));
     }
 
     #[tokio::test]

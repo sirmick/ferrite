@@ -317,6 +317,21 @@ async fn main() -> Result<()> {
         state = state.with_presets_dir(dir);
     }
 
+    // Captures browser: the curated `samples/` tree of replayable
+    // IQ/audio fixtures. `FERRITE_CAPTURES_DIR` overrides; default is
+    // `./samples` (the repo layout in dev). Skipped if absent so a
+    // deployed binary without samples just returns an empty list.
+    {
+        let captures = std::env::var_os("FERRITE_CAPTURES_DIR")
+            .map_or_else(|| PathBuf::from("./samples"), PathBuf::from);
+        if captures.is_dir() {
+            tracing::info!(path = %captures.display(), "captures browser enabled");
+            state = state.with_captures_dir(captures);
+        } else {
+            tracing::debug!(path = %captures.display(), "no captures dir — /api/captures empty");
+        }
+    }
+
     // Warm the device-capability cache before the listener binds. The
     // first `/api/devices` request hits the cache; SoapySource::new
     // doesn't race against an unrelated probe of the same driver.
@@ -366,6 +381,7 @@ async fn main() -> Result<()> {
         .route("/api/ui-sinks", get(routes::list_ui_sinks))
         .route("/api/blocks", get(routes::list_block_schemas))
         .route("/api/presets", get(routes::list_presets))
+        .route("/api/captures", get(routes::list_captures))
         .route("/api/preset", post(routes::load_preset))
         .route(
             "/api/profile",

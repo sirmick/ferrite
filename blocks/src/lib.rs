@@ -46,6 +46,7 @@ pub mod frame;
 pub mod ft8;
 pub mod iq_upmix;
 pub mod log_mag_u8;
+pub mod modulated_file_source;
 #[cfg(feature = "multimon")]
 pub mod morse;
 pub mod morse_audio_source;
@@ -119,6 +120,7 @@ pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 pub use ft8::{Ft8Demod, Ft8DemodParams, Ft8Mode};
 pub use iq_upmix::{IqUpmix, IqUpmixParams};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
+pub use modulated_file_source::{ModulatedFileSource, ModulatedFileSourceParams};
 #[cfg(feature = "multimon")]
 pub use morse::{MorseDemod, MorseDemodParams};
 pub use morse_audio_source::{MorseAudioSource, MorseAudioSourceParams};
