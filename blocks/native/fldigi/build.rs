@@ -74,8 +74,21 @@ fn main() {
         build.include(inc);
     }
 
+    // A few vendored fldigi `.cxx` are *include fragments*, not
+    // translation units — they're `#include`d into a sibling and must
+    // not be compiled standalone (`rsid_defs.cxx` holds the RSID
+    // tables and is pulled into `rsid.cxx`). Skip by name.
+    const INCLUDE_FRAGMENTS: &[&str] = &["rsid_defs.cxx"];
+
     let mut n = 0;
     for src in walk(&shim).into_iter().chain(walk(&vendor)) {
+        if src
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| INCLUDE_FRAGMENTS.contains(&f))
+        {
+            continue;
+        }
         if matches!(
             src.extension().and_then(|e| e.to_str()),
             Some("cxx" | "cpp" | "cc" | "c")
