@@ -24,7 +24,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use num_complex::Complex;
 use serde::Deserialize;
 
@@ -32,6 +32,7 @@ use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, OutBuf, OutputPort, ParamKind, ParamSpec,
     Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
+use crate::wav::parse_wav_header;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IqFileFormat {
@@ -322,69 +323,6 @@ fn decode_cs16(src: &[u8], samples: usize, dst: &mut [Complex<f32>]) {
         let re = i16::from_le_bytes([src[off], src[off + 1]]);
         let im = i16::from_le_bytes([src[off + 2], src[off + 3]]);
         *slot = Complex::new(f32::from(re) * S16_SCALE, f32::from(im) * S16_SCALE);
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WavInfo {
-    format_tag: u16,
-    channels: u16,
-    rate_hz: u32,
-    bits_per_sample: u16,
-    data_start: u64,
-    data_len: u32,
-}
-
-fn parse_wav_header<R: Read + Seek>(r: &mut R) -> Result<WavInfo> {
-    let mut hdr = [0u8; 12];
-    r.read_exact(&mut hdr).context("read RIFF header")?;
-    if &hdr[0..4] != b"RIFF" || &hdr[8..12] != b"WAVE" {
-        bail!("not a RIFF/WAVE file");
-    }
-    let mut fmt_info: Option<(u16, u16, u32, u16)> = None;
-    loop {
-        let mut chunk_id = [0u8; 4];
-        let mut chunk_sz = [0u8; 4];
-        if r.read_exact(&mut chunk_id).is_err() {
-            bail!("WAV: reached EOF before finding `data` chunk");
-        }
-        r.read_exact(&mut chunk_sz).context("read chunk size")?;
-        let sz = u32::from_le_bytes(chunk_sz);
-        match &chunk_id {
-            b"fmt " => {
-                if sz < 16 {
-                    bail!("WAV: short fmt chunk ({sz} bytes)");
-                }
-                let mut fmt = vec![0u8; sz as usize];
-                r.read_exact(&mut fmt).context("read fmt chunk")?;
-                let format_tag = u16::from_le_bytes([fmt[0], fmt[1]]);
-                let channels = u16::from_le_bytes([fmt[2], fmt[3]]);
-                let rate_hz = u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]]);
-                let bits_per_sample = u16::from_le_bytes([fmt[14], fmt[15]]);
-                fmt_info = Some((format_tag, channels, rate_hz, bits_per_sample));
-            }
-            b"data" => {
-                let (format_tag, channels, rate_hz, bits_per_sample) =
-                    fmt_info.ok_or_else(|| anyhow!("WAV: `data` chunk before `fmt `"))?;
-                let data_start = r.stream_position().context("tell data_start")?;
-                return Ok(WavInfo {
-                    format_tag,
-                    channels,
-                    rate_hz,
-                    bits_per_sample,
-                    data_start,
-                    data_len: sz,
-                });
-            }
-            _ => {
-                r.seek(SeekFrom::Current(i64::from(sz)))
-                    .context("skip unknown chunk")?;
-                // Chunks are padded to even length.
-                if sz % 2 == 1 {
-                    r.seek(SeekFrom::Current(1)).ok();
-                }
-            }
-        }
     }
 }
 

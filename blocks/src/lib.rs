@@ -33,14 +33,17 @@ pub mod eas;
 pub mod events_sink;
 pub mod fft;
 pub mod file_audio_sink;
+pub mod file_audio_source;
 pub mod file_sink;
 pub mod file_source;
 #[cfg(feature = "fldigi")]
 pub mod fldigi;
 pub mod fm_demod;
+pub mod fm_modulator;
 pub mod frame;
 #[cfg(feature = "ft8")]
 pub mod ft8;
+pub mod iq_upmix;
 pub mod log_mag_u8;
 #[cfg(feature = "multimon")]
 pub mod morse;
@@ -68,6 +71,7 @@ pub mod ssb_demod;
 pub mod stereo_decoder;
 pub mod tee_iq_f32;
 pub mod tee_real_f32;
+pub mod wav;
 pub mod ws_bridge;
 #[cfg(feature = "wspr")]
 pub mod wspr;
@@ -95,14 +99,17 @@ pub use eas::{EasDemod, EasDemodParams};
 pub use events_sink::{EventsSink, EventsSinkParams};
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
 pub use file_audio_sink::{FileAudioSink, FileAudioSinkParams};
+pub use file_audio_source::{AudioFileFormat, FileAudioSource, FileAudioSourceParams};
 pub use file_sink::{FileIqSink, FileIqSinkParams, IqSinkFormat, WriteSeek};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 #[cfg(feature = "fldigi")]
 pub use fldigi::{FldigiDemod, FldigiDemodParams};
 pub use fm_demod::{FmDemod, FmDemodParams};
+pub use fm_modulator::{FmModulator, FmModulatorParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
 #[cfg(feature = "ft8")]
 pub use ft8::{Ft8Demod, Ft8DemodParams, Ft8Mode};
+pub use iq_upmix::{IqUpmix, IqUpmixParams};
 pub use log_mag_u8::{LogMagU8, LogMagU8Params};
 #[cfg(feature = "multimon")]
 pub use morse::{MorseDemod, MorseDemodParams};
