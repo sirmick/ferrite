@@ -418,11 +418,10 @@ fldigi_modem *fldigi_modem_create(const char *mode, int sample_rate) {
 	m->set_samplerate(sample_rate);
 	m->init();
 	m->rx_init();
-	// RSID detector runs alongside the active modem (auto mode-ID).
-	// Enabled via the generic config passthrough (set_param
-	// "RECEIVERSID"); read here at construct time.
-	if (progdefaults.rsid)
-		h->br.rsid_det = new cRsId();
+	// RSID is NOT auto-created from the progdefaults global (that would
+	// leak across sequentially-created modems, like the waterfall
+	// stub). It is a strictly per-handle resource managed by
+	// set_param("RECEIVERSID", …) below.
 	return h;
 }
 
@@ -517,6 +516,19 @@ void fldigi_modem_set_param(fldigi_modem *h, const char *key, double v) {
 		if (v > 0.0 && h->br.m) {
 			h->br.m->set_freq(v);
 			if (wf) wf->Carrier((int)v);
+		}
+	}
+	else if (k == "RECEIVERSID") {
+		// RSID is a per-handle resource (not a global): create/destroy
+		// the detector on THIS modem so it never leaks across
+		// instances. Still set the progdefaults flag (rsid.cxx reads
+		// it on the detection path) via the generic setter.
+		shim_set_config(key, v);
+		if (v != 0.0) {
+			if (!h->br.rsid_det) h->br.rsid_det = new cRsId();
+		} else {
+			delete h->br.rsid_det;
+			h->br.rsid_det = 0;
 		}
 	}
 	else {

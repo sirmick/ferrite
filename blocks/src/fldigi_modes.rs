@@ -67,6 +67,32 @@ impl FldigiCore {
         self.modem.set_param(key, v);
     }
 
+    /// Rebuild the inner modem as a different mode (same 8 kHz rate),
+    /// keeping the block instance/ports/wiring. The old `FldigiModem`
+    /// is dropped (its `Drop` destroys the C handle, incl. any RSID
+    /// detector). Used by `FldigiAuto` on an RSID hit — the mode swap
+    /// is entirely internal, never a graph change.
+    pub fn switch_mode(&mut self, mode_id: &str, label: impl Into<String>) -> Result<()> {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let rate = FLDIGI_RATE_HZ as u32;
+        let modem = FldigiModem::new(mode_id, rate)
+            .ok_or_else(|| anyhow::anyhow!("fldigi: unknown/unsupported mode {mode_id:?}"))?;
+        self.modem = modem;
+        self.label = label.into();
+        Ok(())
+    }
+
+    /// Drain RSID mode-id detections since the last call (empty unless
+    /// RSID was enabled on this modem via `set("RECEIVERSID", 1.0)`).
+    pub fn take_rsid(&mut self) -> Vec<String> {
+        self.modem.take_rsid()
+    }
+
+    /// The current mode label (`decoder::fldigi mode=` field).
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
     /// Standard fldigi knobs every block exposes: AFC + manual RX
     /// carrier (headless AFC sig-search is inert — see the shim).
     pub fn apply_common(&mut self, afc: bool, rx_freq_hz: f32) {
