@@ -103,6 +103,29 @@ impl Ampmodem {
         y
     }
 
+    /// Modulate one real audio sample → one complex IQ sample (the
+    /// exact inverse of [`Self::demodulate`]; for SSB the same
+    /// Remez-designed `firhilbf` produces the analytic single-sideband
+    /// signal). Same rate in/out.
+    pub fn modulate(&mut self, audio: f32) -> (f32, f32) {
+        let mut y = sys::__BindgenComplex { re: 0.0, im: 0.0 };
+        // SAFETY: `inner` is a valid handle; `y` is a writable complex
+        // stack slot.
+        unsafe {
+            sys::ampmodem_modulate(self.inner, audio, &mut y);
+        }
+        (y.re, y.im)
+    }
+
+    /// Group delay of the modulator's internal filter chain (differs
+    /// from the demod delay). Useful for aligning a modulated signal
+    /// against an undelayed reference.
+    #[must_use]
+    pub fn delay_mod(&self) -> u32 {
+        // SAFETY: `inner` is a valid handle.
+        unsafe { sys::ampmodem_get_delay_mod(self.inner) }
+    }
+
     /// Group delay introduced by the internal filter chain
     /// (Hilbert + DC blocker + LPF). Useful when aligning the
     /// demodulator output against another path that wasn't
