@@ -27,6 +27,9 @@
 //! interpolation + the carrier offset live here. The offset NCO is an
 //! `f64` phase in cycles wrapped to `[0, 1)`, as in `FmModulator`.
 
+// Doc comments name the paired block / DSP terms, not code spans.
+#![allow(clippy::doc_markdown)]
+
 use anyhow::{bail, Result};
 use ferrite_liquid_dsp::{AmType, Ampmodem};
 use num_complex::Complex;

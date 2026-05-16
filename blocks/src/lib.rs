@@ -23,6 +23,7 @@ pub mod am_modulator;
 pub mod audio_nr;
 pub mod audio_shaper;
 pub mod audio_sink;
+pub mod auto_tune;
 pub mod block;
 pub mod channelizer;
 pub mod decimator;
@@ -86,6 +87,7 @@ pub use am_modulator::{AmModulator, AmModulatorParams};
 pub use audio_nr::{AudioNrMono, AudioNrParams, AudioNrStereo, SpectralMethod};
 pub use audio_shaper::{AudioShaper, AudioShaperParams};
 pub use audio_sink::{AudioSink, AudioSinkParams};
+pub use auto_tune::{estimate_center_hz, AutoTune, AutoTuneParams};
 pub use block::{
     AsAny, Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort,
     ParamKind, ParamSpec, Placement, PortMeta, PortSpec, PortType, ReconfigureScope, Work,
