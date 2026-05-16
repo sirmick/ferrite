@@ -3,7 +3,7 @@
   "name": "throb",
   "label": "Throb (slow MFSK QRP)",
   "description": "Throb is a slow, narrow MFSK keyboard mode for weak-signal QRP work \u2014 a small set of dual-tone symbols at a few baud. THROB4 sends 4 symbols/sec in ~72 Hz. On the waterfall it's a sparse pattern of short tone pairs. Very rare on the air. Decoded text streams under decoder::fldigi (vendored fldigi throb core). Tune so the signal sits ~1500 Hz in the USB audio (dial \u2248 signal \u2212 1.5 kHz).",
-  "ai_notes": "Throb (slow dual-tone MFSK, vendored fldigi throb core). THROB4 default; variants via FldigiDemod mode: throb1/2/4, throbx1/2/4. Very low activity \u2014 niche QRP. Tune dial \u2248 signal \u2212 1500 Hz. Output: `tail decoder --category fldigi`.",
+  "ai_notes": "Throb (slow dual-tone MFSK, vendored fldigi throb core). THROB4 default; variants via ThrobDemod mode: throb1/2/4, throbx1/2/4. Very low activity \u2014 niche QRP. Tune dial \u2248 signal \u2212 1500 Hz. Output: `tail decoder --category fldigi`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/THROB",
   "sample_path": "samples/sigidwiki/THROB4.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/THROB4.png",
@@ -98,13 +98,9 @@
       }
     },
     "throb": {
-      "type": "FldigiDemod",
+      "type": "ThrobDemod",
       "placement": "node",
-      "params": {
-        "mode": "throb4",
-        "sample_rate_hz": 8000.0,
-        "afc": true
-      }
+      "params": { "variant": "throb4", "afc": true }
     }
   },
   "wires": [

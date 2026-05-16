@@ -3,7 +3,7 @@
   "name": "mt63",
   "label": "MT63-1000L (robust HF data / EmComm)",
   "description": "MT63 is a highly robust HF data mode — 64 parallel DBPSK tones with heavy interleaving and FEC, designed to punch through fading, interference and poor copy where RTTY/PSK fail. The 1000L variant (1 kHz wide, long interleave) is the EmComm/MARS workhorse for net traffic and bulletins. On the waterfall it's an unmistakable solid rectangular block of energy. Decoded text streams under decoder::fldigi (vendored fldigi MT63 core). Long interleave means it takes several seconds to start producing text and to flush at the end — that latency is the price of its robustness. Tune so the 1 kHz block is centred ~1500 Hz in the USB audio (dial ≈ centre − 1.5 kHz). Audio is teed alongside so you can listen.",
-  "ai_notes": "MT63-1000L (64-tone DBPSK, 1 kHz, long interleave; vendored fldigi mt63 core). EmComm/MARS/net mode — no fixed amateur watering hole; commonly 14.109 / 7.073 / 3.588 MHz on nets, plus MARS channels. Tune dial ≈ centre − 1500 Hz. Several-second decode latency by design (interleaver fill). Output: `tail decoder --category fldigi`. Variants via FldigiDemod `mode`: mt63-500S/L, mt63-1000S/L, mt63-2000S/L.",
+  "ai_notes": "MT63-1000L (64-tone DBPSK, 1 kHz, long interleave; vendored fldigi mt63 core). EmComm/MARS/net mode — no fixed amateur watering hole; commonly 14.109 / 7.073 / 3.588 MHz on nets, plus MARS channels. Tune dial ≈ centre − 1500 Hz. Several-second decode latency by design (interleaver fill). Output: `tail decoder --category fldigi`. Variants via Mt63Demod `mode`: mt63-500S/L, mt63-1000S/L, mt63-2000S/L.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/MT63",
   "sample_path": "samples/sigidwiki/MT63-1000L.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/MT63.png",
@@ -41,9 +41,9 @@
     },
     "audio_tee": { "type": "TeeRealF32", "placement": "node" },
     "mt63": {
-      "type": "FldigiDemod",
+      "type": "Mt63Demod",
       "placement": "node",
-      "params": { "mode": "mt63-1000L", "sample_rate_hz": 8000.0, "afc": true }
+      "params": { "variant": "mt63-1000L", "afc": true }
     },
     "audio_resamp": {
       "type": "RealF32Resamp",

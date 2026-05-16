@@ -362,6 +362,83 @@ impl BlockFactory for Psk31Demod {
 }
 
 // ---------------------------------------------------------------------
+// CwDemod — Morse via the curated fldigi cw core (the `_cw_live`
+// preset's decoder; distinct from the multimon `MorseDemod`).
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CwDemodParams {
+    pub afc: bool,
+    pub rx_freq_hz: f32,
+}
+
+impl Default for CwDemodParams {
+    fn default() -> Self {
+        Self {
+            afc: true,
+            rx_freq_hz: 0.0,
+        }
+    }
+}
+
+pub struct CwDemod {
+    core: FldigiCore,
+}
+
+impl CwDemod {
+    pub fn new(p: CwDemodParams) -> Result<Self> {
+        let mut core = FldigiCore::new("cw", "cw")?;
+        core.apply_common(p.afc, p.rx_freq_hz);
+        Ok(Self { core })
+    }
+}
+
+#[ferrite_blocks_macros::ferrite_block]
+impl Block for CwDemod {
+    fn spec() -> BlockSpec {
+        BlockSpec {
+            type_name: "CwDemod",
+            placement: Placement::Either,
+            inputs: FLDIGI_IN,
+            outputs: &[],
+            params: &[AFC_PARAM, RX_FREQ_PARAM],
+            ai_notes: "Morse/CW via the curated fldigi cw core (decode-side; the multimon MorseDemod is the other CW path). Output: `tail decoder --category fldigi`.",
+        }
+    }
+
+    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+        self.core.warn_if_off_rate(ctx);
+        Ok(())
+    }
+
+    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+        Ok(self.core.pump(io))
+    }
+
+    fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+        let mut changed = false;
+        if let Some(afc) = delta.get("afc").and_then(serde_json::Value::as_bool) {
+            self.core.set("afc", if afc { 1.0 } else { 0.0 });
+            changed = true;
+        }
+        if let Some(f) = delta.get("rx_freq_hz").and_then(serde_json::Value::as_f64) {
+            self.core.set("rx_freq_hz", f);
+            changed = true;
+        }
+        Ok(changed)
+    }
+}
+
+impl BlockFactory for CwDemod {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        Ok(Box::new(CwDemod::new(crate::block::deserialize_params(
+            params,
+        )?)?))
+    }
+}
+
+// ---------------------------------------------------------------------
 // Mt63Demod — MT63, variant-selected (64-tone DBPSK + interleave/FEC).
 // ---------------------------------------------------------------------
 

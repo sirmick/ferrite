@@ -38,13 +38,9 @@
       }
     },
     "cw": {
-      "type": "FldigiDemod",
+      "type": "CwDemod",
       "placement": "node",
-      "params": {
-        "mode": "cw",
-        "sample_rate_hz": 8000.0,
-        "afc": true
-      }
+      "params": { "afc": true }
     }
   },
   "wires": [

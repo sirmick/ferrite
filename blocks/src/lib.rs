@@ -37,8 +37,6 @@ pub mod file_audio_source;
 pub mod file_sink;
 pub mod file_source;
 #[cfg(feature = "fldigi")]
-pub mod fldigi;
-#[cfg(feature = "fldigi")]
 pub mod fldigi_modes;
 pub mod fm_demod;
 pub mod fm_modulator;
@@ -105,12 +103,11 @@ pub use file_audio_source::{AudioFileFormat, FileAudioSource, FileAudioSourcePar
 pub use file_sink::{FileIqSink, FileIqSinkParams, IqSinkFormat, WriteSeek};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 #[cfg(feature = "fldigi")]
-pub use fldigi::{FldigiDemod, FldigiDemodParams};
-#[cfg(feature = "fldigi")]
 pub use fldigi_modes::{
-    ContestiaDemod, ContestiaDemodParams, DominoexDemod, DominoexDemodParams, Mt63Demod,
-    Mt63DemodParams, NavtexDemod, NavtexDemodParams, OliviaDemod, OliviaDemodParams, Psk31Demod,
-    Psk31DemodParams, RttyDemod, RttyDemodParams, ThrobDemod, ThrobDemodParams,
+    ContestiaDemod, ContestiaDemodParams, CwDemod, CwDemodParams, DominoexDemod,
+    DominoexDemodParams, Mt63Demod, Mt63DemodParams, NavtexDemod, NavtexDemodParams, OliviaDemod,
+    OliviaDemodParams, Psk31Demod, Psk31DemodParams, RttyDemod, RttyDemodParams, ThrobDemod,
+    ThrobDemodParams,
 };
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use fm_modulator::{FmModulator, FmModulatorParams};

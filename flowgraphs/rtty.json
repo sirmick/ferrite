@@ -41,9 +41,9 @@
     },
     "audio_tee": { "type": "TeeRealF32", "placement": "node" },
     "rtty": {
-      "type": "FldigiDemod",
+      "type": "RttyDemod",
       "placement": "node",
-      "params": { "mode": "rtty45", "sample_rate_hz": 8000.0, "afc": true }
+      "params": { "afc": true }
     },
     "audio_resamp": {
       "type": "RealF32Resamp",

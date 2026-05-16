@@ -98,13 +98,9 @@
       }
     },
     "navtex": {
-      "type": "FldigiDemod",
+      "type": "NavtexDemod",
       "placement": "node",
-      "params": {
-        "mode": "navtex",
-        "sample_rate_hz": 8000.0,
-        "afc": true
-      }
+      "params": { "variant": "navtex", "afc": true }
     }
   },
   "wires": [

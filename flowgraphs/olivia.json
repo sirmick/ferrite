@@ -3,7 +3,7 @@
   "name": "olivia",
   "label": "Olivia 8/500 (very robust MFSK)",
   "description": "Olivia is the go-to weak-signal MFSK mode for HF: 8 tones in 500 Hz with strong FEC + interleaving, readable well below the noise floor where RTTY/PSK are hopeless \u2014 at the cost of speed (slow text, multi-second latency). 8/500 is the most common amateur variant. On the waterfall it's a clean rectangular block of hopping tones. Decoded text streams under decoder::fldigi (vendored fldigi olivia core, Ja\u0142ocha MFSK engine). Famously tolerant of mistuning \u2014 get the block anywhere in the USB passband and it locks; just expect a few seconds before text appears (interleaver fill).",
-  "ai_notes": "Olivia 8/500 (8-tone MFSK + FEC, vendored fldigi olivia core, Ja\u0142ocha engine). Variants via FldigiDemod mode: olivia, olivia-8-500, olivia-16-500, olivia-32-1000. Very mistuning-tolerant; tune dial \u2248 signal \u2212 1500 Hz. Multi-second decode latency by design (FEC interleaver). Calling freqs ~14.0729 / 7.0729 / 10.142 MHz + nets. Output: `tail decoder --category fldigi`.",
+  "ai_notes": "Olivia 8/500 (8-tone MFSK + FEC, vendored fldigi olivia core, Ja\u0142ocha engine). Variants via OliviaDemod mode: olivia, olivia-8-500, olivia-16-500, olivia-32-1000. Very mistuning-tolerant; tune dial \u2248 signal \u2212 1500 Hz. Multi-second decode latency by design (FEC interleaver). Calling freqs ~14.0729 / 7.0729 / 10.142 MHz + nets. Output: `tail decoder --category fldigi`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Olivia",
   "sample_path": "samples/sigidwiki/Olivia_8-500.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Olivia_8-500.jpg",
@@ -98,13 +98,9 @@
       }
     },
     "olivia": {
-      "type": "FldigiDemod",
+      "type": "OliviaDemod",
       "placement": "node",
-      "params": {
-        "mode": "olivia-8-500",
-        "sample_rate_hz": 8000.0,
-        "afc": true
-      }
+      "params": { "variant": "olivia-8-500", "afc": true }
     }
   },
   "wires": [

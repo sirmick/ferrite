@@ -28,9 +28,9 @@
       "params": { "sample_rate_hz": 8000, "sideband": "usb", "audio_gain": 30.0 }
     },
     "rtty": {
-      "type": "FldigiDemod",
+      "type": "RttyDemod",
       "placement": "node",
-      "params": { "mode": "rtty45", "sample_rate_hz": 8000.0, "afc": true }
+      "params": { "afc": true }
     }
   },
   "wires": [

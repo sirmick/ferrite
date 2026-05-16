@@ -1,4 +1,4 @@
-//! End-to-end RTTY decode through the `FldigiDemod` block.
+//! End-to-end RTTY decode through the `RttyDemod` block.
 //!
 //! Synthesises a deterministic Baudot/ITA2 RTTY signal (matching
 //! fldigi's RX defaults — see `blocks/native/fldigi/tests/
@@ -11,11 +11,14 @@
 //! thumbnail + sigwiki ref) is separate and lands with the preset.
 
 #![cfg(feature = "fldigi")]
+// Synthetic RTTY generator math (sample counts from baud/shift) — same
+// rounding casts the other *_e2e signal generators allow.
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use std::f32::consts::PI;
 
 use ferrite_blocks::block::{BlockIo, InBuf, InputPort, OutputPort, PortMeta};
-use ferrite_blocks::{Block, FldigiDemod, FldigiDemodParams};
+use ferrite_blocks::{Block, RttyDemod, RttyDemodParams};
 
 const FS: f32 = 8_000.0;
 const CENTER: f32 = 1_500.0;
@@ -127,7 +130,7 @@ fn with_fldigi_capture<F: FnOnce()>(f: F) -> Vec<String> {
 fn rtty_through_block_reaches_decoder_tracing() {
     let audio = modulate("CQ CQ DE FERRITE FERRITE K");
     let mut block =
-        FldigiDemod::new(FldigiDemodParams::default()).expect("FldigiDemod rtty45 constructs");
+        RttyDemod::new(RttyDemodParams::default()).expect("RttyDemod rtty45 constructs");
 
     let lines = with_fldigi_capture(|| {
         let mut idx = 0;

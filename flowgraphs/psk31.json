@@ -3,7 +3,7 @@
   "name": "psk31",
   "label": "PSK31 (BPSK keyboard chat)",
   "description": "PSK31 is the most popular HF keyboard-to-keyboard mode: 31.25 baud binary phase-shift keying with a Varicode alphabet, occupying only ~60 Hz. Tiny power goes a long way — a ragchew QSO at 25 W is routine. On the waterfall it's a thin clean carrier with two faint sidebands; multiple QSOs stack a few hundred Hz apart in the sub-band. Decoded text streams under the decoder::fldigi log target (vendored fldigi PSK core). Tune so the signal sits ~1500 Hz in the USB audio (dial ≈ signal − 1.5 kHz); the modem's AFC locks the carrier. Activity clusters tightly: 14.070, 7.070, 3.580, 21.070, 28.120 MHz (±~3 kHz). Audio is teed alongside so you can listen.",
-  "ai_notes": "PSK31 (BPSK 31.25 baud Varicode, vendored fldigi psk core). Watering holes (USB dial): 3.580 / 7.070 / 14.070 / 21.070 / 28.120 MHz — tune dial ≈ centre − 1500 Hz so the sub-band lands on the 1500 Hz PSK sweetspot; click into individual signals on the waterfall. Output: `tail decoder --category fldigi`. Bursty QSO traffic, not a beacon — wait for activity. psk63/psk125 modes also available via the FldigiDemod `mode` param.",
+  "ai_notes": "PSK31 (BPSK 31.25 baud Varicode, vendored fldigi psk core). Watering holes (USB dial): 3.580 / 7.070 / 14.070 / 21.070 / 28.120 MHz — tune dial ≈ centre − 1500 Hz so the sub-band lands on the 1500 Hz PSK sweetspot; click into individual signals on the waterfall. Output: `tail decoder --category fldigi`. Bursty QSO traffic, not a beacon — wait for activity. psk63/psk125 modes also available via the Psk31Demod `mode` param.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/PSK31",
   "sample_path": "samples/sigidwiki/BPSK31.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/PSK31.jpg",
@@ -41,9 +41,9 @@
     },
     "audio_tee": { "type": "TeeRealF32", "placement": "node" },
     "psk": {
-      "type": "FldigiDemod",
+      "type": "Psk31Demod",
       "placement": "node",
-      "params": { "mode": "psk31", "sample_rate_hz": 8000.0, "afc": true }
+      "params": { "afc": true }
     },
     "audio_resamp": {
       "type": "RealF32Resamp",

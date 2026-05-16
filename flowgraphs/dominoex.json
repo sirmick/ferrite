@@ -3,7 +3,7 @@
   "name": "dominoex",
   "label": "DominoEX (incremental MFSK)",
   "description": "DominoEX is an incremental-frequency-keying MFSK mode (IFK+) \u2014 robust against multipath and tuning error, popular for HF NVIS and weak-signal chat. DominoEX 16 is a common amateur variant (~16 baud, ~316 Hz wide). On the waterfall it's a lively staircase of tones. Decoded text streams under decoder::fldigi (vendored fldigi dominoex core). DominoEX is forgiving of mistuning; get the signal roughly into the USB passband and it locks.",
-  "ai_notes": "DominoEX (incremental MFSK / IFK+, vendored fldigi dominoex core). dominoex16 default; variants via FldigiDemod mode: dominoex4/8/11/16/22/44. Activity ~14.070\u201314.078 MHz and on NVIS nets. Tune dial \u2248 signal \u2212 1500 Hz; tolerant of mistuning. Output: `tail decoder --category fldigi`.",
+  "ai_notes": "DominoEX (incremental MFSK / IFK+, vendored fldigi dominoex core). dominoex16 default; variants via DominoexDemod mode: dominoex4/8/11/16/22/44. Activity ~14.070\u201314.078 MHz and on NVIS nets. Tune dial \u2248 signal \u2212 1500 Hz; tolerant of mistuning. Output: `tail decoder --category fldigi`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/DominoEX",
   "sample_path": "samples/sigidwiki/DominoEX_16Bd.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/DominoEX.png",
@@ -98,13 +98,9 @@
       }
     },
     "dominoex": {
-      "type": "FldigiDemod",
+      "type": "DominoexDemod",
       "placement": "node",
-      "params": {
-        "mode": "dominoex16",
-        "sample_rate_hz": 8000.0,
-        "afc": true
-      }
+      "params": { "variant": "dominoex16", "afc": true }
     }
   },
   "wires": [
