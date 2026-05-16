@@ -88,6 +88,12 @@ impl FldigiCore {
         self.modem.take_rsid()
     }
 
+    /// TEST-ONLY: queue an RSID detection (see
+    /// [`ferrite_fldigi::FldigiModem::inject_rsid`]).
+    pub fn inject_rsid(&mut self, id: &str) {
+        self.modem.inject_rsid(id);
+    }
+
     /// The current mode label (`decoder::fldigi mode=` field).
     #[must_use]
     pub fn label(&self) -> &str {
@@ -516,6 +522,13 @@ impl FldigiAuto {
     fn rearm(&mut self) {
         self.core.apply_common(self.afc, self.rx_freq_hz);
         self.core.set("RECEIVERSID", 1.0);
+    }
+
+    /// TEST-ONLY: simulate an RSID detection of `id`; the next
+    /// `process()` acts on it (switch + decode). Exercises our
+    /// detection→switch path without fldigi's RS encoder.
+    pub fn inject_rsid(&mut self, id: &str) {
+        self.core.inject_rsid(id);
     }
 }
 

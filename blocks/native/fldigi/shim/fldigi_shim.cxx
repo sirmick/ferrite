@@ -552,6 +552,17 @@ int fldigi_modem_drain_rsid(fldigi_modem *h, char *out, int cap) {
 	return n;
 }
 
+// TEST-ONLY: queue an RSID detection exactly as ferrite_rsid_detected
+// would (the same string a real cRsId hit appends). Lets e2e tests
+// exercise our detection→take_rsid→FldigiAuto switch→decode path
+// without reproducing fldigi's (upstream-tested) Reed-Solomon encoder.
+// Not used by any production path.
+void fldigi_modem_inject_rsid(fldigi_modem *h, const char *id) {
+	if (!h || !id || !*id) return;
+	h->br.rsid.append(id);
+	h->br.rsid.push_back('\n');
+}
+
 void fldigi_modem_destroy(fldigi_modem *h) {
 	if (!h) return;
 	if (g_active == &h->br) g_active = 0;

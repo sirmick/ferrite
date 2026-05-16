@@ -63,6 +63,7 @@ mod backend {
         fn fldigi_modem_create(mode: *const c_char, sample_rate: c_int) -> Handle;
         fn fldigi_modem_rx(m: Handle, audio: *const f32, n: c_int) -> c_int;
         fn fldigi_modem_set_param(m: Handle, key: *const c_char, value: f64);
+        fn fldigi_modem_inject_rsid(m: Handle, id: *const c_char);
         fn fldigi_modem_drain_text(m: Handle, out: *mut c_char, cap: c_int) -> c_int;
         fn fldigi_modem_drain_status(m: Handle, out: *mut c_char, cap: c_int) -> c_int;
         fn fldigi_modem_drain_rsid(m: Handle, out: *mut c_char, cap: c_int) -> c_int;
@@ -96,6 +97,11 @@ mod backend {
     pub fn set_param(h: Handle, key: &str, v: f64) {
         if let Ok(k) = CString::new(key) {
             unsafe { fldigi_modem_set_param(h, k.as_ptr(), v) };
+        }
+    }
+    pub fn inject_rsid(h: Handle, id: &str) {
+        if let Ok(s) = CString::new(id) {
+            unsafe { fldigi_modem_inject_rsid(h, s.as_ptr()) };
         }
     }
 
@@ -224,6 +230,9 @@ mod backend {
         // so no bridge ABI is added here.
         Vec::new()
     }
+    pub fn inject_rsid(_h: Handle, _id: &str) {
+        // Test seam — native only.
+    }
     pub fn drain_scope(h: Handle) -> Option<ScopeFrame> {
         let data = fldigi_drain_scope(h);
         if data.is_empty() {
@@ -294,6 +303,14 @@ impl FldigiModem {
     /// "RECEIVERSID") and a Reed-Solomon mode-ID was decoded.
     pub fn take_rsid(&mut self) -> Vec<String> {
         backend::drain_rsid(self.h)
+    }
+
+    /// TEST-ONLY: queue an RSID detection (`id` = a make_modem id), as
+    /// if cRsId had decoded it. Drains via [`Self::take_rsid`]. Lets
+    /// e2e exercise the switch path without fldigi's RS encoder
+    /// (upstream-tested). No-op on wasm.
+    pub fn inject_rsid(&mut self, id: &str) {
+        backend::inject_rsid(self.h, id);
     }
 
     /// Drain the most recent scope frame, if any (0 or 1 — coalesced
