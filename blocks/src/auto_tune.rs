@@ -85,6 +85,25 @@ pub fn estimate_center_hz(
     Some((num / den) as f32)
 }
 
+/// AFC control law. `correction` is AutoTune's `afc_shift_hz`
+/// (measured − target). Returns the channelizer's *new absolute*
+/// `freq_shift_hz`, or `None` to leave it (correction inside the
+/// deadband). A loop `gain < 1` damps the slow control loop so it
+/// converges without hunting; the deadband stops sub-Hz dither from
+/// churning the NCO.
+#[must_use]
+pub fn afc_new_shift(
+    current_shift_hz: f64,
+    correction_hz: f64,
+    gain: f64,
+    deadband_hz: f64,
+) -> Option<f64> {
+    if !correction_hz.is_finite() || correction_hz.abs() < deadband_hz {
+        return None;
+    }
+    Some(current_shift_hz + gain * correction_hz)
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct AutoTuneParams {
@@ -120,6 +139,11 @@ pub struct AutoTune {
     win: usize,
     buf: Vec<Complex<f32>>,
     pending: Vec<u8>,
+    /// Most recent `(center_hz, shift_correction_hz)`, for the
+    /// server-side AFC loop to drain via [`Self::take_estimate`].
+    /// Separate from `pending` (the UI events byte-stream) so closing
+    /// the control loop doesn't depend on an events sink being wired.
+    last_estimate: Option<(f32, f32)>,
 }
 
 impl AutoTune {
@@ -137,7 +161,15 @@ impl AutoTune {
             win,
             buf: Vec::with_capacity(win),
             pending: Vec::new(),
+            last_estimate: None,
         })
+    }
+
+    /// Take the latest `(center_hz, afc_shift_hz)` estimate, clearing
+    /// it (so a slow poller never re-applies a stale correction). The
+    /// server AFC loop uses this; the events port is unaffected.
+    pub fn take_estimate(&mut self) -> Option<(f32, f32)> {
+        self.last_estimate.take()
     }
 
     fn flush_estimate(&mut self) {
@@ -145,6 +177,7 @@ impl AutoTune {
         let hi = self.params.target_hz + self.params.gate_hz;
         if let Some(center) = estimate_center_hz(&self.buf, self.fs, lo, hi) {
             let shift = center - self.params.target_hz;
+            self.last_estimate = Some((center, shift));
             self.pending.extend_from_slice(
                 format!("{{\"afc_center_hz\":{center:.1},\"afc_shift_hz\":{shift:.1}}}\n")
                     .as_bytes(),
@@ -285,9 +318,23 @@ impl BlockFactory for AutoTune {
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 mod tests {
-    use super::{estimate_center_hz, AutoTune, AutoTuneParams};
+    use super::{afc_new_shift, estimate_center_hz, AutoTune, AutoTuneParams};
     use crate::block::Block;
     use num_complex::Complex;
+
+    #[test]
+    fn afc_law_deadband_and_gain() {
+        // Inside deadband → no change.
+        assert!(afc_new_shift(1000.0, 3.0, 0.5, 5.0).is_none());
+        // Outside → damped correction added to the current shift.
+        let n = afc_new_shift(1000.0, 200.0, 0.5, 5.0).unwrap();
+        assert!((n - 1100.0).abs() < 1e-9, "got {n}");
+        // Negative correction pulls the other way.
+        let n = afc_new_shift(1000.0, -80.0, 0.5, 5.0).unwrap();
+        assert!((n - 960.0).abs() < 1e-9, "got {n}");
+        // Non-finite is ignored.
+        assert!(afc_new_shift(1000.0, f64::NAN, 0.5, 5.0).is_none());
+    }
 
     fn tone(freq: f32, fs: f32, n: usize) -> Vec<Complex<f32>> {
         (0..n)
@@ -368,5 +415,40 @@ mod tests {
         assert!(s.contains("afc_shift_hz"));
         // Identity passthrough.
         assert!((out[10] - x[10]).norm() < 1e-6);
+    }
+
+    #[test]
+    fn take_estimate_drains_once() {
+        use crate::block::{BlockIo, InBuf, InputPort, OutBuf, OutputPort, PortMeta};
+        let mut at = AutoTune::new(AutoTuneParams {
+            sample_rate_hz: 48_000.0,
+            target_hz: 0.0,
+            gate_hz: 24_000.0,
+            window: 8_192,
+        })
+        .unwrap();
+        assert!(at.take_estimate().is_none(), "nothing decoded yet");
+        let x = tone(5_000.0, 48_000.0, 8_192);
+        let mut out = vec![Complex::new(0.0_f32, 0.0); 8_192];
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::IqF32(&x),
+        }];
+        let mut outputs = [OutputPort {
+            name: "out",
+            meta: PortMeta::default(),
+            buf: OutBuf::IqF32(&mut out),
+        }];
+        at.process(&mut BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut outputs,
+        })
+        .unwrap();
+        let (center, shift) = at.take_estimate().expect("estimate after a full window");
+        assert!((center - 5_000.0).abs() < 50.0, "center {center}");
+        assert!((shift - 5_000.0).abs() < 50.0, "shift {shift}");
+        // Drained — a slow poller won't re-apply a stale correction.
+        assert!(at.take_estimate().is_none(), "estimate not cleared");
     }
 }

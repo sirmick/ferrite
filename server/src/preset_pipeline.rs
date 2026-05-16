@@ -23,7 +23,7 @@ use anyhow::{anyhow, Context, Result};
 use ferrite_blocks::ws_bridge::{
     BridgeSink, WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
 };
-use ferrite_blocks::{SoapyReadback, SoapySource};
+use ferrite_blocks::{afc_new_shift, AutoTune, Channelizer, SoapyReadback, SoapySource};
 use ferrite_runtime::SOURCE_ID;
 use ferrite_runtime::{
     split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry, ReconfigurePlan,
@@ -225,6 +225,68 @@ fn attach_bridge_sinks(
     Ok(())
 }
 
+/// AFC loop gain (< 1 damps the slow control loop so it converges
+/// without hunting) and dead-band (Hz; ignore sub-band dither so the
+/// NCO isn't churned every poll).
+const AFC_GAIN: f64 = 0.5;
+const AFC_DEADBAND_HZ: f64 = 5.0;
+
+/// Lazily-resolved AFC targets in whatever preset is loaded.
+enum AfcTargets {
+    /// Not looked up yet.
+    Unresolved,
+    /// Looked up — no `AutoTune` present, so AFC stays idle.
+    Absent,
+    /// Block ids of the `AutoTune` estimator and the `Channelizer`
+    /// it steers.
+    Found { auto: String, chan: String },
+}
+
+/// One AFC control step: drain `AutoTune`'s latest estimate and, if
+/// it's outside the dead-band, retune the `Channelizer` via the same
+/// live-reconfigure the UI uses for a manual VFO move. Targets are
+/// resolved lazily by type so AFC auto-enables for any preset that
+/// contains an `AutoTune`. The flowgraph stays a forward DAG — this
+/// closes the loop through the control plane, not a graph edge.
+#[allow(clippy::doc_markdown)]
+fn afc_step(rt: &mut Runtime, targets: &mut AfcTargets) {
+    if matches!(targets, AfcTargets::Unresolved) {
+        *targets = match (
+            rt.first_id_typed::<AutoTune>(),
+            rt.first_id_typed::<Channelizer>(),
+        ) {
+            (Some(auto), Some(chan)) => AfcTargets::Found { auto, chan },
+            _ => AfcTargets::Absent,
+        };
+    }
+    let AfcTargets::Found { auto, chan } = targets else {
+        return;
+    };
+    let (at_id, ch_id) = (auto.clone(), chan.clone());
+    // Drained on take, so a stale correction is never re-applied.
+    let Some((_center, corr)) = rt
+        .block_typed::<AutoTune>(&at_id)
+        .and_then(AutoTune::take_estimate)
+    else {
+        return;
+    };
+    let Some(cur) = rt
+        .block_typed::<Channelizer>(&ch_id)
+        .map(|c| c.freq_shift_hz())
+    else {
+        return;
+    };
+    let Some(new) = afc_new_shift(cur, f64::from(corr), AFC_GAIN, AFC_DEADBAND_HZ) else {
+        return;
+    };
+    match rt.live_reconfigure_block(&ch_id, serde_json::json!({ "freq_shift_hz": new })) {
+        Ok(_) => {
+            tracing::debug!(target: "afc", from = cur, to = new, correction = corr, "AFC retune");
+        }
+        Err(err) => tracing::debug!(?err, "AFC retune failed"),
+    }
+}
+
 async fn drive(
     runtime: Arc<Mutex<Runtime>>,
     tick_period: Duration,
@@ -250,6 +312,17 @@ async fn drive(
     // line so an operator doesn't have to diff two JSON blobs by hand.
     let mut prev_ns: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     let mut prev_instant = std::time::Instant::now();
+
+    // AFC: close AutoTune's estimate onto the channelizer shift via the
+    // same live-reconfigure the UI uses for a manual VFO retune — a
+    // slow, latency-tolerant control loop (NOT a graph feedback edge).
+    // Ids are resolved lazily by type from whatever preset is loaded,
+    // so AFC auto-enables wherever an `AutoTune` is present; `None`
+    // until resolved, then `Some((at_id, ch_id))` or `Some(skip)`.
+    let mut afc_targets = AfcTargets::Unresolved;
+    let mut afc_interval = tokio::time::interval(Duration::from_millis(200));
+    afc_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    afc_interval.tick().await; // skip the immediate tick
 
     loop {
         tokio::select! {
@@ -334,6 +407,10 @@ async fn drive(
                     Ok(json) => tracing::info!(target: "flowdiag::node", "flowdiag side=node {json}"),
                     Err(err) => tracing::warn!(?err, "flowdiag serialize"),
                 }
+            }
+            _ = afc_interval.tick() => {
+                let mut rt = runtime.lock().await;
+                afc_step(&mut rt, &mut afc_targets);
             }
         }
     }

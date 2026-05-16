@@ -87,7 +87,7 @@ pub use am_modulator::{AmModulator, AmModulatorParams};
 pub use audio_nr::{AudioNrMono, AudioNrParams, AudioNrStereo, SpectralMethod};
 pub use audio_shaper::{AudioShaper, AudioShaperParams};
 pub use audio_sink::{AudioSink, AudioSinkParams};
-pub use auto_tune::{estimate_center_hz, AutoTune, AutoTuneParams};
+pub use auto_tune::{afc_new_shift, estimate_center_hz, AutoTune, AutoTuneParams};
 pub use block::{
     AsAny, Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutBuf, OutputPort,
     ParamKind, ParamSpec, Placement, PortMeta, PortSpec, PortType, ReconfigureScope, Work,

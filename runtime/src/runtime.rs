@@ -1141,6 +1141,20 @@ impl Runtime {
             .and_then(|b| b.as_any_mut().downcast_mut::<T>())
     }
 
+    /// Id of the first instantiated block of concrete type `T`, if
+    /// any. Lets a server-side loop discover e.g. the `AutoTune` /
+    /// `Channelizer` in whatever preset is loaded without the preset
+    /// hard-coding ids — AFC then auto-enables wherever an `AutoTune`
+    /// is present. `&mut` because `AsAny` only exposes `as_any_mut`.
+    pub fn first_id_typed<T: Block + 'static>(&mut self) -> Option<String> {
+        for entry in &mut self.entries {
+            if entry.block.as_any_mut().downcast_mut::<T>().is_some() {
+                return Some(entry.id.clone());
+            }
+        }
+        None
+    }
+
     /// The doc the runtime was built from. `None` when constructed via
     /// [`Self::from_parts`] — those paths opt out of the reconfigure
     /// machinery because they have no old doc to diff against.
