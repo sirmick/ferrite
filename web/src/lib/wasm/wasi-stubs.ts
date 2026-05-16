@@ -41,3 +41,30 @@ export const proc_exit = (_code: number): void => {
 };
 export const random_get = noop;
 export const clock_time_get = noop;
+// Pulled by wasi-libc's stdio/fopen path once the vendored-C surface
+// grows (a rebuilt `ferrite_blocks_bg.wasm` started importing these —
+// without them wasm-bindgen's `import * as _ from
+// "wasi_snapshot_preview1"` yields `undefined` and the module fails to
+// instantiate with `LinkError: ... 'fd_fdstat_set_flags' is not a
+// Function`, hanging the worker). Same dead-path reasoning: no-ops are
+// correct because nothing actually opens a file. Kept deliberately
+// broad so the next vendored C block doesn't re-trip this.
+export const fd_fdstat_set_flags = noop;
+export const path_open = noop;
+export const fd_filestat_get = noop;
+export const fd_sync = noop;
+export const fd_datasync = noop;
+export const fd_tell = noop;
+export const fd_advise = noop;
+export const fd_allocate = noop;
+export const fd_pread = noop;
+export const fd_pwrite = noop;
+export const path_filestat_get = noop;
+export const path_unlink_file = noop;
+export const path_create_directory = noop;
+export const path_remove_directory = noop;
+export const path_rename = noop;
+export const args_get = noop;
+export const args_sizes_get = noop;
+export const sched_yield = noop;
+export const poll_oneoff = noop;
