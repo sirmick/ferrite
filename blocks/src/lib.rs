@@ -108,9 +108,9 @@ pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 #[cfg(feature = "fldigi")]
 pub use fldigi_modes::{
     ContestiaDemod, ContestiaDemodParams, CwDemod, CwDemodParams, DominoexDemod,
-    DominoexDemodParams, Mt63Demod, Mt63DemodParams, NavtexDemod, NavtexDemodParams, OliviaDemod,
-    OliviaDemodParams, Psk31Demod, Psk31DemodParams, RttyDemod, RttyDemodParams, ThrobDemod,
-    ThrobDemodParams,
+    DominoexDemodParams, FldigiAuto, FldigiAutoParams, Mt63Demod, Mt63DemodParams, NavtexDemod,
+    NavtexDemodParams, OliviaDemod, OliviaDemodParams, Psk31Demod, Psk31DemodParams, RttyDemod,
+    RttyDemodParams, ThrobDemod, ThrobDemodParams,
 };
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use fm_modulator::{FmModulator, FmModulatorParams};

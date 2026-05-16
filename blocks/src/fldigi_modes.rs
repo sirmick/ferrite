@@ -89,6 +89,7 @@ impl FldigiCore {
     }
 
     /// The current mode label (`decoder::fldigi mode=` field).
+    #[must_use]
     pub fn label(&self) -> &str {
         &self.label
     }
@@ -461,6 +462,116 @@ impl BlockFactory for CwDemod {
         Ok(Box::new(CwDemod::new(crate::block::deserialize_params(
             params,
         )?)?))
+    }
+}
+
+// ---------------------------------------------------------------------
+// FldigiAuto — RSID-driven automatic mode. One block; RSID runs
+// alongside the active modem and, on a Reed-Solomon mode-ID, rebuilds
+// the *inner* FldigiCore to the detected mode. Block type/ports/wiring
+// never change — the swap is a private state transition (the fldigi
+// analogue of multimon's adaptive single block). Use this when the
+// mode is unknown; the per-mode blocks remain for known-mode presets.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct FldigiAutoParams {
+    /// Mode to decode until RSID says otherwise (a `make_modem` id).
+    pub start_mode: String,
+    pub afc: bool,
+    pub rx_freq_hz: f32,
+}
+
+impl Default for FldigiAutoParams {
+    fn default() -> Self {
+        Self {
+            start_mode: "rtty45".to_string(),
+            afc: true,
+            rx_freq_hz: 0.0,
+        }
+    }
+}
+
+pub struct FldigiAuto {
+    core: FldigiCore,
+    afc: bool,
+    rx_freq_hz: f32,
+}
+
+impl FldigiAuto {
+    pub fn new(p: FldigiAutoParams) -> Result<Self> {
+        let mut core = FldigiCore::new(&p.start_mode, p.start_mode.clone())?;
+        core.apply_common(p.afc, p.rx_freq_hz);
+        core.set("RECEIVERSID", 1.0); // per-handle: shim creates cRsId
+        Ok(Self {
+            core,
+            afc: p.afc,
+            rx_freq_hz: p.rx_freq_hz,
+        })
+    }
+
+    /// Re-arm a freshly rebuilt modem: same front-end + RSID still on,
+    /// so further mode changes keep being detected.
+    fn rearm(&mut self) {
+        self.core.apply_common(self.afc, self.rx_freq_hz);
+        self.core.set("RECEIVERSID", 1.0);
+    }
+}
+
+#[ferrite_blocks_macros::ferrite_block]
+impl Block for FldigiAuto {
+    fn spec() -> BlockSpec {
+        BlockSpec {
+            type_name: "FldigiAuto",
+            placement: Placement::Either,
+            inputs: FLDIGI_IN,
+            outputs: &[],
+            params: &[
+                ParamSpec {
+                    key: "start_mode",
+                    label: "Start mode",
+                    kind: ParamKind::Text { default: "rtty45" },
+                    reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "Mode decoded until an RSID burst is seen (a make_modem id, e.g. rtty45/psk31/olivia-8-500). RSID then switches it automatically.",
+                },
+                AFC_PARAM,
+                RX_FREQ_PARAM,
+            ],
+            ai_notes: "Auto digital-mode decoder: fldigi RSID identifies the mode in-band and FldigiAuto rebuilds its internal modem to match — no preset/graph change. Use when the mode is unknown; per-mode blocks (RttyDemod, …) are for known-mode presets. Output: `tail decoder --category fldigi`; switches logged to decoder::rsid.",
+        }
+    }
+
+    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+        self.core.warn_if_off_rate(ctx);
+        Ok(())
+    }
+
+    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+        // Feed the chunk: the shim hands the same audio to the active
+        // modem AND the RSID detector.
+        let work = self.core.pump(io);
+        // Act on any RSID hit (last wins within this chunk).
+        if let Some(detected) = self.core.take_rsid().into_iter().last() {
+            if detected != self.core.label() {
+                let from = self.core.label().to_string();
+                if let Err(e) = self.core.switch_mode(&detected, detected.clone()) {
+                    tracing::warn!(target: "decoder::rsid", %detected, "RSID switch failed: {e}");
+                } else {
+                    self.rearm();
+                    tracing::info!(target: "decoder::rsid", from = %from, to = %detected, "RSID");
+                }
+            }
+        }
+        Ok(work)
+    }
+}
+
+impl BlockFactory for FldigiAuto {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        Ok(Box::new(FldigiAuto::new(
+            crate::block::deserialize_params(params)?,
+        )?))
     }
 }
 
