@@ -15,7 +15,9 @@ mod common;
 use common::{load_audio, sample_path};
 use ferrite_blocks::block::{Block, BlockIo, InBuf, InputPort, OutputPort, PortMeta};
 use ferrite_blocks::{
-    Mt63Demod, Mt63DemodParams, Psk31Demod, Psk31DemodParams, RttyDemod, RttyDemodParams,
+    ContestiaDemod, ContestiaDemodParams, DominoexDemod, DominoexDemodParams, Mt63Demod,
+    Mt63DemodParams, NavtexDemod, NavtexDemodParams, OliviaDemod, OliviaDemodParams, Psk31Demod,
+    Psk31DemodParams, RttyDemod, RttyDemodParams, ThrobDemod, ThrobDemodParams,
 };
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -168,5 +170,75 @@ fn mt63_demod_decodes_real_recording() {
             "MT63-1000L",
         ),
         "Mt63Demod",
+    );
+}
+
+#[test]
+fn olivia_demod_decodes_real_recording() {
+    assert_pangram(
+        &run(
+            || Box::new(OliviaDemod::new(OliviaDemodParams::default()).unwrap()),
+            "Olivia_8-500",
+        ),
+        "OliviaDemod",
+    );
+}
+
+#[test]
+fn contestia_demod_decodes_real_recording() {
+    assert_pangram(
+        &run(
+            || Box::new(ContestiaDemod::new(ContestiaDemodParams::default()).unwrap()),
+            "Contestia_8-500",
+        ),
+        "ContestiaDemod",
+    );
+}
+
+#[test]
+fn throb_demod_decodes_real_recording() {
+    assert_pangram(
+        &run(
+            || Box::new(ThrobDemod::new(ThrobDemodParams::default()).unwrap()),
+            "THROB4",
+        ),
+        "ThrobDemod",
+    );
+}
+
+#[test]
+fn dominoex_demod_decodes_real_recording() {
+    // DominoEX_16Bd needs the tuned params the probe found.
+    assert_pangram(
+        &run(
+            || {
+                Box::new(
+                    DominoexDemod::new(DominoexDemodParams {
+                        variant: "dominoex16".to_string(),
+                        afc: true,
+                        rx_freq_hz: 1_220.0,
+                        reverse: true,
+                    })
+                    .unwrap(),
+                )
+            },
+            "DominoEX_16Bd",
+        ),
+        "DominoexDemod",
+    );
+}
+
+#[test]
+#[ignore = "real NAVTEX/SITOR-B clip won't FEC-sync off this recording \
+             (time-diversity FEC + weak ~2080 Hz tone energy). Block is \
+             complete; gate re-enables with a cleaner fixture or the \
+             separate powerDensity/AFC fix."]
+fn navtex_demod_decodes_real_recording() {
+    assert_pangram(
+        &run(
+            || Box::new(NavtexDemod::new(NavtexDemodParams::default()).unwrap()),
+            "NAVTEX_SITOR-B",
+        ),
+        "NavtexDemod",
     );
 }

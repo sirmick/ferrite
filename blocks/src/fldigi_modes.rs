@@ -76,6 +76,15 @@ impl FldigiCore {
         self.modem.set_param("rx_freq_hz", f64::from(rx_freq_hz));
     }
 
+    /// Mark/space (sideband) inversion. The `rtty_reverse` key drives
+    /// the waterfall stub's `Reverse()`, which `modem::rx_init`
+    /// re-derives `reverse` from for *every* modem (not just RTTY) —
+    /// so MFSK/FSK families invert with sideband the same way.
+    pub fn apply_reverse(&mut self, reverse: bool) {
+        self.modem
+            .set_param("rtty_reverse", if reverse { 1.0 } else { 0.0 });
+    }
+
     fn warn_if_off_rate(&mut self, ctx: &InitCtx<'_>) {
         if let Some(rate) = ctx.input_rate("in") {
             if rate > 0.0 && (rate - f64::from(FLDIGI_RATE_HZ)).abs() > 1.0 && !self.warned_off_rate
@@ -151,6 +160,15 @@ const RX_FREQ_PARAM: ParamSpec = ParamSpec {
     reconfig_scope: ReconfigureScope::SelfBlock,
     ai_notes: "Audio carrier the modem centres on. 0 = fldigi default (~1000 Hz). Headless AFC sig-search is inert, so point it at where the signal sits when AFC can't find it.",
 };
+/// Sideband/polarity inversion — relevant to every FSK/MFSK family
+/// (RTTY, Olivia, Contestia, DominoEX, Throb, NAVTEX), not just RTTY.
+const REVERSE_PARAM: ParamSpec = ParamSpec {
+    key: "reverse",
+    label: "Reverse",
+    kind: ParamKind::Toggle { default: false },
+    reconfig_scope: ReconfigureScope::SelfBlock,
+    ai_notes: "Swap mark/space. Tone order inverts with TX/RX sideband (HF data is historically LSB, many SDRs USB). Flip if the tones are clearly present but the text is garbage.",
+};
 
 // ---------------------------------------------------------------------
 // RttyDemod — Baudot/ITA2 RTTY (45.45 baud, 170 Hz shift).
@@ -186,7 +204,7 @@ impl RttyDemod {
     pub fn new(p: RttyDemodParams) -> Result<Self> {
         let mut core = FldigiCore::new("rtty45", "rtty45")?;
         core.apply_common(p.afc, p.rx_freq_hz);
-        core.set("rtty_reverse", if p.reverse { 1.0 } else { 0.0 });
+        core.apply_reverse(p.reverse);
         Ok(Self { core })
     }
 }
@@ -449,6 +467,149 @@ impl BlockFactory for Mt63Demod {
         )?)?))
     }
 }
+
+// ---------------------------------------------------------------------
+// Variant-selected MFSK/FSK families. Structurally identical wrappers
+// (variant + afc + rx_freq + reverse → FldigiCore), so generated from
+// one macro rather than five near-duplicate copies. Variant ids are
+// the shim `make_modem` strings verbatim.
+// ---------------------------------------------------------------------
+
+macro_rules! family_demod {
+    ($params:ident, $block:ident, $type_name:literal,
+     $variants:ident = [$($v:literal),+ $(,)?], $default:literal, $ai:literal) => {
+        const $variants: &[&str] = &[$($v),+];
+
+        #[derive(Debug, Clone, Deserialize)]
+        #[serde(default)]
+        pub struct $params {
+            /// One of the family's `make_modem` ids.
+            pub variant: String,
+            pub afc: bool,
+            pub rx_freq_hz: f32,
+            pub reverse: bool,
+        }
+        impl Default for $params {
+            fn default() -> Self {
+                Self {
+                    variant: $default.to_string(),
+                    afc: true,
+                    rx_freq_hz: 0.0,
+                    reverse: false,
+                }
+            }
+        }
+
+        pub struct $block {
+            core: FldigiCore,
+        }
+        impl $block {
+            pub fn new(p: $params) -> Result<Self> {
+                if !$variants.contains(&p.variant.as_str()) {
+                    bail!(
+                        concat!($type_name, ": variant must be one of {:?}, got {:?}"),
+                        $variants,
+                        p.variant
+                    );
+                }
+                let mut core = FldigiCore::new(&p.variant, p.variant.clone())?;
+                core.apply_common(p.afc, p.rx_freq_hz);
+                core.apply_reverse(p.reverse);
+                Ok(Self { core })
+            }
+        }
+
+        #[ferrite_blocks_macros::ferrite_block]
+        impl Block for $block {
+            fn spec() -> BlockSpec {
+                BlockSpec {
+                    type_name: $type_name,
+                    placement: Placement::Either,
+                    inputs: FLDIGI_IN,
+                    outputs: &[],
+                    params: &[
+                        ParamSpec {
+                            key: "variant",
+                            label: "Variant",
+                            kind: ParamKind::EnumString {
+                                values: $variants,
+                                default: $default,
+                            },
+                            reconfig_scope: ReconfigureScope::SourceRestart,
+                            ai_notes: "Mode variant (bandwidth / tones / interleave).",
+                        },
+                        AFC_PARAM,
+                        RX_FREQ_PARAM,
+                        REVERSE_PARAM,
+                    ],
+                    ai_notes: $ai,
+                }
+            }
+            fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+                self.core.warn_if_off_rate(ctx);
+                Ok(())
+            }
+            fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+                Ok(self.core.pump(io))
+            }
+            fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+                let mut changed = false;
+                if let Some(b) = delta.get("afc").and_then(serde_json::Value::as_bool) {
+                    self.core.set("afc", if b { 1.0 } else { 0.0 });
+                    changed = true;
+                }
+                if let Some(b) = delta.get("reverse").and_then(serde_json::Value::as_bool) {
+                    self.core.apply_reverse(b);
+                    changed = true;
+                }
+                if let Some(f) = delta.get("rx_freq_hz").and_then(serde_json::Value::as_f64) {
+                    self.core.set("rx_freq_hz", f);
+                    changed = true;
+                }
+                Ok(changed)
+            }
+        }
+
+        impl BlockFactory for $block {
+            fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+                Ok(Box::new($block::new(crate::block::deserialize_params(params)?)?))
+            }
+        }
+    };
+}
+
+family_demod!(
+    OliviaDemodParams, OliviaDemod, "OliviaDemod",
+    OLIVIA_VARIANTS = ["olivia", "olivia-8-500", "olivia-16-500", "olivia-32-1000"],
+    "olivia-8-500",
+    "Olivia (MFSK + Reed-Solomon FEC) via the curated fldigi olivia core. Very robust, slow. Tolerant of mistuning; AFC usually pulls it in. Output: `tail decoder --category fldigi`."
+);
+family_demod!(
+    ContestiaDemodParams, ContestiaDemod, "ContestiaDemod",
+    CONTESTIA_VARIANTS = ["contestia", "contestia-8-250", "contestia-8-500", "contestia-16-500"],
+    "contestia-8-500",
+    "Contestia (Olivia-derivative MFSK+FEC) via the curated fldigi contestia core. Tolerant of mistuning. Output: `tail decoder --category fldigi`."
+);
+family_demod!(
+    DominoexDemodParams, DominoexDemod, "DominoexDemod",
+    DOMINOEX_VARIANTS = [
+        "dominoex4", "dominoex8", "dominoex11", "dominoex16", "dominoex22", "dominoex44"
+    ],
+    "dominoex16",
+    "DominoEX (incremental-frequency MFSK) via the curated fldigi dominoex core. Sideband-sensitive — try `reverse` if garbled. Output: `tail decoder --category fldigi`."
+);
+family_demod!(
+    ThrobDemodParams, ThrobDemod, "ThrobDemod",
+    THROB_VARIANTS = ["throb1", "throb2", "throb4", "throbx1", "throbx2", "throbx4"],
+    "throb4",
+    "Throb / ThrobX (slow MFSK) via the curated fldigi throb core. Output: `tail decoder --category fldigi`."
+);
+family_demod!(
+    NavtexDemodParams, NavtexDemod, "NavtexDemod",
+    NAVTEX_VARIANTS = ["navtex", "sitorb"],
+    "navtex",
+    "NAVTEX / SITOR-B (CCIR-476, 100 bd / 170 Hz shift, time-diversity FEC) via the curated fldigi navtex core. 518 kHz maritime safety. Output: `tail decoder --category fldigi`."
+);
 
 #[cfg(test)]
 mod tests {
