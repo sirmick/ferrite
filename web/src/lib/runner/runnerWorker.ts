@@ -5,7 +5,6 @@
 // `RunnerCore` directly (this file is a thin adapter with no branching
 // worth covering).
 
-import { initFldigiBridge } from '../wasm/fldigi/fldigiBridge.js';
 import { FrameClient } from '../ws/client.js';
 import { initFrameDecoder } from '../ws/frame.js';
 import type { RunnerRequest } from './protocol.js';
@@ -20,13 +19,15 @@ import { createRuntime, splitFlowgraphForEnv } from './rustRuntime.js';
 // without going through this glue, so they stay WASM-free.)
 void initFrameDecoder();
 
-// Warm the fldigi Emscripten bridge at worker startup (link-vs-bridge:
-// the wasm32 ferrite-fldigi backend's synchronous snippet calls need
-// the Emscripten module live before any browser-placed FldigiDemod is
-// constructed). `onmessage` awaits it before dispatching so runtime
-// build never races the load. Resolves false (inert) if fldigi.wasm
-// wasn't built — browser fldigi presets unavailable, nothing throws.
-void initFldigiBridge();
+// NB: the fldigi Emscripten bridge is intentionally NOT loaded here.
+// Every shipped fldigi preset places FldigiDemod `node`-side, so the
+// browser runtime never constructs it. Eagerly importing the
+// Emscripten module in the worker breaks instantiation (its Node/WASI
+// imports — e.g. fd_fdstat_set_flags — aren't available in a browser
+// Worker). If/when a browser-side fldigi preset is genuinely wanted,
+// call `initFldigiBridge()` lazily from the FldigiDemod construction
+// path only (and on a browser-built fldigi.wasm), never unconditionally
+// at worker startup. Bridge code stays in web/src/lib/wasm/fldigi/.
 
 const core = new RunnerCore({
   createFrameClient: (wsUrl) =>
@@ -60,10 +61,6 @@ const core = new RunnerCore({
 });
 
 self.onmessage = async (ev: MessageEvent<RunnerRequest>) => {
-  // Idempotent + cached: ~0 cost after the first await, but guarantees
-  // the Emscripten module is ready before a runtime containing a
-  // browser-side FldigiDemod is built (its snippet calls are sync).
-  await initFldigiBridge();
   const resp = await core.handle(ev.data);
   (self as unknown as Worker).postMessage(resp);
 };
