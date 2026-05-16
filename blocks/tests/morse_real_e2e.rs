@@ -68,6 +68,8 @@ fn real_cw_recording_decodes_text() {
     );
     let (audio, rate) = load_audio(rel);
     assert!((rate - f64::from(RATE_HZ)).abs() < 1.0, "expected 22050 Hz");
+    // Full RX flowgraph: CW is a keyed carrier copied as an SSB tone.
+    let audio = common::full_chain_ssb(&audio, f64::from(RATE_HZ));
 
     let mut demod = MorseDemod::new(MorseDemodParams {
         sample_rate_hz: RATE_HZ,

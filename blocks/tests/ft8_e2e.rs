@@ -19,6 +19,9 @@
 //! tests in `blocks/src/ft8.rs` cover spec / construct / params.
 
 #![cfg(feature = "ft8")]
+#![allow(clippy::doc_markdown)]
+
+mod common;
 
 use std::fs::File;
 use std::io::Read;
@@ -64,7 +67,9 @@ fn read_12000_mono_wav(name: &str) -> Vec<f32> {
 
 #[test]
 fn ft8_decodes_websdr_test_wav() {
+    // Full RX flowgraph: FT8 is 8-FSK over USB SSB.
     let audio = read_12000_mono_wav("FT8_websdr_test.wav");
+    let audio = common::full_chain_ssb(&audio, 12_000.0);
     // Sanity: ~15 s @ 12 kHz = 180 000 samples ± a few. The fixture
     // is a deliberately full slot of real off-air audio.
     assert!(
