@@ -38,6 +38,8 @@ pub mod file_sink;
 pub mod file_source;
 #[cfg(feature = "fldigi")]
 pub mod fldigi;
+#[cfg(feature = "fldigi")]
+pub mod fldigi_modes;
 pub mod fm_demod;
 pub mod fm_modulator;
 pub mod frame;
@@ -104,6 +106,10 @@ pub use file_sink::{FileIqSink, FileIqSinkParams, IqSinkFormat, WriteSeek};
 pub use file_source::{FileIqSource, FileIqSourceParams, IqFileFormat, ReadSeek};
 #[cfg(feature = "fldigi")]
 pub use fldigi::{FldigiDemod, FldigiDemodParams};
+#[cfg(feature = "fldigi")]
+pub use fldigi_modes::{
+    Mt63Demod, Mt63DemodParams, Psk31Demod, Psk31DemodParams, RttyDemod, RttyDemodParams,
+};
 pub use fm_demod::{FmDemod, FmDemodParams};
 pub use fm_modulator::{FmModulator, FmModulatorParams};
 pub use frame::{Frame, CONTROL_STREAM, FFT_STREAM, VFO_STREAM_BASE};
