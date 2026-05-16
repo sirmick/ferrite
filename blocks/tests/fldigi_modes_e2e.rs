@@ -1,12 +1,15 @@
-//! Real-sample e2e for the per-mode fldigi blocks (`RttyDemod`,
-//! `Psk31Demod`, `Mt63Demod`).
+//! Real-sample e2e for the per-mode fldigi blocks.
 //!
-//! The generic `fldigi_real_e2e` proves the legacy `FldigiDemod`. This
-//! proves the *new per-mode blocks* decode the same real sigidwiki
-//! recordings (`samples/sigidwiki/8000_mono/`) to the pangram, with
-//! the tuned params each block now exposes as typed knobs — the
-//! refactor's regression gate, landing alongside the blocks per
-//! "add e2e from samples as we go".
+//! The canonical real-recording gate for the fldigi decoders: each
+//! per-mode block (`RttyDemod`, `Psk31Demod`, `Mt63Demod`,
+//! `OliviaDemod`, `ContestiaDemod`, `ThrobDemod`, `DominoexDemod`,
+//! `NavtexDemod`) decodes its real sigidwiki recording
+//! (`samples/sigidwiki/8000_mono/`) to the pangram, with the tuned
+//! params each block exposes as typed knobs. 7 mandatory; navtex
+//! `#[ignore]`d (SITOR-B FEC won't sync off this clip — see the
+//! separate powerDensity/AFC follow-up). Synthetic block+tracing
+//! coverage lives in `fldigi_e2e` (RTTY). Supersedes the old
+//! FldigiDemod-era `fldigi_real_e2e`.
 
 #![cfg(feature = "fldigi")]
 
@@ -22,8 +25,8 @@ use ferrite_blocks::{
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Vendored fldigi keeps one active modem in C++ globals — serialize
-/// every fldigi-touching test in this binary (same rationale as
-/// `fldigi_real_e2e`).
+/// every fldigi-touching test in this binary (block+modem
+/// construction *and* decode; cross-binary is process-isolated).
 fn fldigi_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -123,7 +126,7 @@ fn assert_pangram(got: &str, who: &str) {
 
 #[test]
 fn rtty_demod_decodes_real_recording() {
-    // Same tuned params fldigi_real_e2e proved, now as typed knobs.
+    // Tuned params (probe-established), now as typed knobs.
     assert_pangram(
         &run(
             || {
