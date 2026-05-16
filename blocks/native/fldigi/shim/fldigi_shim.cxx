@@ -311,6 +311,12 @@ fldigi_modem *fldigi_modem_create(const char *mode, int sample_rate) {
 
 	g_active = &h->br;
 	active_modem = m;
+	// The waterfall stub is a process global; a prior modem may have
+	// driven its Carrier/Reverse (rx_freq_hz / rtty_reverse). Reset to
+	// fldigi defaults BEFORE init()/rx_init() read it, so every modem
+	// starts from the same state fldigi would have fresh — no leakage
+	// across sequentially-created modems. (USB stays true: SDR norm.)
+	if (wf) { wf->Carrier(1000); wf->Reverse(false); }
 	m->set_samplerate(sample_rate);
 	m->init();
 	m->rx_init();
@@ -384,8 +390,30 @@ void fldigi_modem_set_param(fldigi_modem *h, const char *key, double v) {
 	else if (k == "rtty_shift")   progdefaults.rtty_shift  = (int)v;
 	else if (k == "rtty_parity")  progdefaults.rtty_parity = (int)v;
 	else if (k == "rtty_stop")    progdefaults.rtty_stop   = (int)v;
-	else if (k == "rtty_reverse") progdefaults.rtty_reverse = (v != 0.0);
+	else if (k == "rtty_reverse") {
+		// RTTY RX polarity is the waterfall "Rev" toggle, not a
+		// progdefault: rtty::rx_process re-derives
+		//   reverse = wf->Reverse() ^ !wf->USB()
+		// every call (rtty.cxx:648), so progdefaults.rtty_reverse and
+		// modem::set_reverse() are both ignored on RX. The stub wf is
+		// USB=true, so its Reverse() == effective polarity. Driving it
+		// here is exactly what fldigi's UI Rev button does.
+		if (wf) wf->Reverse(v != 0.0);
+	}
 	else if (k == "afc")          progStatus.afconoff      = (v != 0.0);
+	else if (k == "rx_freq_hz") {
+		// Headless has no waterfall click and the powerDensity stub
+		// returns 0, so RTTY/FSK AFC sig-search can't lock — the host
+		// places the modem's RX carrier directly. v<=0 = leave the
+		// fldigi default create() already established (the AFC/wide
+		// modes need their own acquisition, not a pinned carrier).
+		// set_freq overrides the value init() derived; pinning the
+		// stub Carrier keeps a later restart() consistent.
+		if (v > 0.0 && h->br.m) {
+			h->br.m->set_freq(v);
+			if (wf) wf->Carrier((int)v);
+		}
+	}
 	if (h->br.m) h->br.m->restart();
 }
 

@@ -9,16 +9,17 @@
 //! case-insensitive `contains("QUICK BROWN FOX")` — immune to the
 //! leading lock-in garbage and per-mode case differences.
 //!
-//! Four modes decode cleanly off the raw recordings (AFC pulls them
-//! in): **psk31, olivia-8-500, contestia-8-500, throb4**. The other
-//! four (rtty45, navtex, mt63-1000L, dominoex16) are narrow-FSK /
-//! tuning-sensitive: the sigidwiki recording is not at fldigi's
-//! expected audio centre and `FldigiDemod` exposes no tune/`reverse`
-//! knob (the shim only plumbs `afc` + the `rtty_*` set_params), so
-//! they are `#[ignore]`d with the reason recorded — re-enable when
-//! the block surfaces a tuning/`rtty_reverse` param or the fixtures
-//! are re-centred. `probe_all_real_fldigi_modes` always runs and
-//! prints every mode's decode for diagnosis.
+//! `psk31, olivia-8-500, contestia-8-500, throb4` decode straight off
+//! the raw recording (their wide capture / AFC pulls them in). The
+//! narrow-FSK / tuning-sensitive ones need the modem pointed at the
+//! signal: headless has no waterfall click and the shim's
+//! `powerDensity` stub returns 0, so the FSK/RTTY AFC sig-search is
+//! inert. With the `rtty_reverse` + `rx_freq_hz` knobs now on
+//! `FldigiDemod`, `rtty45` (rev=false, 1000 Hz), `mt63-1000L`
+//! (1500 Hz) and `dominoex16` (rev=true, 1220 Hz) also decode — see
+//! `CASES`. Only `navtex` (SITOR-B, time-diversity FEC) still won't
+//! sync off this clip and stays `#[ignore]`d. `probe_*` print decodes
+//! for diagnosis and never fail.
 
 #![cfg(feature = "fldigi")]
 #![allow(clippy::doc_markdown)]
@@ -43,16 +44,33 @@ fn fldigi_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// (fldigi mode id, 8 kHz wav under samples/sigidwiki/8000_mono/).
-const CASES: &[(&str, &str)] = &[
-    ("rtty45", "RTTY_170Hz_45.45bd"),
-    ("psk31", "BPSK31"),
-    ("olivia-8-500", "Olivia_8-500"),
-    ("contestia-8-500", "Contestia_8-500"),
-    ("navtex", "NAVTEX_SITOR-B"),
-    ("mt63-1000L", "MT63-1000L"),
-    ("dominoex16", "DominoEX_16Bd"),
-    ("throb4", "THROB4"),
+/// `(mode id, 8 kHz wav stem, rtty_reverse, rx_freq_hz)` — the tuned
+/// params each mode needs to decode the real clip. `0.0` = leave
+/// fldigi's default carrier (AFC-pulled modes). Empirically found by
+/// the `probe_*` sweeps.
+struct Case {
+    mode: &'static str,
+    base: &'static str,
+    reverse: bool,
+    rx_freq_hz: f32,
+}
+const fn c(mode: &'static str, base: &'static str, reverse: bool, rx_freq_hz: f32) -> Case {
+    Case {
+        mode,
+        base,
+        reverse,
+        rx_freq_hz,
+    }
+}
+const CASES: &[Case] = &[
+    c("rtty45", "RTTY_170Hz_45.45bd", false, 1000.0),
+    c("psk31", "BPSK31", false, 0.0),
+    c("olivia-8-500", "Olivia_8-500", false, 0.0),
+    c("contestia-8-500", "Contestia_8-500", false, 0.0),
+    c("mt63-1000L", "MT63-1000L", false, 1500.0),
+    c("dominoex16", "DominoEX_16Bd", true, 1220.0),
+    c("throb4", "THROB4", false, 0.0),
+    c("navtex", "NAVTEX_SITOR-B", false, 0.0),
 ];
 
 fn with_fldigi_capture<F: FnOnce()>(f: F) -> Vec<String> {
@@ -96,8 +114,10 @@ fn with_fldigi_capture<F: FnOnce()>(f: F) -> Vec<String> {
         .collect()
 }
 
-/// Decode one recording, return the reassembled `decoder::fldigi` text.
-fn decode(mode: &str, base: &str) -> String {
+/// Decode one recording with explicit RTTY polarity + RX carrier
+/// (`0.0` = fldigi default); return the reassembled `decoder::fldigi`
+/// text.
+fn decode_full(mode: &str, base: &str, rtty_reverse: bool, rx_freq_hz: f32) -> String {
     let _g = fldigi_guard();
     let rel = format!("sigidwiki/8000_mono/{base}.wav");
     assert!(
@@ -111,6 +131,8 @@ fn decode(mode: &str, base: &str) -> String {
         mode: mode.to_string(),
         sample_rate_hz: 8_000.0,
         afc: true,
+        rtty_reverse,
+        rx_freq_hz,
     })
     .unwrap_or_else(|e| panic!("FldigiDemod {mode}: {e}"));
 
@@ -147,85 +169,102 @@ fn decode(mode: &str, base: &str) -> String {
         .collect()
 }
 
-/// Shared gate: the recording is the standard pangram, so a correct
-/// decode contains "QUICK BROWN FOX" regardless of case or lock-in
-/// garbage.
-fn assert_decodes_pangram(mode: &str, base: &str) {
-    let text = decode(mode, base).to_uppercase();
+fn case(mode: &str) -> &'static Case {
+    CASES.iter().find(|c| c.mode == mode).expect("known mode")
+}
+
+/// Shared gate: every clip is the pangram, so a correct decode contains
+/// "QUICK BROWN FOX" regardless of case or per-mode lock-in garbage.
+fn assert_decodes_pangram(mode: &str) {
+    let k = case(mode);
+    let got = decode_full(k.mode, k.base, k.reverse, k.rx_freq_hz);
     assert!(
-        text.contains("QUICK BROWN FOX"),
-        "{mode}: real recording did not decode the pangram \
-         (got {:?})",
-        decode(mode, base)
+        got.to_uppercase().contains("QUICK BROWN FOX"),
+        "{mode} (rev={}, rx_freq={}): real recording did not decode the \
+         pangram (got {got:?})",
+        k.reverse,
+        k.rx_freq_hz,
     );
 }
 
 #[test]
-#[ignore = "real RTTY clip decodes as garbage through the current \
-             FldigiDemod surface (likely mark/space reversed and/or off \
-             fldigi's audio centre — the block plumbs neither \
-             rtty_reverse nor a tune param). Synthetic RTTY is covered \
-             by fldigi_e2e."]
 fn rtty45_real_recording() {
-    assert_decodes_pangram("rtty45", "RTTY_170Hz_45.45bd");
+    assert_decodes_pangram("rtty45");
 }
 
 #[test]
 fn psk31_real_recording() {
-    assert_decodes_pangram("psk31", "BPSK31");
+    assert_decodes_pangram("psk31");
 }
 
 #[test]
 fn olivia_8_500_real_recording() {
-    assert_decodes_pangram("olivia-8-500", "Olivia_8-500");
+    assert_decodes_pangram("olivia-8-500");
 }
 
 #[test]
 fn contestia_8_500_real_recording() {
-    assert_decodes_pangram("contestia-8-500", "Contestia_8-500");
+    assert_decodes_pangram("contestia-8-500");
 }
 
 #[test]
 fn throb4_real_recording() {
-    assert_decodes_pangram("throb4", "THROB4");
+    assert_decodes_pangram("throb4");
 }
 
 #[test]
-#[ignore = "real NAVTEX/SITOR-B clip not at fldigi's audio centre; \
-             FldigiDemod exposes no tune param. Re-enable when it does \
-             or the fixture is re-centred."]
-fn navtex_real_recording() {
-    assert_decodes_pangram("navtex", "NAVTEX_SITOR-B");
-}
-
-#[test]
-#[ignore = "real MT63-1000L clip off-centre (MT63 needs the 1 kHz block \
-             at ~1500 Hz); no tune param on FldigiDemod."]
 fn mt63_1000l_real_recording() {
-    assert_decodes_pangram("mt63-1000L", "MT63-1000L");
+    assert_decodes_pangram("mt63-1000L");
 }
 
 #[test]
-#[ignore = "real DominoEX_16Bd clip does not lock through the current \
-             FldigiDemod surface (tuning/baud-variant sensitive)."]
 fn dominoex16_real_recording() {
-    assert_decodes_pangram("dominoex16", "DominoEX_16Bd");
+    assert_decodes_pangram("dominoex16");
 }
 
-/// Always-on diagnostic: print every mode's decode (run with
-/// `--nocapture`). Never fails — it is the map for the gates above.
+#[test]
+#[ignore = "real NAVTEX/SITOR-B clip won't FEC-sync off this recording \
+             at any swept carrier/polarity (time-diversity FEC + weak, \
+             spread tone energy ~2080 Hz in the clip). Re-enable with a \
+             cleaner SITOR-B fixture. probe_navtex_sweep shows the \
+             attempts."]
+fn navtex_real_recording() {
+    assert_decodes_pangram("navtex");
+}
+
+/// Diagnostic (always passes, run with `--nocapture`): the decode each
+/// gate mode produces with its tuned `CASES` params.
 #[test]
 fn probe_all_real_fldigi_modes() {
-    println!("\n--- real sigidwiki fldigi decode probe ---");
-    for (mode, base) in CASES {
-        let text = decode(mode, base);
-        let printable: String = text
-            .chars()
-            .filter(|c| !c.is_control() || *c == '\n')
-            .collect();
-        let n = printable.chars().filter(|c| !c.is_whitespace()).count();
-        let preview: String = printable.replace('\n', "⏎").chars().take(80).collect();
-        println!("{mode:>16}  {n:>4} chars  | {preview}");
+    println!("\n--- real sigidwiki fldigi decode (tuned params) ---");
+    for k in CASES {
+        let text = decode_full(k.mode, k.base, k.reverse, k.rx_freq_hz);
+        let printable: String = text.chars().filter(|c| !c.is_control()).collect();
+        println!(
+            "{:>16} rev={} f={:>6} | {}",
+            k.mode,
+            k.reverse,
+            k.rx_freq_hz,
+            printable.chars().take(72).collect::<String>()
+        );
     }
-    println!("--- end probe ---\n");
+    println!("--- end ---\n");
+}
+
+/// Diagnostic for the still-failing NAVTEX clip: sweep carrier ×
+/// polarity so a future cleaner fixture / tuning can be dialed in.
+#[test]
+fn probe_navtex_sweep() {
+    for f in [0.0_f32, 1000.0, 1500.0, 2000.0, 2080.0, 2100.0] {
+        for rev in [false, true] {
+            let t = decode_full("navtex", "NAVTEX_SITOR-B", rev, f);
+            let p: String = t.chars().filter(|c| !c.is_control()).collect();
+            if p.trim().len() >= 4 {
+                println!(
+                    "navtex rev={rev} f={f:>6}: {:?}",
+                    p.chars().take(64).collect::<String>()
+                );
+            }
+        }
+    }
 }

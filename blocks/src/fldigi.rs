@@ -49,6 +49,20 @@ pub struct FldigiDemodParams {
     /// Automatic frequency control (track drift). Maps to fldigi's
     /// `progStatus.afconoff` via the modem's `set_param`.
     pub afc: bool,
+    /// RTTY mark/space polarity swap. RTTY is 2-tone FSK whose received
+    /// polarity is genuinely ambiguous — it inverts with TX/RX sideband
+    /// (HF RTTY is historically LSB; many SDRs/recordings are USB) or
+    /// any odd number of spectral inversions in the chain. Every RTTY
+    /// decoder has this Normal/Reverse control for exactly that reason;
+    /// maps to fldigi's `progdefaults.rtty_reverse`. No effect on
+    /// non-RTTY modes.
+    pub rtty_reverse: bool,
+    /// RX carrier the modem centres its filters on, Hz. `0.0` = leave
+    /// fldigi's default (~1000 Hz / sweet-spot). Headless has no
+    /// waterfall click and the shim's `powerDensity` stub returns 0,
+    /// so the FSK/RTTY AFC sig-search can't lock — point the modem at
+    /// the signal here (tune dial ≈ where the tones sit in the audio).
+    pub rx_freq_hz: f32,
 }
 
 impl Default for FldigiDemodParams {
@@ -57,6 +71,8 @@ impl Default for FldigiDemodParams {
             mode: "rtty45".to_string(),
             sample_rate_hz: 8_000.0,
             afc: true,
+            rtty_reverse: false,
+            rx_freq_hz: 0.0,
         }
     }
 }
@@ -78,6 +94,11 @@ impl FldigiDemod {
             anyhow::anyhow!("FldigiDemod: unknown/unsupported mode {:?}", params.mode)
         })?;
         modem.set_param("afc", if params.afc { 1.0 } else { 0.0 });
+        modem.set_param("rtty_reverse", if params.rtty_reverse { 1.0 } else { 0.0 });
+        // Always set (0 → fldigi default): the shim's waterfall stub is
+        // a process global, so the carrier must be defined per-modem,
+        // never inherited from a previously-constructed one.
+        modem.set_param("rx_freq_hz", f64::from(params.rx_freq_hz));
         Ok(Self {
             params,
             modem,
@@ -128,6 +149,26 @@ impl Block for FldigiDemod {
                     kind: ParamKind::Toggle { default: true },
                     reconfig_scope: ReconfigureScope::SelfBlock,
                     ai_notes: "Automatic frequency control — tracks carrier drift. Leave on unless the signal is rock-stable and you want a fixed bin.",
+                },
+                ParamSpec {
+                    key: "rtty_reverse",
+                    label: "RTTY reverse",
+                    kind: ParamKind::Toggle { default: false },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "RTTY only: swap mark/space. RTTY polarity is ambiguous on receive (inverts with TX/RX sideband — HF RTTY is historically LSB, many SDRs are USB). If RTTY decodes as garbage but the two tones are clearly there, flip this. No effect on non-RTTY modes.",
+                },
+                ParamSpec {
+                    key: "rx_freq_hz",
+                    label: "RX carrier",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 4_000.0,
+                        step: 1.0,
+                        default: 0.0,
+                        unit: "Hz",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Audio carrier the modem centres on. 0 = fldigi default (~1000 Hz). Set to where the signal sits in the audio passband when AFC can't find it (FSK/RTTY headless: the powerDensity AFC search is inert, so point it manually).",
                 },
             ],
             ai_notes: "fldigi digital-mode decoder (curated fldigi cores). Continuous decode (no slots). RTTY: tune so the two tones straddle the audio carrier; AFC pulls it in. Output: `tail decoder --category fldigi`.",
@@ -189,12 +230,32 @@ impl Block for FldigiDemod {
     }
 
     fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+        let mut changed = false;
         if let Some(afc) = delta.get("afc").and_then(serde_json::Value::as_bool) {
             self.params.afc = afc;
             self.modem.set_param("afc", if afc { 1.0 } else { 0.0 });
-            return Ok(true);
+            changed = true;
         }
-        Ok(false)
+        if let Some(rev) = delta
+            .get("rtty_reverse")
+            .and_then(serde_json::Value::as_bool)
+        {
+            self.params.rtty_reverse = rev;
+            self.modem
+                .set_param("rtty_reverse", if rev { 1.0 } else { 0.0 });
+            changed = true;
+        }
+        if let Some(f) = delta.get("rx_freq_hz").and_then(serde_json::Value::as_f64) {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                self.params.rx_freq_hz = f as f32;
+            }
+            if f > 0.0 {
+                self.modem.set_param("rx_freq_hz", f);
+            }
+            changed = true;
+        }
+        Ok(changed)
     }
 }
 
