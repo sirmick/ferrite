@@ -9,7 +9,11 @@
 //! with proper tuning. Always passes; it's a measurement.
 
 #![cfg(feature = "fldigi")]
-#![allow(clippy::cast_precision_loss)]
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::doc_markdown
+)]
 
 mod common;
 
