@@ -235,10 +235,13 @@
 
         <label class="grid gap-1 text-xs">
           <div class="flex justify-between">
-            <span class="text-[color:var(--color-muted)]">Carrier offset</span>
+            <span class="text-[color:var(--color-muted)]">Upmix — carrier offset</span>
             <span class="font-mono">{offsetKHz >= 0 ? '+' : '-'}{Math.abs(offsetKHz)} kHz</span>
           </div>
           <input type="range" min="-40" max="40" step="0.5" bind:value={offsetKHz} />
+          <span class="text-[10px] text-[color:var(--color-muted)]">
+            Where the modulated signal lands in the output IQ (0 = at DC).
+          </span>
         </label>
 
         {#if modulation === 'fm'}
@@ -262,7 +265,7 @@
       {:else}
         <label class="grid gap-1 text-xs">
           <div class="flex justify-between">
-            <span class="text-[color:var(--color-muted)]">Frequency shift</span>
+            <span class="text-[color:var(--color-muted)]">Upmix — frequency shift</span>
             <span class="font-mono">
               {offsetKHz === 0
                 ? 'straight replay'
@@ -270,6 +273,9 @@
             </span>
           </div>
           <input type="range" min="-40" max="40" step="0.5" bind:value={offsetKHz} />
+          <span class="text-[10px] text-[color:var(--color-muted)]">
+            IqUpmix NCO shift applied to the capture (0 = replay as-is).
+          </span>
         </label>
       {/if}
 
