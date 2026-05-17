@@ -62,6 +62,12 @@ mkdir -p "$SRCDIR"
 # rsync the worktree minus build artifacts and minus packaging/build-ctx
 # (which holds *this* tarball — exclude or we recurse). web/build/ is
 # explicitly *kept* so containers don't have to rebuild it.
+#
+# dist/ (prior package output), samples/ (RF test fixtures), research/
+# and *.log are never referenced by debian/rules or rpm/ferrite.spec
+# (the build runs build-soapysdr.sh + `cargo build --release`; tests are
+# skipped). Excluding them shrinks the source tarball from ~260 MB to a
+# few MB and turns the xz staging step from minutes into seconds.
 rsync -a \
     --exclude='target/' \
     --exclude='node_modules/' \
@@ -69,7 +75,10 @@ rsync -a \
     --exclude='soapysdr-src/' \
     --exclude='packaging/build-ctx/' \
     --exclude='.git/' \
-    --exclude='dev-server.log' \
+    --exclude='dist/' \
+    --exclude='samples/' \
+    --exclude='research/' \
+    --exclude='*.log' \
     "$ROOT/" "$SRCDIR/"
 tar -cJf "$BUILD_CTX/$TARBALL_NAME" -C "$TMPDIR" "ferrite-${VERSION}"
 
