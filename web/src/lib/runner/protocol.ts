@@ -47,6 +47,12 @@ export type RunnerRequest =
 export interface LoadResult {
   readonly blocks: ReadonlyArray<string>;
   readonly audioSabs: Readonly<Record<string, SharedArrayBuffer>>;
+  /** Browser-side `ui:<name>` Events sinks the split produced (name +
+   *  the stream_id env_split allocated — identical to the node half's
+   *  allocation). The main thread merges these into `pipeline.uiSinks`
+   *  so the advanced view attaches even when the decoder is
+   *  browser-placed and node never advertised the sink. */
+  readonly uiSinks: ReadonlyArray<{ readonly name: string; readonly stream_id: number }>;
 }
 
 export type RunnerResponse =

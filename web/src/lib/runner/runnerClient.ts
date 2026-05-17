@@ -32,6 +32,11 @@ export class FlowgraphRunner {
   constructor(
     private readonly worker: WorkerLike,
     private readonly onDiag?: (text: string) => void,
+    /** Unified-transport loopback: browser-side decoder events the
+     *  worker drained, to be injected into the main-thread
+     *  `FrameClient` on `streamId` (same channel pattern as `onDiag`,
+     *  so test doubles that ignore it stay unaffected). */
+    private readonly onEvents?: (streamId: number, lines: string[]) => void,
   ) {
     this.worker.onmessage = (ev) => this.onResponse(ev.data);
   }
@@ -87,12 +92,17 @@ export class FlowgraphRunner {
     });
   }
 
-  private onResponse(resp: RunnerResponse | DiagMessage): void {
+  private onResponse(resp: RunnerResponse | DiagMessage | EventsMessage): void {
     // Unsolicited diagnostic log from the worker — threaded out
     // through an optional callback rather than a new protocol kind,
     // so test doubles that don't care about diags stay unaffected.
     if ((resp as DiagMessage).kind === 'diag') {
       this.onDiag?.((resp as DiagMessage).text);
+      return;
+    }
+    if ((resp as EventsMessage).kind === 'events') {
+      const m = resp as EventsMessage;
+      this.onEvents?.(m.streamId, m.lines);
       return;
     }
     const r = resp as RunnerResponse;
@@ -110,6 +120,12 @@ export class FlowgraphRunner {
 interface DiagMessage {
   readonly kind: 'diag';
   readonly text: string;
+}
+
+interface EventsMessage {
+  readonly kind: 'events';
+  readonly streamId: number;
+  readonly lines: string[];
 }
 
 type SuccessResp = Extract<RunnerResponse, { ok: true }>;

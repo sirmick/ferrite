@@ -54,7 +54,7 @@ describe('FlowgraphRunner', () => {
       id: req.id,
       ok: true,
       kind: 'load',
-      data: { blocks: ['a'], audioSabs: { a: sab } },
+      data: { blocks: ['a'], audioSabs: { a: sab }, uiSinks: [] },
     });
     const result = await pending;
     expect(result.blocks).toEqual(['a']);

@@ -69,6 +69,15 @@ class BrowserRuntime {
   /** Block ids currently instantiated on the browser side (for the
    *  audio panel and diagnostics). */
   loadedBlocks = $state<ReadonlyArray<string>>([]);
+  /** Browser-side `ui:<name>` Events sinks from the last load (name +
+   *  stream_id, matching the node half's allocation). `pipeline`
+   *  merges these into `uiSinks` so advanced views attach when the
+   *  decoder ran browser-side. Empty when nothing is loaded. */
+  uiSinks = $state<ReadonlyArray<{ name: string; stream_id: number }>>([]);
+  /** Set by `pipeline`: receives browser-side decoder events the
+   *  worker drained, to loopback into the main-thread FrameClient.
+   *  Unset → events are dropped (no consumer; harmless). */
+  onDecodedEvents: ((streamId: number, lines: string[]) => void) | undefined;
 
   private runner: FlowgraphRunner | undefined;
   private worker: Worker | undefined;
@@ -102,9 +111,13 @@ class BrowserRuntime {
         this.runnerState = 'error';
         logs.push('client', 'error', `runner worker: ${msg}`);
       });
-      this.runner = new FlowgraphRunner(this.worker, (text) => {
-        logs.push('client', 'info', text);
-      });
+      this.runner = new FlowgraphRunner(
+        this.worker,
+        (text) => {
+          logs.push('client', 'info', text);
+        },
+        (streamId, lines) => this.onDecodedEvents?.(streamId, lines),
+      );
     } catch (err) {
       this.errorMessage = errorMessage(err);
       this.runnerState = 'error';
@@ -241,6 +254,7 @@ class BrowserRuntime {
       const plain = $state.snapshot(doc) as FlowgraphDoc;
       const result = await this.runner.load(plain, wsUrl);
       this.loadedBlocks = result.blocks;
+      this.uiSinks = result.uiSinks;
       await this.attachAudioNodes(result.audioSabs);
       this.runnerState = 'loaded';
       const audioCount = Object.keys(result.audioSabs).length;
@@ -407,6 +421,8 @@ class BrowserRuntime {
     this.runnerState = 'idle';
     this.audioState = 'suspended';
     this.lastStructuralFingerprint = undefined;
+    this.loadedBlocks = [];
+    this.uiSinks = [];
 
     // Slow cleanup on the captured refs — safe to interleave with a
     // fresh `init()` because the singleton no longer points at any of

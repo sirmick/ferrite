@@ -5,7 +5,7 @@
 // Decoupling the wire from per-stream consumers keeps the waterfall, VFO
 // audio, and any future panes from each owning their own socket.
 
-import { decodeFrame, type ParsedFrame } from './frame';
+import { decodeFrame, PayloadType, type ParsedFrame } from './frame';
 
 export type FrameHandler = (frame: ParsedFrame) => void;
 
@@ -56,6 +56,29 @@ export class FrameClient {
     }
     const subs = this.subscribers.get(frame.header.streamId);
     if (!subs) return;
+    for (const handler of subs) handler(frame);
+  }
+
+  /** Inject a locally-produced JSON-event payload as if it had
+   *  arrived on the WS for `streamId`. The unified-transport seam:
+   *  browser-side decoders (env_split EventsSink, drained by the
+   *  runner) loopback through here so subscribers — the ft8/wspr/
+   *  fldigi stores — consume node-WS and browser-local decode
+   *  identically. `payload` is the raw newline-delimited JSON the
+   *  store already parses; no re-encode. */
+  injectLocal(streamId: number, payload: Uint8Array): void {
+    const subs = this.subscribers.get(streamId);
+    if (!subs) return;
+    const frame: ParsedFrame = {
+      header: {
+        payloadType: PayloadType.JsonEvent,
+        streamId,
+        seq: 0,
+        timestampNs: 0n,
+        sampleRateHz: 0,
+      },
+      payload,
+    };
     for (const handler of subs) handler(frame);
   }
 

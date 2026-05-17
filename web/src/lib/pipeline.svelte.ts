@@ -37,6 +37,7 @@ import { catalog } from '$lib/presets/catalog';
 import { FrameClient, type ClientStatus } from '$lib/ws/client';
 import { initFrameDecoder } from '$lib/ws/frame';
 import { logs } from '$lib/logs/store.svelte';
+import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
 
 export type PipelinePhase = 'idle' | 'loading' | 'ready' | 'busy' | 'error';
 
@@ -48,9 +49,24 @@ class PipelineStore {
 
   flowgraph = $state<FlowgraphDoc | null>(null);
   source = $state<SourceConfig | null>(null);
-  /** Server-allocated stream_ids for every `ui:<name>` sink, keyed by
-   *  name. Populated on `init()` and re-fetched on preset/source patch. */
-  uiSinks = $state<Record<string, UiSink>>({});
+  /** Node-advertised `ui:<name>` sinks (`/api/ui-sinks`), keyed by
+   *  name. Populated on `init()` and re-fetched on preset/source
+   *  patch. Browser-side sinks (decoder swapped browser) aren't here —
+   *  see `uiSinks`. */
+  private nodeUiSinks = $state<Record<string, UiSink>>({});
+
+  /** All `ui:<name>` sinks the active preset exposes — node-advertised
+   *  plus the browser-side ones the runner produced when a decoder is
+   *  browser-placed. Views key off this; the unified transport means a
+   *  given sink's `stream_id` is the same whichever side it ran on, so
+   *  the store attaches identically. */
+  uiSinks = $derived.by<Record<string, UiSink>>(() => {
+    const merged: Record<string, UiSink> = { ...this.nodeUiSinks };
+    for (const s of browserRuntime.uiSinks) {
+      merged[s.name] = { name: s.name, stream_id: s.stream_id, payload_type: 'JsonEvent' };
+    }
+    return merged;
+  });
 
   /** Composed-preset blocks with their spec and current params, keyed by
    *  block id. Populated on `init()` and re-fetched after any patch.
@@ -101,7 +117,7 @@ class PipelineStore {
       this.flowgraph = fg;
       this.source = src;
       this.status = st;
-      this.uiSinks = indexByName(sinks);
+      this.nodeUiSinks = indexByName(sinks);
       this.blocks = indexById(blocks);
       this.presets = presets;
       this.sourceCaps = caps;
@@ -122,6 +138,13 @@ class PipelineStore {
           logs.push('client', 'error', `ws decode: ${err.message}`);
         },
       });
+      // Unified transport: browser-side decoder events (worker drained
+      // the env_split EventsSink) loopback into this same FrameClient
+      // on the env_split-allocated stream_id, so the ft8/wspr/fldigi
+      // stores consume node-WS and browser-local decode identically.
+      browserRuntime.onDecodedEvents = (streamId, lines) => {
+        this.client?.injectLocal(streamId, new TextEncoder().encode(lines.join('\n')));
+      };
       this.phase = 'ready';
       logs.push('client', 'info', `pipeline init: status=${st}, source=${src.type}`);
     } catch (err) {
@@ -427,7 +450,7 @@ class PipelineStore {
    *  with what the server is actually running. */
   private async refreshComposed(): Promise<void> {
     const [sinks, blocks] = await Promise.all([fetchUiSinks(), fetchPipelineBlocks()]);
-    this.uiSinks = indexByName(sinks);
+    this.nodeUiSinks = indexByName(sinks);
     this.blocks = indexById(blocks);
   }
 
@@ -454,7 +477,7 @@ class PipelineStore {
       this.flowgraph = fg;
       this.source = src;
       this.status = st;
-      this.uiSinks = indexByName(sinks);
+      this.nodeUiSinks = indexByName(sinks);
       this.blocks = indexById(blocks);
       this.sourceCaps = caps;
     } catch (err) {

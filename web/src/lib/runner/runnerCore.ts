@@ -65,11 +65,23 @@ interface BridgeCounter {
   lastRateHz: number;
 }
 
+/** A browser-side `ui:<name>` Events sink. env_split names it
+ *  `__ui_<name>_<stream_id>`; the runner drains it after each tick and
+ *  loopbacks the JSON lines to the main thread keyed by `streamId`
+ *  (which equals the node half's allocation, so stores attach the same
+ *  way regardless of which side the decoder ran on). */
+interface UiEventsBinding {
+  readonly blockId: string;
+  readonly name: string;
+  readonly streamId: number;
+}
+
 interface LoadedState {
   rt: RuntimeHandle;
   client: FrameClient;
   subscribers: Array<() => void>;
   audio: AudioBinding[];
+  uiEvents: UiEventsBinding[];
   tickTimer: ReturnType<typeof setTimeout> | null;
   running: boolean;
   bridges: BridgeCounter[];
@@ -150,13 +162,14 @@ export class RunnerCore {
     try {
       rt = await this.env.createRuntime(splitDoc, 'browser');
       rt.init();
-      const { subscribers, audio, audioSabs, bridges } = wireBlocks(splitDoc, client, rt);
+      const { subscribers, audio, audioSabs, bridges, uiEvents } = wireBlocks(splitDoc, client, rt);
       const blocks = Object.keys(splitDoc.blocks ?? {});
       this.loaded = {
         rt,
         client,
         subscribers,
         audio,
+        uiEvents,
         tickTimer: null,
         running: false,
         bridges,
@@ -164,7 +177,11 @@ export class RunnerCore {
         diagTimer: null,
       };
       this.lastState = 'initialized';
-      return { blocks, audioSabs };
+      return {
+        blocks,
+        audioSabs,
+        uiSinks: uiEvents.map((u) => ({ name: u.name, stream_id: u.streamId })),
+      };
     } catch (err) {
       rt?.free();
       client.close();
@@ -193,6 +210,14 @@ export class RunnerCore {
           const n = state.rt.drainAudio(a.blockId, a.scratch);
           if (n > 0) a.writer.write(a.scratch.subarray(0, n));
           a.drained += n;
+        }
+        // Loopback browser-side decoder events to the main thread on
+        // the same stream_id the node WS path would have used — the
+        // unified transport, so stores/views don't care which side
+        // the decoder ran on.
+        for (const ue of state.uiEvents) {
+          const lines = state.rt.drainEvents(ue.blockId);
+          if (lines.length > 0) postEvents(ue.streamId, lines as string[]);
         }
       } catch (err) {
         // Tick errors are isolated to this iteration so the loop keeps
@@ -317,6 +342,24 @@ function postDiag(text: string): void {
   }
 }
 
+/** Out-of-band event loopback (same channel shape as `postDiag`):
+ *  `FlowgraphRunner` recognises `kind: 'events'` and forwards to its
+ *  `onEvents` callback, which injects them into the main-thread
+ *  `FrameClient` on `streamId`. No-op outside a Worker (tests). */
+function postEvents(streamId: number, lines: string[]): void {
+  const g = globalThis as {
+    postMessage?: (msg: unknown) => void;
+  };
+  if (typeof g.postMessage === 'function') {
+    g.postMessage({ kind: 'events', streamId, lines });
+  }
+}
+
+/** `__ui_<name>_<stream_id>` — env_split's id for a browser-side
+ *  `ui:<name>` Events sink. The name may contain underscores; the
+ *  stream_id is the trailing run of digits. */
+const UI_EVENTS_ID = /^__ui_(.+)_(\d+)$/;
+
 function wireBlocks(
   doc: FlowgraphDoc,
   client: FrameClient,
@@ -326,13 +369,22 @@ function wireBlocks(
   audio: AudioBinding[];
   audioSabs: Record<string, SharedArrayBuffer>;
   bridges: BridgeCounter[];
+  uiEvents: UiEventsBinding[];
 } {
   const subscribers: Array<() => void> = [];
   const audio: AudioBinding[] = [];
   const audioSabs: Record<string, SharedArrayBuffer> = {};
   const bridges: BridgeCounter[] = [];
+  const uiEvents: UiEventsBinding[] = [];
   for (const [blockId, raw] of Object.entries(doc.blocks ?? {})) {
     const block = raw as { type?: string; params?: Record<string, unknown> };
+    const uiMatch = block.type === 'EventsSink' ? UI_EVENTS_ID.exec(blockId) : null;
+    if (uiMatch) {
+      // Browser-side ui: Events sink (env_split). Drained per-tick in
+      // the tick loop and loopbacked to the main thread.
+      uiEvents.push({ blockId, name: uiMatch[1], streamId: Number(uiMatch[2]) });
+      continue;
+    }
     if (block.type === 'WsBridgeRx') {
       const streamId = Number(block.params?.stream_id ?? 0);
       const counter: BridgeCounter = {
@@ -408,7 +460,7 @@ function wireBlocks(
       audioSabs[blockId] = writer.sab;
     }
   }
-  return { subscribers, audio, audioSabs, bridges };
+  return { subscribers, audio, audioSabs, bridges, uiEvents };
 }
 
 function toProtocolState(s: string): RuntimeState {

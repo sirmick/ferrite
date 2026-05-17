@@ -128,6 +128,28 @@ pub fn split_for_environment(
             }
             let tx_type = pick_ui_tx_type(doc, registry, &wire.src, ui_name)?;
             let bridge_id = format!("__ui_{ui_name}_{sid}");
+            // Unified event transport: when the producer is browser-side
+            // (this is the browser split), an `Events` `ui:` wire
+            // terminates in a drainable `EventsSink` instead of a
+            // `WsBridgeTxEvents` (which would ship over a WS the browser
+            // doesn't host). The runner drains it post-tick and
+            // loopbacks frames into the same `FrameClient` the stores
+            // subscribe to — so node-WS and browser-local decode look
+            // identical above the runner. The `__ui_<name>_<sid>` id
+            // carries the routing (runner parses name + stream_id);
+            // `sid` matches the node half's allocation deterministically.
+            if env == Environment::Browser && tx_type == "WsBridgeTxEvents" {
+                insert_bridge(
+                    &mut new_blocks,
+                    doc,
+                    bridge_id.clone(),
+                    "EventsSink",
+                    env,
+                    json!({ "capacity": 8192 }),
+                )?;
+                new_wires.push(Wire::new(wire.src.clone(), format!("{bridge_id}.in")));
+                continue;
+            }
             let mut bridge_params = json!({ "stream_id": sid, "ui_name": ui_name });
             // WsBridgeTxFftU8 emits one Frame::FftU8 per `frame_size`
             // bytes. Without this hint the block falls back to a 4096
@@ -670,6 +692,16 @@ mod tests {
         params: NO_PARAMS,
         ai_notes: "",
     };
+    // Either-placement Events producer (the real ft8/wspr/fldigi
+    // decoders are Placement::Either) — lets a test pin it browser-side.
+    const EVENTS_EITHER_SRC: BlockSpec = BlockSpec {
+        type_name: "EventsEitherSrc",
+        placement: Placement::Either,
+        inputs: NO_PORTS,
+        outputs: EVENTS_OUT,
+        params: NO_PARAMS,
+        ai_notes: "",
+    };
 
     fn stub() -> StubRegistry {
         StubRegistry(vec![
@@ -683,6 +715,7 @@ mod tests {
             ("WasmRealSink", &WASM_REAL_SINK),
             ("BitsHwSrc", &BITS_HW_SRC),
             ("EventsHwSrc", &EVENTS_HW_SRC),
+            ("EventsEitherSrc", &EVENTS_EITHER_SRC),
         ])
     }
 
@@ -1117,6 +1150,36 @@ mod tests {
         let tx_id = format!("__ui_events_{CROSS_ENV_STREAM_BASE}");
         let tx = node.blocks.get(&tx_id).expect("ui-side bridge inserted");
         assert_eq!(tx.type_name, "WsBridgeTxEvents");
+    }
+
+    #[test]
+    fn ui_sink_on_browser_events_source_synthesizes_drainable_events_sink() {
+        // Unified transport: when the events producer is browser-side,
+        // the browser split terminates `ui:<name>` in a drainable
+        // `EventsSink` (id `__ui_<name>_<sid>`, sid matching the node
+        // half) — NOT a WsBridgeTxEvents (no WS to ship over) — so the
+        // runner can drain + loopback it.
+        let doc = doc_from(
+            r#"{
+                "name": "ui-events-browser",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src": {"type": "EventsEitherSrc", "placement": "browser"}
+                },
+                "wires": [["src.out", "ui:events"]]
+            }"#,
+        );
+        let browser = split_for_environment(&doc, Environment::Browser, &stub()).unwrap();
+        let id = format!("__ui_events_{CROSS_ENV_STREAM_BASE}");
+        let sink = browser
+            .blocks
+            .get(&id)
+            .expect("browser ui EventsSink inserted");
+        assert_eq!(sink.type_name, "EventsSink");
+        // Node half must NOT also produce a Tx for this wire (producer
+        // is browser-side; node drops it).
+        let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
+        assert!(!node.blocks.contains_key(&id));
     }
 
     #[test]
