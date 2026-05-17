@@ -27,6 +27,9 @@ TARBALL_NAME="ferrite_${VERSION}.tar.xz"
 # riscv64 is omitted from debian:12 (bookworm) and fedora:40 because
 # their official images don't ship a riscv64 manifest; debian:trixie
 # does.
+# Override the matrix with a newline-separated FERRITE_PKG_TARGETS to
+# build a subset (e.g. amd64-only for a fast local sanity check):
+#   FERRITE_PKG_TARGETS=$'ubuntu-24.04-amd64 linux/amd64 ubuntu:24.04 deb\nfedora-40-amd64 linux/amd64 fedora:40 rpm' ./packaging/run_matrix.sh
 TARGETS=(
   "ubuntu-24.04-amd64    linux/amd64    ubuntu:24.04   deb"
   "ubuntu-24.04-arm64    linux/arm64    ubuntu:24.04   deb"
@@ -38,6 +41,9 @@ TARGETS=(
   "fedora-40-amd64       linux/amd64    fedora:40      rpm"
   "fedora-40-arm64       linux/arm64    fedora:40      rpm"
 )
+if [[ -n "${FERRITE_PKG_TARGETS:-}" ]]; then
+  mapfile -t TARGETS <<<"$FERRITE_PKG_TARGETS"
+fi
 
 mkdir -p "$BUILD_CTX" "$DIST" "$PKG_DIR"
 rm -f "$BUILD_CTX"/*.tar.xz "$BUILD_CTX"/*.spec

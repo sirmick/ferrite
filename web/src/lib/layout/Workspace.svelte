@@ -37,6 +37,7 @@
   import ViewBridge from '$lib/layout/ViewBridge.svelte';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
+  import { activeAdvancedView } from '$lib/advanced/registry';
   import type { FrameClient } from '$lib/ws/client';
 
   interface Props {
@@ -48,6 +49,15 @@
   let hasNarrowSink = $derived(pipeline.uiSinks.fft_narrow !== undefined);
   let narrowVisible = $derived(clientControls.get('client.workspace.narrowVisible'));
   let showNarrow = $derived(hasNarrowSink && narrowVisible);
+
+  // Advanced view replaces *only* the wide FFT/waterfall column when
+  // toggled on (and the preset registers one). The Channel column is
+  // independent — it still shows beside the advanced view if the
+  // operator has it on.
+  let advancedView = $derived(activeAdvancedView(pipeline.uiSinks));
+  let showAdvanced = $derived(
+    advancedView !== null && clientControls.get('client.workspace.advancedVisible'),
+  );
 
   // Channel-detail header label: "Channel · 240 kHz @ 100.001 MHz" so
   // the operator can read the channel width + absolute centre without
@@ -105,14 +115,14 @@
     {#if showNarrow}
       <Split direction="row" defaultFraction={0.65} storageKey="ferrite.split.workspace-columns">
         {#snippet a()}
-          {@render wideColumn()}
+          {@render (showAdvanced ? advancedColumn : wideColumn)()}
         {/snippet}
         {#snippet b()}
           {@render narrowColumn()}
         {/snippet}
       </Split>
     {:else}
-      {@render wideColumn()}
+      {@render (showAdvanced ? advancedColumn : wideColumn)()}
     {/if}
   </div>
 
@@ -144,6 +154,13 @@
       {/snippet}
     </Split>
   </div>
+{/snippet}
+
+{#snippet advancedColumn()}
+  {#if advancedView}
+    {@const Advanced = advancedView.component}
+    <Advanced />
+  {/if}
 {/snippet}
 
 {#snippet narrowColumn()}

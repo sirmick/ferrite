@@ -74,6 +74,21 @@ export const CLIENT_DEFAULTS = {
   // setting persists. Has no effect on bareband presets — the column
   // is hidden automatically when no `fft_narrow` sink is present.
   'client.workspace.narrowVisible': true,
+
+  // Advanced-view toggle. Some presets (FT8/FT4/WSPR, later ADS-B)
+  // register a mode-specific "advanced" workspace — a station map +
+  // decode table — that *replaces* the wide FFT/waterfall column
+  // when on. The Channel column is independent and unaffected. The
+  // toolbar button is disabled (and this has no effect) on presets
+  // with no registered advanced view. Off by default so the familiar
+  // spectrum view is what you see on first load.
+  'client.workspace.advancedVisible': false,
+
+  // Operator's own Maidenhead grid locator (e.g. "FN42" / "IO91wm").
+  // Not in any decode stream — it's the origin of the station-map
+  // contact lines and the "home" marker. Empty = unknown; the map
+  // then just shows decoded stations with no home/lines.
+  'client.station.grid': '',
 } as const;
 
 export type ClientPath = keyof typeof CLIENT_DEFAULTS;

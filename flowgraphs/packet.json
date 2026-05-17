@@ -51,7 +51,7 @@
       "placement": "node",
       "params": {
         "sample_rate_hz": 25000,
-        "max_deviation_hz": 5000
+        "max_deviation_hz": 3000
       }
     },
     "audio_tee": {
@@ -101,6 +101,7 @@
     ["demod.out", "audio_tee.in"],
     ["audio_tee.out0", "resamp.in"],
     ["resamp.out", "packet.in"],
+    ["packet.events", "ui:aprs"],
     ["audio_tee.out1", "audio_resamp.in"],
     ["audio_resamp.out", "audio.in"]
   ]

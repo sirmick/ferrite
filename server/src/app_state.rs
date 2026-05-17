@@ -742,17 +742,19 @@ fn capture_kind(file_name: &str, ext: &str, fmt: Option<&str>) -> Option<&'stati
     }
 }
 
+/// The handful of sidecar fields the capture picker surfaces.
+#[derive(Default)]
+struct Sidecar {
+    name: Option<String>,
+    format: Option<String>,
+    sample_rate_hz: Option<f64>,
+    center_freq_hz: Option<f64>,
+    modulation: Option<String>,
+}
+
 /// Look for `<file>.json` then `<stem>.json` beside a capture and pull
 /// the few fields the picker shows. Missing/!json → all `None`.
-fn read_sidecar(
-    path: &std::path::Path,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<f64>,
-    Option<f64>,
-    Option<String>,
-) {
+fn read_sidecar(path: &std::path::Path) -> Sidecar {
     let stem_json = path.with_extension("json");
     let full_json = {
         let mut s = path.as_os_str().to_owned();
@@ -763,17 +765,17 @@ fn read_sidecar(
         .or_else(|_| std::fs::read(&stem_json))
         .ok();
     let Some(v) = bytes.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else {
-        return (None, None, None, None, None);
+        return Sidecar::default();
     };
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
     let n = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
-    (
-        s("name"),
-        s("format"),
-        n("sample_rate_hz"),
-        n("center_freq_hz"),
-        s("modulation"),
-    )
+    Sidecar {
+        name: s("name"),
+        format: s("format"),
+        sample_rate_hz: n("sample_rate_hz"),
+        center_freq_hz: n("center_freq_hz"),
+        modulation: s("modulation"),
+    }
 }
 
 /// Recursively enumerate replayable captures under `root`.
@@ -802,7 +804,13 @@ fn scan_captures(root: &std::path::Path) -> Result<Vec<CaptureEntry>> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            let (name, format, sample_rate_hz, center_freq_hz, modulation) = read_sidecar(&path);
+            let Sidecar {
+                name,
+                format,
+                sample_rate_hz,
+                center_freq_hz,
+                modulation,
+            } = read_sidecar(&path);
             let Some(kind) = capture_kind(&file_name, &ext, format.as_deref()) else {
                 continue;
             };

@@ -41,6 +41,18 @@
 //! - release = 500 ms              slow enough not to pump on speech
 //! - max boost = +20 dB            covers DX without amplifying static
 
+/// One-pole smoothing coefficient for a given time constant.
+/// Returns 1.0 (no smoothing) for a non-positive rate or tau.
+#[allow(clippy::cast_possible_truncation)]
+fn alpha_from_tau_ms(sample_rate_hz: f64, tau_ms: f32) -> f32 {
+    if sample_rate_hz <= 0.0 || tau_ms <= 0.0 {
+        return 1.0;
+    }
+    let dt = 1.0 / sample_rate_hz as f32;
+    let tau_s = tau_ms * 1e-3;
+    dt / (tau_s + dt)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AgcStage {
     /// Target peak amplitude (linear, derived from `target_dbfs`).
@@ -85,16 +97,7 @@ impl AgcStage {
         // 1.0× floor — negative max_gain_db would require attenuating
         // everything, which is the limiter's job not ours.
         self.max_gain = 10.0_f32.powf(max_gain_db / 20.0).max(1.0);
-        #[allow(clippy::cast_possible_truncation)]
-        let alpha_from_tau_ms = |tau_ms: f32| -> f32 {
-            if sample_rate_hz <= 0.0 || tau_ms <= 0.0 {
-                return 1.0;
-            }
-            let dt = 1.0 / sample_rate_hz as f32;
-            let tau_s = tau_ms * 1e-3;
-            dt / (tau_s + dt)
-        };
-        self.release_alpha = alpha_from_tau_ms(release_ms);
+        self.release_alpha = alpha_from_tau_ms(sample_rate_hz, release_ms);
     }
 
     pub fn reset(&mut self) {

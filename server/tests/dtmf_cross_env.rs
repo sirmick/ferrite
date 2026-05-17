@@ -44,6 +44,14 @@ mod bridge_sink;
 #[allow(dead_code)]
 mod preset_pipeline;
 
+// `app_state` + `routes` reference `crate::view_bridge::…`; this
+// #[path] re-include has to mirror every src module they touch or the
+// test binary won't resolve them. view_bridge.rs is self-contained
+// (std + serde + tokio, no crate:: deps), so the shim is a plain mod.
+#[path = "../src/view_bridge.rs"]
+#[allow(dead_code)]
+mod view_bridge;
+
 #[path = "../src/app_state.rs"]
 #[allow(dead_code)]
 mod app_state;

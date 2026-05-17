@@ -36,9 +36,10 @@ use anyhow::{bail, Result};
 use ferrite_dump1090::{Dump1090, ADSB_INPUT_RATE_HZ};
 use serde::Deserialize;
 
+use crate::aircraft_spot::AircraftSpot;
 use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, ReconfigureScope, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutBuf, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -63,6 +64,14 @@ pub struct AdsbDemod {
     dec: Dump1090,
     warned_off_rate: bool,
     input_rate_hz: f64,
+    /// UTF-8 newline-delimited JSON aircraft rows queued for the
+    /// `events` port (same transport as RDS / FT8).
+    events_out: Vec<u8>,
+    /// Samples consumed since the last aircraft snapshot. The snapshot
+    /// is a full list, not incremental, so we throttle it to ~1 Hz
+    /// (every `ADSB_INPUT_RATE_HZ` samples) rather than flooding the
+    /// events port every tick.
+    samples_since_snap: u64,
 }
 
 impl AdsbDemod {
@@ -77,6 +86,8 @@ impl AdsbDemod {
             dec: Dump1090::new(),
             warned_off_rate: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
+            events_out: Vec::new(),
+            samples_since_snap: 0,
         })
     }
 
@@ -108,7 +119,15 @@ impl Block for AdsbDemod {
                 name: "in",
                 port_type: PortType::IqF32,
             }],
-            outputs: &[],
+            // Text frames still stream via the `decoder::adsb` tracing
+            // target (unchanged). The `events` port additionally
+            // streams a ~1 Hz structured aircraft snapshot for the
+            // `ui:adsb` advanced view, over the same `PortType::Events`
+            // transport RDS / FT8 use.
+            outputs: &[PortSpec {
+                name: "events",
+                port_type: PortType::Events,
+            }],
             params: &[ParamSpec {
                 key: "sample_rate_hz",
                 label: "Input sample rate",
@@ -163,8 +182,49 @@ impl Block for AdsbDemod {
             tracing::info!(target: "decoder::adsb", "{line}");
         }
 
+        // Throttled full-list snapshot for the `ui:adsb` view. dump1090
+        // maintains the aircraft list continuously; we sample it ~1 Hz
+        // (a full list each time — the store upserts by icao + ages
+        // rows), independent of the text path above.
+        self.samples_since_snap += consumed as u64;
+        if self.samples_since_snap >= u64::from(ADSB_INPUT_RATE_HZ) {
+            self.samples_since_snap = 0;
+            for a in self.dec.aircraft_snapshot() {
+                AircraftSpot {
+                    icao: a.icao,
+                    flight: &a.flight,
+                    pos: a.position,
+                    alt_ft: a.altitude_ft,
+                    gs_kt: a.speed_kt,
+                    trk_deg: a.track_deg,
+                    msgs: a.messages,
+                    age_s: a.age_s,
+                }
+                .write_json(&mut self.events_out);
+            }
+        }
+
         let mut w = Work::new();
         w.consumed[0] = consumed;
+
+        // Drain queued JSON into the events port. A 1 Hz snapshot of a
+        // few hundred aircraft is a handful of KB; any remainder rides
+        // to the next tick (IQ flows continuously).
+        if !self.events_out.is_empty() {
+            for port in io.outputs.iter_mut() {
+                if port.name == "events" {
+                    if let OutBuf::Events(dst) = &mut port.buf {
+                        let take = self.events_out.len().min(dst.len());
+                        if take > 0 {
+                            dst[..take].copy_from_slice(&self.events_out[..take]);
+                            self.events_out.drain(..take);
+                            w.produced[0] = take;
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(w)
     }
 }

@@ -1,7 +1,18 @@
 <script lang="ts">
   import { bands, type BandEntry } from './bands';
-  import { pipeline, currentAxes } from '$lib/pipeline.svelte';
+  import { pipeline } from '$lib/pipeline.svelte';
   import { applyControl } from '$lib/control/dispatch';
+  import { presetSlugForMode } from './receivers';
+  import { catalog } from './catalog';
+
+  // Receiver presets that actually shipped in this build. `+RX` is
+  // only offered when the mode's canonical preset is installed —
+  // otherwise the button would 404 at load time.
+  const installedSlugs = new Set(catalog.map((c) => c.slug));
+  function rxSlug(mode: string | undefined): string | null {
+    const slug = presetSlugForMode(mode);
+    return slug && installedSlugs.has(slug) ? slug : null;
+  }
 
   let openGroups = $state<Record<string, boolean>>({});
   function toggle(name: string) {
@@ -18,24 +29,65 @@
     return `${hz} Hz`;
   }
 
-  let tuning = $state(false);
-  async function tune(e: BandEntry) {
-    if (!pipeline.source) return;
-    // In-flight guard — back-to-back tune patches can race; drop the
-    // second click and let the button's `disabled` state cue the user.
-    if (tuning) return;
-    tuning = true;
+  // Selection is tracked by a stable per-entry key, NOT by frequency.
+  // Several entries legitimately share a frequency (e.g. RTTY/PSK31
+  // both 10.142 MHz) — keying the highlight on `center_freq_hz` lit up
+  // every one of them at once. The key is group-scoped + positional so
+  // duplicates stay distinct.
+  function entryKey(groupName: string, idx: number): string {
+    return `${groupName}#${idx}`;
+  }
+  let selectedKey = $state<string | null>(null);
+
+  // One in-flight guard for the whole panel: back-to-back patches race,
+  // so any pending tune/RX disables every action button until it lands.
+  let busy = $state(false);
+
+  async function tuneFreq(e: BandEntry): Promise<void> {
+    const offset = e.vfo_offset_hz ?? 0;
+    await applyControl('flow.src.center_freq_hz', e.hz + offset);
+    await applyControl('flow.chan.freq_shift_hz', -offset);
+  }
+
+  // Load the canonical receiver preset for this entry's mode — a
+  // coherent end-to-end chain (channelizer width, demod, audio rates),
+  // exactly like picking it from the Signal Catalog. The server
+  // preserves the live centre frequency across the swap; the caller
+  // re-tunes to the band entry afterwards. No-op return when the mode
+  // has no installed receiver preset.
+  async function setReceiver(e: BandEntry): Promise<boolean> {
+    const slug = rxSlug(e.mode);
+    if (!slug) return false;
+    await pipeline.loadPreset(slug);
+    return true;
+  }
+
+  async function onTune(key: string, e: BandEntry): Promise<void> {
+    if (busy || !pipeline.source) return;
+    busy = true;
     try {
-      const offset = e.vfo_offset_hz ?? 0;
-      await applyControl('flow.src.center_freq_hz', e.hz + offset);
-      await applyControl('flow.chan.freq_shift_hz', -offset);
+      await tuneFreq(e);
+      selectedKey = key;
     } finally {
-      tuning = false;
+      busy = false;
     }
   }
 
-  let axes = $derived(currentAxes(pipeline));
-  let active = $derived(axes?.center_freq_hz ?? null);
+  async function onTuneRx(key: string, e: BandEntry): Promise<void> {
+    if (busy || !pipeline.source) return;
+    busy = true;
+    try {
+      // Preset load first, tune second: loadPreset swaps the whole
+      // chain (and the server re-merges live source params over the
+      // new preset's hints), so the explicit tuneFreq() afterwards is
+      // what lands us on the band entry's actual frequency + VFO.
+      await setReceiver(e);
+      await tuneFreq(e);
+      selectedKey = key;
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <div
@@ -62,7 +114,9 @@
       >
         Signal Wiki ↗
       </a>
-      <span class="text-[10px] text-[color:var(--color-muted)]">click to tune</span>
+      <span class="text-[10px] text-[color:var(--color-muted)]"
+        >Tune = freq · +RX = freq + receiver preset</span
+      >
     </div>
   </div>
   <div class="min-h-0 flex-1 overflow-y-auto">
@@ -79,23 +133,42 @@
         </button>
         {#if isOpen}
           <ul class="pb-1">
-            {#each group.entries as entry (entry.hz + entry.label)}
-              <li>
-                <button
-                  type="button"
-                  class="flex w-full items-center justify-between gap-2 px-3 py-0.5 text-left text-[11px] hover:bg-slate-800/70 disabled:cursor-wait disabled:opacity-60"
-                  class:active={active === entry.hz + (entry.vfo_offset_hz ?? 0)}
-                  disabled={!pipeline.source || tuning}
-                  onclick={() => void tune(entry)}
-                >
-                  <span class="truncate">{entry.label}</span>
-                  <span class="shrink-0 font-mono text-[10px] text-slate-400">
-                    {fmtHz(entry.hz)}
-                    {#if entry.mode}
-                      <span class="ml-1 text-[9px] text-slate-500">{entry.mode}</span>
-                    {/if}
-                  </span>
-                </button>
+            {#each group.entries as entry, idx (entryKey(group.name, idx))}
+              {@const key = entryKey(group.name, idx)}
+              {@const rxId = rxSlug(entry.mode)}
+              <li
+                class="flex items-center justify-between gap-2 px-3 py-0.5 text-[11px]"
+                class:active={selectedKey === key}
+              >
+                <span class="min-w-0 flex-1 truncate" title={entry.label}>{entry.label}</span>
+                <span class="shrink-0 font-mono text-[10px] text-slate-400">
+                  {fmtHz(entry.hz)}
+                  {#if entry.mode}
+                    <span class="ml-1 text-[9px] text-slate-500">{entry.mode}</span>
+                  {/if}
+                </span>
+                <span class="flex shrink-0 gap-1">
+                  <button
+                    type="button"
+                    class="rounded border border-slate-700 px-1.5 leading-tight text-slate-300 hover:border-slate-500 hover:text-slate-100 disabled:cursor-wait disabled:opacity-50"
+                    disabled={!pipeline.source || busy}
+                    title="Tune the SDR to this frequency (demod chain unchanged)"
+                    onclick={() => void onTune(key, entry)}
+                  >
+                    Tune
+                  </button>
+                  <button
+                    type="button"
+                    class="rounded border border-sky-800 px-1.5 leading-tight text-sky-300 hover:border-sky-500 hover:text-sky-100 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-600 disabled:opacity-60"
+                    disabled={!pipeline.source || busy || !rxId}
+                    title={rxId
+                      ? `Tune here and load the ${rxId} receiver preset`
+                      : `No receiver preset for ${entry.mode ?? 'this mode'} — use Tune`}
+                    onclick={() => void onTuneRx(key, entry)}
+                  >
+                    +RX
+                  </button>
+                </span>
               </li>
             {/each}
           </ul>

@@ -1,0 +1,18 @@
+{
+  "name": "WSPR (wsprsim reference) \u2014 12 kHz audio fixture",
+  "file": "WSPR_refsim_12k.wav",
+  "kind": "audio",
+  "mode": "wspr",
+  "format": "wav-pcm-s16-mono",
+  "sample_rate_hz": 12000,
+  "center_freq_hz": 0,
+  "modulation": "ssb",
+  "expected_decode": "K1JT FN20 20",
+  "sigwiki_url": "https://www.sigidwiki.com/wiki/WSPR",
+  "source": {
+    "origin": "derived from WSPR_refSignal_0dB_iq-f32-375hz.iq (wsprsim 0 dB ref) by inverting the WsprDemod front-end; see make_wspr_sample.py"
+  },
+  "license": {
+    "name": "GPL-3.0"
+  }
+}

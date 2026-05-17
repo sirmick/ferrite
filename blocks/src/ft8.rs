@@ -48,9 +48,10 @@ use ferrite_ft8::{Monitor, MonitorConfig, Protocol};
 use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, ReconfigureScope, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutBuf, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
+use crate::digital_spot::DigitalSpot;
 
 /// Required input sample rate. Hard-pinned by ft8_lib's monitor
 /// sizing — feeding off-rate audio gives garbage waterfall rows.
@@ -145,6 +146,62 @@ pub struct Ft8Demod {
     /// continue to arrive in the dead zone before the slot rolls.
     decoded_this_slot: bool,
     input_rate_hz: f64,
+    /// UTF-8 newline-delimited JSON spots queued for drain on the
+    /// `events` output port (same transport as RDS).
+    events_out: Vec<u8>,
+}
+
+/// 4-char Maidenhead locator test — `[A-R]{2}[0-9]{2}`. FT8/FT4
+/// standard messages only ever carry the 4-char form; 6-char and
+/// reports/RR73/73 must not be mistaken for a grid.
+fn is_ft8_grid(t: &str) -> bool {
+    let b = t.as_bytes();
+    b.len() == 4
+        && (b'A'..=b'R').contains(&b[0])
+        && (b'A'..=b'R').contains(&b[1])
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
+}
+
+/// Loose callsign test — alnum (plus `/` for portable/compound) with
+/// at least one digit. Good enough to tell a call from a directional
+/// tag (`DX`, `NA`, `POTA`) or a report; not used to gate emission.
+fn is_ft8_call(t: &str) -> bool {
+    t.len() >= 3
+        && !is_ft8_grid(t)
+        && t.bytes().any(|c| c.is_ascii_digit())
+        && t.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'/')
+}
+
+/// Pull `(de, dx, grid)` out of an FT8/FT4 message body.
+///
+/// Grammar we resolve:
+///   `CQ <call> <grid>`              → de=call, dx=None, grid
+///   `CQ <tag> <call> <grid>`        → tag = DX/contest/POTA…
+///   `<dx> <de> <grid|report|RR…>`   → directed; grid only if grid-like
+///
+/// Reports (`-15`, `R+03`), `RRR`/`RR73`/`73` and free text yield no
+/// grid. Unrecognised tokens simply return `None` for that slot — the
+/// raw `msg` still ships, so nothing is lost.
+pub fn parse_ft8(text: &str) -> (Option<&str>, Option<&str>, Option<&str>) {
+    let toks: Vec<&str> = text.split_whitespace().collect();
+    let Some(&first) = toks.first() else {
+        return (None, None, None);
+    };
+    // `RR73` is a literal acknowledgement, but it's also a
+    // syntactically valid locator (field RR, square 73) — never read
+    // it as a grid. `RRR` / `73` / reports already fail is_ft8_grid.
+    let is_grid = |t: &str| is_ft8_grid(t) && t != "RR73";
+    if first == "CQ" {
+        let de = toks.iter().skip(1).copied().find(|t| is_ft8_call(t));
+        let grid = toks.last().copied().filter(|t| is_grid(t));
+        (de, None, grid)
+    } else {
+        let dx = toks.first().copied().filter(|t| is_ft8_call(t));
+        let de = toks.get(1).copied().filter(|t| is_ft8_call(t));
+        let grid = toks.get(2).copied().filter(|t| is_grid(t));
+        (de, dx, grid)
+    }
 }
 
 impl Ft8Demod {
@@ -163,6 +220,7 @@ impl Ft8Demod {
             active_slot: None,
             decoded_this_slot: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
+            events_out: Vec::new(),
         })
     }
 
@@ -182,7 +240,7 @@ impl Ft8Demod {
     /// Drain the waterfall on a slot boundary, emit each decoded
     /// message via tracing under `decoder::ft8` (or `::ft4`), reset
     /// the monitor so the next slot starts clean.
-    fn drain_decodes(&mut self) -> usize {
+    fn drain_decodes(&mut self, slot_unix_ms: u64) -> usize {
         let Some(mon) = self.monitor.as_mut() else {
             return 0;
         };
@@ -236,6 +294,32 @@ impl Ft8Demod {
                 ),
             }
         }
+        // Structured spots for the `ui:ft8` advanced view. Separate
+        // pass from the tracing loop above so the log path is exactly
+        // as it was — this only adds the events port.
+        let mode = match self.params.mode {
+            Ft8Mode::Ft8 => "ft8",
+            Ft8Mode::Ft4 => "ft4",
+        };
+        let utc = slot_unix_ms / 1000;
+        for d in &messages {
+            let (de, dx, grid) = parse_ft8(&d.text);
+            DigitalSpot {
+                mode,
+                utc,
+                de: de.unwrap_or(""),
+                dx,
+                grid,
+                snr: d.snr_db,
+                dt: d.time_offset_s,
+                freq: d.freq_hz,
+                msg: &d.text,
+                pwr_dbm: None,
+                drift_hz: None,
+            }
+            .write_json(&mut self.events_out);
+        }
+
         mon.reset();
         messages.len()
     }
@@ -251,12 +335,15 @@ impl Block for Ft8Demod {
                 name: "in",
                 port_type: PortType::RealF32,
             }],
-            // No output port — same shape as the multimon-ng-backed
-            // decoders (PocsagDemod, PacketDemod, EasDemod). Decoded
-            // messages reach the UI via the `decoder::ft{4,8}` tracing
-            // targets that LogBroadcast pumps over `/ws/logs` and
-            // `/api/decoder/recent`.
-            outputs: &[],
+            // Decoded messages still reach the logs panel via the
+            // `decoder::ft{4,8}` tracing targets (unchanged). The
+            // `events` port additionally streams structured spots
+            // (callsigns / grid / SNR) for the `ui:ft8` advanced view,
+            // over the same `PortType::Events` transport RDS uses.
+            outputs: &[PortSpec {
+                name: "events",
+                port_type: PortType::Events,
+            }],
             params: &[
                 ParamSpec {
                     key: "mode",
@@ -376,7 +463,7 @@ impl Block for Ft8Demod {
                 // Decoded covers the case where the slot rolled over
                 // before we got into the dead zone (small process()
                 // ticks at the end of the active window, etc.).
-                let _ = self.drain_decodes();
+                let _ = self.drain_decodes(active * slot_ms);
             }
             if let Some(mon) = self.monitor.as_mut() {
                 mon.reset();
@@ -408,7 +495,7 @@ impl Block for Ft8Demod {
             // slot drained. We don't reset the monitor here; the next
             // slot rollover does that. Sample-drop also happens
             // implicitly: the `else if` arm doesn't extend scratch.
-            let n_msgs = self.drain_decodes();
+            let n_msgs = self.drain_decodes(current_slot * slot_ms);
             self.decoded_this_slot = true;
             // INFO so a quiet slot still emits a heartbeat the user
             // can see in the activity panel — confirms decoder is
@@ -421,6 +508,26 @@ impl Block for Ft8Demod {
             );
         }
         // Else: dead zone, already decoded — silently drop samples.
+
+        // Drain queued JSON spots into the events port. Slots are
+        // 15 s (FT8) / 7.5 s (FT4) apart and each spot is ~120 bytes,
+        // so the buffer comfortably fits a slot's worth; any
+        // remainder stays in `events_out` for the next tick (audio
+        // flows continuously, so process() is called again soon).
+        if !self.events_out.is_empty() {
+            for port in io.outputs.iter_mut() {
+                if port.name == "events" {
+                    if let OutBuf::Events(dst) = &mut port.buf {
+                        let take = self.events_out.len().min(dst.len());
+                        if take > 0 {
+                            dst[..take].copy_from_slice(&self.events_out[..take]);
+                            self.events_out.drain(..take);
+                            work.produced[0] = take;
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(work)
     }
@@ -439,7 +546,7 @@ mod tests {
     use crate::block::Block;
 
     #[test]
-    fn spec_is_either_real_in_no_outputs() {
+    fn spec_real_in_events_out() {
         let s = Ft8Demod::spec();
         assert_eq!(s.type_name, "Ft8Demod");
         // Placement::Either — the C lib compiles to both native and
@@ -447,12 +554,39 @@ mod tests {
         // same way multimon-ng does). Preset author picks the side.
         assert!(matches!(s.placement, crate::block::Placement::Either));
         assert_eq!(s.inputs.len(), 1);
-        assert_eq!(
-            s.outputs.len(),
-            0,
-            "FT8 emits via tracing — same as the multimon-ng decoders"
-        );
         assert_eq!(s.inputs[0].port_type, crate::block::PortType::RealF32);
+        // Events port carries the structured spots for `ui:ft8`; the
+        // tracing log path is unchanged and independent of it.
+        assert_eq!(s.outputs.len(), 1);
+        assert_eq!(s.outputs[0].name, "events");
+        assert_eq!(s.outputs[0].port_type, crate::block::PortType::Events);
+    }
+
+    #[test]
+    fn parse_ft8_forms() {
+        use super::parse_ft8;
+        assert_eq!(
+            parse_ft8("CQ K1ABC FN42"),
+            (Some("K1ABC"), None, Some("FN42"))
+        );
+        assert_eq!(
+            parse_ft8("CQ DX K1ABC FN42"),
+            (Some("K1ABC"), None, Some("FN42"))
+        );
+        assert_eq!(
+            parse_ft8("W9XYZ K1ABC FN42"),
+            (Some("K1ABC"), Some("W9XYZ"), Some("FN42"))
+        );
+        // Report message — no grid.
+        assert_eq!(
+            parse_ft8("W9XYZ K1ABC -15"),
+            (Some("K1ABC"), Some("W9XYZ"), None)
+        );
+        assert_eq!(
+            parse_ft8("W9XYZ K1ABC RR73"),
+            (Some("K1ABC"), Some("W9XYZ"), None)
+        );
+        assert_eq!(parse_ft8(""), (None, None, None));
     }
 
     #[test]

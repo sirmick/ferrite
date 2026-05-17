@@ -169,8 +169,8 @@ mod backend {
             }
             out.push(ImageRow {
                 px: buf[..(n as usize).min(CAP)].to_vec(),
-                row: row as i32,
-                kind: kind as i32,
+                row,
+                kind,
             });
         }
         out

@@ -45,9 +45,10 @@ use ferrite_liquid_dsp::{FirdecimCx, Nco};
 use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, ReconfigureScope, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutBuf, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
+use crate::digital_spot::DigitalSpot;
 
 /// Required input sample rate. WSPR audio chain is pinned here; the
 /// front-end mix + ÷32 decimate assumes exactly 12 kHz in.
@@ -123,6 +124,9 @@ pub struct WsprDemod {
     active_slot: Option<u64>,
     warned_off_rate: bool,
     input_rate_hz: f64,
+    /// UTF-8 newline-delimited JSON spots queued for drain on the
+    /// `events` output port (same transport as RDS / Ft8Demod).
+    events_out: Vec<u8>,
 }
 
 impl WsprDemod {
@@ -153,6 +157,7 @@ impl WsprDemod {
             active_slot: None,
             warned_off_rate: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
+            events_out: Vec::new(),
         })
     }
 
@@ -192,6 +197,36 @@ impl WsprDemod {
                 s.message,
             );
         }
+
+        // Structured spots for the `ui:ft8` advanced view (WSPR
+        // shares the FT8/FT4 view — beacon rows, no DX call). Separate
+        // pass so the tracing path above is byte-for-byte unchanged.
+        let utc = slot_unix_ms / 1000;
+        for s in &spots {
+            #[allow(clippy::cast_possible_truncation)]
+            let freq = s.freq_hz as f32;
+            #[allow(clippy::cast_possible_truncation)]
+            let drift = s.drift_hz.round() as i32;
+            DigitalSpot {
+                mode: "wspr",
+                utc,
+                de: &s.callsign,
+                dx: None,
+                grid: if s.grid.is_empty() {
+                    None
+                } else {
+                    Some(s.grid.as_str())
+                },
+                snr: s.snr_db,
+                dt: s.dt_s,
+                freq,
+                msg: &s.message,
+                pwr_dbm: s.power_dbm.trim().parse::<i32>().ok(),
+                drift_hz: Some(drift),
+            }
+            .write_json(&mut self.events_out);
+        }
+
         self.i_buf.clear();
         self.q_buf.clear();
     }
@@ -207,10 +242,14 @@ impl Block for WsprDemod {
                 name: "in",
                 port_type: PortType::RealF32,
             }],
-            // No output port — same shape as Ft8Demod / the
-            // multimon-ng decoders. Decodes reach the UI via the
-            // `decoder::wspr` tracing target.
-            outputs: &[],
+            // Decodes still reach the logs panel via the
+            // `decoder::wspr` tracing target (unchanged). The `events`
+            // port additionally streams structured spots for the
+            // shared `ui:ft8` advanced view.
+            outputs: &[PortSpec {
+                name: "events",
+                port_type: PortType::Events,
+            }],
             params: &[
                 ParamSpec {
                     key: "sample_rate_hz",
@@ -311,6 +350,26 @@ impl Block for WsprDemod {
                 }
             }
         }
+
+        // Drain queued JSON spots into the events port. Slots are
+        // 2 min apart and a slot yields a handful of ~120-byte spots,
+        // so the buffer fits a slot's worth with room to spare; any
+        // remainder rides along to the next tick.
+        if !self.events_out.is_empty() {
+            for port in io.outputs.iter_mut() {
+                if port.name == "events" {
+                    if let OutBuf::Events(dst) = &mut port.buf {
+                        let take = self.events_out.len().min(dst.len());
+                        if take > 0 {
+                            dst[..take].copy_from_slice(&self.events_out[..take]);
+                            self.events_out.drain(..take);
+                            work.produced[0] = take;
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(work)
     }
 }
@@ -328,13 +387,15 @@ mod tests {
     use crate::block::Block;
 
     #[test]
-    fn spec_is_either_real_in_no_outputs() {
+    fn spec_real_in_events_out() {
         let s = WsprDemod::spec();
         assert_eq!(s.type_name, "WsprDemod");
         assert!(matches!(s.placement, crate::block::Placement::Either));
         assert_eq!(s.inputs.len(), 1);
-        assert_eq!(s.outputs.len(), 0);
         assert_eq!(s.inputs[0].port_type, crate::block::PortType::RealF32);
+        assert_eq!(s.outputs.len(), 1);
+        assert_eq!(s.outputs[0].name, "events");
+        assert_eq!(s.outputs[0].port_type, crate::block::PortType::Events);
     }
 
     #[test]

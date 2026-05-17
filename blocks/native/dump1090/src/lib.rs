@@ -51,6 +51,29 @@ mod sys {
 /// preamble correlator and bit slicer are sized for exactly this rate.
 pub const ADSB_INPUT_RATE_HZ: u32 = 2_000_000;
 
+/// One tracked aircraft, decoded from [`Dump1090::aircraft_snapshot`].
+/// A safe, owned view of the C `struct ferrite_aircraft`.
+#[derive(Debug, Clone)]
+pub struct Aircraft {
+    /// ICAO 24-bit address (the stable per-airframe key).
+    pub icao: u32,
+    /// Callsign / flight number; empty until an identification frame.
+    pub flight: String,
+    /// Barometric altitude, feet (0 until decoded).
+    pub altitude_ft: i32,
+    /// Ground speed, knots.
+    pub speed_kt: i32,
+    /// Track angle, degrees 0–359.
+    pub track_deg: i32,
+    /// Seconds since this aircraft's last Mode-S message.
+    pub age_s: i32,
+    /// Total Mode-S messages received from it this session.
+    pub messages: i64,
+    /// `(lat, lon)` once a CPR pair has decoded; `None` until then
+    /// (an aircraft is heard — ID/altitude — before its position).
+    pub position: Option<(f64, f64)>,
+}
+
 /// Safe handle around the global dump1090 state.
 ///
 /// Construction is cheap after the first instance — `dump1090_init` is
@@ -126,6 +149,41 @@ impl Dump1090 {
         s.split('\n')
             .filter(|line| !line.is_empty())
             .map(str::to_string)
+            .collect()
+    }
+
+    /// Snapshot the live aircraft list (`Modes.aircrafts`). Cheap
+    /// pointer walk on the C side — safe to poll on a timer. Returns
+    /// at most 512 entries (far above a real receiver's concurrent
+    /// track count); excess is silently dropped.
+    #[must_use]
+    pub fn aircraft_snapshot(&mut self) -> Vec<Aircraft> {
+        const CAP: usize = 512;
+        // POD struct, all-zero is a valid (empty) record.
+        let mut buf: Vec<sys::ferrite_aircraft> = vec![unsafe { std::mem::zeroed() }; CAP];
+        // SAFETY: `buf` holds CAP valid records; the C side writes
+        // `n <= CAP` of them and returns n. No pointers escape.
+        let n = unsafe { sys::dump1090_aircraft_snapshot(buf.as_mut_ptr(), CAP) };
+        buf.truncate(n.min(CAP));
+        buf.iter()
+            .map(|a| {
+                // flight is a fixed [c_char; 9], NUL-terminated by the
+                // shim. Take up to the NUL, lossy-decode, trim padding.
+                let bytes: &[u8] =
+                    unsafe { std::slice::from_raw_parts(a.flight.as_ptr().cast(), 9) };
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(9);
+                let flight = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
+                Aircraft {
+                    icao: a.addr,
+                    flight,
+                    altitude_ft: a.altitude,
+                    speed_kt: a.speed,
+                    track_deg: a.track,
+                    age_s: a.age_s,
+                    messages: a.messages,
+                    position: (a.has_pos != 0).then_some((a.lat, a.lon)),
+                }
+            })
             .collect()
     }
 

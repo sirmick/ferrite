@@ -221,6 +221,21 @@ pub mod pocsag {
     }
 }
 
+/// Switch AX.25 frame display to the compact TNC2 APRS form
+/// (`APRS: SRC>DEST,path:info`) instead of multimon's verbose
+/// `AFSK1200: fm … UI pid=F0` default. Process-global (one
+/// `aprs_mode` int in vendor/hdlc.c); only affects AX.25 packet
+/// decoders, so it's safe to set once when a `PacketDemod` is
+/// constructed without disturbing POCSAG/FLEX/DTMF blocks.
+pub fn set_aprs_mode(on: bool) {
+    // SAFETY: thin C-shim setter writing a single int global that
+    // multimon reads during decode from the same serialised tick
+    // thread — same justification as the pocsag setters.
+    unsafe {
+        sys::multimon_set_aprs_mode(i32::from(on));
+    }
+}
+
 /// One running multimon-ng decoder instance.
 ///
 /// Holds the heavy `demod_state` on the heap (it's a few KB —

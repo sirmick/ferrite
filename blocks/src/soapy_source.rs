@@ -775,6 +775,13 @@ impl Drop for SoapySource {
         if let Some(handle) = self.reader.take() {
             let _ = handle.join();
         }
+        // `self.device` is unmade microseconds from now, when the
+        // struct's fields drop after this body returns. Stamp the
+        // close anchor here: the sub-millisecond skew vs. the actual
+        // `SoapySDRDevice_unmake` is immaterial against a ~1 s settle
+        // window, and keeping the field a plain `Device` (not
+        // `Option`) avoids rippling `.as_ref()` through every helper.
+        soapy_retry::mark_device_closed();
     }
 }
 
@@ -877,6 +884,19 @@ fn run_reader(
 /// tearing down inside the driver. Shared constants + classifier with
 /// the raw-FFI probe path live in [`crate::soapy_retry`].
 fn open_with_retry(args: &str) -> Result<Device> {
+    // Proactive settle: if a device was closed recently (the common
+    // stop→start case), wait out the remainder of the driver's
+    // teardown window before the *first* attempt rather than letting
+    // it fail and lean on the reactive backoff below. Cold opens and
+    // opens long after the last close sleep zero.
+    let slept = soapy_retry::wait_settle_after_close();
+    if !slept.is_zero() {
+        tracing::info!(
+            target: "driver",
+            settled_ms = slept.as_millis() as u64,
+            "waited out post-close settle window before opening device"
+        );
+    }
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..soapy_retry::OPEN_MAX_ATTEMPTS {
         match Device::new(args) {

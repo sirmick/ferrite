@@ -57,6 +57,20 @@
   );
   let vfoAbsHz = $derived((axes?.center_freq_hz ?? 0) + vfoShiftHz);
 
+  // Zoom about the VFO: as the span shrinks/grows, recompute the pan so
+  // the tuned frequency stays centred in the view (clamped to the edge
+  // when the VFO sits near the captured-span boundary at high zoom).
+  function onZoomInput(z: number) {
+    void applyControl('client.spectrum.viewZoom', z);
+    if (!axes) return;
+    const rate = axes.sample_rate_hz;
+    const span = rate / Math.max(1, z);
+    const head = rate - span;
+    const fullMin = axes.center_freq_hz - rate / 2;
+    const pan = head > 0 ? Math.max(0, Math.min(1, (vfoAbsHz - span / 2 - fullMin) / head)) : 0.5;
+    void applyControl('client.spectrum.viewPan', pan);
+  }
+
   let rateChoices = $derived.by(() => {
     const caps = pipeline.sourceCaps;
     if (!caps || caps.kind !== 'hardware') return [] as number[];
@@ -184,11 +198,7 @@
         max={16}
         step={0.5}
         value={viewZoom}
-        oninput={(e) =>
-          void applyControl(
-            'client.spectrum.viewZoom',
-            Number((e.currentTarget as HTMLInputElement).value),
-          )}
+        oninput={(e) => onZoomInput(Number((e.currentTarget as HTMLInputElement).value))}
       />
       <span class="w-7 text-right font-mono text-slate-300">{viewZoom.toFixed(1)}×</span>
       {#if viewZoom > 1}

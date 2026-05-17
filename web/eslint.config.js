@@ -35,6 +35,15 @@ export default ts.config(
         parser: ts.parser,
       },
     },
+    rules: {
+      // TypeScript itself resolves identifiers, so core `no-undef` is a
+      // false positive on type-land — `<script generics="…">` params
+      // and ambient namespace types (e.g. `GeoJSON.FeatureCollection`
+      // from @types/geojson) read as "undefined" to it. typescript-
+      // eslint disables this rule for its own TS-matched files for the
+      // same reason; the .svelte override needs it explicitly.
+      'no-undef': 'off',
+    },
   },
   {
     ignores: [

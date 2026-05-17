@@ -14,10 +14,15 @@
 //! unit tests in `blocks/src/wspr.rs`.
 
 #![cfg(feature = "wspr")]
+#![allow(clippy::doc_markdown)]
+// Same casts WsprDemod uses to map a WsprDecode onto DigitalSpot.
+#![allow(clippy::cast_possible_truncation)]
 
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+
+use ferrite_blocks::digital_spot::DigitalSpot;
 
 fn read_ref_iq() -> (Vec<f32>, Vec<f32>) {
     let path: PathBuf = [
@@ -90,4 +95,59 @@ fn reference_signal_decodes_to_k1jt() {
         "implausible Fano cycle count {} — decode is marginal/garbage",
         k1jt.fano_cycles,
     );
+
+    // Ship-gate for the WSPR side of the shared `ui:ft8` advanced
+    // view: the same real decode, run through the exact `DigitalSpot`
+    // mapping `WsprDemod::drain_decodes` uses, must produce
+    // store-contract JSON (see `web/src/lib/ft8/store.svelte.ts`) —
+    // beacon shape: no `dx`, `pwr`/`drift` present, placeable grid.
+    // Folded into this test (not a second #[test]) because the
+    // vendored wsprd core is not safe to call concurrently from
+    // parallel test threads — one decode, two layers of assertion.
+    let mut buf = Vec::new();
+    for s in &spots {
+        DigitalSpot {
+            mode: "wspr",
+            utc: 1_747_400_040,
+            de: &s.callsign,
+            dx: None,
+            grid: if s.grid.is_empty() {
+                None
+            } else {
+                Some(s.grid.as_str())
+            },
+            snr: s.snr_db,
+            dt: s.dt_s,
+            freq: s.freq_hz as f32,
+            msg: &s.message,
+            pwr_dbm: s.power_dbm.trim().parse::<i32>().ok(),
+            drift_hz: Some(s.drift_hz.round() as i32),
+        }
+        .write_json(&mut buf);
+    }
+
+    let text = String::from_utf8(buf).expect("events bytes must be UTF-8");
+    let mut k1jt_seen = false;
+    for line in text.lines() {
+        let v: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("invalid spot JSON {line:?}: {e}"));
+        assert_eq!(v["t"], "wspr");
+        assert!(v["utc"].is_number());
+        assert!(v["de"].is_string());
+        assert!(v["snr"].is_number());
+        assert!(v["freq"].is_number());
+        assert!(v["msg"].is_string());
+        // WSPR is a beacon — never an addressed call.
+        assert!(
+            v.get("dx").is_none(),
+            "WSPR spot must not carry dx: {line:?}"
+        );
+        if v["de"] == "K1JT" {
+            k1jt_seen = true;
+            assert_eq!(v["grid"], "FN20");
+            assert_eq!(v["pwr"], 20);
+            assert!(v.get("drift").is_some(), "WSPR spot should carry drift");
+        }
+    }
+    assert!(k1jt_seen, "K1JT spot not present in emitted contract JSON");
 }

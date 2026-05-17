@@ -109,3 +109,18 @@ void multimon_pocsag_set_show_partial(int enabled) {
 void multimon_pocsag_set_polarity(int mode) {
     pocsag_polarity = mode;
 }
+
+/* --- AX.25 / APRS display mode -------------------------------------- *
+ *
+ * `aprs_mode` (vendor/hdlc.c, default 0) switches AX.25 frame display
+ * from the verbose `AFSK1200: fm SRC to DEST via … UI pid=F0 <info>`
+ * form to the compact TNC2 monitor form `APRS: SRC>DEST,path:info`
+ * every APRS toolchain expects. It only gates AX.25 packet display —
+ * POCSAG/FLEX/DTMF decoders don't touch hdlc.c — so enabling it for
+ * `PacketDemod` is safe for the other multimon-backed blocks. Single
+ * int global, one set per process. */
+extern int aprs_mode;
+
+void multimon_set_aprs_mode(int on) {
+    aprs_mode = on ? 1 : 0;
+}

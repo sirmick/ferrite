@@ -93,6 +93,32 @@ void dump1090_push_iq_u8(const unsigned char *iq, size_t bytes);
  * unrelated capture sessions in the analyzer. */
 void dump1090_reset(void);
 
+/* --- Structured aircraft snapshot ------------------------------------
+ *
+ * dump1090 maintains `Modes.aircrafts` (a linked list, one node per
+ * ICAO seen, updated by `interactiveReceiveData` which our build calls
+ * unconditionally). This is a flat POD view of it for the `ui:adsb`
+ * advanced view — bindgen generates the matching Rust struct, the
+ * accessor at the bottom of dump1090.c fills a caller array (it lives
+ * in that translation unit so it can see `Modes` + `struct aircraft`).
+ * POD only — no pointers cross the FFI boundary. */
+struct ferrite_aircraft {
+    uint32_t addr;       /* ICAO 24-bit address */
+    char     flight[9];  /* callsign, NUL-terminated; "" until an ID msg */
+    int32_t  altitude;   /* feet (0 until a position/altitude msg) */
+    int32_t  speed;      /* ground speed, knots */
+    int32_t  track;      /* heading, degrees 0–359 */
+    int32_t  age_s;      /* seconds since last message (computed in C) */
+    int64_t  messages;   /* total Mode-S messages from this aircraft */
+    double   lat;        /* valid only when has_pos == 1 */
+    double   lon;
+    uint8_t  has_pos;    /* 1 once CPR lat/lon has been decoded */
+};
+
+/* Fill `dst[0..cap)` with the current aircraft list; returns the count
+ * written (<= cap). Cheap pointer walk + field copy — safe to poll. */
+size_t dump1090_aircraft_snapshot(struct ferrite_aircraft *dst, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

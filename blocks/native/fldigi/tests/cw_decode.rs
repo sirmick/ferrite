@@ -56,7 +56,7 @@ fn modulate(text: &str) -> Vec<f32> {
     let dot = (1.2 / WPM * FS) as usize; // PARIS timing
     let mut out = Vec::new();
     let mut ph = 0.0f32;
-    let mut tone = |on: bool, n: usize, out: &mut Vec<f32>, ph: &mut f32| {
+    let tone = |on: bool, n: usize, out: &mut Vec<f32>, ph: &mut f32| {
         for i in 0..n {
             *ph += 2.0 * PI * TONE / FS;
             // 5 ms raised-cosine envelope to avoid key clicks.

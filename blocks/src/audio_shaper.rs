@@ -129,7 +129,7 @@ impl AudioShaper {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let mut n = (3.3 * fs / trans).ceil() as usize;
         n = n.clamp(31, 401);
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             n += 1;
         }
         let fc_norm = cutoff / fs; // cycles/sample, 0..0.5

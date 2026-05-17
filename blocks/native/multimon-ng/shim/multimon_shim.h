@@ -31,6 +31,10 @@ void multimon_reset_buffer(void);
 void multimon_pocsag_set_show_partial(int enabled);
 void multimon_pocsag_set_polarity(int mode);
 
+/* Switch AX.25 display to TNC2 APRS form (`APRS: SRC>DEST,path:info`).
+ * See multimon_shim.c for why this is safe for non-APRS decoders. */
+void multimon_set_aprs_mode(int on);
+
 #ifdef __cplusplus
 }
 #endif

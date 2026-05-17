@@ -16,10 +16,12 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "adsb")]
 pub mod adsb;
+pub mod aircraft_spot;
 #[cfg(feature = "ais")]
 pub mod ais;
 pub mod am_demod;
 pub mod am_modulator;
+pub mod aprs;
 pub mod audio_nr;
 pub mod audio_shaper;
 pub mod audio_sink;
@@ -27,6 +29,7 @@ pub mod auto_tune;
 pub mod block;
 pub mod channelizer;
 pub mod decimator;
+pub mod digital_spot;
 pub mod dtmf_audio_source;
 pub mod dtmf_decoder;
 #[cfg(feature = "multimon")]

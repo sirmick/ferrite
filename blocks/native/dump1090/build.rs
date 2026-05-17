@@ -53,6 +53,8 @@ fn main() {
         .allowlist_function("dump1090_push_iq_u8")
         .allowlist_function("dump1090_drain")
         .allowlist_function("dump1090_reset")
+        .allowlist_function("dump1090_aircraft_snapshot")
+        .allowlist_type("ferrite_aircraft")
         .layout_tests(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()

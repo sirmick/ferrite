@@ -109,6 +109,7 @@
     ["audio_resamp.out", "audio_nr.in"],
     ["audio_nr.out", "audio.in"],
     ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"]
+    ["logmag.out", "ui:fft"],
+    ["ft8.events", "ui:ft8"]
   ]
 }

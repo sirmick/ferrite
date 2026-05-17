@@ -16,11 +16,18 @@
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { applyControl } from '$lib/control/dispatch';
+  import { activeAdvancedView } from '$lib/advanced/registry';
 
   // Channel-detail pane toggle. Disabled when the active preset has no
   // Channelizer (no runtime-injected `ui:fft_narrow` sink).
   let hasNarrow = $derived(pipeline.uiSinks.fft_narrow !== undefined);
   let narrowVisible = $derived(clientControls.get('client.workspace.narrowVisible'));
+
+  // Advanced-view toggle. The active preset's registered view (or
+  // null); when null the button is disabled. Independent of Channel —
+  // Advanced replaces only the wide FFT/waterfall column.
+  let advancedView = $derived(activeAdvancedView(pipeline.uiSinks));
+  let advancedVisible = $derived(clientControls.get('client.workspace.advancedVisible'));
 
   let frameRate = $state(0);
   let wsBwBps = $state(0);
@@ -138,6 +145,21 @@
       onclick={() => void applyControl('client.workspace.narrowVisible', !narrowVisible)}
     >
       Channel
+    </button>
+    <button
+      type="button"
+      class="rounded border px-2 py-0.5 text-[11px] hover:border-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+      class:channel-on={advancedView && advancedVisible}
+      class:border-slate-700={!(advancedView && advancedVisible)}
+      disabled={!advancedView}
+      title={advancedView
+        ? advancedVisible
+          ? `Hide ${advancedView.label} advanced view — show spectrum`
+          : `Show ${advancedView.label} advanced view — replaces the wide FFT / waterfall`
+        : 'Active preset has no advanced view'}
+      onclick={() => void applyControl('client.workspace.advancedVisible', !advancedVisible)}
+    >
+      {advancedView ? advancedView.label : 'Advanced'}
     </button>
     <button
       type="button"

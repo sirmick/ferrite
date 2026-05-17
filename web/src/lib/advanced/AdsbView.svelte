@@ -1,0 +1,125 @@
+<script lang="ts">
+  // Advanced view for ADS-B — a station map (hero) beside an aircraft
+  // table. Mounted in place of the wide FFT/waterfall column when the
+  // operator toggles "ADS-B" and the active preset advertises a
+  // `ui:adsb` sink. Selection is keyed by ICAO so the map triangle and
+  // the table row stay coupled both ways.
+
+  import { pipeline } from '$lib/pipeline.svelte';
+  import { adsb, type Aircraft } from '$lib/adsb/store.svelte';
+  import DecodeTable from '$lib/viz/DecodeTable.svelte';
+  import StationMap from '$lib/viz/StationMap.svelte';
+  import Split from '$lib/layout/Split.svelte';
+
+  let streamId = $derived(pipeline.uiSinks.adsb?.stream_id);
+  let client = $derived(pipeline.client);
+
+  $effect(() => {
+    if (client && streamId !== undefined) {
+      adsb.attach(client, streamId);
+      return () => adsb.detach();
+    }
+    adsb.detach();
+    return () => {};
+  });
+
+  // Selection is the ICAO id — shared verbatim by table + map.
+  let selected = $state<string | null>(null);
+  function onReset(): void {
+    adsb.reset();
+    selected = null;
+  }
+
+  const columns = [
+    { key: 'flight' as const, label: 'Flight', format: (a: Aircraft) => a.flight || '—' },
+    { key: 'id' as const, label: 'ICAO' },
+    {
+      key: 'alt' as const,
+      label: 'Alt ft',
+      numeric: true,
+      format: (a: Aircraft) => (a.alt ? a.alt.toLocaleString() : '—'),
+    },
+    {
+      key: 'gs' as const,
+      label: 'GS kt',
+      numeric: true,
+      format: (a: Aircraft) => (a.gs ? `${a.gs}` : '—'),
+    },
+    {
+      key: 'trk' as const,
+      label: 'Trk',
+      numeric: true,
+      format: (a: Aircraft) => (a.lat === null ? '—' : `${a.trk}°`),
+    },
+    { key: 'msgs' as const, label: 'Msgs', numeric: true, format: (a: Aircraft) => `${a.msgs}` },
+    { key: 'age' as const, label: 'Age', numeric: true, format: (a: Aircraft) => `${a.age}s` },
+  ];
+
+  let positioned = $derived(adsb.stations.length);
+</script>
+
+<div class="flex h-full w-full min-h-0 flex-col bg-[color:var(--color-bg)]">
+  <header class="panel-head">
+    <span>
+      <span class="rounded-sm bg-sky-900/50 px-1 font-mono text-sky-300">ADS-B</span>
+      <span class="ml-2 text-[color:var(--color-muted)]">
+        {adsb.aircraft.length} aircraft · {positioned} positioned
+      </span>
+    </span>
+    <button
+      type="button"
+      class="rounded border border-slate-700 px-1.5 py-0 text-[10px] leading-none normal-case text-slate-300 hover:border-slate-500 hover:text-slate-100 disabled:opacity-40"
+      disabled={adsb.aircraft.length === 0}
+      title="Clear the aircraft list + tracks (otherwise persists across view toggles)"
+      onclick={onReset}
+    >
+      Reset
+    </button>
+  </header>
+
+  <div class="min-h-0 flex-1">
+    <!-- Map-hero: the map is the point of ADS-B; the table rides
+         alongside as the sortable detail/selection list. -->
+    <Split direction="row" defaultFraction={0.64} storageKey="ferrite.split.advanced-adsb">
+      {#snippet a()}
+        <div class="h-full min-h-0">
+          <StationMap
+            stations={adsb.stations}
+            trails={adsb.trails}
+            selectedId={selected}
+            onselect={(id) => (selected = id)}
+            storageKey="ferrite.map.adsb"
+          />
+        </div>
+      {/snippet}
+      {#snippet b()}
+        <div class="h-full min-h-0 border-l border-slate-800">
+          <DecodeTable
+            {columns}
+            rows={adsb.aircraft}
+            selectedId={selected}
+            onselect={(id) => (selected = id)}
+            defaultSort={{ key: 'alt', dir: 'desc' }}
+            placeholder="listening for aircraft… (needs line-of-sight + 1090 MHz)"
+          />
+        </div>
+      {/snippet}
+    </Split>
+  </div>
+</div>
+
+<style>
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 3px 8px;
+    border-bottom: 1px solid rgb(30 41 59);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+</style>

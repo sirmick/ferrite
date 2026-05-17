@@ -18,8 +18,10 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
+use ferrite_blocks::aircraft_spot::AircraftSpot;
 use ferrite_blocks::block::{BlockIo, InBuf, InputPort, OutputPort, PortMeta};
 use ferrite_blocks::{AdsbDemod, AdsbDemodParams, Block};
+use ferrite_dump1090::Dump1090;
 use num_complex::Complex;
 
 /// Read the dump1090 reference IQ — u8 interleaved, 127 = zero, 2 MS/s.
@@ -139,4 +141,74 @@ fn modes1_decodes_known_frames() {
         "expected ICAO 4d2023 (the DF 17 sender in modes1.bin) in the decoded output"
     );
     assert!(joined.contains("DF 11"), "expected a DF 11 all-call reply");
+}
+
+/// Ship-gate for the `ui:adsb` advanced view: the real modes1.bin
+/// decode, run through `Dump1090::aircraft_snapshot` →
+/// `AircraftSpot::write_json` (the exact path `AdsbDemod`'s events
+/// port uses), must produce store-contract JSON (see
+/// `web/src/lib/adsb/store.svelte.ts`). Drives `Dump1090` directly:
+/// the fixture is ~0.18 s, below the block's 1 Hz snapshot throttle,
+/// same reason ft8/wspr e2e bypass their blocks' wall-clock gates.
+#[test]
+fn adsb_events_emit_store_contract_json() {
+    let iq = read_modes1_iq();
+    let mut d = Dump1090::new();
+    for c in iq.chunks(800) {
+        d.push_iq(c);
+    }
+    let _ = d.drain_lines(); // text path exercised by the test above
+    let acs = d.aircraft_snapshot();
+    assert!(
+        !acs.is_empty(),
+        "modes1.bin should yield ≥1 tracked aircraft"
+    );
+
+    let mut buf = Vec::new();
+    for a in &acs {
+        AircraftSpot {
+            icao: a.icao,
+            flight: &a.flight,
+            pos: a.position,
+            alt_ft: a.altitude_ft,
+            gs_kt: a.speed_kt,
+            trk_deg: a.track_deg,
+            msgs: a.messages,
+            age_s: a.age_s,
+        }
+        .write_json(&mut buf);
+    }
+
+    let text = String::from_utf8(buf).expect("events bytes must be UTF-8");
+    let mut rows = 0;
+    let mut saw_4d2023 = false;
+    for line in text.lines() {
+        let v: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("invalid aircraft JSON {line:?}: {e}"));
+        // Fields the store reads unconditionally.
+        assert!(v["icao"].is_string(), "icao missing in {line:?}");
+        assert!(v["alt"].is_number(), "alt missing in {line:?}");
+        assert!(v["gs"].is_number(), "gs missing in {line:?}");
+        assert!(v["trk"].is_number(), "trk missing in {line:?}");
+        assert!(v["msgs"].is_number(), "msgs missing in {line:?}");
+        assert!(v["age"].is_number(), "age missing in {line:?}");
+        // lat/lon, when present, must be a coherent pair.
+        assert_eq!(
+            v.get("lat").is_some(),
+            v.get("lon").is_some(),
+            "lat/lon must appear together in {line:?}"
+        );
+        if v["icao"] == "4D2023" {
+            saw_4d2023 = true;
+        }
+        rows += 1;
+    }
+    assert_eq!(rows, acs.len(), "one JSON row per tracked aircraft");
+    // 4d2023 is the DF 17 sender the text-path test also asserts —
+    // serialized upper-hex here.
+    assert!(
+        saw_4d2023,
+        "expected ICAO 4D2023 in the snapshot; got:\n{text}"
+    );
+    eprintln!("ADS-B contract OK: {rows} aircraft");
 }

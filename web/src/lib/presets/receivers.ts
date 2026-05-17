@@ -56,6 +56,56 @@ export function findRecipe(id: ReceiverId): ReceiverRecipe {
   return r;
 }
 
+/** Map a Bands-panel entry's decorative `mode` chip to the canonical
+ *  receiver **preset slug** that demodulates it end-to-end, or `null`
+ *  when no audio receiver applies (data-only signals: GMSK/AIS, ADS-B
+ *  pulse, ISM OOK/FSK, or an unrecognised mode).
+ *
+ *  Why a preset slug and not an in-place `demod` swap: a recipe only
+ *  rewrites the `demod` block, leaving the channelizer width and the
+ *  downstream chain (RDS, decim, audio rates) shaped for whatever
+ *  preset happened to be loaded — so a cross-mode swap tunes but
+ *  produces broken or silent audio. The per-mode presets ship a
+ *  coherent chain, so loading one is the only reliable "set receiver".
+ *
+ *  FT8 / FT4 / WSPR / APRS get their own `mode` in `bands.json` and
+ *  map to the per-mode decoding presets — those ship a coherent
+ *  demod chain *plus* the decoder and its advanced-view sink
+ *  (`ui:ft8` / `ui:aprs`), so `+RX` on one of those band entries
+ *  lands you on a working decoder + map/table, not bare audio. (APRS
+ *  → `packet`, which is NBFM Bell-202; the others are USB.) The
+ *  remaining HF data modes (RTTY, PSK31, Olivia, …) are still
+ *  authored as `USB` and land on the generic SSB receiver — decoding
+ *  those stays a Signal-Catalog/fldigi concern for now. Unknown modes
+ *  return `null` rather than guessing a preset and serving the wrong
+ *  audio. */
+export function presetSlugForMode(mode: string | undefined): string | null {
+  switch ((mode ?? '').toUpperCase()) {
+    case 'WFM':
+      return 'wbfm';
+    case 'NBFM':
+      return 'nbfm';
+    case 'AM':
+      return 'wbam';
+    case 'USB':
+      return 'usb';
+    case 'LSB':
+      return 'lsb';
+    case 'CW':
+      return 'cw';
+    case 'FT8':
+      return 'ft8';
+    case 'FT4':
+      return 'ft4';
+    case 'WSPR':
+      return 'wspr';
+    case 'APRS':
+      return 'packet';
+    default:
+      return null;
+  }
+}
+
 /** Given the live preset and a chosen recipe, build the doc to PATCH.
  * Returns `null` when the doc has no `demod` block (not a receivers-
  * style preset). Everything except the demod block stays verbatim — in

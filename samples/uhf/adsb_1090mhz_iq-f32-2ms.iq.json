@@ -1,0 +1,19 @@
+{
+  "name": "ADS-B / Mode-S (dump1090 modes1 reference) \u2014 1090 MHz IQ fixture",
+  "file": "adsb_1090mhz_iq-f32-2ms.iq",
+  "kind": "iq",
+  "mode": "adsb",
+  "format": "f32",
+  "layout": "interleaved I,Q little-endian f32",
+  "sample_rate_hz": 2000000,
+  "center_freq_hz": 1090000000,
+  "modulation": "iq",
+  "expected_decode": "DF17 ADS-B from ICAO 4D2023 (+ DF11/DF4 replies)",
+  "sigwiki_url": "https://www.sigidwiki.com/wiki/Automatic_Dependent_Surveillance-Broadcast_(ADS-B)",
+  "source": {
+    "origin": "antirez/dump1090 BSD test recording modes1.bin, u8\u2192f32 (see blocks/tests/fixtures)"
+  },
+  "license": {
+    "name": "BSD-2-Clause"
+  }
+}

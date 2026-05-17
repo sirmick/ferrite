@@ -108,7 +108,10 @@ fn acurite_606tx_capture_decodes_at_least_one_event() {
 
     let bytes =
         fs::read(&fixture).unwrap_or_else(|e| panic!("read fixture {}: {e}", fixture.display()));
-    assert!(bytes.len() % 2 == 0, "fixture must be CU8 (2 bytes/sample)");
+    assert!(
+        bytes.len().is_multiple_of(2),
+        "fixture must be CU8 (2 bytes/sample)"
+    );
 
     // CU8 → Complex<f32> in ±1.0 convention. u8 128 = zero; the upstream
     // rtl_sdr capture tool emits this directly off the RTL2832.

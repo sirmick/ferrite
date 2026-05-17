@@ -26,12 +26,13 @@
 //! `PagerDemod`.
 
 use anyhow::{bail, Result};
-use ferrite_multimon_ng::{Decoder, MultimonDemod};
+use ferrite_multimon_ng::{set_aprs_mode, Decoder, MultimonDemod};
 use serde::Deserialize;
 
+use crate::aprs::{parse_aprs, split_tnc2, AprsSpot};
 use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, ReconfigureScope, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutBuf, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 /// Required input sample rate. Hard contract from multimon-ng's
@@ -65,6 +66,9 @@ pub struct PacketDemod {
     decoders: Vec<MultimonDemod>,
     warned_off_rate: bool,
     input_rate_hz: f64,
+    /// UTF-8 newline-delimited JSON APRS spots queued for the `events`
+    /// port (same transport as RDS / FT8 / ADS-B).
+    events_out: Vec<u8>,
 }
 
 impl PacketDemod {
@@ -75,6 +79,10 @@ impl PacketDemod {
                 params.sample_rate_hz
             );
         }
+        // TNC2 APRS display so the `events` parser sees
+        // `APRS: SRC>DEST,path:info`. Process-global, AX.25-only —
+        // doesn't disturb the POCSAG/FLEX/DTMF multimon blocks.
+        set_aprs_mode(true);
         Ok(Self {
             decoders: vec![
                 MultimonDemod::new(Decoder::Afsk1200),
@@ -85,6 +93,7 @@ impl PacketDemod {
             ],
             warned_off_rate: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
+            events_out: Vec::new(),
         })
     }
 
@@ -111,7 +120,13 @@ impl Block for PacketDemod {
                 name: "in",
                 port_type: PortType::RealF32,
             }],
-            outputs: &[],
+            // Frames still stream as text via the `decoder::packet`
+            // tracing target (now TNC2 form). The `events` port adds
+            // parsed APRS records for the `ui:aprs` advanced view.
+            outputs: &[PortSpec {
+                name: "events",
+                port_type: PortType::Events,
+            }],
             params: &[ParamSpec {
                 key: "sample_rate_hz",
                 label: "Input sample rate",
@@ -169,12 +184,48 @@ impl Block for PacketDemod {
         for d in &mut self.decoders {
             d.push(src);
             for line in d.drain_lines() {
+                // Text path unchanged (TNC2 form now that aprs_mode is
+                // on). Additionally parse APRS frames for the events
+                // port — non-APRS lines (FSK9600 raw, etc.) just don't
+                // match split_tnc2 and are text-only, as before.
+                if let Some((call, path, info)) = split_tnc2(&line) {
+                    let p = parse_aprs(info);
+                    AprsSpot {
+                        call,
+                        path,
+                        kind: p.kind,
+                        pos: p.pos,
+                        name: p.name,
+                        text: p.text,
+                        raw: info,
+                    }
+                    .write_json(&mut self.events_out);
+                }
                 tracing::info!(target: "decoder::packet", "{line}");
             }
         }
 
         let mut w = Work::new();
         w.consumed[0] = consumed;
+
+        // Drain queued JSON into the events port. APRS frame rate is
+        // low (a busy channel is a few per second, ~150 B each); any
+        // remainder rides to the next tick.
+        if !self.events_out.is_empty() {
+            for port in io.outputs.iter_mut() {
+                if port.name == "events" {
+                    if let OutBuf::Events(dst) = &mut port.buf {
+                        let take = self.events_out.len().min(dst.len());
+                        if take > 0 {
+                            dst[..take].copy_from_slice(&self.events_out[..take]);
+                            self.events_out.drain(..take);
+                            w.produced[0] = take;
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(w)
     }
 }

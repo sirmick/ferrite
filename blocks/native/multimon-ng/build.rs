@@ -114,6 +114,7 @@ fn main() {
         // functions in the shim because bindgen can't see globals
         // that are only defined in .c sources.
         .allowlist_function("multimon_pocsag_.*")
+        .allowlist_function("multimon_set_aprs_mode")
         // Common shapes:
         .allowlist_type("demod_param")
         .allowlist_type("demod_state")

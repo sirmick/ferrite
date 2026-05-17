@@ -2,16 +2,20 @@
 //! reference sample.
 //!
 //! Loads `samples/sigidwiki/22050_mono/AFSK1200_Sound.wav` (22 050 Hz
-//! mono s16, derived from the upstream MP3 by `convert.py`), feeds the
-//! audio through `PacketDemod`, and asserts at least one frame line
-//! emerges into the `decoder::packet` tracing target.
+//! mono s16, derived from the upstream MP3 by `convert.py`), runs it
+//! through the full FM RX chain + `PacketDemod`, and asserts the
+//! `events` port emits ≥1 APRS frame whose JSON satisfies the
+//! `ui:aprs` store contract. `rows > 0` also proves the decode chain
+//! still locks the carrier, so this single test subsumes the old
+//! line-count check — kept to one decode because the vendored
+//! multimon C state isn't safe to exercise from parallel test
+//! threads (same constraint as `wspr_e2e`).
 //!
 //! `PacketDemod` runs five multimon decoders in parallel: AFSK1200
 //! (the APRS workhorse), three AFSK2400 timing variants, and FSK9600.
-//! We only assert on the count of `decoder::packet` lines; whichever
-//! inner decoder locks the carrier produces the lines, all log into
-//! the shared category. AFSK1200_Sound.mp3 is an AFSK1200 capture, so
-//! AFSK1200 is the one that should hit.
+//! AFSK1200_Sound is an AFSK1200 capture, so AFSK1200 is the one that
+//! hits; with `aprs_mode` on it prints TNC2 form the events parser
+//! consumes.
 
 #![cfg(feature = "multimon")]
 #![allow(clippy::doc_markdown)]
@@ -22,7 +26,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
-use ferrite_blocks::block::{BlockIo, InBuf, InputPort, OutputPort, PortMeta};
+use ferrite_blocks::block::{BlockIo, InBuf, InputPort, OutBuf, OutputPort, PortMeta};
 use ferrite_blocks::{Block, PacketDemod, PacketDemodParams};
 
 fn read_22050_mono_wav(name: &str) -> Vec<f32> {
@@ -60,81 +64,68 @@ fn read_22050_mono_wav(name: &str) -> Vec<f32> {
     out
 }
 
-fn decode_packet(audio: &[f32]) -> Vec<String> {
+/// Ship-gate for the `ui:aprs` advanced view: drive the real
+/// `events` port (PacketDemod's split_tnc2 → parse_aprs →
+/// AprsSpot::write_json path) over the AFSK1200 fixture and assert
+/// the emitted newline-JSON satisfies the contract the web `aprs`
+/// store parses (see `web/src/lib/aprs/store.svelte.ts`).
+#[test]
+fn aprs_events_emit_store_contract_json() {
+    let audio = common::full_chain_fm(&read_22050_mono_wav("AFSK1200_Sound.wav"), 22_050.0);
     let mut block = PacketDemod::new(PacketDemodParams::default()).expect("packet demod");
+
+    let mut emitted: Vec<u8> = Vec::new();
+    let mut scratch = vec![0u8; 16_384];
     let chunk = 4_096;
     let mut idx = 0;
-    with_packet_capture(|| {
-        while idx < audio.len() {
-            let take = chunk.min(audio.len() - idx);
-            let mut inputs = [InputPort {
-                name: "in",
-                meta: PortMeta::default(),
-                buf: InBuf::RealF32(&audio[idx..idx + take]),
-            }];
-            let mut outputs: [OutputPort; 0] = [];
-            let mut io = BlockIo {
-                inputs: &mut inputs,
-                outputs: &mut outputs,
-            };
-            block.process(&mut io).unwrap();
-            idx += take;
+    while idx < audio.len() {
+        let take = chunk.min(audio.len() - idx);
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::RealF32(&audio[idx..idx + take]),
+        }];
+        let mut outputs = [OutputPort {
+            name: "events",
+            meta: PortMeta::default(),
+            buf: OutBuf::Events(&mut scratch),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut outputs,
+        };
+        let w = block.process(&mut io).unwrap();
+        let n = w.produced[0];
+        if n > 0 {
+            emitted.extend_from_slice(&scratch[..n]);
         }
-    })
-}
-
-fn with_packet_capture<F: FnOnce()>(f: F) -> Vec<String> {
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::fmt::MakeWriter;
-
-    #[derive(Clone)]
-    struct VecWriter(Arc<Mutex<Vec<u8>>>);
-    impl Write for VecWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> MakeWriter<'a> for VecWriter {
-        type Writer = VecWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
+        idx += take;
     }
 
-    let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let writer = VecWriter(Arc::clone(&buf));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(writer)
-        .with_target(true)
-        .with_ansi(false)
-        .without_time()
-        .with_max_level(tracing::Level::INFO)
-        .finish();
-    tracing::subscriber::with_default(subscriber, f);
-
-    let bytes = buf.lock().unwrap();
-    let s = String::from_utf8_lossy(&bytes);
-    s.lines()
-        .filter(|l| l.contains("decoder::packet"))
-        .map(str::to_string)
-        .collect()
-}
-
-#[test]
-fn afsk1200_decodes_at_least_one_frame() {
-    // Full RX flowgraph: AFSK1200 is Bell-202 over NBFM, so FM-modulate
-    // the fixture, channelize, FM-demod, resample — the production path
-    // — then decode (mirrors aprs_iq_e2e's real-IQ variant from audio).
-    let audio = read_22050_mono_wav("AFSK1200_Sound.wav");
-    let audio = common::full_chain_fm(&audio, 22_050.0);
-    let lines = decode_packet(&audio);
+    let text = String::from_utf8(emitted).expect("events bytes must be UTF-8");
+    let mut rows = 0;
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("invalid APRS JSON {line:?}: {e}"));
+        // Fields the store reads unconditionally.
+        assert!(v["call"].is_string(), "call missing in {line:?}");
+        assert!(v["kind"].is_string(), "kind missing in {line:?}");
+        assert!(v["raw"].is_string(), "raw missing in {line:?}");
+        // lat/lon must appear together when present.
+        assert_eq!(
+            v.get("lat").is_some(),
+            v.get("lon").is_some(),
+            "lat/lon must co-occur in {line:?}"
+        );
+        rows += 1;
+    }
     assert!(
-        !lines.is_empty(),
-        "expected ≥1 decoder::packet line from AFSK1200_Sound.wav through the full RX chain, got 0",
+        rows > 0,
+        "AFSK1200_Sound.wav should yield ≥1 APRS frame on the events port \
+         (aprs_mode TNC2 form); got none"
     );
+    eprintln!("APRS contract OK: {rows} frames");
 }

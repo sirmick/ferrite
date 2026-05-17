@@ -27,6 +27,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
+use ferrite_blocks::digital_spot::DigitalSpot;
+use ferrite_blocks::ft8::parse_ft8;
 use ferrite_ft8::{Monitor, MonitorConfig};
 
 fn read_12000_mono_wav(name: &str) -> Vec<f32> {
@@ -122,4 +124,82 @@ fn ft8_decodes_websdr_test_wav() {
         callsign_like,
         "no callsign-shaped token in any decoded message — sanity check failed",
     );
+}
+
+/// Ship-gate for the `ui:ft8` advanced view: real off-air decodes,
+/// run through the exact `parse_ft8` → `DigitalSpot::write_json` path
+/// the `Ft8Demod` events port uses, must produce newline-JSON that
+/// satisfies the contract the web `ft8` store parses (see
+/// `web/src/lib/ft8/store.svelte.ts`). Drives `Monitor` directly for
+/// the same wall-clock reason as the test above.
+#[test]
+fn ft8_events_emit_store_contract_json() {
+    let audio = common::full_chain_ssb(&read_12000_mono_wav("FT8_websdr_test.wav"), 12_000.0);
+    let mut mon = Monitor::new(&MonitorConfig::ft8_default()).expect("Monitor::new");
+    let block = mon.block_size();
+    for chunk in audio.chunks_exact(block) {
+        mon.process_block(chunk).expect("process_block");
+    }
+    let decoded = mon.decode_slot(40);
+    assert!(
+        !decoded.is_empty(),
+        "need ≥1 decode to exercise the contract"
+    );
+
+    let mut buf = Vec::new();
+    for d in &decoded {
+        let (de, dx, grid) = parse_ft8(&d.text);
+        DigitalSpot {
+            mode: "ft8",
+            utc: 1_747_400_000,
+            de: de.unwrap_or(""),
+            dx,
+            grid,
+            snr: d.snr_db,
+            dt: d.time_offset_s,
+            freq: d.freq_hz,
+            msg: &d.text,
+            pwr_dbm: None,
+            drift_hz: None,
+        }
+        .write_json(&mut buf);
+    }
+
+    let text = String::from_utf8(buf).expect("events bytes must be UTF-8");
+    let mut rows = 0;
+    let mut with_grid = 0;
+    for line in text.lines() {
+        let v: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("invalid spot JSON {line:?}: {e}"));
+        // Fields the store reads unconditionally.
+        assert_eq!(v["t"], "ft8");
+        assert!(v["utc"].is_number(), "utc missing/!number in {line:?}");
+        assert!(v["de"].is_string(), "de missing/!string in {line:?}");
+        assert!(v["snr"].is_number(), "snr missing/!number in {line:?}");
+        assert!(v["freq"].is_number(), "freq missing/!number in {line:?}");
+        assert!(v["msg"].is_string(), "msg missing/!string in {line:?}");
+        if let Some(g) = v.get("grid").and_then(|g| g.as_str()) {
+            // Grid, when present, must be a placeable 4-char locator
+            // (the web `gridToLatLon` would otherwise drop the marker).
+            let b = g.as_bytes();
+            assert!(
+                b.len() == 4
+                    && (b'A'..=b'R').contains(&b[0])
+                    && (b'A'..=b'R').contains(&b[1])
+                    && b[2].is_ascii_digit()
+                    && b[3].is_ascii_digit(),
+                "non-placeable grid {g:?} in {line:?}",
+            );
+            with_grid += 1;
+        }
+        rows += 1;
+    }
+    assert_eq!(rows, decoded.len(), "one JSON row per decode");
+    // The kgoba reference slot is known to carry CQ/grid messages —
+    // if zero grids parsed, parse_ft8 or the wire shape regressed.
+    assert!(
+        with_grid > 0,
+        "no grid parsed from any of {rows} real decodes — parse_ft8/contract regression",
+    );
+    eprintln!("contract OK: {rows} spots, {with_grid} with placeable grid");
 }

@@ -17,7 +17,106 @@
 //! `anyhow::Error` to walk. One routine, two callers, no coupling to
 //! either side's error type.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+/// Process-global settle gate between closing the last SoapySDR device
+/// (`SoapySDRDevice_unmake`) and opening the next one.
+///
+/// The retry loops below are *reactive* — they let an open fail, then
+/// back off and try again. But the dominant stop→start failure isn't
+/// random: it's deterministic timing. SDRplay's `sdrplay_apiService`
+/// daemon needs ~1 s after a stream deactivates before the next
+/// `Device::new` will `activateStream()` cleanly; opened sooner, ~half
+/// of cycles fail with `sdrplay_api_Fail` (this is documented in the
+/// `device_lifecycle` stress test, which only sidesteps it because it
+/// sleeps `FERRITE_TEST_DEVICE_GAP_MS` between iterations — the
+/// production stop→start path had no equivalent gap). HackRF/USB has a
+/// smaller but similar re-enumeration window.
+///
+/// This gate makes the wait *proactive* and pay-once: the close path
+/// stamps a monotonic timestamp, and the open path sleeps out only the
+/// remainder of the window. A cold first open (nothing closed yet) and
+/// an open long after the last close both pay zero.
+mod settle {
+    use super::*;
+
+    /// Monotonic process anchor. All close timestamps are nanos since
+    /// this; a single `OnceLock` so the clock is shared even though
+    /// `Instant` has no const ctor.
+    fn anchor() -> Instant {
+        static ANCHOR: OnceLock<Instant> = OnceLock::new();
+        *ANCHOR.get_or_init(Instant::now)
+    }
+
+    /// Nanos-since-anchor of the most recent device close. `0` ==
+    /// "no device has been closed in this process yet" (cold open).
+    static LAST_CLOSE_NS: AtomicU64 = AtomicU64::new(0);
+
+    /// Settle window. Default 1000 ms (matches the observed SDRplay
+    /// daemon teardown). `FERRITE_SOAPY_SETTLE_MS` overrides it —
+    /// `0` disables the gate entirely (faster hardware, RTL-only
+    /// rigs, or stress runs that drive their own cadence).
+    fn window() -> Duration {
+        static MS: OnceLock<u64> = OnceLock::new();
+        let ms = *MS.get_or_init(|| {
+            std::env::var("FERRITE_SOAPY_SETTLE_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000)
+        });
+        Duration::from_millis(ms)
+    }
+
+    /// Record that a device was just unmade. Called from
+    /// `SoapySource`'s drop path. `max(1)` keeps a close that lands
+    /// at t≈anchor from reading back as the "never closed" sentinel.
+    pub fn mark_closed() {
+        let ns = anchor().elapsed().as_nanos() as u64;
+        LAST_CLOSE_NS.store(ns.max(1), Ordering::SeqCst);
+    }
+
+    /// Block the calling thread until the settle window since the last
+    /// close has elapsed. No-op on a cold open or once the window is
+    /// already satisfied. Returns the duration actually slept so the
+    /// caller can log it.
+    pub fn wait() -> Duration {
+        let last = LAST_CLOSE_NS.load(Ordering::SeqCst);
+        if last == 0 {
+            return Duration::ZERO;
+        }
+        let win = window();
+        if win.is_zero() {
+            return Duration::ZERO;
+        }
+        let since_close = anchor()
+            .elapsed()
+            .saturating_sub(Duration::from_nanos(last));
+        let Some(remaining) = win.checked_sub(since_close) else {
+            return Duration::ZERO;
+        };
+        if remaining.is_zero() {
+            return Duration::ZERO;
+        }
+        std::thread::sleep(remaining);
+        remaining
+    }
+}
+
+/// Record that the last SoapySDR device handle was just released. Call
+/// this immediately after a `soapysdr::Device` is dropped.
+pub fn mark_device_closed() {
+    settle::mark_closed();
+}
+
+/// Wait out the post-close settle window before the first open attempt.
+/// See [`settle`] for why this is proactive rather than left to the
+/// retry loop. Returns how long it actually slept (zero on a cold
+/// open).
+pub fn wait_settle_after_close() -> Duration {
+    settle::wait()
+}
 
 /// Number of open attempts before we surface the error. Matches the
 /// SoapySource construct loop.
@@ -135,5 +234,28 @@ mod tests {
     #[test]
     fn unknown_chain_yields_no_hint() {
         assert!(hint_for_exhausted("some novel error", "driver=anything").is_none());
+    }
+
+    #[test]
+    fn settle_gate_is_cold_then_armed() {
+        // This is the only test that touches the settle module, so its
+        // env read (cached in a OnceLock on first `window()` call) is
+        // deterministic here. Short window keeps the test ~fast.
+        std::env::set_var("FERRITE_SOAPY_SETTLE_MS", "120");
+
+        // Cold: nothing closed yet → no wait.
+        assert_eq!(wait_settle_after_close(), Duration::ZERO);
+
+        // After a close, the very next open waits out (most of) the
+        // window — bounded by it, and clearly non-trivial.
+        mark_device_closed();
+        let slept = wait_settle_after_close();
+        assert!(
+            slept > Duration::from_millis(50) && slept <= Duration::from_millis(120),
+            "expected a sub-window settle wait, got {slept:?}"
+        );
+
+        // Immediately after the wait the window is satisfied → zero.
+        assert_eq!(wait_settle_after_close(), Duration::ZERO);
     }
 }

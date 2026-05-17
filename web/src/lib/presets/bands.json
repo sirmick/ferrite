@@ -1,57 +1,1102 @@
 {
-  "$comment": "Frequency presets surfaced in the Bands panel. Each group renders as a collapsible section. `hz` is the desired listen frequency; `vfo_offset_hz` (optional, default 0) shifts the SDR centre off the signal to avoid a DC-spike pollution \u2014 applied as center_freq_hz = hz + vfo_offset_hz and freq_shift_hz = -vfo_offset_hz, so the signal still lands at baseband. `mode` is decorative chip text \u2014 selecting a band does NOT swap the demod chain (pick that from the Signal Catalog). User-editable.",
+  "$comment": "Frequency presets surfaced in the Bands panel. Each group renders as a collapsible section. `hz` is the desired listen frequency; `vfo_offset_hz` (optional, default 0) shifts the SDR centre off the signal to avoid a DC-spike pollution — applied as center_freq_hz = hz + vfo_offset_hz and freq_shift_hz = -vfo_offset_hz, so the signal still lands at baseband. `mode` drives the panel's two actions: the `Tune` button moves frequency only (demod chain unchanged), while `+RX` loads the canonical receiver preset for `mode` (WFM→wbfm, NBFM→nbfm, AM→wbam, USB→usb, LSB→lsb, CW→cw, FT8/FT4/WSPR→ft8/ft4/wspr, APRS→packet; other HF data modes are authored as USB) then tunes — a coherent end-to-end chain, same as picking it from the Signal Catalog. `+RX` is disabled when no receiver preset matches the mode (data-only GMSK/Pulse/OOK·FSK) or that preset isn't installed in this build. User-editable.",
   "groups": [
     {
-      "name": "FM broadcast (87.9\u2013107.9 MHz)",
+      "name": "FM broadcast (NA, 87.9–107.9 MHz)",
       "entries": [
         {
-          "label": "87.9 (band low)",
+          "label": "87.9 MHz",
           "hz": 87900000,
           "mode": "WFM"
         },
         {
-          "label": "93.3",
+          "label": "88.1 MHz",
+          "hz": 88100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "88.3 MHz",
+          "hz": 88300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "88.5 MHz",
+          "hz": 88500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "88.7 MHz",
+          "hz": 88700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "88.9 MHz",
+          "hz": 88900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "89.1 MHz",
+          "hz": 89100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "89.3 MHz",
+          "hz": 89300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "89.5 MHz",
+          "hz": 89500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "89.7 MHz",
+          "hz": 89700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "89.9 MHz",
+          "hz": 89900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "90.1 MHz",
+          "hz": 90100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "90.3 MHz",
+          "hz": 90300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "90.5 MHz",
+          "hz": 90500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "90.7 MHz",
+          "hz": 90700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "90.9 MHz",
+          "hz": 90900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "91.1 MHz",
+          "hz": 91100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "91.3 MHz",
+          "hz": 91300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "91.5 MHz",
+          "hz": 91500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "91.7 MHz",
+          "hz": 91700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "91.9 MHz",
+          "hz": 91900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "92.1 MHz",
+          "hz": 92100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "92.3 MHz",
+          "hz": 92300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "92.5 MHz",
+          "hz": 92500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "92.7 MHz",
+          "hz": 92700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "92.9 MHz",
+          "hz": 92900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "93.1 MHz",
+          "hz": 93100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "93.3 MHz",
           "hz": 93300000,
           "mode": "WFM"
         },
         {
-          "label": "96.9",
+          "label": "93.5 MHz",
+          "hz": 93500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "93.7 MHz",
+          "hz": 93700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "93.9 MHz",
+          "hz": 93900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "94.1 MHz",
+          "hz": 94100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "94.3 MHz",
+          "hz": 94300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "94.5 MHz",
+          "hz": 94500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "94.7 MHz",
+          "hz": 94700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "94.9 MHz",
+          "hz": 94900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "95.1 MHz",
+          "hz": 95100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "95.3 MHz",
+          "hz": 95300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "95.5 MHz",
+          "hz": 95500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "95.7 MHz",
+          "hz": 95700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "95.9 MHz",
+          "hz": 95900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "96.1 MHz",
+          "hz": 96100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "96.3 MHz",
+          "hz": 96300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "96.5 MHz",
+          "hz": 96500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "96.7 MHz",
+          "hz": 96700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "96.9 MHz",
           "hz": 96900000,
           "mode": "WFM"
         },
         {
-          "label": "100.1",
+          "label": "97.1 MHz",
+          "hz": 97100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "97.3 MHz",
+          "hz": 97300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "97.5 MHz",
+          "hz": 97500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "97.7 MHz",
+          "hz": 97700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "97.9 MHz",
+          "hz": 97900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "98.1 MHz",
+          "hz": 98100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "98.3 MHz",
+          "hz": 98300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "98.5 MHz",
+          "hz": 98500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "98.7 MHz",
+          "hz": 98700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "98.9 MHz",
+          "hz": 98900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "99.1 MHz",
+          "hz": 99100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "99.3 MHz",
+          "hz": 99300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "99.5 MHz",
+          "hz": 99500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "99.7 MHz",
+          "hz": 99700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "99.9 MHz",
+          "hz": 99900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "100.1 MHz",
           "hz": 100100000,
           "mode": "WFM"
         },
         {
-          "label": "105.7",
+          "label": "100.3 MHz",
+          "hz": 100300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "100.5 MHz",
+          "hz": 100500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "100.7 MHz",
+          "hz": 100700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "100.9 MHz",
+          "hz": 100900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "101.1 MHz",
+          "hz": 101100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "101.3 MHz",
+          "hz": 101300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "101.5 MHz",
+          "hz": 101500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "101.7 MHz",
+          "hz": 101700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "101.9 MHz",
+          "hz": 101900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "102.1 MHz",
+          "hz": 102100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "102.3 MHz",
+          "hz": 102300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "102.5 MHz",
+          "hz": 102500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "102.7 MHz",
+          "hz": 102700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "102.9 MHz",
+          "hz": 102900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "103.1 MHz",
+          "hz": 103100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "103.3 MHz",
+          "hz": 103300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "103.5 MHz",
+          "hz": 103500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "103.7 MHz",
+          "hz": 103700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "103.9 MHz",
+          "hz": 103900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "104.1 MHz",
+          "hz": 104100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "104.3 MHz",
+          "hz": 104300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "104.5 MHz",
+          "hz": 104500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "104.7 MHz",
+          "hz": 104700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "104.9 MHz",
+          "hz": 104900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "105.1 MHz",
+          "hz": 105100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "105.3 MHz",
+          "hz": 105300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "105.5 MHz",
+          "hz": 105500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "105.7 MHz",
           "hz": 105700000,
           "mode": "WFM"
         },
         {
-          "label": "107.9 (band high)",
+          "label": "105.9 MHz",
+          "hz": 105900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "106.1 MHz",
+          "hz": 106100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "106.3 MHz",
+          "hz": 106300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "106.5 MHz",
+          "hz": 106500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "106.7 MHz",
+          "hz": 106700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "106.9 MHz",
+          "hz": 106900000,
+          "mode": "WFM"
+        },
+        {
+          "label": "107.1 MHz",
+          "hz": 107100000,
+          "mode": "WFM"
+        },
+        {
+          "label": "107.3 MHz",
+          "hz": 107300000,
+          "mode": "WFM"
+        },
+        {
+          "label": "107.5 MHz",
+          "hz": 107500000,
+          "mode": "WFM"
+        },
+        {
+          "label": "107.7 MHz",
+          "hz": 107700000,
+          "mode": "WFM"
+        },
+        {
+          "label": "107.9 MHz",
           "hz": 107900000,
           "mode": "WFM"
         }
       ]
     },
     {
-      "name": "AM broadcast (540\u20131700 kHz)",
+      "name": "AM broadcast (NA, 540–1700 kHz)",
       "entries": [
         {
-          "label": "540 (band low)",
+          "label": "540 kHz",
           "hz": 540000,
           "mode": "AM"
         },
         {
-          "label": "1040",
+          "label": "550 kHz",
+          "hz": 550000,
+          "mode": "AM"
+        },
+        {
+          "label": "560 kHz",
+          "hz": 560000,
+          "mode": "AM"
+        },
+        {
+          "label": "570 kHz",
+          "hz": 570000,
+          "mode": "AM"
+        },
+        {
+          "label": "580 kHz",
+          "hz": 580000,
+          "mode": "AM"
+        },
+        {
+          "label": "590 kHz",
+          "hz": 590000,
+          "mode": "AM"
+        },
+        {
+          "label": "600 kHz",
+          "hz": 600000,
+          "mode": "AM"
+        },
+        {
+          "label": "610 kHz",
+          "hz": 610000,
+          "mode": "AM"
+        },
+        {
+          "label": "620 kHz",
+          "hz": 620000,
+          "mode": "AM"
+        },
+        {
+          "label": "630 kHz",
+          "hz": 630000,
+          "mode": "AM"
+        },
+        {
+          "label": "640 kHz",
+          "hz": 640000,
+          "mode": "AM"
+        },
+        {
+          "label": "650 kHz",
+          "hz": 650000,
+          "mode": "AM"
+        },
+        {
+          "label": "660 kHz",
+          "hz": 660000,
+          "mode": "AM"
+        },
+        {
+          "label": "670 kHz",
+          "hz": 670000,
+          "mode": "AM"
+        },
+        {
+          "label": "680 kHz",
+          "hz": 680000,
+          "mode": "AM"
+        },
+        {
+          "label": "690 kHz",
+          "hz": 690000,
+          "mode": "AM"
+        },
+        {
+          "label": "700 kHz",
+          "hz": 700000,
+          "mode": "AM"
+        },
+        {
+          "label": "710 kHz",
+          "hz": 710000,
+          "mode": "AM"
+        },
+        {
+          "label": "720 kHz",
+          "hz": 720000,
+          "mode": "AM"
+        },
+        {
+          "label": "730 kHz",
+          "hz": 730000,
+          "mode": "AM"
+        },
+        {
+          "label": "740 kHz",
+          "hz": 740000,
+          "mode": "AM"
+        },
+        {
+          "label": "750 kHz",
+          "hz": 750000,
+          "mode": "AM"
+        },
+        {
+          "label": "760 kHz",
+          "hz": 760000,
+          "mode": "AM"
+        },
+        {
+          "label": "770 kHz",
+          "hz": 770000,
+          "mode": "AM"
+        },
+        {
+          "label": "780 kHz",
+          "hz": 780000,
+          "mode": "AM"
+        },
+        {
+          "label": "790 kHz",
+          "hz": 790000,
+          "mode": "AM"
+        },
+        {
+          "label": "800 kHz",
+          "hz": 800000,
+          "mode": "AM"
+        },
+        {
+          "label": "810 kHz",
+          "hz": 810000,
+          "mode": "AM"
+        },
+        {
+          "label": "820 kHz",
+          "hz": 820000,
+          "mode": "AM"
+        },
+        {
+          "label": "830 kHz",
+          "hz": 830000,
+          "mode": "AM"
+        },
+        {
+          "label": "840 kHz",
+          "hz": 840000,
+          "mode": "AM"
+        },
+        {
+          "label": "850 kHz",
+          "hz": 850000,
+          "mode": "AM"
+        },
+        {
+          "label": "860 kHz",
+          "hz": 860000,
+          "mode": "AM"
+        },
+        {
+          "label": "870 kHz",
+          "hz": 870000,
+          "mode": "AM"
+        },
+        {
+          "label": "880 kHz",
+          "hz": 880000,
+          "mode": "AM"
+        },
+        {
+          "label": "890 kHz",
+          "hz": 890000,
+          "mode": "AM"
+        },
+        {
+          "label": "900 kHz",
+          "hz": 900000,
+          "mode": "AM"
+        },
+        {
+          "label": "910 kHz",
+          "hz": 910000,
+          "mode": "AM"
+        },
+        {
+          "label": "920 kHz",
+          "hz": 920000,
+          "mode": "AM"
+        },
+        {
+          "label": "930 kHz",
+          "hz": 930000,
+          "mode": "AM"
+        },
+        {
+          "label": "940 kHz",
+          "hz": 940000,
+          "mode": "AM"
+        },
+        {
+          "label": "950 kHz",
+          "hz": 950000,
+          "mode": "AM"
+        },
+        {
+          "label": "960 kHz",
+          "hz": 960000,
+          "mode": "AM"
+        },
+        {
+          "label": "970 kHz",
+          "hz": 970000,
+          "mode": "AM"
+        },
+        {
+          "label": "980 kHz",
+          "hz": 980000,
+          "mode": "AM"
+        },
+        {
+          "label": "990 kHz",
+          "hz": 990000,
+          "mode": "AM"
+        },
+        {
+          "label": "1000 kHz",
+          "hz": 1000000,
+          "mode": "AM"
+        },
+        {
+          "label": "1010 kHz",
+          "hz": 1010000,
+          "mode": "AM"
+        },
+        {
+          "label": "1020 kHz",
+          "hz": 1020000,
+          "mode": "AM"
+        },
+        {
+          "label": "1030 kHz",
+          "hz": 1030000,
+          "mode": "AM"
+        },
+        {
+          "label": "1040 kHz",
           "hz": 1040000,
           "mode": "AM"
         },
         {
-          "label": "1610 (band high)",
+          "label": "1050 kHz",
+          "hz": 1050000,
+          "mode": "AM"
+        },
+        {
+          "label": "1060 kHz",
+          "hz": 1060000,
+          "mode": "AM"
+        },
+        {
+          "label": "1070 kHz",
+          "hz": 1070000,
+          "mode": "AM"
+        },
+        {
+          "label": "1080 kHz",
+          "hz": 1080000,
+          "mode": "AM"
+        },
+        {
+          "label": "1090 kHz",
+          "hz": 1090000,
+          "mode": "AM"
+        },
+        {
+          "label": "1100 kHz",
+          "hz": 1100000,
+          "mode": "AM"
+        },
+        {
+          "label": "1110 kHz",
+          "hz": 1110000,
+          "mode": "AM"
+        },
+        {
+          "label": "1120 kHz",
+          "hz": 1120000,
+          "mode": "AM"
+        },
+        {
+          "label": "1130 kHz",
+          "hz": 1130000,
+          "mode": "AM"
+        },
+        {
+          "label": "1140 kHz",
+          "hz": 1140000,
+          "mode": "AM"
+        },
+        {
+          "label": "1150 kHz",
+          "hz": 1150000,
+          "mode": "AM"
+        },
+        {
+          "label": "1160 kHz",
+          "hz": 1160000,
+          "mode": "AM"
+        },
+        {
+          "label": "1170 kHz",
+          "hz": 1170000,
+          "mode": "AM"
+        },
+        {
+          "label": "1180 kHz",
+          "hz": 1180000,
+          "mode": "AM"
+        },
+        {
+          "label": "1190 kHz",
+          "hz": 1190000,
+          "mode": "AM"
+        },
+        {
+          "label": "1200 kHz",
+          "hz": 1200000,
+          "mode": "AM"
+        },
+        {
+          "label": "1210 kHz",
+          "hz": 1210000,
+          "mode": "AM"
+        },
+        {
+          "label": "1220 kHz",
+          "hz": 1220000,
+          "mode": "AM"
+        },
+        {
+          "label": "1230 kHz",
+          "hz": 1230000,
+          "mode": "AM"
+        },
+        {
+          "label": "1240 kHz",
+          "hz": 1240000,
+          "mode": "AM"
+        },
+        {
+          "label": "1250 kHz",
+          "hz": 1250000,
+          "mode": "AM"
+        },
+        {
+          "label": "1260 kHz",
+          "hz": 1260000,
+          "mode": "AM"
+        },
+        {
+          "label": "1270 kHz",
+          "hz": 1270000,
+          "mode": "AM"
+        },
+        {
+          "label": "1280 kHz",
+          "hz": 1280000,
+          "mode": "AM"
+        },
+        {
+          "label": "1290 kHz",
+          "hz": 1290000,
+          "mode": "AM"
+        },
+        {
+          "label": "1300 kHz",
+          "hz": 1300000,
+          "mode": "AM"
+        },
+        {
+          "label": "1310 kHz",
+          "hz": 1310000,
+          "mode": "AM"
+        },
+        {
+          "label": "1320 kHz",
+          "hz": 1320000,
+          "mode": "AM"
+        },
+        {
+          "label": "1330 kHz",
+          "hz": 1330000,
+          "mode": "AM"
+        },
+        {
+          "label": "1340 kHz",
+          "hz": 1340000,
+          "mode": "AM"
+        },
+        {
+          "label": "1350 kHz",
+          "hz": 1350000,
+          "mode": "AM"
+        },
+        {
+          "label": "1360 kHz",
+          "hz": 1360000,
+          "mode": "AM"
+        },
+        {
+          "label": "1370 kHz",
+          "hz": 1370000,
+          "mode": "AM"
+        },
+        {
+          "label": "1380 kHz",
+          "hz": 1380000,
+          "mode": "AM"
+        },
+        {
+          "label": "1390 kHz",
+          "hz": 1390000,
+          "mode": "AM"
+        },
+        {
+          "label": "1400 kHz",
+          "hz": 1400000,
+          "mode": "AM"
+        },
+        {
+          "label": "1410 kHz",
+          "hz": 1410000,
+          "mode": "AM"
+        },
+        {
+          "label": "1420 kHz",
+          "hz": 1420000,
+          "mode": "AM"
+        },
+        {
+          "label": "1430 kHz",
+          "hz": 1430000,
+          "mode": "AM"
+        },
+        {
+          "label": "1440 kHz",
+          "hz": 1440000,
+          "mode": "AM"
+        },
+        {
+          "label": "1450 kHz",
+          "hz": 1450000,
+          "mode": "AM"
+        },
+        {
+          "label": "1460 kHz",
+          "hz": 1460000,
+          "mode": "AM"
+        },
+        {
+          "label": "1470 kHz",
+          "hz": 1470000,
+          "mode": "AM"
+        },
+        {
+          "label": "1480 kHz",
+          "hz": 1480000,
+          "mode": "AM"
+        },
+        {
+          "label": "1490 kHz",
+          "hz": 1490000,
+          "mode": "AM"
+        },
+        {
+          "label": "1500 kHz",
+          "hz": 1500000,
+          "mode": "AM"
+        },
+        {
+          "label": "1510 kHz",
+          "hz": 1510000,
+          "mode": "AM"
+        },
+        {
+          "label": "1520 kHz",
+          "hz": 1520000,
+          "mode": "AM"
+        },
+        {
+          "label": "1530 kHz",
+          "hz": 1530000,
+          "mode": "AM"
+        },
+        {
+          "label": "1540 kHz",
+          "hz": 1540000,
+          "mode": "AM"
+        },
+        {
+          "label": "1550 kHz",
+          "hz": 1550000,
+          "mode": "AM"
+        },
+        {
+          "label": "1560 kHz",
+          "hz": 1560000,
+          "mode": "AM"
+        },
+        {
+          "label": "1570 kHz",
+          "hz": 1570000,
+          "mode": "AM"
+        },
+        {
+          "label": "1580 kHz",
+          "hz": 1580000,
+          "mode": "AM"
+        },
+        {
+          "label": "1590 kHz",
+          "hz": 1590000,
+          "mode": "AM"
+        },
+        {
+          "label": "1600 kHz",
+          "hz": 1600000,
+          "mode": "AM"
+        },
+        {
+          "label": "1610 kHz",
           "hz": 1610000,
+          "mode": "AM"
+        },
+        {
+          "label": "1620 kHz",
+          "hz": 1620000,
+          "mode": "AM"
+        },
+        {
+          "label": "1630 kHz",
+          "hz": 1630000,
+          "mode": "AM"
+        },
+        {
+          "label": "1640 kHz",
+          "hz": 1640000,
+          "mode": "AM"
+        },
+        {
+          "label": "1650 kHz",
+          "hz": 1650000,
+          "mode": "AM"
+        },
+        {
+          "label": "1660 kHz",
+          "hz": 1660000,
+          "mode": "AM"
+        },
+        {
+          "label": "1670 kHz",
+          "hz": 1670000,
+          "mode": "AM"
+        },
+        {
+          "label": "1680 kHz",
+          "hz": 1680000,
+          "mode": "AM"
+        },
+        {
+          "label": "1690 kHz",
+          "hz": 1690000,
+          "mode": "AM"
+        },
+        {
+          "label": "1700 kHz",
+          "hz": 1700000,
           "mode": "AM"
         }
       ]
@@ -97,57 +1142,57 @@
       ]
     },
     {
-      "name": "Marine VHF (156\u2013162 MHz)",
+      "name": "Marine VHF (156–162 MHz)",
       "entries": [
         {
-          "label": "Ch 06 \u2014 safety",
+          "label": "Ch 06 — safety",
           "hz": 156300000,
           "mode": "NBFM"
         },
         {
-          "label": "Ch 09 \u2014 calling (recreational)",
+          "label": "Ch 09 — calling (recreational)",
           "hz": 156450000,
           "mode": "NBFM"
         },
         {
-          "label": "Ch 13 \u2014 bridge-to-bridge",
+          "label": "Ch 13 — bridge-to-bridge",
           "hz": 156650000,
           "mode": "NBFM"
         },
         {
-          "label": "Ch 16 \u2014 distress / hailing",
+          "label": "Ch 16 — distress / hailing",
           "hz": 156800000,
           "mode": "NBFM"
         },
         {
-          "label": "Ch 22A \u2014 USCG liaison",
+          "label": "Ch 22A — USCG liaison",
           "hz": 157100000,
           "mode": "NBFM"
         },
         {
-          "label": "Ch 68 \u2014 non-commercial",
+          "label": "Ch 68 — non-commercial",
           "hz": 156425000,
           "mode": "NBFM"
         },
         {
-          "label": "Ch 70 \u2014 DSC (digital)",
+          "label": "Ch 70 — DSC (digital)",
           "hz": 156525000,
           "mode": "NBFM"
         },
         {
-          "label": "Ch 72 \u2014 non-commercial",
+          "label": "Ch 72 — non-commercial",
           "hz": 156625000,
           "mode": "NBFM"
         },
         {
-          "label": "AIS-1/2 (162.000) \u2014 pair centre",
+          "label": "AIS-1/2 (162.000) — pair centre",
           "hz": 162000000,
           "mode": "GMSK"
         }
       ]
     },
     {
-      "name": "FRS / GMRS (462\u2013467 MHz)",
+      "name": "FRS / GMRS (462–467 MHz)",
       "entries": [
         {
           "label": "Ch 1",
@@ -177,7 +1222,7 @@
       ]
     },
     {
-      "name": "Citizens Band (26.965\u201327.405 MHz)",
+      "name": "Citizens Band (26.965–27.405 MHz)",
       "entries": [
         {
           "label": "Ch 01",
@@ -185,27 +1230,27 @@
           "mode": "AM"
         },
         {
-          "label": "Ch 09 \u2014 emergency",
+          "label": "Ch 09 — emergency",
           "hz": 27065000,
           "mode": "AM"
         },
         {
-          "label": "Ch 17 \u2014 westbound truckers",
+          "label": "Ch 17 — westbound truckers",
           "hz": 27165000,
           "mode": "AM"
         },
         {
-          "label": "Ch 19 \u2014 highway / truckers",
+          "label": "Ch 19 — highway / truckers",
           "hz": 27185000,
           "mode": "AM"
         },
         {
-          "label": "Ch 36 \u2014 SSB calling (LSB)",
+          "label": "Ch 36 — SSB calling (LSB)",
           "hz": 27365000,
           "mode": "LSB"
         },
         {
-          "label": "Ch 38 \u2014 SSB DX (LSB)",
+          "label": "Ch 38 — SSB DX (LSB)",
           "hz": 27385000,
           "mode": "LSB"
         },
@@ -217,7 +1262,7 @@
       ]
     },
     {
-      "name": "Aviation (118\u2013137 MHz)",
+      "name": "Aviation (118–137 MHz)",
       "entries": [
         {
           "label": "Emergency (guard)",
@@ -297,7 +1342,7 @@
       ]
     },
     {
-      "name": "Ham 80m (3.5\u20134.0 MHz)",
+      "name": "Ham 80m (3.5–4.0 MHz)",
       "entries": [
         {
           "label": "CW DX",
@@ -307,17 +1352,17 @@
         {
           "label": "FT8",
           "hz": 3573000,
-          "mode": "USB"
+          "mode": "FT8"
         },
         {
           "label": "FT4",
           "hz": 3575000,
-          "mode": "USB"
+          "mode": "FT4"
         },
         {
           "label": "WSPR",
           "hz": 3568600,
-          "mode": "USB"
+          "mode": "WSPR"
         },
         {
           "label": "RTTY",
@@ -342,7 +1387,7 @@
       ]
     },
     {
-      "name": "Ham 40m (7.0\u20137.3 MHz)",
+      "name": "Ham 40m (7.0–7.3 MHz)",
       "entries": [
         {
           "label": "CW",
@@ -352,17 +1397,17 @@
         {
           "label": "FT8",
           "hz": 7074000,
-          "mode": "USB"
+          "mode": "FT8"
         },
         {
           "label": "FT4",
           "hz": 7047500,
-          "mode": "USB"
+          "mode": "FT4"
         },
         {
           "label": "WSPR",
           "hz": 7038600,
-          "mode": "USB"
+          "mode": "WSPR"
         },
         {
           "label": "RTTY",
@@ -407,7 +1452,7 @@
       ]
     },
     {
-      "name": "Ham 20m (14.0\u201314.35 MHz)",
+      "name": "Ham 20m (14.0–14.35 MHz)",
       "entries": [
         {
           "label": "CW",
@@ -417,17 +1462,17 @@
         {
           "label": "FT8",
           "hz": 14074000,
-          "mode": "USB"
+          "mode": "FT8"
         },
         {
           "label": "FT4",
           "hz": 14080000,
-          "mode": "USB"
+          "mode": "FT4"
         },
         {
           "label": "WSPR",
           "hz": 14095600,
-          "mode": "USB"
+          "mode": "WSPR"
         },
         {
           "label": "RTTY",
@@ -472,22 +1517,22 @@
       ]
     },
     {
-      "name": "Ham 17m (18.068\u201318.168 MHz)",
+      "name": "Ham 17m (18.068–18.168 MHz)",
       "entries": [
         {
           "label": "FT8",
           "hz": 18100000,
-          "mode": "USB"
+          "mode": "FT8"
         },
         {
           "label": "FT4",
           "hz": 18104000,
-          "mode": "USB"
+          "mode": "FT4"
         },
         {
           "label": "WSPR",
           "hz": 18104600,
-          "mode": "USB"
+          "mode": "WSPR"
         },
         {
           "label": "SSB",
@@ -497,22 +1542,22 @@
       ]
     },
     {
-      "name": "Ham 15m (21.0\u201321.45 MHz)",
+      "name": "Ham 15m (21.0–21.45 MHz)",
       "entries": [
         {
           "label": "FT8",
           "hz": 21074000,
-          "mode": "USB"
+          "mode": "FT8"
         },
         {
           "label": "FT4",
           "hz": 21140000,
-          "mode": "USB"
+          "mode": "FT4"
         },
         {
           "label": "WSPR",
           "hz": 21094600,
-          "mode": "USB"
+          "mode": "WSPR"
         },
         {
           "label": "RTTY",
@@ -532,22 +1577,22 @@
       ]
     },
     {
-      "name": "Ham 10m (28.0\u201329.7 MHz)",
+      "name": "Ham 10m (28.0–29.7 MHz)",
       "entries": [
         {
           "label": "FT8",
           "hz": 28074000,
-          "mode": "USB"
+          "mode": "FT8"
         },
         {
           "label": "FT4",
           "hz": 28180000,
-          "mode": "USB"
+          "mode": "FT4"
         },
         {
           "label": "WSPR",
           "hz": 28124600,
-          "mode": "USB"
+          "mode": "WSPR"
         },
         {
           "label": "RTTY",
@@ -572,7 +1617,7 @@
       ]
     },
     {
-      "name": "Ham 6m (50\u201354 MHz)",
+      "name": "Ham 6m (50–54 MHz)",
       "entries": [
         {
           "label": "SSB calling",
@@ -582,17 +1627,17 @@
         {
           "label": "FT8",
           "hz": 50313000,
-          "mode": "USB"
+          "mode": "FT8"
         },
         {
           "label": "FT4",
           "hz": 50318000,
-          "mode": "USB"
+          "mode": "FT4"
         },
         {
           "label": "WSPR",
           "hz": 50293000,
-          "mode": "USB"
+          "mode": "WSPR"
         },
         {
           "label": "FM simplex calling",
@@ -602,7 +1647,7 @@
       ]
     },
     {
-      "name": "Ham 2m (144\u2013148 MHz)",
+      "name": "Ham 2m (144–148 MHz)",
       "entries": [
         {
           "label": "SSB calling",
@@ -612,7 +1657,7 @@
         {
           "label": "FT8",
           "hz": 144174000,
-          "mode": "USB"
+          "mode": "FT8"
         },
         {
           "label": "FM simplex calling",
@@ -623,12 +1668,12 @@
           "label": "APRS",
           "hz": 144390000,
           "vfo_offset_hz": 10000,
-          "mode": "NBFM"
+          "mode": "APRS"
         }
       ]
     },
     {
-      "name": "Ham 1.25m (222\u2013225 MHz)",
+      "name": "Ham 1.25m (222–225 MHz)",
       "entries": [
         {
           "label": "FM simplex calling",
@@ -638,7 +1683,7 @@
       ]
     },
     {
-      "name": "Ham 70cm (420\u2013450 MHz)",
+      "name": "Ham 70cm (420–450 MHz)",
       "entries": [
         {
           "label": "SSB calling",
@@ -653,7 +1698,7 @@
       ]
     },
     {
-      "name": "Ham 33cm (902\u2013928 MHz)",
+      "name": "Ham 33cm (902–928 MHz)",
       "entries": [
         {
           "label": "FM simplex calling",
@@ -679,6 +1724,241 @@
           "label": "ISM band centre",
           "hz": 433920000,
           "mode": "OOK/FSK"
+        }
+      ]
+    },
+    {
+      "name": "Shortwave broadcast (meter bands, AM)",
+      "entries": [
+        {
+          "label": "120 m low (2.300)",
+          "hz": 2300000,
+          "mode": "AM"
+        },
+        {
+          "label": "120 m high (2.495)",
+          "hz": 2495000,
+          "mode": "AM"
+        },
+        {
+          "label": "90 m low (3.200)",
+          "hz": 3200000,
+          "mode": "AM"
+        },
+        {
+          "label": "90 m high (3.400)",
+          "hz": 3400000,
+          "mode": "AM"
+        },
+        {
+          "label": "75 m low (3.900)",
+          "hz": 3900000,
+          "mode": "AM"
+        },
+        {
+          "label": "75 m high (4.000)",
+          "hz": 4000000,
+          "mode": "AM"
+        },
+        {
+          "label": "60 m low (4.750)",
+          "hz": 4750000,
+          "mode": "AM"
+        },
+        {
+          "label": "60 m high (5.060)",
+          "hz": 5060000,
+          "mode": "AM"
+        },
+        {
+          "label": "49 m low (5.900)",
+          "hz": 5900000,
+          "mode": "AM"
+        },
+        {
+          "label": "49 m high (6.200)",
+          "hz": 6200000,
+          "mode": "AM"
+        },
+        {
+          "label": "41 m low (7.200)",
+          "hz": 7200000,
+          "mode": "AM"
+        },
+        {
+          "label": "41 m high (7.450)",
+          "hz": 7450000,
+          "mode": "AM"
+        },
+        {
+          "label": "31 m low (9.400)",
+          "hz": 9400000,
+          "mode": "AM"
+        },
+        {
+          "label": "31 m high (9.900)",
+          "hz": 9900000,
+          "mode": "AM"
+        },
+        {
+          "label": "25 m low (11.600)",
+          "hz": 11600000,
+          "mode": "AM"
+        },
+        {
+          "label": "25 m high (12.100)",
+          "hz": 12100000,
+          "mode": "AM"
+        },
+        {
+          "label": "22 m low (13.570)",
+          "hz": 13570000,
+          "mode": "AM"
+        },
+        {
+          "label": "22 m high (13.870)",
+          "hz": 13870000,
+          "mode": "AM"
+        },
+        {
+          "label": "19 m low (15.100)",
+          "hz": 15100000,
+          "mode": "AM"
+        },
+        {
+          "label": "19 m high (15.800)",
+          "hz": 15800000,
+          "mode": "AM"
+        },
+        {
+          "label": "16 m low (17.480)",
+          "hz": 17480000,
+          "mode": "AM"
+        },
+        {
+          "label": "16 m high (17.900)",
+          "hz": 17900000,
+          "mode": "AM"
+        },
+        {
+          "label": "15 m low (18.900)",
+          "hz": 18900000,
+          "mode": "AM"
+        },
+        {
+          "label": "15 m high (19.020)",
+          "hz": 19020000,
+          "mode": "AM"
+        },
+        {
+          "label": "13 m low (21.450)",
+          "hz": 21450000,
+          "mode": "AM"
+        },
+        {
+          "label": "13 m high (21.850)",
+          "hz": 21850000,
+          "mode": "AM"
+        },
+        {
+          "label": "11 m low (25.670)",
+          "hz": 25670000,
+          "mode": "AM"
+        },
+        {
+          "label": "11 m high (26.100)",
+          "hz": 26100000,
+          "mode": "AM"
+        }
+      ]
+    },
+    {
+      "name": "Ham 60m (5.3 MHz, 5 channels USB)",
+      "entries": [
+        {
+          "label": "Ch 1 (5332.0)",
+          "hz": 5332000,
+          "mode": "USB"
+        },
+        {
+          "label": "Ch 2 (5348.0)",
+          "hz": 5348000,
+          "mode": "USB"
+        },
+        {
+          "label": "Ch 3 (5358.5)",
+          "hz": 5358500,
+          "mode": "USB"
+        },
+        {
+          "label": "Ch 4 (5373.0)",
+          "hz": 5373000,
+          "mode": "USB"
+        },
+        {
+          "label": "Ch 5 (5405.0)",
+          "hz": 5405000,
+          "mode": "USB"
+        }
+      ]
+    },
+    {
+      "name": "Ham 30m (10.1–10.15 MHz)",
+      "entries": [
+        {
+          "label": "CW",
+          "hz": 10115000,
+          "mode": "CW"
+        },
+        {
+          "label": "FT8",
+          "hz": 10136000,
+          "mode": "FT8"
+        },
+        {
+          "label": "FT4",
+          "hz": 10140000,
+          "mode": "FT4"
+        },
+        {
+          "label": "WSPR",
+          "hz": 10138700,
+          "mode": "WSPR"
+        },
+        {
+          "label": "RTTY",
+          "hz": 10142000,
+          "mode": "USB"
+        },
+        {
+          "label": "PSK31",
+          "hz": 10142000,
+          "mode": "USB"
+        }
+      ]
+    },
+    {
+      "name": "Ham 12m (24.89–24.99 MHz)",
+      "entries": [
+        {
+          "label": "FT8",
+          "hz": 24915000,
+          "mode": "FT8"
+        },
+        {
+          "label": "FT4",
+          "hz": 24919000,
+          "mode": "FT4"
+        },
+        {
+          "label": "WSPR",
+          "hz": 24924600,
+          "mode": "WSPR"
+        },
+        {
+          "label": "SSB",
+          "hz": 24950000,
+          "mode": "USB"
         }
       ]
     }

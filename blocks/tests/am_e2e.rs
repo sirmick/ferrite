@@ -11,8 +11,9 @@
 //!    PLL pulled in only ~±500 Hz, so beyond it the output was the
 //!    carrier *beat note*, not the audio (SINAD went negative).
 //!
-//! 2. **Real off-air loudness/finiteness.** `AM_IQ_5s.wav` (5 s slice of
-//!    sigidwiki's `AM_IQ.zip`, 64 kHz stereo u8, L=I R=Q, offset binary)
+//! 2. **Real off-air loudness/finiteness.** `AM_IQ_5s_iq-s16.wav` (5 s
+//!    slice of sigidwiki's `AM_IQ.zip`, 64 kHz stereo s16, L=I R=Q;
+//!    transcoded from the original offset-binary u8, signal identical)
 //!    must demodulate to finite audio whose post-settle RMS clears a
 //!    floor tied to the known-good reference recording (~-27 dBFS at
 //!    unity gain). The coherent version sat ~7 dB under this even
@@ -83,13 +84,13 @@ fn read_am_iq_wav() -> Vec<Complex<f32>> {
         "..",
         "samples",
         "sigidwiki",
-        "AM_IQ_5s.wav",
+        "AM_IQ_5s_iq-s16.wav",
     ]
     .iter()
     .collect();
     let mut bytes = Vec::new();
     File::open(&path)
-        .expect("open AM_IQ_5s.wav — pruned?")
+        .expect("open AM_IQ_5s_iq-s16.wav — pruned?")
         .read_to_end(&mut bytes)
         .unwrap();
     let mut pos = 0;
@@ -100,15 +101,17 @@ fn read_am_iq_wav() -> Vec<Complex<f32>> {
         }
         pos += 1;
     }
-    assert!(pos < bytes.len(), "no data chunk in AM_IQ_5s.wav");
+    assert!(pos < bytes.len(), "no data chunk in AM_IQ_5s_iq-s16.wav");
+    // s16 LE stereo, L=I R=Q → 4 bytes per complex sample. (The fixture
+    // was transcoded from the original offset-binary u8; FileIqSource
+    // requires s16 stereo. Signal is sample-for-sample identical.)
     let pcm = &bytes[pos..];
-    let n = pcm.len() / 2;
+    let n = pcm.len() / 4;
     (0..n)
         .map(|i| {
-            Complex::new(
-                (f32::from(pcm[i * 2]) - 128.0) / 128.0,
-                (f32::from(pcm[i * 2 + 1]) - 128.0) / 128.0,
-            )
+            let i_le = i16::from_le_bytes([pcm[i * 4], pcm[i * 4 + 1]]);
+            let q_le = i16::from_le_bytes([pcm[i * 4 + 2], pcm[i * 4 + 3]]);
+            Complex::new(f32::from(i_le) / 32768.0, f32::from(q_le) / 32768.0)
         })
         .collect()
 }

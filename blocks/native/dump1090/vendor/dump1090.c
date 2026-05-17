@@ -3073,4 +3073,29 @@ void dump1090_modes_reset_aircraft_list(void) {
     Modes.aircrafts = NULL;
 }
 
+/* Flat POD snapshot of the aircraft list for the `ui:adsb` view.
+ * `struct ferrite_aircraft` comes from dump1090_shim.h (included at
+ * the top of this file). No allocation, no pointers escape. */
+size_t dump1090_aircraft_snapshot(struct ferrite_aircraft *dst, size_t cap) {
+    if (dst == NULL || cap == 0) return 0;
+    time_t now = time(NULL);
+    size_t n = 0;
+    for (struct aircraft *a = Modes.aircrafts; a != NULL && n < cap; a = a->next) {
+        struct ferrite_aircraft *o = &dst[n++];
+        o->addr = a->addr;
+        memcpy(o->flight, a->flight, 9);
+        o->flight[8] = '\0';
+        o->altitude = a->altitude;
+        o->speed = a->speed;
+        o->track = a->track;
+        o->age_s = (int32_t)(now - a->seen);
+        o->messages = (int64_t)a->messages;
+        o->lat = a->lat;
+        o->lon = a->lon;
+        /* dump1090 leaves lat/lon at 0 until a CPR pair decodes. */
+        o->has_pos = (a->lat != 0.0 || a->lon != 0.0) ? 1 : 0;
+    }
+    return n;
+}
+
 
