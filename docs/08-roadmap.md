@@ -129,16 +129,20 @@ in [`10-commits.md`](10-commits.md); plan→ship deltas live in
 
 ## Forward work — 1.0
 
-Three concrete tracks remain before we cut 1.0:
+Concrete tracks remaining before we cut 1.0:
 
-- **Decoder UI panels** — structured outputs for ADS-B (aircraft table
-  + map) and APRS (station list + map). The block-side state in place
-  (`AdsbDemod` already maintains `Modes.aircrafts`); the UI side is
-  greenfield.
-- **`rtl_433` ISM-device decoder bundle** — 200+ device flavours. See
+- **Broader `rtl_433` ISM-device coverage** — 200+ device flavours. See
   [`docs/decoder-roadmap/03-phase-3-aviation-aprs-ism.md`](decoder-roadmap/03-phase-3-aviation-aprs-ism.md).
 - **`Mode A/C` follow-up to dump1090** — adds non-Mode-S transponder
   support.
+- **sigidwiki sample/thumbnail backfill** for the newest fldigi
+  presets (per the per-mode ship gate).
+
+**Shipped** (was on this list): the decoder UI panels — ADS-B aircraft
+map, APRS station map + packet console, FT8/FT4/WSPR decode table +
+station map, and the fldigi text console — plus the fldigi keyboard
+modes + RSID, FT8/FT4/WSPR, and browser-side decode with the live
+node↔browser swap (D28).
 
 Other UX leftovers tracked in [`10-commits.md`](10-commits.md):
 

@@ -372,6 +372,36 @@ hint readers (`presetSrcFreqHint`, `presetVfoHint`, `restoreVfo`) are
 left intact — a future preset can still bring frequency back if a use
 case appears. No machinery deleted; only the data carrying it.
 
+## D28 — Browser-side decode + unified event transport (placement is invisible above the runner)
+
+**Decision.** Make every decoder block genuinely placement-`Either` and
+let the demod-placement chip move it node↔browser **live, no reload**.
+The blockers were closed rather than worked around:
+
+- fldigi (C++/STL, no clean wasm path) rides a *link-vs-bridge*: Rust
+  wasm declares the modem `extern "C"` ABI as imports; a sibling
+  Emscripten module (`blocks/native/fldigi/emscripten/`, built in CI
+  via emsdk) satisfies them, instantiated lazily only when a fldigi
+  block is browser-placed.
+- FT8/WSPR were `Either` but absent from the runtime `wasm` feature and
+  panicked on `wasm32` (`SystemTime::now()`); fixed via `web_time` + the
+  feature flip + an 8 MiB wasm shadow stack (wsprd's working set).
+- **Event transport unified at the consumption seam, not a new bridge
+  block.** A browser-side `ui:` `Events` producer terminates in a
+  drainable `EventsSink` (`__ui_<name>_<sid>`, sid == the node half's);
+  the runner drains it per-tick and loopbacks via
+  `FrameClient.injectLocal`, so the ft8/wspr/fldigi/aprs/adsb/rds
+  stores are byte-for-byte unchanged and don't know which side ran.
+  `pipeline.uiSinks` is a `$derived` over node `/api/ui-sinks` +
+  browser-split sinks so the advanced view attaches either way.
+
+**Why not a single `EventBridge` block.** Considered and declined: it
+would rewrite the proven node WS path for a tidiness win, moving the
+node-vs-browser branch inside a block rather than removing it. The
+convergence-at-`FrameClient` design erases the only divergence that
+mattered (to the UI) at zero risk to the shipping node path; the two
+`env_split` block types never leak above the runner.
+
 ## Revisiting decisions
 
 Decisions are load-bearing assumptions, not immutable. To reverse one:

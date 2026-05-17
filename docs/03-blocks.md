@@ -213,9 +213,10 @@ serialise. The Rx side holds an internal `IqRing`; the browser's
 
 ## Shipped blocks
 
-The 21 registered blocks plus the soapysdr-feature-gated `SoapySource`.
+~50 registered blocks plus the soapysdr-feature-gated `SoapySource`.
 Source of truth: `registry_contains_every_shipped_block` in
-[`blocks/src/lib.rs`](../blocks/src/lib.rs).
+[`blocks/src/lib.rs`](../blocks/src/lib.rs) (the link-time inventory is
+the authority; the tables below are a curated tour, not exhaustive).
 
 ### Sources
 
@@ -250,6 +251,30 @@ Source of truth: `registry_contains_every_shipped_block` in
 | `FileIqSink`     | IqF32    | NativeOnly  | [`blocks/src/file_sink.rs`](../blocks/src/file_sink.rs)           |
 | `FileAudioSink`  | RealF32  | NativeOnly  | [`blocks/src/file_audio_sink.rs`](../blocks/src/file_audio_sink.rs) |
 | `EventsSink`     | Events   | Either      | [`blocks/src/events_sink.rs`](../blocks/src/events_sink.rs)       |
+
+### Decoders
+
+All `Placement::Either` — they decode native in `ferrited` *and* in
+the browser wasm runtime (D28). Each emits newline-delimited JSON on an
+`events` port (→ `ui:<name>` → the matching advanced view) and mirrors
+the same text to a `decoder::<cat>` tracing target for `tail decoder`.
+fldigi modems are C++/STL: native = static link, wasm32 = link-vs-bridge
+to a sibling Emscripten module (see [01-architecture.md](01-architecture.md)).
+
+| type                | backing                          | file                                                          |
+|---------------------|----------------------------------|---------------------------------------------------------------|
+| `AdsbDemod`         | dump1090                         | [`blocks/src/adsb.rs`](../blocks/src/adsb.rs)                 |
+| `AisDemod`          | rtl-ais                          | [`blocks/src/ais.rs`](../blocks/src/ais.rs)                   |
+| `PacketDemod`       | multimon-ng (AFSK/AX.25 → APRS)  | [`blocks/src/packet.rs`](../blocks/src/packet.rs)            |
+| `PagerDemod`        | multimon-ng (POCSAG/FLEX)        | [`blocks/src/pager.rs`](../blocks/src/pager.rs)              |
+| `EasDemod`          | multimon-ng (EAS/SAME)           | [`blocks/src/eas.rs`](../blocks/src/eas.rs)                  |
+| `MorseDemod`        | multimon-ng (CW)                 | [`blocks/src/morse.rs`](../blocks/src/morse.rs)             |
+| `RdsDemod`          | in-tree                          | [`blocks/src/rds_demod.rs`](../blocks/src/rds_demod.rs)      |
+| `Rtl433Demod`       | rtl_433 (ISM)                    | [`blocks/src/rtl_433.rs`](../blocks/src/rtl_433.rs)         |
+| `Ft8Demod`          | ft8_lib (FT8 / FT4, slot-timed)  | [`blocks/src/ft8.rs`](../blocks/src/ft8.rs)                  |
+| `WsprDemod`         | wsprd (WSPR, 120 s slot)         | [`blocks/src/wspr.rs`](../blocks/src/wspr.rs)                |
+| `RttyDemod` `Psk31Demod` `CwDemod` `Mt63Demod` `OliviaDemod` `ContestiaDemod` `DominoexDemod` `ThrobDemod` `NavtexDemod` | fldigi v4.2.11 cores | [`blocks/src/fldigi_modes.rs`](../blocks/src/fldigi_modes.rs) |
+| `FldigiAuto`        | fldigi RSID — hot-swaps the inner modem on detect | [`blocks/src/fldigi_modes.rs`](../blocks/src/fldigi_modes.rs) |
 
 ### Bridges (auto-inserted by `env_split`)
 

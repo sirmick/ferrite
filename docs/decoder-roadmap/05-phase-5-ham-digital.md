@@ -1,12 +1,16 @@
 # Phase 5 — Ham digital modes
 
-**Status:** not started, except for one early-landed item: **RDS** (the
-57 kHz subcarrier on broadcast FM) shipped during Phase 1 as `RdsDemod`
-— it's just a sidechannel on the WBFM audio chain, didn't need to wait
-for the rest of this phase. The other ~14 modes are still sketches.
-
-The fork-in-the-road bake-off (vendor fldigi vs Rust-from-scratch) still
-applies to the remaining modes.
+**Status: SHIPPED.** The fork-in-the-road below was resolved in favour
+of **vendoring fldigi** (v4.2.11 curated cores, `blocks/native/fldigi`).
+RTTY, PSK31, CW, MT63, Olivia, Contestia, DominoEX, Throb and NAVTEX
+ship as per-mode blocks/presets, plus **RSID auto-detect** (`FldigiAuto`
+hot-swaps the inner modem on a detected burst). FT8/FT4 (`ft8_lib`) and
+WSPR (vendored `wsprd`) also shipped. All decode native *and*
+browser-side (fldigi via the link-vs-bridge Emscripten path; D28), with
+a live fldigi text console + FT8/WSPR table/map advanced views. RDS
+shipped earlier in Phase 1. The historical analysis below is kept as
+the decision record; the "Rust-from-scratch" ship list did **not**
+win — read it as superseded.
 
 ## Goal
 

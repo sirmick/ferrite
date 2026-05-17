@@ -57,18 +57,24 @@ subset; DMR/DSD deferred for AMBE patent reasons.
 | AIS | — | ✓ | `blocks/native/rtl-ais` |
 | APRS (AFSK + HDLC) | ✓ | ✓ | `blocks/native/multimon-ng` |
 | EAS / SAME | — | ✓ | `blocks/native/multimon-ng` |
-| FT8 | ✓ | ✓ | `blocks/native/ft8` (kgoba `ft8_lib`) |
+| FT8 / FT4 | ✓ | ✓ | `blocks/native/ft8` (kgoba `ft8_lib`) — also browser-side |
+| WSPR | ✓ | ✓ | `blocks/native/wsprd` (WSJT-X core via Guenael) — also browser-side |
+| RTTY / PSK31 / CW / MT63 / Olivia / Contestia / DominoEX / Throb / NAVTEX | — | ✓ | `blocks/native/fldigi` v4.2.11 (curated cores; link-vs-bridge on wasm) |
+| RSID auto-mode | — | ✓ | `blocks/native/fldigi` (FldigiAuto — RSID hot-swaps the inner modem) |
 | POCSAG / FLEX | — | ✓ | `blocks/native/multimon-ng` |
 | Morse / DTMF | — | ✓ | `blocks/native/multimon-ng` |
 | RDS | — | ✓ | `blocks/src/rds_demod.rs` (in-tree) |
-| WSPR | ✓ | — | Same `ft8_lib` could host it; not wired |
 | Codec2 / M17 | ✓ | — | Deferred |
 | DMR / DSD | deferred | deferred | AMBE patent |
-| `rtl_433` (ISM bundle) | — | open | Tracked for 1.0 |
+| `rtl_433` (ISM bundle) | — | ✓ | `blocks/native/rtl_433` (broader device coverage tracked for 1.0) |
 
-Net: roughly the planned subset shipped, plus six unplanned digital
-decoders (POCSAG / FLEX / EAS / AIS / RDS / Morse / DTMF) that came
-along for free with `multimon-ng` and `rtl-ais`.
+Net: the full planned subset shipped (incl. WSPR — the plan expected
+`ft8_lib` to host it, but it became a dedicated vendored `wsprd`), plus
+the entire unplanned fldigi keyboard-mode family + RSID auto-detect and
+the decoders that came along with `multimon-ng` / `rtl-ais`. FT8/FT4/
+WSPR and all fldigi modes decode browser-side as well as on the server
+(D28); the mode-specific decoder panels (FT8/WSPR map+table, ADS-B map,
+APRS map+console, fldigi text console) have shipped.
 
 ## Audio noise reduction stack
 
@@ -159,12 +165,18 @@ trivial, but the topology editor doesn't exist.
   flowgraph runner).
 - The `/api/identify` one-shot endpoint (replaced by persistent AI
   chat).
-- WSPR / M17 / Codec2 (no blocker, just unprioritised).
+- M17 / Codec2 (no blocker, just unprioritised). WSPR did ship
+  (dedicated `wsprd`, not the `ft8_lib`-hosted route the plan guessed).
 - Mobile UI (still desktop-first by design).
 
 ## Pending for 1.0 — see [08-roadmap.md](08-roadmap.md)
 
-- ADS-B aircraft table + map UI.
-- APRS station list + map UI.
-- `rtl_433` ISM-device decoder bundle.
+- Broader `rtl_433` ISM-device coverage.
 - `Mode A/C` follow-up to dump1090.
+- sigidwiki sample/thumbnail backfill for the newest fldigi presets.
+
+Shipped since the original plan: the fldigi keyboard-mode family +
+RSID, FT8/FT4/WSPR, browser-side decode with the live node↔browser
+swap, and the mode-specific decoder panels — ADS-B aircraft map,
+APRS station map + packet console, FT8/FT4/WSPR decode table +
+station map, and the fldigi text console.

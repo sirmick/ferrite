@@ -3,10 +3,13 @@
 **A browser-native SDR with a built-in AI operator.**
 
 Point a small Rust daemon at your radio, open the URL on any machine on the
-LAN, and you get a fluent spectrum/waterfall UI, twenty-one ready-to-go
-listening and decoder presets, and an optional Claude sidecar that finds
-signals, tunes the rig, captures clips, and explains what it's hearing —
-all without leaving the page.
+LAN, and you get a fluent spectrum/waterfall UI, thirty-plus ready-to-go
+listening and decoder presets (analog, paging/packet/aviation, the full
+fldigi keyboard-mode family, FT8/FT4/WSPR weak-signal — many decoding
+right in the browser), mode-specific decoder panels (maps, tables, live
+text), and an optional Claude sidecar that finds signals, tunes the rig,
+captures clips, and explains what it's hearing — all without leaving the
+page.
 
 ![Ferrite spectrum and waterfall](docs/images/spectrum-waterfall.png)
 
@@ -17,10 +20,14 @@ One app, in the browser, out of the box:
 - **One binary, one URL.** A single Rust daemon serves the whole UI. No
   client install, no companion desktop app, no per-mode tool zoo — open
   the page and listen.
-- **Every common mode built in.** Analog voice/music and the digital
-  decoders people actually reach for (ADS-B, AIS, APRS/packet, POCSAG/FLEX,
-  FT8, RDS, EAS/SAME, CW, DTMF) ship as presets — no recompiling, no
-  external decoders running as subprocesses.
+- **Every common mode built in.** Analog voice/music plus the digital
+  decoders people actually reach for — ADS-B, AIS, APRS/packet,
+  POCSAG/FLEX, RDS, EAS/SAME, DTMF, the weak-signal trio (FT8, FT4,
+  WSPR), and the full vendored **fldigi** keyboard-mode family (RTTY,
+  PSK31, CW, MT63, Olivia, Contestia, DominoEX, Throb, NAVTEX) with
+  **RSID auto-detect** that hot-swaps to whatever mode shows up. All
+  ship as presets — no recompiling, no external decoders as
+  subprocesses.
 - **An AI operator that drives the radio.** Optional, local-auth, and it
   uses the *same* control surface you do — it can find a signal, tune,
   swap presets, capture, and show you the spectrum it just looked at.
@@ -49,12 +56,25 @@ One app, in the browser, out of the box:
   subscription — no API key in a file. Every command it runs surfaces in
   the activity panel.
 - **One block crate, two compile targets.** Every DSP unit (channelizer,
-  FM/AM/SSB demod, audio shaper, EAS/POCSAG/RDS/ADS-B/AIS/FT8 decoders, …)
-  is one Rust source file that builds native into `ferrited` *and* into
-  the browser's WASM worker. No second implementation, no drift.
+  FM/AM/SSB demod, audio shaper, EAS/POCSAG/RDS/ADS-B/AIS/FT8/WSPR/fldigi
+  decoders, …) is one Rust source file that builds native into `ferrited`
+  *and* into the browser's WASM worker. No second implementation, no
+  drift. fldigi is C++/STL with no clean wasm path, so it rides a
+  link-vs-bridge design: the Rust wasm declares the modem ABI as
+  imports, satisfied at runtime by a sibling Emscripten module.
+- **Decode on the server *or* in the browser — flip it live.** Every
+  decoder block is placement-`Either`; the demod-placement chip moves
+  it node↔browser at runtime with no preset edit and no reload. A
+  unified event transport means decoded text/spots reach the UI
+  identically whichever side ran it — offload a CPU-heavy FT8/WSPR
+  decode onto each listener's browser, or keep it on the box.
+- **Mode-specific decoder panels.** "Advanced" swaps the wide
+  FFT/waterfall column for a mode view: FT8/FT4/WSPR decode table +
+  station map, ADS-B aircraft map, APRS station map + packet console,
+  and a live fldigi text console (mode badge tracks RSID switches).
 - **JSON-authored flowgraphs.** A mode is a flowgraph file in
   [`flowgraphs/`](flowgraphs/) plus optional blocks — no UI work, no
-  server recompile. Twenty-one ship in the box.
+  server recompile. Thirty-plus ship in the box.
 - **World-class analog chain.** Envelope AM (offset-immune), limiter +
   discriminator FM, post-demod `AudioShaper` (DC block + brick-wall LPF:
   15 kHz WBFM mono / 3.4 kHz NBFM / 5 kHz AM), pilot-PLL stereo with
@@ -118,10 +138,12 @@ fresh dongle isn't seen, replug or `sudo modprobe -r dvb_usb_rtl28xxu`.
 
 ## Modes & test maturity
 
-Twenty-one shipped flowgraph presets. **Coverage** legend: **fixture** =
+Thirty-plus shipped flowgraph presets. **Coverage** legend: **fixture** =
 e2e replays a real/known IQ or audio capture and asserts decoded output;
 **loopback** = synthetic modulate→demod→analyze e2e; **contract** =
-compose/split/instantiate + chunk-invariance/glitch/rate-drift guards.
+compose/split/instantiate + chunk-invariance/glitch/rate-drift guards;
+**browser** = the decoder is exercised through the wasm runtime in a
+browser-path e2e (not just node-side).
 
 | Mode | Preset(s) | Kind | Coverage |
 |---|---|---|---|
@@ -130,12 +152,16 @@ compose/split/instantiate + chunk-invariance/glitch/rate-drift guards.
 | AM broadcast / SW / air | `wbam` | analog | fixture (`am_e2e`, real sigidwiki IQ) + loopback + contract |
 | NBFM voice | `nbfm` | analog | loopback (`audio_modes_e2e`) + contract |
 | SSB (USB / LSB) | `usb`, `lsb` | analog | loopback (`audio_modes_e2e`) |
-| CW / Morse | `cw` | analog | fixture (`morse_e2e`) |
+| CW / Morse (multimon) | `cw`, `morse-e2e` | digital | fixture (`morse_e2e`) |
 | ADS-B / Mode S | `adsb` | digital | fixture (`adsb_e2e`, dump1090) |
 | AIS | `ais` | digital | fixture (`ais_e2e`, rtl-ais) |
 | AX.25 packet / APRS | `packet`, `packet-debug` | digital | fixture (`packet_e2e`) |
 | POCSAG / FLEX paging | `pager` | digital | fixture (`pager_e2e`, multimon-ng) |
-| FT8 | `ft8` | digital | fixture (`ft8_e2e`, ft8_lib) |
+| FT8 / FT4 | `ft8`, `ft4` | digital | fixture (`ft8_e2e`, ft8_lib) + **browser** (`ft8BrowserE2E`) |
+| WSPR | `wspr` | digital | fixture (`wspr_e2e`, wsprd → `K1JT FN20 20`) + **browser** (`wsprBrowserE2E`) |
+| RTTY / PSK31 / CW / MT63 / Olivia / Contestia / DominoEX / Throb / NAVTEX | `rtty`, `psk31`, `mt63`, `throb`, `dominoex`, `contestia`, `olivia`, `navtex` | digital (fldigi) | fixture (`fldigi_modes_e2e`, real samples) + loopback (`fldigi_e2e`) + **browser** (`fldigiBrowserE2E`) |
+| RSID auto-mode | `rsid` | digital (fldigi) | fixture (`fldigi_auto_e2e` — RSID hot-swap + decode) |
+| Combined HF digital | `digital-hf-20m` | digital | contract |
 | NOAA WX + EAS/SAME | `nwr` | hazard | fixture (`eas_e2e`) |
 | DTMF | `dtmf-e2e` | tones | fixture (`dtmf_e2e`, `dtmf_cross_env`) |
 | rtl_433 ISM | `rtl433-433` | digital | fixture (`rtl433_e2e`, real Acurite CU8) |
@@ -162,12 +188,16 @@ the pinned commit + resync steps.
 | ft8_lib | [kgoba/ft8_lib](https://github.com/kgoba/ft8_lib) | MIT | Streaming-decoder subset only (`ft8/` coding + `common/monitor` + bundled `kiss_fft`); upstream CLI demo kept as reference, not compiled. |
 | aisdecoder (rtl-ais) | [dgiardini/rtl-ais](https://github.com/dgiardini/rtl-ais) | GPL-2.0-or-later | Only the `aisdecoder/` subdir vendored; upstream's `rtl_ais.c` RF pipeline + TCP/UDP NMEA bridge dropped (Ferrite's own Channelizer/FmDemod/Resamp feed it). |
 | rtl_433 | [merbanan/rtl_433](https://github.com/merbanan/rtl_433) | GPL-2.0-or-later | Dropped `rtl_433.c` (`main()`/CLI) and `sdr.c` (device I/O) for a `shim/` that wires the C decoder to the `Block` interface. Trimmed `tests/examples/docs/man/cmake/conf/debian/getopt`. |
+| fldigi (modem cores) | [w1hkj/fldigi](https://github.com/w1hkj/fldigi) v4.2.11 | GPL-3.0-or-later | Curated RX-only modem cores (RTTY/PSK/CW/MT63/Olivia/Contestia/DominoEX/Throb/NAVTEX + RSID) behind a narrow C ABI. ~21 replacement `shim/` headers strip FLTK/UI/TX. **Native**: static C++ link. **wasm32**: link-vs-bridge — `build.rs` compiles nothing, the ABI is left as wasm imports satisfied by a sibling Emscripten module (`emscripten/build.sh`, emsdk). |
+| wsprd | [Guenael/rtlsdr-wsprd](https://github.com/Guenael/rtlsdr-wsprd) | GPL-3.0 | WSJT-X WSPR decode core (K1JT/K9AN) only — one 120 s window in, spots out. FFTW shimmed to bundled `kiss_fft` so it cross-compiles to wasm32 with the rest. |
 
 Vendored data: the spectrum band-allocation overlay
 (`web/src/lib/presets/bandplan-usa.json`) is Arrin Clark (KN1E)'s
 [SDR-Band-Plans](https://github.com/Arrin-KN1E/SDR-Band-Plans), **CC0**,
 imported verbatim (one-file copy; the alpha channel is stripped at load).
-WSPR (`blocks/native/wsprd`) is in progress and not yet a shipped preset.
+Natural Earth map polygons (public domain) back the station maps. fldigi
+and FT8/FT4/WSPR all decode browser-side as well as on the server (see
+[docs/01-architecture.md](docs/01-architecture.md)).
 
 ## Hardware
 
@@ -318,11 +348,13 @@ files. Details in [docs/05-testing.md](docs/05-testing.md).
 ## Status
 
 **0.9.0 — pre-release.** User-facing surface is feature-complete and
-stable for daily listening. Before 1.0: decoder UI panels for ADS-B
-(aircraft table + map) and APRS (station list + map) — block-side state
-exists, UI is greenfield; broader `rtl_433` device coverage; `Mode A/C`.
-Out of scope for 1.0 by design: multi-listener/multi-device, auth
-(LAN-trust), transmit, mobile-first UI, DMR/DSD (AMBE patent).
+stable for daily listening. The mode-specific decoder panels (FT8/FT4/
+WSPR table+map, ADS-B map, APRS map+console, fldigi text console) and
+browser-side decode with the live node↔browser swap have **shipped**.
+Before 1.0: broader `rtl_433` device coverage; `Mode A/C`; sigidwiki
+sample/thumbnail backfill for the newest fldigi presets. Out of scope
+for 1.0 by design: multi-listener/multi-device, auth (LAN-trust),
+transmit, mobile-first UI, DMR/DSD (AMBE patent).
 
 Live tally in [docs/08-roadmap.md](docs/08-roadmap.md);
 [docs/12-shipped-vs-planned.md](docs/12-shipped-vs-planned.md) tracks

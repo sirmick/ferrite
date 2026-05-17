@@ -156,8 +156,17 @@ preset selector, a Source dialog, a Flowgraph dialog, and Start/Stop.
   ([`runtime/src/wasm.rs`](../runtime/src/wasm.rs)), wires `WsBridgeRx`
   blocks to incoming frames by `stream_id`, and ticks the graph on a fixed
   cadence; `AudioSink` writes into a SAB ring drained by an AudioWorklet on
-  the audio thread. `runnerWorker.ts` is the Worker entry; `runnerClient.ts`
-  is the main-thread half.
+  the audio thread; browser-side `__ui_*` `EventsSink`s are drained each
+  tick and loopbacked to the main thread (`kind:'events'` worker message
+  → `FrameClient.injectLocal`). `runnerWorker.ts` is the Worker entry;
+  `runnerClient.ts` is the main-thread half.
+- fldigi modems are C++/STL and don't cross-compile to
+  `wasm32-unknown-unknown`. The Rust wasm leaves their `extern "C"` ABI
+  as undefined imports; `initFldigiBridge()` (lazily, only when a
+  fldigi block is browser-placed) instantiates a sibling Emscripten
+  module and publishes it on `globalThis.__FERRITE_FLDIGI__` for the
+  wasm-bindgen snippet to call into. FT8/WSPR cross-compile directly
+  (their slot clock uses `web_time` so it works on wasm32).
 - [`src/lib/audio/ringBuffer.ts`](../web/src/lib/audio/ringBuffer.ts) +
   [`audioRingProcessor.ts`](../web/src/lib/audio/audioRingProcessor.ts) — the
   SAB ring (Uint32 head/tail header + Float32 ring). Requires
@@ -190,9 +199,20 @@ Both ends instantiate the *same* `ferrite_runtime::Runtime` over the *same*
   ([`runtime/src/env_split.rs`](../runtime/src/env_split.rs)) carves the doc
   into an env-local subgraph. Wires that crossed the boundary become a
   `WsBridgeTx`-on-node + `WsBridgeRx`-on-browser pair sharing a `stream_id`
-  starting at `CROSS_ENV_STREAM_BASE = 1000`. Wires terminating in `ui:<name>`
-  become a `WsBridgeTx*` on the node side only; the browser learns the id
-  via `GET /api/ui-sinks`.
+  starting at `CROSS_ENV_STREAM_BASE = 1000`.
+- A wire terminating in `ui:<name>` (a decoder's `events`/FFT/audio
+  stream feeding a UI panel) is allocated the same `stream_id` in both
+  halves. When the producer is **node-side**, it becomes a
+  `WsBridgeTx*` and the browser learns the id via `GET /api/ui-sinks`.
+  When the producer is **browser-side** (a decoder placed or swapped
+  into the browser), an `Events` `ui:` wire instead terminates in a
+  drainable `EventsSink` (`__ui_<name>_<sid>`); the runner drains it
+  each tick and loopbacks the JSON into the same `FrameClient` the
+  store subscribes to (`injectLocal`). Net: every decoder block is
+  placement-`Either`, the demod-placement chip moves it node↔browser
+  live with no reload, and the decode reaches the UI **identically**
+  whichever side ran it — the transport divergence never leaks above
+  the runner. (D28; see [09-decisions.md](09-decisions.md).)
 - Browser→node crossings are rejected (`SplitError::UnsupportedCrossing`).
 - The Source block is a placeholder: presets author it as `"type": "Source"`
   with tuning hints; `compose_source`
