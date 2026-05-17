@@ -26,8 +26,8 @@ use ferrite_fldigi::FldigiModem;
 use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, ReconfigureScope, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutBuf, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 /// fldigi modes run at 8 kHz in this shim; presets feed a
@@ -42,6 +42,12 @@ pub struct FldigiCore {
     /// Shown in the `mode=` tracing field (the family or variant id).
     label: String,
     warned_off_rate: bool,
+    /// UTF-8 newline-delimited JSON decode records queued for the
+    /// `events` port — the same transport ft8/RDS/DTMF use, so the
+    /// decoded text is observable browser-side (`drainEvents`) and
+    /// node-side (`ui:events`), not only via the `decoder::fldigi`
+    /// tracing log.
+    events_out: Vec<u8>,
 }
 
 impl FldigiCore {
@@ -57,6 +63,7 @@ impl FldigiCore {
             modem,
             label: label.into(),
             warned_off_rate: false,
+            events_out: Vec::new(),
         })
     }
 
@@ -156,11 +163,44 @@ impl FldigiCore {
         let text = self.modem.take_text();
         if !text.is_empty() {
             tracing::info!(target: "decoder::fldigi", mode = %self.label, "{}", text);
+            // Mirror onto the `events` port as one newline-terminated
+            // JSON record (serde_json handles escaping). `t:"fldigi"`
+            // tags the family for the generic decode console; `mode`
+            // is the variant label. No timestamp: fldigi text has no
+            // slot time and `SystemTime::now()` panics on
+            // wasm32-unknown-unknown — the consumer stamps on receipt.
+            let rec = serde_json::json!({
+                "t": "fldigi",
+                "mode": self.label,
+                "text": text,
+            });
+            if serde_json::to_writer(&mut self.events_out, &rec).is_ok() {
+                self.events_out.push(b'\n');
+            }
         }
         // Scope: future tuning-aid widget; status: fldigi UI chrome.
         // Drain both so they don't grow unbounded.
         let _ = self.modem.take_scope();
         let _ = self.modem.take_status();
+
+        // Drain queued JSON records into the `events` port (same
+        // pattern as Ft8Demod). Any remainder that doesn't fit the
+        // ring this tick stays buffered for the next — audio flows
+        // continuously so `pump` is called again soon.
+        if !self.events_out.is_empty() {
+            for port in io.outputs.iter_mut() {
+                if port.name == "events" {
+                    if let OutBuf::Events(dst) = &mut port.buf {
+                        let take = self.events_out.len().min(dst.len());
+                        if take > 0 {
+                            dst[..take].copy_from_slice(&self.events_out[..take]);
+                            self.events_out.drain(..take);
+                            work.produced[0] = take;
+                        }
+                    }
+                }
+            }
+        }
         work
     }
 }
@@ -169,6 +209,16 @@ impl FldigiCore {
 const FLDIGI_IN: &[PortSpec] = &[PortSpec {
     name: "in",
     port_type: PortType::RealF32,
+}];
+
+/// Decoded-text egress shared by every fldigi block: newline-delimited
+/// JSON on a `PortType::Events` port (same transport as ft8/RDS/DTMF).
+/// Wire it to `ui:events`/`EventsSink`; unwired it's simply ignored,
+/// and `decoder::fldigi` tracing still carries the text for
+/// `tail decoder`.
+const FLDIGI_OUT: &[PortSpec] = &[PortSpec {
+    name: "events",
+    port_type: PortType::Events,
 }];
 
 /// The two knobs every fldigi block carries (const so they can back a
@@ -249,7 +299,7 @@ impl Block for RttyDemod {
             type_name: "RttyDemod",
             placement: Placement::Either,
             inputs: FLDIGI_IN,
-            outputs: &[],
+            outputs: FLDIGI_OUT,
             params: &[
                 ParamSpec {
                     key: "afc",
@@ -357,7 +407,7 @@ impl Block for Psk31Demod {
             type_name: "Psk31Demod",
             placement: Placement::Either,
             inputs: FLDIGI_IN,
-            outputs: &[],
+            outputs: FLDIGI_OUT,
             params: &[AFC_PARAM, RX_FREQ_PARAM],
             ai_notes: "BPSK31 via the curated fldigi psk core. Narrow, AFC pulls it in. Output: `tail decoder --category fldigi`.",
         }
@@ -434,7 +484,7 @@ impl Block for CwDemod {
             type_name: "CwDemod",
             placement: Placement::Either,
             inputs: FLDIGI_IN,
-            outputs: &[],
+            outputs: FLDIGI_OUT,
             params: &[AFC_PARAM, RX_FREQ_PARAM],
             ai_notes: "Morse/CW via the curated fldigi cw core (decode-side; the multimon MorseDemod is the other CW path). Output: `tail decoder --category fldigi`.",
         }
@@ -539,7 +589,7 @@ impl Block for FldigiAuto {
             type_name: "FldigiAuto",
             placement: Placement::Either,
             inputs: FLDIGI_IN,
-            outputs: &[],
+            outputs: FLDIGI_OUT,
             params: &[
                 ParamSpec {
                     key: "start_mode",
@@ -645,7 +695,7 @@ impl Block for Mt63Demod {
             type_name: "Mt63Demod",
             placement: Placement::Either,
             inputs: FLDIGI_IN,
-            outputs: &[],
+            outputs: FLDIGI_OUT,
             params: &[
                 ParamSpec {
                     key: "variant",
@@ -753,7 +803,7 @@ macro_rules! family_demod {
                     type_name: $type_name,
                     placement: Placement::Either,
                     inputs: FLDIGI_IN,
-                    outputs: &[],
+                    outputs: FLDIGI_OUT,
                     params: &[
                         ParamSpec {
                             key: "variant",
@@ -846,7 +896,7 @@ mod tests {
     use crate::block::Block;
 
     #[test]
-    fn specs_are_real_in_no_outputs() {
+    fn specs_are_real_in_events_out() {
         for (name, s) in [
             ("RttyDemod", RttyDemod::spec()),
             ("Psk31Demod", Psk31Demod::spec()),
@@ -854,8 +904,12 @@ mod tests {
         ] {
             assert_eq!(s.type_name, name);
             assert_eq!(s.inputs.len(), 1);
-            assert_eq!(s.outputs.len(), 0);
             assert_eq!(s.inputs[0].port_type, crate::block::PortType::RealF32);
+            // Decoded text now egresses on a single `events` port
+            // (browser `drainEvents` / node `ui:events`).
+            assert_eq!(s.outputs.len(), 1);
+            assert_eq!(s.outputs[0].name, "events");
+            assert_eq!(s.outputs[0].port_type, crate::block::PortType::Events);
         }
     }
 

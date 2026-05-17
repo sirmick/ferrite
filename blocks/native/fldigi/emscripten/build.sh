@@ -30,8 +30,20 @@ mkdir -p "$out_dir"
 
 # Same source set + include order as build.rs (shim first so the
 # replacement headers win), minus the wasm-skip branch.
+#
+# INCLUDE_FRAGMENTS: a few vendored .cxx are include fragments, not
+# standalone TUs (e.g. rsid_defs.cxx holds the RSID tables and is
+# `#include`d into rsid.cxx). build.rs skips these by name; mirror that
+# exact list here or the standalone compile fails (undeclared cRsId).
+INCLUDE_FRAGMENTS=(rsid_defs.cxx)
 srcs=()
-while IFS= read -r f; do srcs+=("$f"); done < <(
+while IFS= read -r f; do
+	skip=
+	for frag in "${INCLUDE_FRAGMENTS[@]}"; do
+		[[ "$(basename "$f")" == "$frag" ]] && skip=1 && break
+	done
+	[[ -n "$skip" ]] || srcs+=("$f")
+done < <(
 	find "$crate/shim" "$crate/vendor" -maxdepth 1 \
 		\( -name '*.cxx' -o -name '*.cpp' -o -name '*.cc' -o -name '*.c' \) | sort
 )

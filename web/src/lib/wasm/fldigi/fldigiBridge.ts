@@ -18,21 +18,27 @@ let initPromise: Promise<boolean> | undefined;
 
 /** Instantiate the Emscripten fldigi module and publish it for the
  *  wasm-bindgen snippet. Idempotent; returns whether the bridge is
- *  live. Safe to await unconditionally. */
-export function initFldigiBridge(): Promise<boolean> {
+ *  live. Safe to await unconditionally.
+ *
+ *  `moduleArg` is merged into the Emscripten `Module` (e.g. pass
+ *  `{ wasmBinary }` to instantiate from in-memory bytes instead of the
+ *  default `fetch(new URL('fldigi.wasm', import.meta.url))`). Browser
+ *  callers pass nothing — the fetch path resolves the vite-emitted
+ *  asset; only the node/vitest e2e injects bytes (its module-URL
+ *  scheme isn't a real fetch/file path). */
+export function initFldigiBridge(moduleArg?: Record<string, unknown>): Promise<boolean> {
   if (!initPromise) {
     initPromise = (async () => {
       try {
-        // Built artifact sits next to this file. @vite-ignore: the
-        // file may not exist until `pnpm wasm:build:fldigi` runs.
-        // The specifier is widened to a non-literal so svelte-check /
-        // tsc don't require the git-ignored generated module to
-        // resolve types (it's only present after wasm:build:fldigi).
-        const spec = './fldigi.mjs' as string;
-        const mod = (await import(/* @vite-ignore */ spec)) as {
-          default: () => Promise<unknown>;
-        };
-        const M = await mod.default();
+        // fldigi.{mjs,wasm} are emitted by `pnpm wasm:build:fldigi`
+        // (emsdk; git-ignored). Literal specifier so vite bundles the
+        // Emscripten ESM module and emits its
+        // `new URL('fldigi.wasm', import.meta.url)` sidecar as a
+        // hashed asset. Types resolve via the committed sibling
+        // `fldigi.d.ts` ambient declaration, so svelte-check passes
+        // whether or not the generated file is present.
+        const mod = await import('./fldigi.mjs');
+        const M = await mod.default(moduleArg);
         (globalThis as Record<string, unknown>).__FERRITE_FLDIGI__ = M;
         return true;
       } catch {

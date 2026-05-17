@@ -19,8 +19,35 @@ import initWasm, {
 } from '../wasm/runtime/runtime.js';
 
 import type { FlowgraphDoc } from '../flowgraph.js';
+import { initFldigiBridge } from '../wasm/fldigi/fldigiBridge.js';
 
 let initPromise: Promise<void> | undefined;
+
+// Block `type`s backed by the vendored fldigi cores (blocks/src/
+// fldigi_modes.rs). When any of these lands browser-side, the wasm
+// runtime's fldigi ABI is satisfied by the sibling Emscripten module —
+// which must be instantiated *before* the runtime constructs the block.
+const FLDIGI_BLOCK_TYPES = new Set([
+  'RttyDemod',
+  'Psk31Demod',
+  'CwDemod',
+  'Mt63Demod',
+  'FldigiAuto',
+  'OliviaDemod',
+  'ContestiaDemod',
+  'DominoexDemod',
+  'ThrobDemod',
+  'NavtexDemod',
+]);
+
+function docNeedsFldigi(doc: FlowgraphDoc): boolean {
+  const blocks = doc.blocks;
+  if (!blocks) return false;
+  for (const decl of Object.values(blocks)) {
+    if (FLDIGI_BLOCK_TYPES.has(decl.type)) return true;
+  }
+  return false;
+}
 
 async function ensureInit(): Promise<void> {
   if (!initPromise) {
@@ -74,6 +101,15 @@ export async function createRuntime(
   framesHint?: number,
 ): Promise<RuntimeHandle> {
   await ensureInit();
+  // Lazily instantiate the Emscripten fldigi bridge before the Rust
+  // runtime constructs any fldigi block (its wasm-bindgen snippet reads
+  // the module off `globalThis.__FERRITE_FLDIGI__`). Browser-only and
+  // only when a fldigi block is actually present — keeps the Emscripten
+  // module out of every other flowgraph's worker. Inert if the artifact
+  // is absent (decode just won't produce; nothing throws).
+  if (env === 'browser' && docNeedsFldigi(doc)) {
+    await initFldigiBridge();
+  }
   return new RuntimeHandle(JSON.stringify(doc), env, framesHint);
 }
 

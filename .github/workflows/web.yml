@@ -46,13 +46,28 @@ jobs:
         with:
           version: latest
 
+      - name: Install Emscripten
+        # `wasm:build` includes `wasm:build:fldigi`, which compiles the
+        # curated fldigi C++ to a sibling Emscripten module
+        # (web/src/lib/wasm/fldigi/fldigi.{mjs,wasm}) for the in-browser
+        # fldigi bridge. build.sh is emcc-gated and no-ops without it;
+        # install emsdk so CI actually produces the artifact (svelte-
+        # check + the browser-path fldigi e2e need it). Pinned to the
+        # dev-box emcc version for reproducibility; cached by the action.
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 5.0.7
+          actions-cache-folder: emsdk-cache
+
       - name: pnpm install
         run: pnpm install --frozen-lockfile
 
       - name: Build wasm artifacts
         # `pnpm -r check` (svelte-check) imports from
         # web/src/lib/wasm/{blocks,runtime}; both are produced by
-        # wasm-pack. Build them before lint / check / test.
+        # wasm-pack. `wasm:build:fldigi` additionally emits the
+        # Emscripten fldigi bridge (emsdk installed above). Build all
+        # before lint / check / test.
         run: pnpm --filter @ferrite/web wasm:build
 
       - name: pnpm -r lint

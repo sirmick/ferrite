@@ -19,15 +19,14 @@ import { createRuntime, splitFlowgraphForEnv } from './rustRuntime.js';
 // without going through this glue, so they stay WASM-free.)
 void initFrameDecoder();
 
-// NB: the fldigi Emscripten bridge is intentionally NOT loaded here.
-// Every shipped fldigi preset places FldigiDemod `node`-side, so the
-// browser runtime never constructs it. Eagerly importing the
-// Emscripten module in the worker breaks instantiation (its Node/WASI
-// imports — e.g. fd_fdstat_set_flags — aren't available in a browser
-// Worker). If/when a browser-side fldigi preset is genuinely wanted,
-// call `initFldigiBridge()` lazily from the FldigiDemod construction
-// path only (and on a browser-built fldigi.wasm), never unconditionally
-// at worker startup. Bridge code stays in web/src/lib/wasm/fldigi/.
+// NB: the fldigi Emscripten bridge is NOT loaded unconditionally here.
+// Eagerly importing the Emscripten module in every worker is wasteful
+// (most flowgraphs have no fldigi block). Instead it's instantiated
+// lazily and conditionally in `rustRuntime.createRuntime()` — only
+// when the browser-side split doc actually contains a fldigi block,
+// and before the Rust runtime constructs it (its wasm-bindgen snippet
+// reads the module off `globalThis.__FERRITE_FLDIGI__`). Inert if the
+// artifact is absent. Bridge code stays in web/src/lib/wasm/fldigi/.
 
 const core = new RunnerCore({
   createFrameClient: (wsUrl) =>

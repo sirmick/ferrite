@@ -21,7 +21,16 @@ default = []
 # multimon variant). Lets presets place those blocks on the browser
 # side, which removes the need for a node↔browser audio bridge in
 # decoder presets that don't otherwise need anything node-only.
-wasm    = ["dep:wasm-bindgen", "ferrite-blocks/multimon", "ferrite-blocks/rtl_433"]
+# `fldigi` registers the vendored fldigi modems (RttyDemod / Psk31Demod
+# / … ) in the browser runtime; on wasm32 their C ABI is satisfied by
+# the sibling Emscripten module via the wasm-bindgen snippet (see
+# web/src/lib/wasm/fldigi/fldigiBridge.ts + initFldigiBridge wiring).
+wasm    = [
+    "dep:wasm-bindgen",
+    "ferrite-blocks/multimon",
+    "ferrite-blocks/rtl_433",
+    "ferrite-blocks/fldigi",
+]
 
 [dependencies]
 anyhow         = "1"
