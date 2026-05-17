@@ -89,6 +89,12 @@ export const CLIENT_DEFAULTS = {
   // contact lines and the "home" marker. Empty = unknown; the map
   // then just shows decoded stations with no home/lines.
   'client.station.grid': '',
+
+  // whisper `initial_prompt` override for the VoiceTranscribe worker.
+  // Empty = use the built-in dense ham corpus (hamPrompt.ts). Edited
+  // from the Transcript tab; fanned out live to the worker by
+  // `applyControl` (see dispatch.ts), same pattern as audio volume.
+  'client.transcribe.prompt': '',
 } as const;
 
 export type ClientPath = keyof typeof CLIENT_DEFAULTS;

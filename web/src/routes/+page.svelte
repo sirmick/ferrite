@@ -3,6 +3,7 @@
   import LogPanel from '$lib/layout/LogPanel.svelte';
   import FlowPanel from '$lib/layout/FlowPanel.svelte';
   import AiPanel from '$lib/layout/AiPanel.svelte';
+  import TranscriptionPanel from '$lib/layout/TranscriptionPanel.svelte';
   import Split from '$lib/layout/Split.svelte';
   import BandsPanel from '$lib/presets/BandsPanel.svelte';
   import SettingsPanel from '$lib/presets/SettingsPanel.svelte';
@@ -17,7 +18,7 @@
   import { composeSource } from '$lib/flowgraph';
   import { onMount } from 'svelte';
 
-  type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs' | 'flow' | 'ai';
+  type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs' | 'flow' | 'ai' | 'transcript';
   let leftTab = $state<LeftTab>('bands');
 
   // Opening the Logs tab acks the error badge. While the tab is open,
@@ -190,6 +191,12 @@
               class:tab-active={leftTab === 'ai'}
               onclick={() => (leftTab = 'ai')}>AI</button
             >
+            <button
+              type="button"
+              class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
+              class:tab-active={leftTab === 'transcript'}
+              onclick={() => (leftTab = 'transcript')}>Transcript</button
+            >
           </div>
           <div class="min-h-0 flex-1">
             {#if leftTab === 'bands'}
@@ -205,6 +212,8 @@
               <FlowPanel />
             {:else if leftTab === 'ai'}
               <AiPanel />
+            {:else if leftTab === 'transcript'}
+              <TranscriptionPanel />
             {:else}
               <LogPanel />
             {/if}

@@ -1,0 +1,120 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "usb-transcribe",
+  "label": "USB voice + transcribe",
+  "description": "Upper-sideband SSB voice with in-browser speech-to-text. Same chain as the USB preset plus a VoiceTranscribe tap after the noise reduction — open the Transcript tab to read it and toggle Off / On / Transcript.",
+  "ai_notes": "USB SSB voice + whisper.cpp transcription. Identical signal path to `usb`; adds a browser-only VoiceTranscribe block between AudioNrMono and AudioSink (pure passthrough — audio is unaffected). Transcription runs in a Web Worker (Silero/energy VAD + whisper tiny.en by default). Control + transcript live in the Transcript tab.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Single_Sideband_Voice",
+  "sample_path": "samples/sigidwiki/USB_Sound.mp3",
+  "signal_wiki_image": "samples/sigidwiki/images/USB_Waterfall.png",
+  "environments": ["node", "browser"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 8000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "demod": {
+      "type": "SsbDemod",
+      "placement": "browser",
+      "placement_role": "demod",
+      "params": {
+        "sample_rate_hz": 8000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "buffer_samples": 8192
+      }
+    },
+    "resamp": {
+      "type": "RealF32Resamp",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio_nr": {
+      "type": "AudioNrMono",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "sample_rate_hz": 48000.0,
+        "blanker_enable": true,
+        "blanker_threshold_db": 15.0,
+        "blanker_hold_ms": 0.5,
+        "notch_enable": true,
+        "notch_taps": 64,
+        "notch_mu": 0.01,
+        "notch_delay": 2,
+        "spectral_enable": true,
+        "spectral_method": "mmse_lsa",
+        "spectral_block_size": 512,
+        "spectral_oversub": 2.0,
+        "spectral_floor": 0.1,
+        "neural_enable": true,
+        "neural_attenuation_db": 24.0
+      }
+    },
+    "transcribe": {
+      "type": "VoiceTranscribe",
+      "placement": "browser",
+      "when": { "audio": true },
+      "params": {
+        "mode": "on",
+        "buffer_samples": 16384
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "tee.in"],
+    ["tee.out0", "chan.in"],
+    ["tee.out1", "fft.in"],
+    ["chan.out", "demod.in"],
+    ["fft.out", "logmag.in"],
+    ["logmag.out", "ui:fft"],
+    ["demod.out", "resamp.in"],
+    ["resamp.out", "audio_nr.in"],
+    ["audio_nr.out", "transcribe.in"],
+    ["transcribe.out", "audio.in"]
+  ]
+}

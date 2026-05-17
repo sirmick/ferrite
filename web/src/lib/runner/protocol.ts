@@ -47,6 +47,11 @@ export type RunnerRequest =
 export interface LoadResult {
   readonly blocks: ReadonlyArray<string>;
   readonly audioSabs: Readonly<Record<string, SharedArrayBuffer>>;
+  /** `VoiceTranscribe` blocks' tap rings, keyed by block id. The main
+   *  thread spins up one transcription Worker per entry (Silero VAD +
+   *  whisper.cpp) that reads the SAB on its own cadence — the
+   *  worklet-less sibling of `audioSabs`. */
+  readonly transcribeSabs: Readonly<Record<string, SharedArrayBuffer>>;
   /** Browser-side `ui:<name>` Events sinks the split produced (name +
    *  the stream_id env_split allocated — identical to the node half's
    *  allocation). The main thread merges these into `pipeline.uiSinks`

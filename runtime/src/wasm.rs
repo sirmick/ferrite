@@ -10,7 +10,7 @@
 //! it, native builds compile without any wasm-bindgen dependency pulled
 //! in.
 
-use ferrite_blocks::{AudioSink, EventsSink, WsBridgeRx, WsBridgeRxF32};
+use ferrite_blocks::{AudioSink, EventsSink, VoiceTranscribe, WsBridgeRx, WsBridgeRxF32};
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 
@@ -183,6 +183,46 @@ impl RuntimeHandle {
             .block_typed::<AudioSink>(block_id)
             .ok_or_else(|| JsError::new(&format!("no AudioSink block named {block_id:?}")))?;
         Ok(sink.dropped_samples())
+    }
+
+    /// Drain accumulated samples from the named `VoiceTranscribe`
+    /// block's tap ring into `out`. Returns the number of samples
+    /// copied — shorter than `out.len()` means the ring drained dry
+    /// (transcription `off`, or simply no audio yet). The browser
+    /// runner calls this after each `tick` and pushes the samples into
+    /// the transcription worker's `SharedArrayBuffer`.
+    #[wasm_bindgen(js_name = drainTranscribe)]
+    pub fn drain_transcribe(&mut self, block_id: &str, out: &mut [f32]) -> Result<usize, JsError> {
+        let vt = self
+            .rt
+            .block_typed::<VoiceTranscribe>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no VoiceTranscribe block named {block_id:?}")))?;
+        Ok(vt.ring_mut().read(out))
+    }
+
+    /// Negotiated input sample rate (Hz) of the named `VoiceTranscribe`
+    /// block, known after the graph starts. The transcription worker
+    /// needs it to resample the tapped audio to whisper's 16 kHz mono.
+    /// Returns 0.0 before the first init.
+    #[wasm_bindgen(js_name = transcribeInputRate)]
+    pub fn transcribe_input_rate(&mut self, block_id: &str) -> Result<f64, JsError> {
+        let vt = self
+            .rt
+            .block_typed::<VoiceTranscribe>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no VoiceTranscribe block named {block_id:?}")))?;
+        Ok(vt.input_rate_hz())
+    }
+
+    /// Cumulative count of samples the named `VoiceTranscribe` tap ring
+    /// has dropped because the worker fell behind. Surfaced as a glitch
+    /// counter in the transcript panel.
+    #[wasm_bindgen(js_name = transcribeDroppedSamples)]
+    pub fn transcribe_dropped_samples(&mut self, block_id: &str) -> Result<u64, JsError> {
+        let vt = self
+            .rt
+            .block_typed::<VoiceTranscribe>(block_id)
+            .ok_or_else(|| JsError::new(&format!("no VoiceTranscribe block named {block_id:?}")))?;
+        Ok(vt.dropped_samples())
     }
 
     /// Push a batch of interleaved `[i0, q0, i1, q1, …]` IQ floats into

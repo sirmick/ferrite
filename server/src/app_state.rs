@@ -17,8 +17,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{anyhow, Result};
 use ferrite_blocks::{registry, SoapyReadback};
 use ferrite_runtime::{
-    apply_profile, compose_source, inject_narrow_fft_taps, split_for_environment, Environment,
-    FlowgraphDoc, InventorySpecRegistry, Profile, ReconfigurePlan, SourceConfig, SOURCE_ID,
+    apply_profile, compose_source, inject_narrow_fft_taps, inject_voice_transcribe,
+    split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry, Profile,
+    ReconfigurePlan, SourceConfig, SOURCE_ID,
 };
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -254,6 +255,7 @@ impl AppState {
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
         apply_profile(&mut composed, &*self.inner.profile.read().await);
+        inject_voice_transcribe(&mut composed);
         let node_half = split_for_environment(&composed, Environment::Node, &InventorySpecRegistry)
             .map_err(|e| anyhow!("env_split: {e}"))?;
         let mut out = Vec::new();
@@ -310,6 +312,7 @@ impl AppState {
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
         apply_profile(&mut composed, &*self.inner.profile.read().await);
+        inject_voice_transcribe(&mut composed);
         let mut out = Vec::with_capacity(composed.blocks.len());
         for (id, decl) in &composed.blocks {
             let Some(entry) = registry::find(&decl.type_name) else {
@@ -512,6 +515,7 @@ impl AppState {
             compose_source(&new_doc, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
         apply_profile(&mut composed, &*self.inner.profile.read().await);
+        inject_voice_transcribe(&mut composed);
         let mut pipeline = self.inner.pipeline.lock().await;
         let plan = if let Some(mount) = pipeline.as_mut() {
             Some(mount.reconfigure(&composed).await?)
@@ -558,6 +562,7 @@ impl AppState {
             .map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
         apply_profile(&mut composed, &*self.inner.profile.read().await);
+        inject_voice_transcribe(&mut composed);
         let mut pipeline = self.inner.pipeline.lock().await;
         let plan = if let Some(mount) = pipeline.as_mut() {
             Some(mount.reconfigure(&composed).await?)
@@ -581,6 +586,7 @@ impl AppState {
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
         apply_profile(&mut composed, &*self.inner.profile.read().await);
+        inject_voice_transcribe(&mut composed);
         let mount = spawn_preset(&composed, self.inner.frames.clone(), self.inner.tick_period)?;
         *guard = Some(mount);
         Ok(())

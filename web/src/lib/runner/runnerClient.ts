@@ -37,6 +37,11 @@ export class FlowgraphRunner {
      *  `FrameClient` on `streamId` (same channel pattern as `onDiag`,
      *  so test doubles that ignore it stay unaffected). */
     private readonly onEvents?: (streamId: number, lines: string[]) => void,
+    /** One-shot: the negotiated input sample rate of a
+     *  `VoiceTranscribe` block, forwarded to the matching
+     *  transcription Worker so it can resample to 16 kHz. Same
+     *  optional-callback pattern as `onEvents`. */
+    private readonly onTranscribeRate?: (blockId: string, rateHz: number) => void,
   ) {
     this.worker.onmessage = (ev) => this.onResponse(ev.data);
   }
@@ -92,7 +97,9 @@ export class FlowgraphRunner {
     });
   }
 
-  private onResponse(resp: RunnerResponse | DiagMessage | EventsMessage): void {
+  private onResponse(
+    resp: RunnerResponse | DiagMessage | EventsMessage | TranscribeRateMessage,
+  ): void {
     // Unsolicited diagnostic log from the worker — threaded out
     // through an optional callback rather than a new protocol kind,
     // so test doubles that don't care about diags stay unaffected.
@@ -103,6 +110,11 @@ export class FlowgraphRunner {
     if ((resp as EventsMessage).kind === 'events') {
       const m = resp as EventsMessage;
       this.onEvents?.(m.streamId, m.lines);
+      return;
+    }
+    if ((resp as TranscribeRateMessage).kind === 'transcribeRate') {
+      const m = resp as TranscribeRateMessage;
+      this.onTranscribeRate?.(m.blockId, m.rateHz);
       return;
     }
     const r = resp as RunnerResponse;
@@ -126,6 +138,12 @@ interface EventsMessage {
   readonly kind: 'events';
   readonly streamId: number;
   readonly lines: string[];
+}
+
+interface TranscribeRateMessage {
+  readonly kind: 'transcribeRate';
+  readonly blockId: string;
+  readonly rateHz: number;
 }
 
 type SuccessResp = Extract<RunnerResponse, { ok: true }>;

@@ -77,6 +77,7 @@ pub mod ssb_modulator;
 pub mod stereo_decoder;
 pub mod tee_iq_f32;
 pub mod tee_real_f32;
+pub mod voice_transcribe;
 pub mod wav;
 pub mod ws_bridge;
 #[cfg(feature = "wspr")]
@@ -147,6 +148,7 @@ pub use ssb_modulator::{SsbModulator, SsbModulatorParams};
 pub use stereo_decoder::{StereoDecoder, StereoDecoderParams};
 pub use tee_iq_f32::TeeIqF32;
 pub use tee_real_f32::TeeRealF32;
+pub use voice_transcribe::{VoiceTranscribe, VoiceTranscribeParams};
 pub use ws_bridge::{
     BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxF32, WsBridgeRxParams,
     WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,

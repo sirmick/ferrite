@@ -39,6 +39,9 @@ export interface RunnerEnv {
 
 const DEFAULT_TICK_MS = 10;
 const DEFAULT_AUDIO_SINK_CAPACITY = 8192;
+/** Mirror of `VoiceTranscribe`'s Rust-side default tap-ring capacity
+ *  (`DEFAULT_BUFFER_SAMPLES` = ~340 ms at 48 kHz). */
+const DEFAULT_TRANSCRIBE_CAPACITY = 16384;
 
 interface AudioBinding {
   readonly blockId: string;
@@ -49,6 +52,20 @@ interface AudioBinding {
   /** Cumulative `AudioSink::dropped_samples` snapshot taken at the last
    *  diag report, so the next tick can print the delta. */
   droppedBaseline: bigint;
+}
+
+/** A `VoiceTranscribe` tap binding. Same drain-into-SAB shape as
+ *  `AudioBinding`, but the SAB is consumed by a transcription Worker
+ *  (Silero VAD + whisper.cpp) instead of an `AudioWorkletNode`. The
+ *  source sample rate is posted out-of-band once, the first tick it's
+ *  known, so the Worker can resample to whisper's 16 kHz mono. */
+interface TranscribeBinding {
+  readonly blockId: string;
+  readonly writer: AudioRingWriter;
+  readonly scratch: Float32Array;
+  /** True once the negotiated input rate has been posted to the main
+   *  thread — it's static for the life of the graph, so post once. */
+  rateSent: boolean;
 }
 
 /** Per-bridge inbound counter. Incremented from the WS subscription
@@ -81,6 +98,7 @@ interface LoadedState {
   client: FrameClient;
   subscribers: Array<() => void>;
   audio: AudioBinding[];
+  transcribe: TranscribeBinding[];
   uiEvents: UiEventsBinding[];
   tickTimer: ReturnType<typeof setTimeout> | null;
   running: boolean;
@@ -162,13 +180,15 @@ export class RunnerCore {
     try {
       rt = await this.env.createRuntime(splitDoc, 'browser');
       rt.init();
-      const { subscribers, audio, audioSabs, bridges, uiEvents } = wireBlocks(splitDoc, client, rt);
+      const { subscribers, audio, audioSabs, transcribe, transcribeSabs, bridges, uiEvents } =
+        wireBlocks(splitDoc, client, rt);
       const blocks = Object.keys(splitDoc.blocks ?? {});
       this.loaded = {
         rt,
         client,
         subscribers,
         audio,
+        transcribe,
         uiEvents,
         tickTimer: null,
         running: false,
@@ -180,6 +200,7 @@ export class RunnerCore {
       return {
         blocks,
         audioSabs,
+        transcribeSabs,
         uiSinks: uiEvents.map((u) => ({ name: u.name, stream_id: u.streamId })),
       };
     } catch (err) {
@@ -210,6 +231,19 @@ export class RunnerCore {
           const n = state.rt.drainAudio(a.blockId, a.scratch);
           if (n > 0) a.writer.write(a.scratch.subarray(0, n));
           a.drained += n;
+        }
+        // VoiceTranscribe tap → SAB the transcription Worker reads.
+        // Empty when mode is `off` (the block never fills its ring).
+        for (const t of state.transcribe) {
+          const n = state.rt.drainTranscribe(t.blockId, t.scratch);
+          if (n > 0) t.writer.write(t.scratch.subarray(0, n));
+          if (!t.rateSent) {
+            const rateHz = state.rt.transcribeInputRate(t.blockId);
+            if (rateHz > 0) {
+              postTranscribeRate(t.blockId, rateHz);
+              t.rateSent = true;
+            }
+          }
         }
         // Loopback browser-side decoder events to the main thread on
         // the same stream_id the node WS path would have used — the
@@ -355,6 +389,20 @@ function postEvents(streamId: number, lines: string[]): void {
   }
 }
 
+/** One-shot out-of-band notify (same channel shape as `postDiag`):
+ *  the negotiated input sample rate of a `VoiceTranscribe` block, sent
+ *  the first tick it's known. `FlowgraphRunner` forwards it to the
+ *  matching transcription Worker so it can resample to 16 kHz. No-op
+ *  outside a Worker (tests). */
+function postTranscribeRate(blockId: string, rateHz: number): void {
+  const g = globalThis as {
+    postMessage?: (msg: unknown) => void;
+  };
+  if (typeof g.postMessage === 'function') {
+    g.postMessage({ kind: 'transcribeRate', blockId, rateHz });
+  }
+}
+
 /** `__ui_<name>_<stream_id>` — env_split's id for a browser-side
  *  `ui:<name>` Events sink. The name may contain underscores; the
  *  stream_id is the trailing run of digits. */
@@ -368,12 +416,16 @@ function wireBlocks(
   subscribers: Array<() => void>;
   audio: AudioBinding[];
   audioSabs: Record<string, SharedArrayBuffer>;
+  transcribe: TranscribeBinding[];
+  transcribeSabs: Record<string, SharedArrayBuffer>;
   bridges: BridgeCounter[];
   uiEvents: UiEventsBinding[];
 } {
   const subscribers: Array<() => void> = [];
   const audio: AudioBinding[] = [];
   const audioSabs: Record<string, SharedArrayBuffer> = {};
+  const transcribe: TranscribeBinding[] = [];
+  const transcribeSabs: Record<string, SharedArrayBuffer> = {};
   const bridges: BridgeCounter[] = [];
   const uiEvents: UiEventsBinding[] = [];
   for (const [blockId, raw] of Object.entries(doc.blocks ?? {})) {
@@ -458,9 +510,21 @@ function wireBlocks(
         droppedBaseline: 0n,
       });
       audioSabs[blockId] = writer.sab;
+    } else if (block.type === 'VoiceTranscribe') {
+      const capacity = nextPow2(
+        Number(block.params?.buffer_samples ?? DEFAULT_TRANSCRIBE_CAPACITY),
+      );
+      const writer = AudioRingWriter.create(capacity);
+      transcribe.push({
+        blockId,
+        writer,
+        scratch: new Float32Array(capacity),
+        rateSent: false,
+      });
+      transcribeSabs[blockId] = writer.sab;
     }
   }
-  return { subscribers, audio, audioSabs, bridges, uiEvents };
+  return { subscribers, audio, audioSabs, transcribe, transcribeSabs, bridges, uiEvents };
 }
 
 function toProtocolState(s: string): RuntimeState {

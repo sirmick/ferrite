@@ -1,0 +1,209 @@
+//! Runtime injection of a `VoiceTranscribe` tap immediately upstream of
+//! every `AudioSink`, so in-browser speech-to-text is available on
+//! *any* preset with an audio chain — no per-preset JSON, no
+//! hand-authored block. Mirrors [`inject_narrow_fft`](crate::inject_narrow_fft):
+//! a compose-time graph splice that runs before `split_for_environment`.
+//!
+//! ```text
+//!   …NR/resamp… ─► audio.in                 (before)
+//!
+//!   …NR/resamp… ─► __voice_transcribe_audio.in
+//!   __voice_transcribe_audio.out ─► audio.in (after)
+//! ```
+//!
+//! `VoiceTranscribe` is a pure RealF32 passthrough (`Placement::WasmOnly`,
+//! same browser side as `AudioSink`), so the audio bytes are unchanged
+//! and no cross-env wire is created. Its `mode` defaults to `"off"` —
+//! zero cost until the operator engages it from the block-settings
+//! panel (the same generic `BlockParams` surface as Audio / NR; D24) or
+//! the transcription panel. Run *after* `apply_profile` so a profile
+//! with `audio: false` has already stripped the `AudioSink` chain and
+//! this pass simply finds nothing to do.
+//!
+//! Idempotent and conservative: skips if a `VoiceTranscribe` already
+//! exists (a preset opted in by hand), if the synthetic id would
+//! collide, or if an `AudioSink` has no producer wire.
+
+use serde_json::json;
+
+use crate::doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
+
+/// Synthetic-block id prefix. `__` matches the convention `env_split`
+/// and `inject_narrow_fft` already use; no registry block starts `__`.
+const PREFIX: &str = "__voice_transcribe";
+
+/// Splice a `VoiceTranscribe` before every `AudioSink` in `doc`.
+///
+/// No-op when the preset has no `AudioSink` (no audio chain — e.g. a
+/// pure decoder/record preset) or already carries a `VoiceTranscribe`
+/// (hand-authored opt-in: leave the operator's wiring alone).
+pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc) {
+    let already_present = doc
+        .blocks
+        .values()
+        .any(|b| b.type_name == "VoiceTranscribe")
+        || doc.blocks.keys().any(|k| k.starts_with(PREFIX));
+    if already_present {
+        return;
+    }
+
+    let sink_ids: Vec<String> = doc
+        .blocks
+        .iter()
+        .filter(|(_, b)| b.type_name == "AudioSink")
+        .map(|(id, _)| id.clone())
+        .collect();
+    if sink_ids.is_empty() {
+        return;
+    }
+
+    for sink_id in sink_ids {
+        let vt_id = format!("{PREFIX}_{sink_id}");
+        if doc.blocks.contains_key(&vt_id) {
+            // Refuse to clobber an operator-authored block; better to
+            // leave transcription absent for this sink than mangle it.
+            eprintln!(
+                "inject_voice_transcribe: id collision for sink {sink_id:?}; skipping ({vt_id:?})",
+            );
+            continue;
+        }
+
+        // Re-point the AudioSink's producer wire(s) through the new
+        // tap: `<producer> → audio.in` becomes
+        // `<producer> → __vt.in` and we add `__vt.out → audio.in`.
+        let sink_in = format!("{sink_id}.in");
+        let mut repointed = false;
+        for wire in doc.wires.iter_mut() {
+            if wire.dst == sink_in {
+                wire.dst = format!("{vt_id}.in");
+                repointed = true;
+            }
+        }
+        if !repointed {
+            // AudioSink with no producer — nothing to tap. Don't
+            // materialise a dangling block.
+            continue;
+        }
+        doc.wires.push(Wire::new(format!("{vt_id}.out"), sink_in));
+
+        // WasmOnly, browser side (same as the AudioSink it precedes);
+        // `mode: "off"` is the zero-cost default.
+        doc.blocks.insert(
+            vt_id,
+            BlockInstanceDecl {
+                type_name: "VoiceTranscribe".into(),
+                params: Some(json!({ "mode": "off" })),
+                placement: Some(Environment::Browser),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doc::FlowgraphDoc;
+
+    fn parse(json: &[u8]) -> FlowgraphDoc {
+        FlowgraphDoc::from_json(json).expect("doc parses")
+    }
+
+    #[test]
+    fn no_audio_sink_means_no_injection() {
+        let mut doc = parse(
+            br#"{
+                "name": "noop",
+                "environments": ["node"],
+                "blocks": {
+                    "src":  {"type": "SineSource"},
+                    "sink": {"type": "FileIqSink"}
+                },
+                "wires": [["src.out", "sink.in"]]
+            }"#,
+        );
+        let (b, w) = (doc.blocks.len(), doc.wires.len());
+        inject_voice_transcribe(&mut doc);
+        assert_eq!(doc.blocks.len(), b);
+        assert_eq!(doc.wires.len(), w);
+    }
+
+    #[test]
+    fn splices_before_audio_sink() {
+        let mut doc = parse(
+            br#"{
+                "name": "audio",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src":   {"type": "SineSource"},
+                    "demod": {"type": "FmDemod"},
+                    "nr":    {"type": "AudioNrMono", "placement": "browser"},
+                    "audio": {"type": "AudioSink", "placement": "browser"}
+                },
+                "wires": [
+                    ["src.out", "demod.in"],
+                    ["demod.out", "nr.in"],
+                    ["nr.out", "audio.in"]
+                ]
+            }"#,
+        );
+        inject_voice_transcribe(&mut doc);
+
+        let vt = "__voice_transcribe_audio";
+        assert_eq!(
+            doc.blocks.get(vt).map(|b| b.type_name.as_str()),
+            Some("VoiceTranscribe"),
+        );
+        // nr now feeds the tap, the tap feeds the sink.
+        assert!(doc
+            .wires
+            .iter()
+            .any(|w| w.src == "nr.out" && w.dst == format!("{vt}.in")));
+        assert!(doc
+            .wires
+            .iter()
+            .any(|w| w.src == format!("{vt}.out") && w.dst == "audio.in"));
+        // No remaining direct nr→audio wire.
+        assert!(!doc
+            .wires
+            .iter()
+            .any(|w| w.src == "nr.out" && w.dst == "audio.in"));
+    }
+
+    #[test]
+    fn idempotent_and_respects_hand_authored() {
+        let mut doc = parse(
+            br#"{
+                "name": "audio",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src":   {"type": "SineSource"},
+                    "audio": {"type": "AudioSink", "placement": "browser"}
+                },
+                "wires": [["src.out", "audio.in"]]
+            }"#,
+        );
+        inject_voice_transcribe(&mut doc);
+        let after_first = (doc.blocks.len(), doc.wires.len());
+        // Second pass: the `__voice_transcribe_*` already present → no-op.
+        inject_voice_transcribe(&mut doc);
+        assert_eq!((doc.blocks.len(), doc.wires.len()), after_first);
+
+        // Hand-authored VoiceTranscribe → pass leaves it entirely alone.
+        let mut hand = parse(
+            br#"{
+                "name": "hand",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src":   {"type": "SineSource"},
+                    "vt":    {"type": "VoiceTranscribe", "placement": "browser"},
+                    "audio": {"type": "AudioSink", "placement": "browser"}
+                },
+                "wires": [["src.out", "vt.in"], ["vt.out", "audio.in"]]
+            }"#,
+        );
+        let before = (hand.blocks.len(), hand.wires.len());
+        inject_voice_transcribe(&mut hand);
+        assert_eq!((hand.blocks.len(), hand.wires.len()), before);
+    }
+}

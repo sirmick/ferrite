@@ -25,6 +25,8 @@ import { AUDIO_RING_PROCESSOR_NAME } from '$lib/audio/audioRingProcessor';
 // the page JS without a hand-written build step.
 import audioWorkletUrl from '$lib/audio/audioRingProcessor?worker&url';
 import { logs } from '$lib/logs/store.svelte';
+import { clientControls } from '$lib/control/clientStore.svelte';
+import { transcript } from '$lib/transcribe/store.svelte';
 import type { FlowgraphDoc } from '$lib/flowgraph';
 
 import { FlowgraphRunner } from './runnerClient';
@@ -78,12 +80,20 @@ class BrowserRuntime {
    *  worker drained, to loopback into the main-thread FrameClient.
    *  Unset → events are dropped (no consumer; harmless). */
   onDecodedEvents: ((streamId: number, lines: string[]) => void) | undefined;
+  /** Set by the page: resolves the live VFO absolute frequency (Hz) so
+   *  transcript segments are stamped with the band they were heard on.
+   *  Injected (not imported) to avoid a tuning→dispatch→browserRuntime
+   *  import cycle. Unset → segments stamp `vfoHz: null`. */
+  vfoHzProvider: (() => number | null) | undefined;
 
   private runner: FlowgraphRunner | undefined;
   private worker: Worker | undefined;
   private audioCtx: AudioContext | undefined;
   private workletReady: Promise<void> | undefined;
   private audioNodes: MountedAudioNode[] = [];
+  /** One transcription Worker per `VoiceTranscribe` block, keyed by
+   *  block id. Reads the tap SAB directly; not an audio node. */
+  private transcribeWorkers = new Map<string, Worker>();
   private lastStructuralFingerprint: string | undefined;
   /** Serialise concurrent reload/start/stop so a rapid preset swap
    *  doesn't interleave two lifecycles against one runner. */
@@ -117,6 +127,7 @@ class BrowserRuntime {
           logs.push('client', 'info', text);
         },
         (streamId, lines) => this.onDecodedEvents?.(streamId, lines),
+        (blockId, rateHz) => this.forwardTranscribeRate(blockId, rateHz),
       );
     } catch (err) {
       this.errorMessage = errorMessage(err);
@@ -241,6 +252,7 @@ class BrowserRuntime {
       // something is already loaded. The first call is a no-op because
       // we haven't loaded anything yet; the worker tolerates stop-on-empty.
       await this.tearDownAudioNodes();
+      this.tearDownTranscribeWorkers();
       try {
         await this.runner.stop();
       } catch {
@@ -256,6 +268,7 @@ class BrowserRuntime {
       this.loadedBlocks = result.blocks;
       this.uiSinks = result.uiSinks;
       await this.attachAudioNodes(result.audioSabs);
+      this.attachTranscribeWorkers(result.transcribeSabs);
       this.runnerState = 'loaded';
       const audioCount = Object.keys(result.audioSabs).length;
       logs.push(
@@ -390,6 +403,96 @@ class BrowserRuntime {
     this.audioNodes = [];
   }
 
+  /** Spin up one transcription Worker per `VoiceTranscribe` tap SAB.
+   *  The Worker reads the ring on its own clock; we just forward
+   *  results into the transcript store. Worklet-less sibling of
+   *  `attachAudioNodes`. */
+  private attachTranscribeWorkers(
+    transcribeSabs: Readonly<Record<string, SharedArrayBuffer>>,
+  ): void {
+    const ids = Object.keys(transcribeSabs);
+    if (ids.length === 0) {
+      transcript.setStatus('idle');
+      return;
+    }
+    for (const [blockId, sab] of Object.entries(transcribeSabs)) {
+      try {
+        // Worker options must be statically analyzable for Vite's
+        // worker plugin — a template-literal `name` trips "value is
+        // not static" (and broke every audio preset once VoiceTranscribe
+        // became ubiquitous). The name is only a devtools label; keep
+        // it constant and disambiguate per block via the message
+        // payloads / `transcript` store keying instead.
+        const w = new Worker(new URL('../transcribe/transcribeWorker.ts', import.meta.url), {
+          type: 'module',
+          name: 'ferrite-transcribe',
+        });
+        w.onmessage = (ev: MessageEvent) => this.onTranscribeMessage(ev.data);
+        w.onerror = (ev) => transcript.setStatus('error', `worker: ${ev.message || 'load failed'}`);
+        w.postMessage({ type: 'init', sab, blockId });
+        // Seed the worker with the persisted prompt override (empty →
+        // it uses its built-in ham corpus).
+        const p = clientControls.get('client.transcribe.prompt');
+        if (p) w.postMessage({ type: 'prompt', text: p });
+        this.transcribeWorkers.set(blockId, w);
+        logs.push('client', 'info', `transcribe worker attached: block=${blockId}`);
+      } catch (err) {
+        transcript.setStatus('error', errorMessage(err));
+        logs.push('client', 'error', `transcribe worker ${blockId}: ${errorMessage(err)}`);
+      }
+    }
+  }
+
+  private tearDownTranscribeWorkers(): void {
+    for (const w of this.transcribeWorkers.values()) {
+      try {
+        w.postMessage({ type: 'stop' });
+        w.terminate();
+      } catch {
+        /* best effort */
+      }
+    }
+    this.transcribeWorkers.clear();
+    transcript.setStatus('idle');
+  }
+
+  private forwardTranscribeRate(blockId: string, rateHz: number): void {
+    this.transcribeWorkers.get(blockId)?.postMessage({ type: 'rate', rateHz });
+  }
+
+  /** Push an edited whisper `initial_prompt` to every live
+   *  transcription Worker. Called by `applyControl` when
+   *  `client.transcribe.prompt` changes (off-thread fan-out, same
+   *  pattern as audio volume → worklet). */
+  setTranscribePrompt(text: string): void {
+    for (const w of this.transcribeWorkers.values()) {
+      w.postMessage({ type: 'prompt', text });
+    }
+  }
+
+  /** Worker → store bridge. Segment / status / glitch-counter messages
+   *  land here and update the reactive transcript store the panel
+   *  renders. */
+  private onTranscribeMessage(msg: { type: string; [k: string]: unknown }): void {
+    if (msg.type === 'segment') {
+      transcript.push({
+        atMs: msg.atMs as number,
+        vfoHz: this.vfoHzProvider?.() ?? null,
+        t0: msg.t0 as number,
+        t1: msg.t1 as number,
+        text: msg.text as string,
+        tokens: (msg.tokens as { text: string; p: number }[]) ?? [],
+        confidence: msg.confidence as number,
+        noSpeechProb: msg.noSpeechProb as number,
+      });
+    } else if (msg.type === 'status') {
+      transcript.setStatus(msg.status as never, String(msg.detail ?? ''));
+      transcript.modelName = String(msg.model ?? '');
+    } else if (msg.type === 'dropped') {
+      transcript.droppedSamples = msg.total as number;
+    }
+  }
+
   /** Run lifecycle ops one-at-a-time so a fast preset flip doesn't
    *  interleave load/start/stop. Errors stay in-channel — the next op
    *  still runs. */
@@ -413,6 +516,7 @@ class BrowserRuntime {
     const oldRunner = this.runner;
     const oldAudioCtx = this.audioCtx;
     const oldNodes = this.audioNodes;
+    this.tearDownTranscribeWorkers();
     this.runner = undefined;
     this.worker = undefined;
     this.audioCtx = undefined;

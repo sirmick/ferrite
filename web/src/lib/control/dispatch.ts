@@ -84,6 +84,10 @@ export async function applyControl(path: string, value: unknown): Promise<void> 
       // store.
       if (path === 'client.audio.volume') audioPanel.setVolume(value as number);
       else if (path === 'client.audio.muted') audioPanel.setMuted(value as boolean);
+      // The whisper prompt has an off-thread consumer too (the
+      // transcription Worker) — push it live, same fan-out shape.
+      else if (path === 'client.transcribe.prompt')
+        browserRuntime.setTranscribePrompt(value as string);
       return;
     }
     default:

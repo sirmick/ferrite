@@ -54,6 +54,9 @@ export default ts.config(
       'src/lib/wasm/runtime/',
       // Generated Emscripten module; fldigiBridge.ts stays linted.
       'src/lib/wasm/fldigi/fldigi.mjs',
+      // Generated whisper.cpp Emscripten glue (minified, `@ts-nocheck`);
+      // whisper.d.ts in the same dir is hand-written and stays linted.
+      'src/lib/wasm/whisper/whisper.mjs',
     ],
   },
 );

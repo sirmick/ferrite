@@ -145,6 +145,14 @@ class PipelineStore {
       browserRuntime.onDecodedEvents = (streamId, lines) => {
         this.client?.injectLocal(streamId, new TextEncoder().encode(lines.join('\n')));
       };
+      // Stamp transcript segments with the live VFO frequency so the
+      // transcript doubles as a band log. Injected (not imported by
+      // browserRuntime) to avoid a tuning→dispatch→browserRuntime cycle.
+      browserRuntime.vfoHzProvider = () => {
+        const center = (this.source?.params as Record<string, unknown> | undefined)?.center_freq_hz;
+        if (typeof center !== 'number' || !Number.isFinite(center)) return null;
+        return center + (this.currentVfoOffset() ?? 0);
+      };
       this.phase = 'ready';
       logs.push('client', 'info', `pipeline init: status=${st}, source=${src.type}`);
     } catch (err) {
