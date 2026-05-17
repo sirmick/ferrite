@@ -46,6 +46,16 @@ pub struct PacketDemodParams {
     /// reads the live rate at `init()` / `update_rates()` and warns
     /// if it doesn't match `PACKET_INPUT_RATE_HZ`.
     pub sample_rate_hz: f32,
+    /// APRS display mode (multimon `aprs_mode`, process-global, set at
+    /// construction). When `true` (default — this block is
+    /// APRS-primary and the `events` port / `ui:aprs` view need it)
+    /// AX.25 UI/0xF0 frames print in compact TNC2 form
+    /// `APRS: SRC>DEST,path:info` that `aprs.rs` parses. The trade-off
+    /// is that multimon then prints *only* UI/0xF0 frames —
+    /// connected-mode / BBS packet is suppressed. Set `false` for a
+    /// general AX.25 monitor (verbose multi-line form, all frame
+    /// types) at the cost of structured APRS events.
+    pub aprs_mode: bool,
 }
 
 impl Default for PacketDemodParams {
@@ -53,6 +63,7 @@ impl Default for PacketDemodParams {
         Self {
             #[allow(clippy::cast_precision_loss)]
             sample_rate_hz: PACKET_INPUT_RATE_HZ as f32,
+            aprs_mode: true,
         }
     }
 }
@@ -81,8 +92,9 @@ impl PacketDemod {
         }
         // TNC2 APRS display so the `events` parser sees
         // `APRS: SRC>DEST,path:info`. Process-global, AX.25-only —
-        // doesn't disturb the POCSAG/FLEX/DTMF multimon blocks.
-        set_aprs_mode(true);
+        // doesn't disturb the POCSAG/FLEX/DTMF multimon blocks. Off
+        // for a general AX.25 monitor (keeps connected-mode frames).
+        set_aprs_mode(params.aprs_mode);
         Ok(Self {
             decoders: vec![
                 MultimonDemod::new(Decoder::Afsk1200),
@@ -260,6 +272,7 @@ mod tests {
     fn rejects_bad_params() {
         assert!(PacketDemod::new(PacketDemodParams {
             sample_rate_hz: 0.0,
+            ..PacketDemodParams::default()
         })
         .is_err());
     }

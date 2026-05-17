@@ -134,7 +134,16 @@ fn aprs_decodes_from_real_iq_capture() {
         "non-finite audio into PacketDemod"
     );
 
-    let mut pkt = PacketDemod::new(PacketDemodParams::default()).expect("packet demod");
+    // General AX.25 monitor mode (aprs_mode off): the 145.07 capture
+    // is connected-mode / BBS packet, not APRS UI/0xF0 — multimon's
+    // APRS display suppresses non-UI frames entirely. This test is the
+    // RF-chain smoke test; the APRS-events path is covered by
+    // packet_e2e's contract test (which keeps the default aprs_mode).
+    let mut pkt = PacketDemod::new(PacketDemodParams {
+        aprs_mode: false,
+        ..PacketDemodParams::default()
+    })
+    .expect("packet demod");
     let lines = with_packet_capture(|| {
         let mut idx = 0;
         while idx < audio.len() {
