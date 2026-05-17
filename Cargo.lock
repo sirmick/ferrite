@@ -455,6 +455,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wasm-bindgen",
+ "web-time",
 ]
 
 [[package]]

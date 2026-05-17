@@ -25,11 +25,17 @@ default = []
 # / … ) in the browser runtime; on wasm32 their C ABI is satisfied by
 # the sibling Emscripten module via the wasm-bindgen snippet (see
 # web/src/lib/wasm/fldigi/fldigiBridge.ts + initFldigiBridge wiring).
+# `ft8` / `wspr` are the slot-aligned weak-signal decoders (ft8_lib /
+# wsprd cross-compile to wasm32 directly); they use `web_time` so the
+# UTC-slot clock works browser-side. With these every `Placement::
+# Either` block is genuinely browser-runnable — no more "fake Either".
 wasm    = [
     "dep:wasm-bindgen",
     "ferrite-blocks/multimon",
     "ferrite-blocks/rtl_433",
     "ferrite-blocks/fldigi",
+    "ferrite-blocks/ft8",
+    "ferrite-blocks/wspr",
 ]
 
 [dependencies]

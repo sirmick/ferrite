@@ -38,7 +38,10 @@
 //! `wasm32-unknown-unknown`. Shipped presets place it `node` so the
 //! decode happens once server-side and fans out via the log stream.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+// `web_time` re-exports `std::time` on native and uses the JS clock on
+// wasm32 (where `std::time::SystemTime::now()` panics) — lets the
+// UTC-slot-aligned decoder run browser-side.
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 use ferrite_liquid_dsp::{FirdecimCx, Nco};

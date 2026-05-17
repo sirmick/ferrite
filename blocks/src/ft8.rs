@@ -41,7 +41,10 @@
 //! LDPC work happens once on the server and the decoded text fans
 //! out via the existing log stream — cheaper for multi-tab UX.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+// `web_time` re-exports `std::time` on native and uses the JS clock on
+// wasm32 (where `std::time::SystemTime::now()` panics) — lets the
+// UTC-slot-aligned decoder run browser-side.
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 use ferrite_ft8::{Monitor, MonitorConfig, Protocol};
