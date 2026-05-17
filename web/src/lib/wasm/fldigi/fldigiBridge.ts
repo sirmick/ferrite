@@ -25,9 +25,13 @@ export function initFldigiBridge(): Promise<boolean> {
       try {
         // Built artifact sits next to this file. @vite-ignore: the
         // file may not exist until `pnpm wasm:build:fldigi` runs.
-        const mod: { default: () => Promise<unknown> } = await import(
-          /* @vite-ignore */ './fldigi.mjs'
-        );
+        // The specifier is widened to a non-literal so svelte-check /
+        // tsc don't require the git-ignored generated module to
+        // resolve types (it's only present after wasm:build:fldigi).
+        const spec = './fldigi.mjs' as string;
+        const mod = (await import(/* @vite-ignore */ spec)) as {
+          default: () => Promise<unknown>;
+        };
         const M = await mod.default();
         (globalThis as Record<string, unknown>).__FERRITE_FLDIGI__ = M;
         return true;

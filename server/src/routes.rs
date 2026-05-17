@@ -888,9 +888,10 @@ async fn ws_ui_views_loop(mut socket: WebSocket, state: AppState) {
                         }
                     }
                     Message::Close(_) => break,
-                    Message::Ping(p) => {
-                        if socket.send(Message::Pong(p)).await.is_err() { break; }
-                    }
+                    Message::Ping(p) => match socket.send(Message::Pong(p)).await {
+                        Ok(()) => {}
+                        Err(_) => break,
+                    },
                     _ => {}
                 }
             }
