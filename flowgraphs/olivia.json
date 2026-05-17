@@ -100,7 +100,10 @@
     "olivia": {
       "type": "OliviaDemod",
       "placement": "node",
-      "params": { "variant": "olivia-8-500", "afc": true }
+      "params": {
+        "variant": "olivia-8-500",
+        "afc": true
+      }
     }
   },
   "wires": [
@@ -143,6 +146,10 @@
     [
       "fft.out",
       "logmag.in"
+    ],
+    [
+      "olivia.events",
+      "ui:fldigi"
     ],
     [
       "logmag.out",

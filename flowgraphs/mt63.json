@@ -80,6 +80,7 @@
     ["audio_resamp.out", "audio_nr.in"],
     ["audio_nr.out", "audio.in"],
     ["fft.out", "logmag.in"],
+    ["mt63.events", "ui:fldigi"],
     ["logmag.out", "ui:fft"]
   ]
 }

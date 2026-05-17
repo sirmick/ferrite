@@ -15,6 +15,7 @@ import type { Component } from 'svelte';
 import Ft8View from './Ft8View.svelte';
 import AdsbView from './AdsbView.svelte';
 import AprsView from './AprsView.svelte';
+import FldigiView from './FldigiView.svelte';
 
 export interface AdvancedView {
   /** UI-sink name the runtime advertises (`pipeline.uiSinks[sink]`)
@@ -32,6 +33,8 @@ export const ADVANCED_VIEWS: AdvancedView[] = [
   { sink: 'adsb', label: 'ADS-B', component: AdsbView },
   // APRS (AX.25 packet) — station map + table + packet console.
   { sink: 'aprs', label: 'APRS', component: AprsView },
+  // fldigi family (RTTY/PSK31/CW/MT63/Olivia/…/RSID) — text console.
+  { sink: 'fldigi', label: 'fldigi', component: FldigiView },
 ];
 
 /** The advanced view for the active preset, or null when none of the

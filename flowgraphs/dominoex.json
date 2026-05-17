@@ -100,7 +100,10 @@
     "dominoex": {
       "type": "DominoexDemod",
       "placement": "node",
-      "params": { "variant": "dominoex16", "afc": true }
+      "params": {
+        "variant": "dominoex16",
+        "afc": true
+      }
     }
   },
   "wires": [
@@ -143,6 +146,10 @@
     [
       "fft.out",
       "logmag.in"
+    ],
+    [
+      "dominoex.events",
+      "ui:fldigi"
     ],
     [
       "logmag.out",

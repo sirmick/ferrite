@@ -100,7 +100,10 @@
     "throb": {
       "type": "ThrobDemod",
       "placement": "node",
-      "params": { "variant": "throb4", "afc": true }
+      "params": {
+        "variant": "throb4",
+        "afc": true
+      }
     }
   },
   "wires": [
@@ -143,6 +146,10 @@
     [
       "fft.out",
       "logmag.in"
+    ],
+    [
+      "throb.events",
+      "ui:fldigi"
     ],
     [
       "logmag.out",

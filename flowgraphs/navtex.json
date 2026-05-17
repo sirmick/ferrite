@@ -100,7 +100,10 @@
     "navtex": {
       "type": "NavtexDemod",
       "placement": "node",
-      "params": { "variant": "navtex", "afc": true }
+      "params": {
+        "variant": "navtex",
+        "afc": true
+      }
     }
   },
   "wires": [
@@ -143,6 +146,10 @@
     [
       "fft.out",
       "logmag.in"
+    ],
+    [
+      "navtex.events",
+      "ui:fldigi"
     ],
     [
       "logmag.out",

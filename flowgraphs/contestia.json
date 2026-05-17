@@ -100,7 +100,10 @@
     "contestia": {
       "type": "ContestiaDemod",
       "placement": "node",
-      "params": { "variant": "contestia-8-500", "afc": true }
+      "params": {
+        "variant": "contestia-8-500",
+        "afc": true
+      }
     }
   },
   "wires": [
@@ -143,6 +146,10 @@
     [
       "fft.out",
       "logmag.in"
+    ],
+    [
+      "contestia.events",
+      "ui:fldigi"
     ],
     [
       "logmag.out",
