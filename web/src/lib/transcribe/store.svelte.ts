@@ -35,10 +35,12 @@ export interface TranscriptSegment {
   readonly confidence: number;
   /** Whisper's no-speech probability — high ⇒ likely VAD false-fire. */
   readonly noSpeechProb: number;
-  /** Continues the previous segment with no speaker pause between.
-   *  False ⇒ fresh utterance after silence ⇒ rolling-transcript
-   *  paragraph break. */
+  /** Continues the previous segment with no speaker pause between
+   *  (mid-utterance max-cut / later sub-segment of one clip). */
   readonly cont: boolean;
+  /** Silence (ms) before this utterance; 0 mid-utterance. The rolling
+   *  transcript breaks a paragraph when this exceeds the threshold. */
+  readonly gapMs: number;
 }
 
 export type EngineStatus =

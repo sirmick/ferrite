@@ -84,6 +84,13 @@ class BrowserRuntime {
    *  graph, or null. Used to push the persisted NR preset after every
    *  (re)load so it survives the transcribe-triggered re-compose. */
   private audioNrId: string | null = null;
+  /** Live param values applied to browser-placed blocks via
+   *  `reconfigureBlock`, keyed by block id → {param: value}. The server
+   *  REST `/api/pipeline/blocks` can't see these (browser side), so
+   *  `pipeline.blocks` overlays this map — the single place browser
+   *  block state loops back to the UI, mirroring the uiSinks merge.
+   *  Cleared on (re)load: the new graph starts from authored params. */
+  paramOverrides = $state<Record<string, Record<string, unknown>>>({});
   /** Browser-side `ui:<name>` Events sinks from the last load (name +
    *  stream_id, matching the node half's allocation). `pipeline`
    *  merges these into `uiSinks` so advanced views attach when the
@@ -236,7 +243,18 @@ class BrowserRuntime {
     const runner = this.runner;
     if (!runner) return;
     try {
-      await runner.reconfigureBlock(blockId, delta);
+      const res = await runner.reconfigureBlock(blockId, delta);
+      // Loop the applied values back so the UI mirror reflects a
+      // browser-placed block's live params (server REST never sees
+      // them). `pipeline.blocks` overlays `paramOverrides`, mirroring
+      // the node+browser `uiSinks` merge.
+      if (res.changes.length > 0) {
+        const next = { ...this.paramOverrides };
+        for (const c of res.changes) {
+          next[c.block_id] = { ...(next[c.block_id] ?? {}), [c.param_key]: c.new_value };
+        }
+        this.paramOverrides = next;
+      }
     } catch (err) {
       const msg = errorMessage(err);
       logs.push('client', 'error', `browser-block reconfigure ${blockId}: ${msg}`);
@@ -249,6 +267,11 @@ class BrowserRuntime {
    *  on a live pick. `auto`/no block → no-op (keep authored NR). */
   applyNrPreset(): void {
     if (!this.audioNrId) return;
+    // The browser runner only has a graph when loaded/running. A pick
+    // made while stopped or mid-reload would hit "no flowgraph loaded"
+    // — skip it; reload()'s post-load call applies the persisted
+    // selection once the graph is up, so nothing is lost.
+    if (this.runnerState !== 'loaded' && this.runnerState !== 'running') return;
     const bundle = nrBundle(clientControls.get('client.audio.nrPreset') as string);
     if (bundle) void this.reconfigureBlock(this.audioNrId, bundle);
   }
@@ -297,11 +320,18 @@ class BrowserRuntime {
         Object.entries(plain.blocks ?? {}).find(([, b]) =>
           (b.type ?? '').startsWith('AudioNr'),
         )?.[0] ?? null;
+      // New graph starts from the server's authored params — drop any
+      // overrides from the previous one; applyNrPreset() below repopulates.
+      this.paramOverrides = {};
+      // Mark loaded *before* re-applying the NR preset so the
+      // runner-state guard in applyNrPreset() passes here (the
+      // legitimate post-load apply) but still rejects clicks made
+      // while the runner has no graph (loading / stopped).
+      this.runnerState = 'loaded';
       // Re-apply the persisted NR preset on top of the preset's
       // authored params (same post-load fan-out as the transcribe
       // prompt) so it survives this and every re-compose.
       this.applyNrPreset();
-      this.runnerState = 'loaded';
       const audioCount = Object.keys(result.audioSabs).length;
       logs.push(
         'client',
@@ -517,6 +547,7 @@ class BrowserRuntime {
         confidence: msg.confidence as number,
         noSpeechProb: msg.noSpeechProb as number,
         cont: msg.cont as boolean,
+        gapMs: msg.gapMs as number,
       });
     } else if (msg.type === 'status') {
       transcript.setStatus(msg.status as never, String(msg.detail ?? ''));
@@ -569,6 +600,7 @@ class BrowserRuntime {
     this.loadedBlocks = [];
     this.voiceTranscribeIds = [];
     this.audioNrId = null;
+    this.paramOverrides = {};
     this.uiSinks = [];
 
     // Slow cleanup on the captured refs — safe to interleave with a

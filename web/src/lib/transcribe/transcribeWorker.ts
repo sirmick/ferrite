@@ -55,9 +55,12 @@ type OutMsg =
       noSpeechProb: number;
       /** This segment continues the previous one with no speaker pause
        *  between (mid-utterance: a max-cut split, or a later sub-
-       *  segment of the same clip). False ⇒ a fresh utterance after a
-       *  silence — the rolling transcript starts a new paragraph. */
+       *  segment of the same clip). */
       cont: boolean;
+      /** Silence (ms) before this utterance — only the first chunk of
+       *  an utterance carries it; 0 otherwise. The rolling transcript
+       *  starts a new paragraph when it exceeds the threshold. */
+      gapMs: number;
     };
 
 const POLL_MS = 150;
@@ -91,6 +94,8 @@ interface PendingSeg {
   /** ms at the start of `pcm` carried from the previous max-cut —
    *  whisper segments fully inside this were already emitted. */
   leadMs: number;
+  /** Silence (ms) before this utterance — for the paragraph break. */
+  gapMs: number;
 }
 const pendingSegs: PendingSeg[] = [];
 const MAX_PENDING = 6;
@@ -116,7 +121,7 @@ function rollingPrompt(): string {
   return promptBase + recentCalls.slice(-MAX_PROMPT_CALLS).join(' ');
 }
 
-function transcribeOne(pcm16k: Float32Array, leadMs: number): void {
+function transcribeOne(pcm16k: Float32Array, leadMs: number, gapMs: number): void {
   if (!engine?.loaded) return;
   status('transcribing');
   const res = engine.transcribe(pcm16k, rollingPrompt());
@@ -141,6 +146,9 @@ function transcribeOne(pcm16k: Float32Array, leadMs: number): void {
     // same clip are always continuous. `cont=false` ⇒ fresh utterance
     // after a silence ⇒ paragraph break in the rolling transcript.
     const cont = kept > 0 || leadMs > 0;
+    // Only the very first kept chunk of an utterance carries the
+    // preceding pause; later sub-segments are mid-utterance.
+    const segGapMs = kept === 0 && leadMs === 0 ? gapMs : 0;
     kept += 1;
     const atMs = Math.round(endMs - Math.max(0, lastT1 - (seg.t1 ?? lastT1)) * 1000);
     for (const c of extractCallsigns(cleaned)) {
@@ -163,11 +171,12 @@ function transcribeOne(pcm16k: Float32Array, leadMs: number): void {
       confidence: Math.max(0, Math.min(1, Math.exp(seg.avgLogprob))),
       noSpeechProb: seg.noSpeechProb ?? 0,
       cont,
+      gapMs: segGapMs,
     });
   }
 }
 
-function enqueueSegment(pcm16k: Float32Array, leadMs: number): void {
+function enqueueSegment(pcm16k: Float32Array, leadMs: number, gapMs: number): void {
   if (!engine?.loaded) return;
   if (pendingSegs.length >= MAX_PENDING) {
     // Whisper is behind the speaker — shed the oldest utterance so
@@ -176,7 +185,7 @@ function enqueueSegment(pcm16k: Float32Array, leadMs: number): void {
     droppedTotal += 1;
     post({ type: 'dropped', total: droppedTotal });
   }
-  pendingSegs.push({ pcm: pcm16k, leadMs });
+  pendingSegs.push({ pcm: pcm16k, leadMs, gapMs });
   void drainSegments();
 }
 
@@ -191,7 +200,7 @@ async function drainSegments(): Promise<void> {
     while (pendingSegs.length > 0 && engine?.loaded) {
       const item = pendingSegs.shift() as PendingSeg;
       try {
-        transcribeOne(item.pcm, item.leadMs);
+        transcribeOne(item.pcm, item.leadMs, item.gapMs);
       } catch (e) {
         status('error', String(e));
       }
@@ -243,7 +252,9 @@ function poll(): void {
 
 async function init(sab: SharedArrayBuffer): Promise<void> {
   reader = AudioRingReader.fromSab(sab);
-  segmenter = new EnergyVadSegmenter({}, (pcm, leadMs) => enqueueSegment(pcm, leadMs));
+  segmenter = new EnergyVadSegmenter({}, (pcm, leadMs, gapMs) =>
+    enqueueSegment(pcm, leadMs, gapMs),
+  );
   timer = setInterval(poll, POLL_MS);
 
   status('loading-model', `${curModel.label} (~${curModel.approxMB} MB, one-time)`);

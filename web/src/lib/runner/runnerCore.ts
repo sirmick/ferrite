@@ -20,7 +20,14 @@ import { AudioRingWriter } from '../audio/ringBuffer.js';
 import type { FrameClient } from '../ws/client.js';
 import { PayloadType } from '../ws/frame.js';
 import { viewF32, viewIqF32 } from '../ws/source.js';
-import type { LoadResult, RunnerRequest, RunnerResponse, RuntimeState } from './protocol.js';
+import type {
+  LoadResult,
+  ReconfigureChange,
+  ReconfigureResult,
+  RunnerRequest,
+  RunnerResponse,
+  RuntimeState,
+} from './protocol.js';
 import type { RuntimeHandle } from './rustRuntime.js';
 
 /**
@@ -146,8 +153,12 @@ export class RunnerCore {
             data: { state: this.currentState() },
           };
         case 'reconfigureBlock':
-          this.doReconfigureBlock(req.blockId, req.delta);
-          return { id: req.id, ok: true, kind: 'reconfigureBlock' };
+          return {
+            id: req.id,
+            ok: true,
+            kind: 'reconfigureBlock',
+            data: this.doReconfigureBlock(req.blockId, req.delta),
+          };
       }
     } catch (err) {
       return { id: req.id, ok: false, error: errorMessage(err) };
@@ -161,13 +172,19 @@ export class RunnerCore {
    *  makes — keeps the two halves consistent and lets browser-placed
    *  blocks update in place without a full load/start cycle.
    *
-   *  The JSON response body (reconfigure plan) is parsed but discarded
-   *  — the main thread doesn't need the reconfigure plan for a
-   *  client-triggered write, and the Rust side throws on error
-   *  anyway. */
-  private doReconfigureBlock(blockId: string, delta: Record<string, unknown>): void {
+   *  The JSON response body (the applied changes) is returned so the
+   *  main thread can loop browser-placed block params back into the
+   *  UI mirror — the server REST `/api/pipeline/blocks` never sees a
+   *  browser block's live value. */
+  private doReconfigureBlock(blockId: string, delta: Record<string, unknown>): ReconfigureResult {
     const state = this.loaded ?? throwNoRuntime();
-    state.rt.reconfigureBlock(blockId, JSON.stringify(delta));
+    const json = state.rt.reconfigureBlock(blockId, JSON.stringify(delta));
+    try {
+      const parsed = JSON.parse(json) as { changes?: ReconfigureChange[] };
+      return { changes: parsed.changes ?? [] };
+    } catch {
+      return { changes: [] };
+    }
   }
 
   private currentState(): RuntimeState {

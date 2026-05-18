@@ -72,6 +72,14 @@ export class EnergyVadSegmenter {
    *  from the previous max-cut. Passed out so the worker can drop the
    *  redundant re-decoded lead. 0 unless a max-cut just happened. */
   private leadOverlapMs = 0;
+  /** Silence accumulated since the last utterance ended (ms) — the
+   *  pause that precedes the *next* utterance. */
+  private idleMs = 0;
+  /** The pause (ms) before the current utterance, emitted with its
+   *  first chunk so the rolling transcript can break a paragraph on a
+   *  sufficiently long silence. Consumed after the first emit so
+   *  mid-utterance max-cut chunks report 0. */
+  private utteranceGapMs = 0;
 
   /** Snapshot for the live gate/level meter: current frame RMS, the
    *  adaptive open threshold, and whether an utterance is being
@@ -87,8 +95,14 @@ export class EnergyVadSegmenter {
   constructor(
     cfg: Partial<VadConfig>,
     /** `leadOverlapMs` = ms at the start of `pcm16k` carried from the
-     *  previous max-cut (0 for silence-closed / first segments). */
-    private readonly onSegment: (pcm16k: Float32Array, leadOverlapMs: number) => void,
+     *  previous max-cut (0 for silence-closed / first segments).
+     *  `gapMs` = the silence that preceded this utterance (0 for
+     *  mid-utterance max-cut continuations). */
+    private readonly onSegment: (
+      pcm16k: Float32Array,
+      leadOverlapMs: number,
+      gapMs: number,
+    ) => void,
   ) {
     this.cfg = { ...DEFAULT_VAD, ...cfg };
   }
@@ -112,7 +126,12 @@ export class EnergyVadSegmenter {
     const open = level > this.noiseFloor * this.cfg.openRatio;
 
     if (open) {
-      if (!this.speaking) this.speaking = true;
+      if (!this.speaking) {
+        this.speaking = true;
+        // New utterance — the accumulated idle is the pause before it.
+        this.utteranceGapMs = this.idleMs;
+        this.idleMs = 0;
+      }
       this.silenceMs = 0;
       for (let i = off; i < off + FRAME; i++) this.acc.push(data[i]);
     } else if (this.speaking) {
@@ -128,8 +147,10 @@ export class EnergyVadSegmenter {
       if (this.silenceMs >= this.cfg.hangoverMs) this.flush(false);
     } else {
       // True idle: no utterance in progress and below threshold —
-      // genuine noise. The only safe place to learn the floor.
+      // genuine noise. The only safe place to learn the floor, and
+      // where we measure the inter-utterance pause.
       this.noiseFloor = this.noiseFloor * 0.97 + level * 0.03;
+      this.idleMs += frameMs;
     }
 
     // Hard cap on continuous speech — cut mid-word, so carry a tail.
@@ -142,6 +163,10 @@ export class EnergyVadSegmenter {
     const ms = (this.acc.length / this.cfg.rateHz) * 1000;
     const pcm = Float32Array.from(this.acc);
     const emittedLeadMs = this.leadOverlapMs;
+    // The pause before this utterance — only its first emitted chunk
+    // carries it; consume so a max-cut continuation reports 0.
+    const emittedGapMs = this.utteranceGapMs;
+    this.utteranceGapMs = 0;
 
     if (maxCut) {
       // Still mid-utterance: keep talking, and seed the next segment
@@ -160,9 +185,13 @@ export class EnergyVadSegmenter {
       this.leadOverlapMs = 0;
       this.speaking = false;
       this.silenceMs = 0;
+      // The hangover that closed this is real dead air the operator
+      // paused for — count it toward the next utterance's gap so the
+      // paragraph break reflects the perceived pause.
+      this.idleMs = this.cfg.hangoverMs;
     }
 
-    if (ms >= this.cfg.minSpeechMs) this.onSegment(pcm, emittedLeadMs);
+    if (ms >= this.cfg.minSpeechMs) this.onSegment(pcm, emittedLeadMs, emittedGapMs);
   }
 
   reset(): void {
@@ -173,5 +202,7 @@ export class EnergyVadSegmenter {
     this.noiseFloor = 1e-4;
     this.lastLevel = 0;
     this.leadOverlapMs = 0;
+    this.idleMs = 0;
+    this.utteranceGapMs = 0;
   }
 }

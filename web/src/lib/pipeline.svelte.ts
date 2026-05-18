@@ -68,10 +68,28 @@ class PipelineStore {
     return merged;
   });
 
-  /** Composed-preset blocks with their spec and current params, keyed by
-   *  block id. Populated on `init()` and re-fetched after any patch.
-   *  Feeds the receiver panel and the generic `<BlockParams>` component. */
-  blocks = $state<Record<string, PipelineBlock>>({});
+  /** Server-composed blocks (spec + authored/node-live params) from
+   *  `/api/pipeline/blocks`. Browser-placed blocks are present here too
+   *  (list_blocks walks the composed doc) but their *values* are the
+   *  authored ones — the server never sees a browser block's live
+   *  param. See `blocks`. */
+  private nodeBlocks = $state<Record<string, PipelineBlock>>({});
+
+  /** All composed blocks for the UI — server specs/values with
+   *  browser-placed blocks' live param overrides overlaid. The single
+   *  loopback point for browser-side `reconfigureBlock` writes (NR
+   *  preset, any browser BlockParams edit), mirroring the node+browser
+   *  `uiSinks` merge so `<BlockParams>` reflects them without a server
+   *  round-trip. */
+  blocks = $derived.by<Record<string, PipelineBlock>>(() => {
+    const overrides = browserRuntime.paramOverrides;
+    const out: Record<string, PipelineBlock> = {};
+    for (const [id, b] of Object.entries(this.nodeBlocks)) {
+      const ov = overrides[id];
+      out[id] = ov ? { ...b, values: { ...(b.values ?? {}), ...ov } } : b;
+    }
+    return out;
+  });
 
   /** Browseable preset files the server can load. Populated on `init()`;
    *  stable for the session (the presets dir isn't watched). */
@@ -118,7 +136,7 @@ class PipelineStore {
       this.source = src;
       this.status = st;
       this.nodeUiSinks = indexByName(sinks);
-      this.blocks = indexById(blocks);
+      this.nodeBlocks = indexById(blocks);
       this.presets = presets;
       this.sourceCaps = caps;
       this.profile = profile;
@@ -459,7 +477,7 @@ class PipelineStore {
   private async refreshComposed(): Promise<void> {
     const [sinks, blocks] = await Promise.all([fetchUiSinks(), fetchPipelineBlocks()]);
     this.nodeUiSinks = indexByName(sinks);
-    this.blocks = indexById(blocks);
+    this.nodeBlocks = indexById(blocks);
   }
 
   /** Pull every server mirror (source + flowgraph + status + composed +
@@ -486,7 +504,7 @@ class PipelineStore {
       this.source = src;
       this.status = st;
       this.nodeUiSinks = indexByName(sinks);
-      this.blocks = indexById(blocks);
+      this.nodeBlocks = indexById(blocks);
       this.sourceCaps = caps;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

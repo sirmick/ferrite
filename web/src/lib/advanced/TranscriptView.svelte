@@ -104,14 +104,16 @@
   }
 
   // Right pane: Tier-0 rolling transcript — segments joined into
-  // flowing prose, a paragraph break only at a real speaker pause
-  // (`!cont`), never at an arbitrary 10 s max-cut. Whisper supplies the
-  // punctuation/casing; no model.
+  // flowing prose. A paragraph break only when the silence before an
+  // utterance was *sufficient* (≥ PARA_SILENCE_MS) — a real over/turn,
+  // not every short sentence pause or an arbitrary 10 s max-cut.
+  // Whisper supplies the punctuation/casing; no model.
+  const PARA_SILENCE_MS = 1500;
   let cleaned = $derived.by(() => {
     const segs = transcript.segments;
     let out = '';
     for (let i = 0; i < segs.length; i++) {
-      if (i > 0) out += segs[i].cont ? ' ' : '\n\n';
+      if (i > 0) out += segs[i].gapMs >= PARA_SILENCE_MS ? '\n\n' : ' ';
       out += segs[i].text;
     }
     return out;

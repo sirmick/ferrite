@@ -69,5 +69,21 @@ export type RunnerResponse =
       readonly kind: 'state';
       readonly data: { readonly state: RuntimeState };
     }
-  | { readonly id: number; readonly ok: true; readonly kind: 'reconfigureBlock' }
+  | {
+      readonly id: number;
+      readonly ok: true;
+      readonly kind: 'reconfigureBlock';
+      readonly data: ReconfigureResult;
+    }
   | { readonly id: number; readonly ok: false; readonly error: string };
+
+/** The effective param changes the wasm runtime applied — the loopback
+ *  channel for browser-placed blocks (server REST never sees them). */
+export interface ReconfigureChange {
+  readonly block_id: string;
+  readonly param_key: string;
+  readonly new_value: unknown;
+}
+export interface ReconfigureResult {
+  readonly changes: ReadonlyArray<ReconfigureChange>;
+}

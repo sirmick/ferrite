@@ -8,7 +8,13 @@
 
 import type { FlowgraphDoc } from '../flowgraph.js';
 
-import type { LoadResult, RunnerRequest, RunnerResponse, RuntimeState } from './protocol.js';
+import type {
+  LoadResult,
+  ReconfigureResult,
+  RunnerRequest,
+  RunnerResponse,
+  RuntimeState,
+} from './protocol.js';
 
 /**
  * The shape we require of the underlying transport. `Worker` satisfies
@@ -73,7 +79,10 @@ export class FlowgraphRunner {
    *  blocks that implement `apply_live_params`, block-rebuild fallback
    *  otherwise. No network hop (the browser runtime is already
    *  in-process in the worker). */
-  async reconfigureBlock(blockId: string, delta: Record<string, unknown>): Promise<void> {
+  async reconfigureBlock(
+    blockId: string,
+    delta: Record<string, unknown>,
+  ): Promise<ReconfigureResult> {
     const resp = await this.send({
       id: this.nextId++,
       kind: 'reconfigureBlock',
@@ -81,6 +90,7 @@ export class FlowgraphRunner {
       delta,
     });
     assertKind(resp, 'reconfigureBlock');
+    return resp.data;
   }
 
   terminate(): void {
