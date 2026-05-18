@@ -5,14 +5,17 @@
 // assistant turn (text delta, tool use, tool result) or an envelope
 // signal (turn done, error, hello).
 //
-// Reload persistence: the Claude Agent SDK's session lives on the
-// sidecar's filesystem (`.claude/sessions/<id>`), so once we have a
-// `session_id` we can resume the conversation across browser reloads
-// just by passing it back as `resume:` on the next query. We persist
-// the session id + transcript + mode in localStorage; on store
-// construction we restore everything, and on connect we send the
-// stored id in the WS hello so the next user turn picks up where the
-// previous browser session left off.
+// Conversation-state authority: the SIDECAR, keyed by `session_id`
+// (its SDK session + per-session transcript share that id and reset/
+// resume together). This store is a pure VIEW. localStorage is
+// demoted to a first-paint cache: we restore it on construction so
+// the panel paints instantly, but on WS connect we ask the sidecar
+// for the authoritative transcript (`request_snapshot`) and a
+// `conversation_snapshot` *replaces* local turns — or a
+// `session_reset` clears them with an honest banner when that session
+// is unresumable (sidecar restarted, file gone). The cache can lag or
+// be stale; the snapshot/reset always wins, so the visible log and the
+// LLM context can no longer silently diverge.
 
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
@@ -86,7 +89,7 @@ const LS_SETUP = 'ferrite-ai.setup_description';
  *  display ring. */
 const MAX_PERSISTED_TURNS = 200;
 
-class AiStore {
+export class AiStore {
   turns = $state<Turn[]>([]);
   mode = $state<AiMode>('explorer');
   connection = $state<ConnectionState>('idle');
@@ -358,6 +361,15 @@ class AiStore {
       localStorage.removeItem(LS_SESSION);
       localStorage.removeItem(LS_NEXT_ID);
     }
+    // Unified reset: tell the sidecar (the authority) to drop the SDK
+    // session binding so transcript + context roll together — not
+    // independently. It echoes a `session_reset` that re-clears
+    // coherently and adds the honest banner. When offline the local
+    // wipe above stands; the next connect's request_snapshot then
+    // gets a session_reset for the now-absent session anyway.
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'reset_session', reason: 'clear' }));
+    }
   }
 
   /** Drop the SDK session id but keep the transcript intact (visible
@@ -437,6 +449,15 @@ class AiStore {
     ws.addEventListener('open', () => {
       this.retryCount = 0;
       this.connection = 'connected';
+      // Demote the restored localStorage cache to a hint: ask the
+      // sidecar (the authority) for the transcript of the session we
+      // think we're continuing. It replies `conversation_snapshot`
+      // (replace local turns) or `session_reset` (clear + banner) if
+      // that session is gone. With no prior session there's nothing to
+      // reconcile — the cache is the only state and stays as painted.
+      if (this.sessionId && this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'request_snapshot', session_id: this.sessionId }));
+      }
     });
     ws.addEventListener('message', (e) => {
       if (typeof e.data !== 'string') return;
@@ -512,6 +533,73 @@ class AiStore {
         this.sessionId = sid;
         this.persist();
       }
+      return;
+    }
+
+    // Authoritative transcript replay from the sidecar. The restored
+    // localStorage was a first-paint cache; this *replaces* it. Fold
+    // each recorded event back through this same reducer (no second
+    // renderer) after clearing: `ferrite_ai_user_turn` rebuilds the
+    // user prompt + its assistant turn, the SDK events rebuild the
+    // assistant body, the terminal envelope resolves status.
+    if (t === 'conversation_snapshot') {
+      const events = event['events'];
+      this.turns = [];
+      this.nextId = 1;
+      if (Array.isArray(events)) {
+        for (const ev of events) {
+          if (ev && typeof ev === 'object') {
+            this.ingestEvent(ev as Record<string, unknown>);
+          }
+        }
+      }
+      const sid = event['session_id'];
+      if (typeof sid === 'string') this.sessionId = sid;
+      this.persist();
+      return;
+    }
+
+    // The session the browser tried to continue is gone (sidecar
+    // restarted, transcript rolled, never existed). Clear coherently
+    // and show one honest banner instead of a stale log the assistant
+    // has no memory of.
+    if (t === 'session_reset') {
+      const reason = typeof event['reason'] === 'string' ? event['reason'] : 'reset';
+      this.turns = [];
+      this.sessionId = null;
+      this.nextId = 1;
+      this.pushTurn({
+        id: this.nextId++,
+        role: 'assistant',
+        t: Date.now(),
+        chunks: [
+          {
+            kind: 'meta',
+            label: `── reasoning context reset (${reason}) — history preserved, assistant won't remember the above`,
+          },
+        ],
+        status: 'complete',
+      });
+      if (typeof localStorage !== 'undefined') localStorage.removeItem(LS_SESSION);
+      this.persist();
+      return;
+    }
+
+    // Snapshot-replay only: reconstruct a user prompt + a fresh
+    // streaming assistant turn (mirrors what `send()` pushes live).
+    // The sidecar records but does NOT forward this on the live
+    // stream, so the live optimistic-bubble UX is unchanged.
+    if (t === 'ferrite_ai_user_turn') {
+      const text = typeof event['text'] === 'string' ? event['text'] : '';
+      const when = typeof event['t'] === 'number' ? (event['t'] as number) : Date.now();
+      this.pushTurn({ id: this.nextId++, role: 'user', text, t: when });
+      this.pushTurn({
+        id: this.nextId++,
+        role: 'assistant',
+        t: when,
+        chunks: [],
+        status: 'streaming',
+      });
       return;
     }
 

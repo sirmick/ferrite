@@ -72,6 +72,16 @@ FERRITE_SCREENSHOTS_DIR="${FERRITE_SCREENSHOTS_DIR:-$(pwd)/screenshots}"
 mkdir -p "$FERRITE_SCREENSHOTS_DIR"
 echo "[run] shots    → $FERRITE_SCREENSHOTS_DIR  (Screenshot button)"
 
+# Persist the AI sidecar's conversation state — per-session raw event
+# transcripts + the readable per-turn log — into a repo-local dir
+# (gitignored) so the chat panel survives a sidecar restart / browser
+# reload instead of vanishing from /tmp. Same convention as
+# FERRITE_SCREENSHOTS_DIR. The sidecar keys files by SDK session id, so
+# the visible transcript and the LLM context reset/resume together.
+FERRITE_AI_STATE_DIR="${FERRITE_AI_STATE_DIR:-$(pwd)/.ferrite-ai-state}"
+mkdir -p "$FERRITE_AI_STATE_DIR"
+echo "[run] ai state → $FERRITE_AI_STATE_DIR  (conversation transcripts)"
+
 # ferrited on 0.0.0.0:10001, logs prefixed via process substitution
 RUST_LOG="${RUST_LOG:-info}" \
   FERRITE_SCREENSHOTS_DIR="$FERRITE_SCREENSHOTS_DIR" \
@@ -84,7 +94,8 @@ FERRITED_PID=$!
 # ferrite-ai sidecar on FERRITE_AI_PORT (default 10002). ferrited's
 # /ws/chat handler reverse-proxies to this; the UI never connects
 # directly so single-port architecture holds end-to-end.
-( cd tools/ferrite-ai && FERRITE_AI_PORT="$FERRITE_AI_PORT" npm start --silent ) \
+( cd tools/ferrite-ai && FERRITE_AI_PORT="$FERRITE_AI_PORT" \
+    FERRITE_AI_STATE_DIR="$FERRITE_AI_STATE_DIR" npm start --silent ) \
     > >(prefix '[ai      ]') 2> >(prefix '[ai      ]' >&2) &
 AI_PID=$!
 

@@ -75,3 +75,8 @@ run.log
 
 # Repo-local screenshot artifacts (Screenshot button / ferrite-ctl view)
 /screenshots/
+
+# Repo-local AI sidecar conversation state — per-session raw event
+# transcripts (<session_id>.jsonl, the conversation-state authority) +
+# the readable per-turn log. Same convention as /screenshots/.
+/.ferrite-ai-state/

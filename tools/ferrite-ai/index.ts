@@ -10,7 +10,7 @@
 
 import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
@@ -54,14 +54,82 @@ const CTL_HELP = captureCtlHelp();
 console.log(`[ferrite-ai] FERRITE_HOME=${FERRITE_HOME}`);
 console.log(`[ferrite-ai] FERRITE_CTL=${FERRITE_CTL}`);
 
-// Where the per-turn transcript lands. Gives a human-readable record
-// of what the AI actually said + what tools it ran, so when the user
-// reports "the AI did something weird," we can grep this rather than
-// reconstruct from /api/decoder/recent. Tail with:
-//   tail -F /tmp/ferrite-ai-transcript.log
+// Single state directory for everything the sidecar is the authority
+// for: the per-session raw event transcripts (`<session_id>.jsonl`,
+// the conversation-state single source of truth) and the human-
+// readable per-turn log. Mirrors the FERRITE_SCREENSHOTS_DIR
+// convention — run.sh points this at a repo-local, gitignored dir so
+// it survives reboots; default falls back to /tmp for a bare
+// `npm start`. The session files are co-located with the SDK session
+// they key off (both keyed by `session_id`) so the visible transcript
+// and the LLM context reset and resume together by construction.
+const STATE_DIR = process.env.FERRITE_AI_STATE_DIR ?? "/tmp/ferrite-ai-state";
+try {
+  mkdirSync(STATE_DIR, { recursive: true });
+} catch (e) {
+  console.warn(`[ferrite-ai] could not create state dir ${STATE_DIR}:`, e);
+}
+console.log(`[ferrite-ai] state=${STATE_DIR}`);
+
+// Human-readable record of what the AI said + what tools it ran, for
+// grepping when the user reports "the AI did something weird." Now
+// lives under the state dir by default (one gitignored place) instead
+// of a separate /tmp file; still overridable. Tail with:
+//   tail -F "$FERRITE_AI_STATE_DIR/transcript.log"
 const TRANSCRIPT_PATH =
-  process.env.FERRITE_AI_TRANSCRIPT ?? "/tmp/ferrite-ai-transcript.log";
+  process.env.FERRITE_AI_TRANSCRIPT ?? join(STATE_DIR, "transcript.log");
 console.log(`[ferrite-ai] transcript=${TRANSCRIPT_PATH}`);
+
+/** Per-session raw event transcript path. The browser-bound event
+ *  stream for one SDK `session_id`, one JSON value per line. This is
+ *  the conversation-state authority: ferrited proxies /ws/chat
+ *  transparently and the browser is a pure view, so this file (next to
+ *  the SDK session it shares a `session_id` with) is the only place
+ *  the full transcript lives off the browser. */
+function sessionFile(id: string): string {
+  return join(STATE_DIR, `${id}.jsonl`);
+}
+
+/** Append a turn's browser-bound events to its session file. Called
+ *  once per turn (the turn is the unit) keyed by the SDK session id —
+ *  so a new session (mode change, /clear, fresh conversation) rolls a
+ *  new file by construction. A logging miss must not crash the turn. */
+function recordSession(id: string, events: unknown[]): void {
+  if (!id || events.length === 0) return;
+  try {
+    appendFileSync(
+      sessionFile(id),
+      events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+    );
+  } catch (e) {
+    console.warn(`[ferrite-ai] session record failed for ${id}:`, e);
+  }
+}
+
+/** Read back the complete recorded event stream for a session, or
+ *  `null` when there is no (readable) transcript on disk for that id —
+ *  the caller treats `null` as "unresumable → session_reset". */
+function readSession(id: string): unknown[] | null {
+  if (!id) return null;
+  const f = sessionFile(id);
+  if (!existsSync(f)) return null;
+  try {
+    return readFileSync(f, "utf-8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => {
+        try {
+          return JSON.parse(l) as unknown;
+        } catch {
+          return null;
+        }
+      })
+      .filter((x): x is unknown => x !== null);
+  } catch (e) {
+    console.warn(`[ferrite-ai] session read failed for ${id}:`, e);
+    return null;
+  }
+}
 
 function logLine(line: string): void {
   const ts = new Date().toISOString().slice(11, 23);
@@ -238,10 +306,21 @@ function allowedToolsFor(mode: Mode): string[] {
 }
 
 type IncomingMessage = {
-  /** Control envelope shape — `{type: "stop"}` aborts the current
-   *  turn. Plain text messages have no `type` and use `text`. */
-  type?: "stop" | string;
+  /** Control envelope shape. `{type: "stop"}` aborts the current
+   *  turn; `{type: "request_snapshot", session_id?}` asks for the
+   *  authoritative transcript replay; `{type: "reset_session"}` drops
+   *  the SDK session binding and rolls a fresh transcript. Plain text
+   *  messages have no `type` and use `text`. */
+  type?: "stop" | "request_snapshot" | "reset_session" | string;
   text?: string;
+  /** Session id the browser believes it is continuing — sent on
+   *  `request_snapshot` (on WS connect) so the sidecar, which starts
+   *  each connection with no session, knows which transcript to
+   *  replay and adopt as the binding. */
+  session_id?: string;
+  /** Free-text reason for a `reset_session` (e.g. `clear`), echoed
+   *  back on the `session_reset` envelope for the UI banner. */
+  reason?: string;
   mode?: Mode | string;
   /** Caller-supplied resume id — when present, takes precedence over
    *  the per-connection `sessionId` the WS handler tracks. Used by
@@ -484,9 +563,53 @@ wss.on("connection", (ws) => {
         }
         return;
       }
+      // The sidecar is the conversation-state authority. On connect
+      // (or an explicit ask) the browser hands back the session id it
+      // *thinks* it's continuing; we replay the complete recorded
+      // transcript so the browser's view matches our record — or, if
+      // that session has no transcript on disk (sidecar restarted, file
+      // gone, never existed), tell it to clear coherently instead of
+      // showing its stale localStorage log.
+      if (parsed.type === "request_snapshot") {
+        const want = parsed.session_id ?? sessionId;
+        const events = want ? readSession(want) : null;
+        if (want && events) {
+          // Adopt as the connection binding so the next turn resumes
+          // this same session even without a caller-supplied id.
+          sessionId = want;
+          send(ws, {
+            type: "conversation_snapshot",
+            session_id: want,
+            events,
+          });
+        } else {
+          sessionId = null;
+          send(ws, {
+            type: "session_reset",
+            reason: want
+              ? "no transcript on disk for the prior session"
+              : "no prior session",
+          });
+        }
+        return;
+      }
+      // Unified reset: drop the SDK session binding so the next turn
+      // starts fresh (a new session id rolls a new transcript file by
+      // construction — log + context reset together). Echo a
+      // session_reset so the UI clears coherently with an honest
+      // banner instead of a now-orphaned log.
+      if (parsed.type === "reset_session") {
+        sessionId = null;
+        send(ws, {
+          type: "session_reset",
+          reason: parsed.reason ?? "reset",
+        });
+        return;
+      }
       send(ws, {
         type: "ferrite_ai_error",
-        message: "expected JSON {text, mode?} or {type: 'stop'}",
+        message:
+          "expected JSON {text, mode?} or a control {type: stop|request_snapshot|reset_session}",
       });
       return;
     }
@@ -501,6 +624,21 @@ wss.on("connection", (ws) => {
     }
 
     const transcript = new TurnTranscript(mode, parsed.text);
+
+    // Buffer this turn's browser-bound events so we can persist them
+    // once (the turn is the unit) under the SDK session id. The
+    // leading synthetic `ferrite_ai_user_turn` lets a snapshot replay
+    // reconstruct the user's prompt + a fresh assistant turn through
+    // the browser's existing reducer; it is NOT sent live (the browser
+    // already shows the prompt optimistically), so the proxied live
+    // stream is byte-identical to before.
+    const turnRecords: unknown[] = [
+      { type: "ferrite_ai_user_turn", text: parsed.text, t: Date.now() },
+    ];
+    const emit = (payload: unknown): void => {
+      send(ws, payload);
+      turnRecords.push(payload);
+    };
 
     // Per-turn AbortController. The SDK's `abortController` option
     // is the supported way to cancel mid-query for non-streaming
@@ -557,31 +695,36 @@ wss.on("connection", (ws) => {
         // forwarding to the WS client unchanged.
         transcript.ingest(e);
         send(ws, event);
+        turnRecords.push(event);
       }
       if (turnAbort.signal.aborted) {
         transcript.finish("error", "stopped by user");
-        send(ws, { type: "ferrite_ai_stopped", reason: "user" });
+        emit({ type: "ferrite_ai_stopped", reason: "user" });
       } else {
         transcript.finish("done");
-        send(ws, { type: "ferrite_ai_done", mode });
+        emit({ type: "ferrite_ai_done", mode });
       }
     } catch (err) {
       if (turnAbort.signal.aborted) {
         // The SDK surfaces aborts as thrown errors. Treat as a clean
         // stop, not a fatal error.
         transcript.finish("error", "stopped by user");
-        send(ws, { type: "ferrite_ai_stopped", reason: "user" });
+        emit({ type: "ferrite_ai_stopped", reason: "user" });
       } else {
         const msg = String(err);
         transcript.finish("error", msg);
         console.error("[ferrite-ai] turn failed:", err);
-        send(ws, {
+        emit({
           type: "ferrite_ai_error",
           message: msg,
         });
       }
     } finally {
       if (activeAbort === turnAbort) activeAbort = null;
+      // Persist the turn under its session id. A turn that errored
+      // before `system/init` has no session to key by (nothing
+      // resumable anyway) — skip it.
+      recordSession(sessionId ?? "", turnRecords);
     }
   });
 
