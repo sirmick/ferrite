@@ -53,6 +53,11 @@ type OutMsg =
       tokens: { text: string; p: number }[];
       confidence: number;
       noSpeechProb: number;
+      /** This segment continues the previous one with no speaker pause
+       *  between (mid-utterance: a max-cut split, or a later sub-
+       *  segment of the same clip). False ⇒ a fresh utterance after a
+       *  silence — the rolling transcript starts a new paragraph. */
+      cont: boolean;
     };
 
 const POLL_MS = 150;
@@ -126,10 +131,17 @@ function transcribeOne(pcm16k: Float32Array, leadMs: number): void {
   // straddles the boundary (t1 past the lead) is kept: that's the word
   // we re-decoded *with* its lead-in context, the whole point.
   const leadSec = leadMs / 1000;
+  let kept = 0;
   for (const seg of res.segments) {
     if (leadSec > 0 && (seg.t1 ?? 0) <= leadSec) continue;
     const cleaned = applyHamPostProcess(seg.text);
     if (!cleaned) continue;
+    // The first kept segment continues the prior chunk iff this clip
+    // carried a max-cut lead (mid-utterance). Later sub-segments of the
+    // same clip are always continuous. `cont=false` ⇒ fresh utterance
+    // after a silence ⇒ paragraph break in the rolling transcript.
+    const cont = kept > 0 || leadMs > 0;
+    kept += 1;
     const atMs = Math.round(endMs - Math.max(0, lastT1 - (seg.t1 ?? lastT1)) * 1000);
     for (const c of extractCallsigns(cleaned)) {
       if (!recentCalls.includes(c)) {
@@ -150,6 +162,7 @@ function transcribeOne(pcm16k: Float32Array, leadMs: number): void {
       // avg log-prob → rough 0..1 confidence for the panel's dimming.
       confidence: Math.max(0, Math.min(1, Math.exp(seg.avgLogprob))),
       noSpeechProb: seg.noSpeechProb ?? 0,
+      cont,
     });
   }
 }

@@ -516,6 +516,7 @@ class BrowserRuntime {
         tokens: (msg.tokens as { text: string; p: number }[]) ?? [],
         confidence: msg.confidence as number,
         noSpeechProb: msg.noSpeechProb as number,
+        cont: msg.cont as boolean,
       });
     } else if (msg.type === 'status') {
       transcript.setStatus(msg.status as never, String(msg.detail ?? ''));

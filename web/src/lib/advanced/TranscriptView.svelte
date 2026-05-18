@@ -17,6 +17,7 @@
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { transcript, type TranscriptSegment } from '$lib/transcribe/store.svelte';
   import { DEFAULT_HAM_PROMPT } from '$lib/transcribe/hamPrompt';
+  import Split from '$lib/layout/Split.svelte';
 
   // whisper initial_prompt — the single biggest accuracy lever for ham
   // voice. Stored empty = "use the built-in dense corpus"; the textarea
@@ -100,6 +101,30 @@
   function onScroll(): void {
     if (!listEl) return;
     pinned = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 40;
+  }
+
+  // Right pane: Tier-0 rolling transcript — segments joined into
+  // flowing prose, a paragraph break only at a real speaker pause
+  // (`!cont`), never at an arbitrary 10 s max-cut. Whisper supplies the
+  // punctuation/casing; no model.
+  let cleaned = $derived.by(() => {
+    const segs = transcript.segments;
+    let out = '';
+    for (let i = 0; i < segs.length; i++) {
+      if (i > 0) out += segs[i].cont ? ' ' : '\n\n';
+      out += segs[i].text;
+    }
+    return out;
+  });
+  let cleanEl: HTMLDivElement | undefined = $state();
+  let cleanPinned = $state(true);
+  $effect(() => {
+    const n = transcript.segments.length;
+    if (cleanPinned && cleanEl && n >= 0) cleanEl.scrollTop = cleanEl.scrollHeight;
+  });
+  function onCleanScroll(): void {
+    if (!cleanEl) return;
+    cleanPinned = cleanEl.scrollHeight - cleanEl.scrollTop - cleanEl.clientHeight < 40;
   }
 </script>
 
@@ -216,39 +241,70 @@
     </p>
   {/if}
 
-  <!-- Segment log — chronological, auto-pinned to newest. -->
-  <div
-    bind:this={listEl}
-    onscroll={onScroll}
-    class="min-h-0 flex-1 overflow-y-auto p-2 text-xs leading-relaxed"
-  >
-    {#if transcript.segments.length === 0}
-      <p class="text-slate-600">
-        Nothing yet — set the receiver's Audio control to
-        <span class="text-slate-400">transcribe</span> and tune a voice signal. Segments appear here when
-        speech is detected.
-      </p>
-    {:else}
-      {#each transcript.segments as seg (seg.id)}
-        <div class="border-b border-slate-900/60 py-1">
-          <div class="flex gap-2 font-mono text-[10px] text-slate-600">
-            <span>{fmtTime(seg.atMs)}</span>
-            <span>{fmtFreq(seg.vfoHz)}</span>
-            <span class="ml-auto">{Math.round(seg.confidence * 100)}%</span>
-          </div>
-          <div>
-            {#if seg.tokens.length > 0}
-              {#each seg.tokens as tk, i (i)}<span class={tokClass(tk.p)}>{tk.text}</span>{/each}
+  <!-- Split body: left = accurate timestamped/probability log;
+       right = Tier-0 rolling cleaned transcript. -->
+  <div class="min-h-0 flex-1">
+    <Split direction="row" defaultFraction={0.5} storageKey="ferrite.split.transcript-cols">
+      {#snippet a()}
+        <section class="flex h-full min-h-0 flex-col">
+          <header
+            class="border-b border-slate-800 px-2 py-1 text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]"
+          >
+            log · time · freq · confidence
+          </header>
+          <div
+            bind:this={listEl}
+            onscroll={onScroll}
+            class="min-h-0 flex-1 overflow-y-auto p-2 text-xs leading-relaxed"
+          >
+            {#if transcript.segments.length === 0}
+              <p class="text-slate-600">
+                Nothing yet — set the receiver's Audio control to
+                <span class="text-slate-400">transcribe</span> and tune a voice signal.
+              </p>
             {:else}
-              <span class="text-slate-300">{seg.text}</span>
+              {#each transcript.segments as seg (seg.id)}
+                <div class="border-b border-slate-900/60 py-1">
+                  <div class="flex gap-2 font-mono text-[10px] text-slate-600">
+                    <span>{fmtTime(seg.atMs)}</span>
+                    <span>{fmtFreq(seg.vfoHz)}</span>
+                    <span class="ml-auto">{Math.round(seg.confidence * 100)}%</span>
+                  </div>
+                  <div>
+                    {#if seg.tokens.length > 0}
+                      {#each seg.tokens as tk, i (i)}<span class={tokClass(tk.p)}>{tk.text}</span
+                        >{/each}
+                    {:else}
+                      <span class="text-slate-300">{seg.text}</span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
             {/if}
           </div>
-          {#if seg.tokens.length > 0 && seg.text}
-            <div class="text-[10px] text-slate-500">↳ {seg.text}</div>
-          {/if}
-        </div>
-      {/each}
-    {/if}
+        </section>
+      {/snippet}
+      {#snippet b()}
+        <section class="flex h-full min-h-0 flex-col border-l border-slate-800">
+          <header
+            class="border-b border-slate-800 px-2 py-1 text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]"
+          >
+            transcript · rolling
+          </header>
+          <div
+            bind:this={cleanEl}
+            onscroll={onCleanScroll}
+            class="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap p-2 text-xs leading-relaxed text-slate-300"
+          >
+            {#if cleaned}
+              {cleaned}
+            {:else}
+              <span class="text-slate-600">cleaned transcript appears here</span>
+            {/if}
+          </div>
+        </section>
+      {/snippet}
+    </Split>
   </div>
 </div>
 

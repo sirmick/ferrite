@@ -35,6 +35,10 @@ export interface TranscriptSegment {
   readonly confidence: number;
   /** Whisper's no-speech probability — high ⇒ likely VAD false-fire. */
   readonly noSpeechProb: number;
+  /** Continues the previous segment with no speaker pause between.
+   *  False ⇒ fresh utterance after silence ⇒ rolling-transcript
+   *  paragraph break. */
+  readonly cont: boolean;
 }
 
 export type EngineStatus =
