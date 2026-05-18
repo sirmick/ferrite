@@ -38,7 +38,9 @@
   // switches NR to `voice` (best signal for whisper); the post-load
   // re-apply in browserRuntime makes it stick across the re-compose.
   function pickAudioMode(mode: 'off' | 'on' | 'transcribe'): void {
-    if (mode === 'transcribe') void applyControl('client.audio.nrPreset', 'voice');
+    // Transcribe ⇒ voice-NR coupling lives in +page.svelte's profile
+    // effect now, so the CLI (`ferrite-ctl transcribe on`) converges
+    // through the same path. Just flip the profile axes here.
     void pipeline.setProfile({
       ...pipeline.profile,
       audio: mode !== 'off',

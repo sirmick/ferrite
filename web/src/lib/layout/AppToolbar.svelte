@@ -18,6 +18,8 @@
   import { applyControl } from '$lib/control/dispatch';
   import { activeAdvancedView } from '$lib/advanced/registry';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
+  import { snapshotView } from '$lib/viz/viewRegistry';
+  import { logs } from '$lib/logs/store.svelte';
 
   // Channel-detail pane toggle. Disabled when the active preset has no
   // Channelizer (no runtime-injected `ui:fft_narrow` sink).
@@ -102,6 +104,39 @@
     return `${s.type} ${freq}`;
   });
 
+  let shotBusy = $state(false);
+  // Grab the main canvas the operator is looking at and persist it
+  // server-side via POST /api/screenshot. Whichever wide pane is
+  // mounted wins (waterfall when an advanced view hasn't replaced it,
+  // else the spectrum); the registry returns '' for an unmounted pane.
+  async function takeScreenshot() {
+    if (shotBusy) return;
+    shotBusy = true;
+    try {
+      let shot = snapshotView('wide-waterfall');
+      if (shot.error || !shot.png_b64) shot = snapshotView('wide-spectrum');
+      if (shot.error || !shot.png_b64) {
+        logs.push('client', 'warn', `screenshot: no canvas to capture (${shot.error || 'empty'})`);
+        return;
+      }
+      const res = await fetch('/api/screenshot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ png_b64: shot.png_b64, label: sourceLabel }),
+      });
+      if (!res.ok) {
+        logs.push('client', 'warn', `screenshot: server ${res.status} ${await res.text()}`);
+        return;
+      }
+      const { path } = (await res.json()) as { path: string };
+      logs.push('client', 'info', `screenshot saved: ${path}`);
+    } catch (e) {
+      logs.push('client', 'warn', `screenshot failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      shotBusy = false;
+    }
+  }
+
   async function togglePipeline() {
     if (startStopBusy) return;
     startStopBusy = true;
@@ -139,9 +174,9 @@
   <div class="ml-auto flex flex-wrap items-center gap-x-2 gap-y-1">
     <button
       type="button"
-      class="rounded border px-2 py-0.5 text-[11px] hover:border-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+      class="cursor-pointer rounded border bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:text-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
       class:channel-on={hasNarrow && narrowVisible}
-      class:border-slate-700={!(hasNarrow && narrowVisible)}
+      class:border-slate-500={!(hasNarrow && narrowVisible)}
       disabled={!hasNarrow}
       title={hasNarrow
         ? narrowVisible
@@ -154,9 +189,9 @@
     </button>
     <button
       type="button"
-      class="rounded border px-2 py-0.5 text-[11px] hover:border-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+      class="cursor-pointer rounded border bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:text-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
       class:channel-on={advancedView && advancedVisible}
-      class:border-slate-700={!(advancedView && advancedVisible)}
+      class:border-slate-500={!(advancedView && advancedVisible)}
       disabled={!advancedView}
       title={advancedView
         ? advancedVisible
@@ -179,14 +214,23 @@
     </button>
     <button
       type="button"
-      class="rounded border border-slate-700 px-2 py-0.5 text-[11px] hover:border-slate-600"
+      class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:bg-slate-700 hover:text-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+      disabled={shotBusy}
+      title="Capture the current spectrum/waterfall and store it on the server"
+      onclick={takeScreenshot}
+    >
+      {shotBusy ? 'Saving…' : 'Screenshot'}
+    </button>
+    <button
+      type="button"
+      class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:bg-slate-700 hover:text-slate-50"
       onclick={() => (showSource = true)}
     >
       Source…
     </button>
     <button
       type="button"
-      class="rounded border border-slate-700 px-2 py-0.5 text-[11px] hover:border-slate-600"
+      class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:bg-slate-700 hover:text-slate-50"
       onclick={() => (showFlowgraph = true)}
     >
       Flowgraph…

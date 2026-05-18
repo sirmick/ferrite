@@ -492,13 +492,14 @@ class PipelineStore {
   async refreshFromServer(): Promise<void> {
     if (this.phase !== 'ready') return;
     try {
-      const [fg, src, st, sinks, blocks, caps] = await Promise.all([
+      const [fg, src, st, sinks, blocks, caps, profile] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
         fetchUiSinks(),
         fetchPipelineBlocks(),
         fetchSourceCapabilities(),
+        fetchProfile(),
       ]);
       this.flowgraph = fg;
       this.source = src;
@@ -506,6 +507,11 @@ class PipelineStore {
       this.nodeUiSinks = indexByName(sinks);
       this.nodeBlocks = indexById(blocks);
       this.sourceCaps = caps;
+      // Profile too: a CLI-driven `transcribe on/off` flips this axis
+      // without touching `setProfile`. Pulling it here keeps the
+      // tri-state Audio control honest and lets the transcribe→voice-NR
+      // coupling in +page.svelte fire for the CLI path as well.
+      this.profile = profile;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logs.push('client', 'warn', `pipeline refresh failed: ${msg}`);

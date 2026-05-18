@@ -781,6 +781,80 @@ pub async fn browser_log(Json(entry): Json<BrowserLogEntry>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+/// `POST /api/screenshot` body. `png_b64` is a base64 PNG (with or
+/// without a `data:image/png;base64,` prefix); `label` is an optional
+/// short slug folded into the filename so a stored shot is greppable
+/// (e.g. `nwr-transcribe`).
+#[derive(Deserialize)]
+pub struct ScreenshotReq {
+    pub png_b64: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ScreenshotResp {
+    pub path: String,
+}
+
+/// `POST /api/screenshot` — the top-bar Screenshot button. The browser
+/// snapshots its primary canvas and hands us the PNG; we persist it so
+/// the operator (or the embedded AI, via the log line) has a durable
+/// artifact rather than the ephemeral request-response `/api/ui-views`
+/// round-trip. Saved under `FERRITE_SCREENSHOTS_DIR` (default
+/// `/tmp/ferrite-views`, the same place `ferrite-ctl view` parks PNGs).
+pub async fn save_screenshot(Json(req): Json<ScreenshotReq>) -> impl IntoResponse {
+    use base64::Engine as _;
+    let raw = req
+        .png_b64
+        .split_once("base64,")
+        .map_or(req.png_b64.as_str(), |(_, b)| b);
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("bad png_b64: {e}")).into_response(),
+    };
+    let dir = std::env::var_os("FERRITE_SCREENSHOTS_DIR").map_or_else(
+        || std::path::PathBuf::from("/tmp/ferrite-views"),
+        Into::into,
+    );
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("mkdir {}: {e}", dir.display()),
+        )
+            .into_response();
+    }
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let slug: String = req
+        .label
+        .unwrap_or_default()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let name = if slug.trim_matches('-').is_empty() {
+        format!("screenshot-{ms}.png")
+    } else {
+        format!("screenshot-{ms}-{}.png", slug.trim_matches('-'))
+    };
+    let path = dir.join(name);
+    if let Err(e) = tokio::fs::write(&path, &bytes).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("write {}: {e}", path.display()),
+        )
+            .into_response();
+    }
+    let path_str = path.display().to_string();
+    // Log it so the embedded AI / `ferrite-ctl tail` learns the path
+    // without a DOM peek — same observability rationale as the
+    // browser-side decoder surfacing.
+    tracing::info!(target: "browser", source = "screenshot", "screenshot saved: {path_str}");
+    (StatusCode::OK, Json(ScreenshotResp { path: path_str })).into_response()
+}
+
 async fn handle_preset(mut socket: WebSocket, state: AppState) {
     let mut rx = state.subscribe();
     tracing::debug!("ws preset subscribed");

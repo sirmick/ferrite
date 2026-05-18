@@ -15,6 +15,7 @@
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
   import { wsUrlFor } from '$lib/api/errors';
   import { composeSource, injectVoiceTranscribe } from '$lib/flowgraph';
+  import { applyControl } from '$lib/control/dispatch';
   import { onMount } from 'svelte';
 
   type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs' | 'flow' | 'ai';
@@ -83,6 +84,20 @@
   });
   $effect(() => {
     browserRuntime.syncStatus(pipeline.status === 'running');
+  });
+
+  // Transcribe ⇒ voice-NR, in one place. Engaging transcription (UI
+  // tri-state Off|On|Transcribe, or `ferrite-ctl transcribe on` —
+  // surfaced here once refreshFromServer pulls the profile) should
+  // default the noise-reduction chain to the `voice` preset, exactly
+  // as clicking the Transcribe chip used to do inline. Edge-triggered
+  // on the off→true transition only, so the operator can still pick a
+  // different NR preset by hand while transcription stays on.
+  let prevTranscribe = false;
+  $effect(() => {
+    const on = pipeline.profile.transcribe;
+    if (on && !prevTranscribe) void applyControl('client.audio.nrPreset', 'voice');
+    prevTranscribe = on;
   });
 
   // Out-of-band state sync. `ferrite-ctl` (and the AI sidecar driving
