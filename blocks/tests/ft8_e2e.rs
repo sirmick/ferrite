@@ -124,6 +124,32 @@ fn ft8_decodes_websdr_test_wav() {
         callsign_like,
         "no callsign-shaped token in any decoded message — sanity check failed",
     );
+
+    // Regression guard: freq/time used to read as a flat 0.0 because
+    // `ftx_decode_candidate` doesn't populate `status.freq`/`.time` on
+    // the public path. They're now resolved from the candidate. Every
+    // decode must land inside the analysis band (ft8_default =
+    // 100–3000 Hz) with a slot-plausible time offset.
+    for d in &decoded {
+        assert!(
+            (100.0..=3000.0).contains(&d.freq_hz),
+            "decode freq {:.1} Hz outside the 100–3000 Hz analysis band — \
+             freq resolution regressed: {:?}",
+            d.freq_hz,
+            d.text,
+        );
+        assert!(
+            (-2.5..=5.0).contains(&d.time_offset_s),
+            "decode time offset {:.2} s implausible for a 15 s slot — \
+             time resolution regressed: {:?}",
+            d.time_offset_s,
+            d.text,
+        );
+    }
+    assert!(
+        decoded.iter().any(|d| d.freq_hz != 0.0),
+        "all decodes report freq 0.0 — the status-field-zero bug is back",
+    );
 }
 
 /// Ship-gate for the `ui:ft8` advanced view: real off-air decodes,

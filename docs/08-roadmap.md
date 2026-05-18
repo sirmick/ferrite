@@ -149,6 +149,28 @@ Other UX leftovers tracked in [`10-commits.md`](10-commits.md):
 - Sample-rate dropdown driven by `/api/source/capabilities` (the
   endpoint exists; the web side still hard-codes choices).
 
+### Structural simplifications (from the 2026-05-17 cleanup audit)
+
+Two refactors that each remove a recurring *category* of bug rather
+than an instance — worth doing before 1.0:
+
+- **Single source of truth for per-driver / preset tables.** The
+  SDRplay IF-filter ladder is hand-duplicated across the Rust server,
+  the Rust CLI (`ferrite-ctl` self-flags it `DUPLICATE-OF`), and the
+  web `sdr-presets` JSON; sample slugs are similarly duplicated (see
+  the sample-consolidation note). Define each table once in Rust and
+  generate the CLI + web copies (build script / serde export). Kills
+  the drift class the comment/dead-code cleanup kept finding.
+- **Make the running pipeline the single doc authority.** Today
+  `AppState` owns `preset_doc`, the runtime owns `applied_doc`, and
+  live reconfigure mutates the runtime then mirrors the delta back
+  under two separate locks (the `apply_block_params` desync window
+  patched in the same audit was a symptom). Have `list_blocks` /
+  `/api/flowgraph` read *through* the runtime's `applied_doc` while a
+  pipeline is live (fall back to `preset_doc` only when stopped):
+  one writer, one reader-of-record, eliminating the dual-write and
+  the lock-ordering hazard outright.
+
 ## Parked feature ideas
 
 Captured in [`11-browsdr-inspired-plan.md`](11-browsdr-inspired-plan.md):

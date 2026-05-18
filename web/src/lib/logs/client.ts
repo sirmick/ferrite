@@ -1,6 +1,7 @@
 // WebSocket client for the server `/ws/logs` text stream. Reconnects with
 // linear backoff so a dev-server restart doesn't require a page reload.
 
+import { wsUrlFor } from '../api/errors';
 import { logs, pushServerLine } from './store.svelte';
 
 export function connectServerLogs(): () => void {
@@ -8,13 +9,9 @@ export function connectServerLogs(): () => void {
   let closed = false;
   let retry = 0;
 
-  const url = (() => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // In dev, vite serves the page on :5173 but ferrited is on :8088.
-    // Use the current host in production builds (served by ferrited itself).
-    const host = location.port === '5173' ? `${location.hostname}:8088` : location.host;
-    return `${proto}//${host}/ws/logs`;
-  })();
+  // Same-origin: in production ferrited serves the page; in dev vite
+  // proxies `/ws` → ferrited. Identical to the AI client's transport.
+  const url = wsUrlFor('/ws/logs');
 
   const open = () => {
     if (closed) return;

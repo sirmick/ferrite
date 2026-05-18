@@ -59,15 +59,41 @@ jobs:
           version: 5.0.7
           actions-cache-folder: emsdk-cache
 
+      - name: Vendor whisper.cpp (pinned)
+        # `wasm:build:whisper` is inert until whisper.cpp is vendored,
+        # which leaves the whisper golden e2e green-by-skip. Vendor the
+        # pinned commit (see blocks/native/whisper/README.md) so the
+        # Emscripten whisper module is actually built and that e2e
+        # becomes a hard gate. Exact-commit fetch, not a --depth 1
+        # clone, so the pin can't drift.
+        run: |
+          PIN=968eebe77225d25e57a3f981da7c696310f0e881
+          mkdir -p blocks/native/whisper/vendor/whisper.cpp
+          cd blocks/native/whisper/vendor/whisper.cpp
+          git init -q
+          git remote add origin https://github.com/ggml-org/whisper.cpp
+          git fetch -q --depth 1 origin "$PIN"
+          git checkout -q FETCH_HEAD
+
+      - name: Fetch whisper tiny model
+        # The golden e2e (whisperGoldenE2E.test.ts) transcribes through
+        # the built module against ggml-tiny.en-q5_1 (~30 MB — chosen
+        # small enough for the fast lane).
+        run: |
+          mkdir -p web/static/models
+          curl -fL --retry 3 --retry-delay 5 \
+            -o web/static/models/ggml-tiny.en-q5_1.bin \
+            https://huggingface.co/ggml-org/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin
+
       - name: pnpm install
         run: pnpm install --frozen-lockfile
 
       - name: Build wasm artifacts
         # `pnpm -r check` (svelte-check) imports from
         # web/src/lib/wasm/{blocks,runtime}; both are produced by
-        # wasm-pack. `wasm:build:fldigi` additionally emits the
-        # Emscripten fldigi bridge (emsdk installed above). Build all
-        # before lint / check / test.
+        # wasm-pack. `wasm:build:fldigi` emits the Emscripten fldigi
+        # bridge and `wasm:build:whisper` the whisper module (emsdk +
+        # vendored sources above). Build all before lint / check / test.
         run: pnpm --filter @ferrite/web wasm:build
 
       - name: pnpm -r lint

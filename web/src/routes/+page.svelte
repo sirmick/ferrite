@@ -3,7 +3,6 @@
   import LogPanel from '$lib/layout/LogPanel.svelte';
   import FlowPanel from '$lib/layout/FlowPanel.svelte';
   import AiPanel from '$lib/layout/AiPanel.svelte';
-  import TranscriptionPanel from '$lib/layout/TranscriptionPanel.svelte';
   import Split from '$lib/layout/Split.svelte';
   import BandsPanel from '$lib/presets/BandsPanel.svelte';
   import SettingsPanel from '$lib/presets/SettingsPanel.svelte';
@@ -15,10 +14,10 @@
   import { installAutoSettingsEffect } from '$lib/controls/autoSettings.svelte';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
   import { wsUrlFor } from '$lib/api/errors';
-  import { composeSource } from '$lib/flowgraph';
+  import { composeSource, injectVoiceTranscribe } from '$lib/flowgraph';
   import { onMount } from 'svelte';
 
-  type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs' | 'flow' | 'ai' | 'transcript';
+  type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs' | 'flow' | 'ai';
   let leftTab = $state<LeftTab>('bands');
 
   // Opening the Logs tab acks the error badge. While the tab is open,
@@ -73,7 +72,14 @@
       type: source.type,
       params: source.params as Record<string, unknown>,
     });
-    browserRuntime.syncFlowgraph(composed, wsUrlFor('/ws/preset'));
+    // Mirror the server's profile-gated VoiceTranscribe injection
+    // (runtime/src/inject_voice_transcribe.rs). The browser runtime
+    // builds its own graph from composeSource, so without this the tap
+    // exists only node-side. Same `transcribe` profile bit the
+    // receiver's Audio control sets — reading it here makes this effect
+    // re-sync the browser graph when the operator engages transcription.
+    const withVt = pipeline.profile.transcribe ? injectVoiceTranscribe(composed) : composed;
+    browserRuntime.syncFlowgraph(withVt, wsUrlFor('/ws/preset'));
   });
   $effect(() => {
     browserRuntime.syncStatus(pipeline.status === 'running');
@@ -191,12 +197,6 @@
               class:tab-active={leftTab === 'ai'}
               onclick={() => (leftTab = 'ai')}>AI</button
             >
-            <button
-              type="button"
-              class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
-              class:tab-active={leftTab === 'transcript'}
-              onclick={() => (leftTab = 'transcript')}>Transcript</button
-            >
           </div>
           <div class="min-h-0 flex-1">
             {#if leftTab === 'bands'}
@@ -212,8 +212,6 @@
               <FlowPanel />
             {:else if leftTab === 'ai'}
               <AiPanel />
-            {:else if leftTab === 'transcript'}
-              <TranscriptionPanel />
             {:else}
               <LogPanel />
             {/if}

@@ -43,6 +43,12 @@ pub struct Profile {
     /// decode — frees WS bandwidth and stops the browser AudioWorklet
     /// from being fed silence.
     pub audio: bool,
+    /// When true, a `VoiceTranscribe` tap is spliced before every
+    /// `AudioSink` (browser-side speech-to-text). Default false —
+    /// transcription is opt-in via the receiver's Audio control, the
+    /// same build-time mechanism as `audio`. Implies `audio` (the tap
+    /// sits on the audio chain); the UI never sets it without `audio`.
+    pub transcribe: bool,
     /// Override placement for blocks tagged `"placement_role": "demod"`.
     /// `None` leaves the preset's authored placement in effect; on
     /// flip, the bridge crossing relocates automatically because the
@@ -54,6 +60,7 @@ impl Default for Profile {
     fn default() -> Self {
         Self {
             audio: true,
+            transcribe: false,
             demod_placement: None,
         }
     }
@@ -67,6 +74,7 @@ impl Profile {
     fn value(&self, key: &str) -> Option<Value> {
         match key {
             "audio" => Some(Value::Bool(self.audio)),
+            "transcribe" => Some(Value::Bool(self.transcribe)),
             _ => None,
         }
     }
@@ -151,6 +159,7 @@ mod tests {
             &mut doc,
             &Profile {
                 audio: false,
+                transcribe: false,
                 demod_placement: None,
             },
         );
@@ -196,6 +205,7 @@ mod tests {
             &mut doc,
             &Profile {
                 audio: false,
+                transcribe: false,
                 demod_placement: None,
             },
         );
@@ -221,6 +231,7 @@ mod tests {
             &mut doc,
             &Profile {
                 audio: true,
+                transcribe: false,
                 demod_placement: Some(Environment::Browser),
             },
         );
@@ -271,6 +282,7 @@ mod tests {
             &mut doc,
             &Profile {
                 audio: false,
+                transcribe: false,
                 demod_placement: None,
             },
         );
@@ -307,6 +319,7 @@ mod tests {
     fn profile_round_trips_through_json() {
         let p = Profile {
             audio: false,
+            transcribe: false,
             demod_placement: Some(Environment::Browser),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -356,6 +369,7 @@ mod tests {
         );
         let profile = Profile {
             audio: false,
+            transcribe: false,
             demod_placement: None,
         };
         apply_profile(&mut doc, &profile);

@@ -561,8 +561,9 @@ fn probe_rx_channel(device: *mut SoapySDRDevice, channel: usize) -> Result<RxCha
 
     // SAFETY: device is open.
     let has_agc = unsafe { soapysdr_sys::SoapySDRDevice_hasGainMode(device, SOAPY_RX, channel) };
-    // hasGainMode sets status when the driver doesn't support it — swallow
-    // that, mirroring the previous `unwrap_or(false)`.
+    // hasGainMode sets the SoapySDR error status when the driver doesn't
+    // support gain-mode control; treat that as "no AGC" rather than
+    // surfacing it.
     let has_agc = check_last_status().is_ok() && has_agc;
 
     // SAFETY: device is open. Same status-swallow pattern as has_agc —

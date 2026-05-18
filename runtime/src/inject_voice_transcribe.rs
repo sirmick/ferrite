@@ -13,31 +13,44 @@
 //!
 //! `VoiceTranscribe` is a pure RealF32 passthrough (`Placement::WasmOnly`,
 //! same browser side as `AudioSink`), so the audio bytes are unchanged
-//! and no cross-env wire is created. Its `mode` defaults to `"off"` —
-//! zero cost until the operator engages it from the block-settings
-//! panel (the same generic `BlockParams` surface as Audio / NR; D24) or
-//! the transcription panel. Run *after* `apply_profile` so a profile
-//! with `audio: false` has already stripped the `AudioSink` chain and
-//! this pass simply finds nothing to do.
+//! and no cross-env wire is created. The tap is injected `mode: "on"`
+//! (audio plays and is transcribed) — it only exists when transcription
+//! is engaged.
 //!
-//! Idempotent and conservative: skips if a `VoiceTranscribe` already
-//! exists (a preset opted in by hand), if the synthetic id would
-//! collide, or if an `AudioSink` has no producer wire.
+//! **Opt-in via the [`Profile`].** This pass is gated on
+//! `profile.transcribe`: it's the same build-time mechanism as the
+//! `audio` chain gate (the receiver's Audio control is Off | On |
+//! Transcribe). Run *after* `apply_profile`, so when `audio: false`
+//! the chain is already stripped and there's nothing to tap; and
+//! `transcribe` implies `audio` (UI-enforced), so the chain is present
+//! whenever this pass injects.
+//!
+//! Idempotent and conservative: no-op unless `profile.transcribe`;
+//! skips if a `VoiceTranscribe` already exists (a preset opted in by
+//! hand), if the synthetic id would collide, or if an `AudioSink` has
+//! no producer wire.
 
 use serde_json::json;
 
+use crate::apply_profile::Profile;
 use crate::doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
 
 /// Synthetic-block id prefix. `__` matches the convention `env_split`
 /// and `inject_narrow_fft` already use; no registry block starts `__`.
 const PREFIX: &str = "__voice_transcribe";
 
-/// Splice a `VoiceTranscribe` before every `AudioSink` in `doc`.
+/// Splice a `VoiceTranscribe` before every `AudioSink` in `doc` when
+/// `profile.transcribe` is set.
 ///
-/// No-op when the preset has no `AudioSink` (no audio chain — e.g. a
-/// pure decoder/record preset) or already carries a `VoiceTranscribe`
-/// (hand-authored opt-in: leave the operator's wiring alone).
-pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc) {
+/// No-op when transcription isn't engaged (`!profile.transcribe`), when
+/// the preset has no `AudioSink` (no audio chain — e.g. a pure
+/// decoder/record preset), or when it already carries a
+/// `VoiceTranscribe` (hand-authored opt-in: leave the wiring alone).
+pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc, profile: &Profile) {
+    if !profile.transcribe {
+        return;
+    }
+
     let already_present = doc
         .blocks
         .values()
@@ -86,13 +99,14 @@ pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc) {
         }
         doc.wires.push(Wire::new(format!("{vt_id}.out"), sink_in));
 
-        // WasmOnly, browser side (same as the AudioSink it precedes);
-        // `mode: "off"` is the zero-cost default.
+        // WasmOnly, browser side (same as the AudioSink it precedes).
+        // `mode: "on"` — the tap only exists when transcription is
+        // engaged, so it's active on injection (audio plays + STT).
         doc.blocks.insert(
             vt_id,
             BlockInstanceDecl {
                 type_name: "VoiceTranscribe".into(),
-                params: Some(json!({ "mode": "off" })),
+                params: Some(json!({ "mode": "on" })),
                 placement: Some(Environment::Browser),
                 ..Default::default()
             },
@@ -109,6 +123,38 @@ mod tests {
         FlowgraphDoc::from_json(json).expect("doc parses")
     }
 
+    /// Profile with transcription engaged (the receiver's "Transcribe"
+    /// state — implies `audio`).
+    fn engaged() -> Profile {
+        Profile {
+            audio: true,
+            transcribe: true,
+            demod_placement: None,
+        }
+    }
+
+    #[test]
+    fn disabled_when_transcribe_off() {
+        // Same audio preset as `splices_before_audio_sink`, but the
+        // profile hasn't engaged transcription → pass is a no-op.
+        let mut doc = parse(
+            br#"{
+                "name": "audio",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src":   {"type": "SineSource"},
+                    "audio": {"type": "AudioSink", "placement": "browser"}
+                },
+                "wires": [["src.out", "audio.in"]]
+            }"#,
+        );
+        let (b, w) = (doc.blocks.len(), doc.wires.len());
+        inject_voice_transcribe(&mut doc, &Profile::default()); // transcribe: false
+        assert_eq!(doc.blocks.len(), b);
+        assert_eq!(doc.wires.len(), w);
+        assert!(!doc.blocks.keys().any(|k| k.starts_with(PREFIX)));
+    }
+
     #[test]
     fn no_audio_sink_means_no_injection() {
         let mut doc = parse(
@@ -123,7 +169,7 @@ mod tests {
             }"#,
         );
         let (b, w) = (doc.blocks.len(), doc.wires.len());
-        inject_voice_transcribe(&mut doc);
+        inject_voice_transcribe(&mut doc, &engaged());
         assert_eq!(doc.blocks.len(), b);
         assert_eq!(doc.wires.len(), w);
     }
@@ -147,7 +193,7 @@ mod tests {
                 ]
             }"#,
         );
-        inject_voice_transcribe(&mut doc);
+        inject_voice_transcribe(&mut doc, &engaged());
 
         let vt = "__voice_transcribe_audio";
         assert_eq!(
@@ -183,10 +229,10 @@ mod tests {
                 "wires": [["src.out", "audio.in"]]
             }"#,
         );
-        inject_voice_transcribe(&mut doc);
+        inject_voice_transcribe(&mut doc, &engaged());
         let after_first = (doc.blocks.len(), doc.wires.len());
         // Second pass: the `__voice_transcribe_*` already present → no-op.
-        inject_voice_transcribe(&mut doc);
+        inject_voice_transcribe(&mut doc, &engaged());
         assert_eq!((doc.blocks.len(), doc.wires.len()), after_first);
 
         // Hand-authored VoiceTranscribe → pass leaves it entirely alone.
@@ -203,7 +249,7 @@ mod tests {
             }"#,
         );
         let before = (hand.blocks.len(), hand.wires.len());
-        inject_voice_transcribe(&mut hand);
+        inject_voice_transcribe(&mut hand, &engaged());
         assert_eq!((hand.blocks.len(), hand.wires.len()), before);
     }
 }

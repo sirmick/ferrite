@@ -596,10 +596,10 @@ function presetVfoHint(slug: string): number | null {
 export const pipeline = new PipelineStore();
 
 /**
- * Compatibility surface for viz components that haven't migrated to
- * the preset-first world yet. Exposes just enough of the legacy
- * `SessionState` shape (center freq, sample rate) to unblock tuning
- * while the FFT display axes move to the flowgraph in a follow-up.
+ * Axis context (center freq, sample rate) the spectrum/waterfall viz
+ * components read to label and tune their displays. This is a stable
+ * shim: the FFT display axes are derived here from the active preset
+ * rather than carried on each viz component.
  */
 export interface PipelineAxes {
   center_freq_hz: number;

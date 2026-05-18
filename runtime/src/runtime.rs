@@ -1630,9 +1630,8 @@ mod tests {
 
     #[test]
     fn stop_is_idempotent_after_first_stop() {
-        // Second stop() is a no-op, not an error — matches the TS
-        // runtime's contract so a `try { stop() }` in a cleanup path
-        // doesn't flag on a double-stop race.
+        // Second stop() is a no-op, not an error — so a `try { stop() }`
+        // in a cleanup path doesn't flag on a double-stop race.
         let mut rt = load(
             r#"{
                 "name":"t","environments":["browser"],

@@ -68,3 +68,32 @@ const ftx_waterfall_t* ferrite_monitor_waterfall(const monitor_t* m)
 {
     return m ? &m->wf : NULL;
 }
+
+// Geometry needed to turn a candidate's (freq_offset, freq_sub) /
+// (time_offset, time_sub) into absolute audio Hz / seconds, mirroring
+// upstream's demo (vendor/decode_ft8_reference.c:153-154):
+//   freq_hz  = (min_bin + freq_offset + freq_sub/freq_osr) / symbol_period
+//   time_sec = (time_offset + time_sub/time_osr) * symbol_period
+// These live on the opaque monitor_t / its waterfall, so they have to
+// come back through glue rather than be recomputed Rust-side (min_bin
+// is an int truncation of f_min*symbol_period — recomputing it risks
+// an off-by-one).
+int ferrite_monitor_min_bin(const monitor_t* m)
+{
+    return m ? m->min_bin : 0;
+}
+
+float ferrite_monitor_symbol_period(const monitor_t* m)
+{
+    return m ? m->symbol_period : 0.0f;
+}
+
+int ferrite_monitor_freq_osr(const monitor_t* m)
+{
+    return m ? m->wf.freq_osr : 1;
+}
+
+int ferrite_monitor_time_osr(const monitor_t* m)
+{
+    return m ? m->wf.time_osr : 1;
+}

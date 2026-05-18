@@ -8,7 +8,7 @@
 //! IEEE-float tag 3) and lets each caller enforce the layout it
 //! actually supports with a clear error.
 
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -85,6 +85,71 @@ pub fn parse_wav_header<R: Read + Seek>(r: &mut R) -> Result<WavInfo> {
             }
         }
     }
+}
+/// Write a 44-byte 16-bit-PCM RIFF/WAVE header with placeholder RIFF
+/// and `data` chunk sizes (both zero — patched by [`patch_wav_sizes`]
+/// at finalise once the total sample count is known). Returns the byte
+/// offset of the `data` size `u32` so the caller can seek back to it.
+///
+/// `channels` is 1 for mono audio ([`FileAudioSink`](crate::file_audio_sink))
+/// or 2 for stereo IQ ([`FileIqSink`](crate::file_sink)); both write
+/// signed 16-bit samples, so `block_align = channels * 2`.
+pub fn write_pcm_s16_stub_header<W: Write + Seek>(
+    w: &mut W,
+    rate_hz: f64,
+    channels: u16,
+) -> Result<u64> {
+    if !(rate_hz > 0.0) || rate_hz > f64::from(u32::MAX) {
+        bail!("WAV: rate_hz out of range: {rate_hz}");
+    }
+    // Bounded by the check above: 0 < rate_hz <= u32::MAX, so the
+    // round-and-cast is exact and non-negative.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rate = rate_hz.round() as u32;
+    let block_align = channels.saturating_mul(2); // s16 = 2 B/sample
+    let byte_rate = rate.saturating_mul(u32::from(block_align));
+
+    w.write_all(b"RIFF").context("RIFF")?;
+    w.write_all(&0u32.to_le_bytes()).context("RIFF size stub")?; // patched on finalise
+    w.write_all(b"WAVE").context("WAVE")?;
+
+    w.write_all(b"fmt ").context("fmt id")?;
+    w.write_all(&16u32.to_le_bytes()).context("fmt size")?;
+    w.write_all(&WAVE_FORMAT_PCM.to_le_bytes())
+        .context("PCM tag")?;
+    w.write_all(&channels.to_le_bytes()).context("channels")?;
+    w.write_all(&rate.to_le_bytes()).context("sample rate")?;
+    w.write_all(&byte_rate.to_le_bytes()).context("byte rate")?;
+    w.write_all(&block_align.to_le_bytes())
+        .context("block align")?;
+    w.write_all(&16u16.to_le_bytes()).context("bits")?;
+
+    w.write_all(b"data").context("data id")?;
+    let data_size_pos = w.stream_position().context("tell data size pos")?;
+    w.write_all(&0u32.to_le_bytes()).context("data size stub")?; // patched on finalise
+    Ok(data_size_pos)
+}
+
+/// Back-patch the RIFF and `data` chunk sizes once writing is done.
+/// `data_size_pos` is what [`write_pcm_s16_stub_header`] returned;
+/// `data_bytes` is the total sample-payload size in bytes.
+pub fn patch_wav_sizes<W: Write + Seek>(
+    mut w: W,
+    data_size_pos: u64,
+    data_bytes: u32,
+) -> Result<()> {
+    w.seek(SeekFrom::Start(data_size_pos))
+        .context("seek data size")?;
+    w.write_all(&data_bytes.to_le_bytes())
+        .context("patch data size")?;
+    // RIFF chunk size = 36 + data_bytes (header is 44 B; the RIFF size
+    // field excludes the leading `RIFF` + size = 8 B).
+    let riff_size = data_bytes.saturating_add(36);
+    w.seek(SeekFrom::Start(4)).context("seek riff size")?;
+    w.write_all(&riff_size.to_le_bytes())
+        .context("patch riff size")?;
+    w.flush().context("flush after patch")?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,11 +1,14 @@
-//! RDS (Radio Data System) decoder — Phase 1 scaffold.
+//! RDS (Radio Data System) decoder.
 //!
 //! RDS is the ~1.2 kbps data stream broadcast FM stations carry on a
 //! 57 kHz suppressed-carrier subcarrier. Every commercial FM signal
 //! has it. This block takes the FM demod's MPX output, recovers the
-//! 57 kHz subcarrier, coherently mixes it to baseband, and emits the
-//! biphase-encoded data envelope for a downstream bit-sync / block-
-//! sync / group-parser to turn into PS / RT / PI events.
+//! 57 kHz subcarrier, coherently mixes it to baseband, then runs the
+//! full pipeline — biphase recovery → bit sync → block sync → group
+//! assembler — and emits newline-delimited JSON RDS events (PI / PS /
+//! PTY / TP / TA). RadioText (RT), AF and clock-time (CT) groups are
+//! parsed for sync but not yet surfaced as events (see the group
+//! handler).
 //!
 //! ### Why 57 kHz is trivially coherent to recover
 //!
@@ -15,7 +18,7 @@
 //! acquisition, no squaring loop. We run an `Nco` PLL at 19 kHz and
 //! multiply its phase by 3 to synthesise the 57 kHz local oscillator.
 //!
-//! ### Signal chain (this commit)
+//! ### Signal chain
 //!
 //! ```text
 //! MPX @ Fs ──┬── BPF 18.5..19.5 kHz ── Nco PLL lock ── phase19
@@ -25,10 +28,11 @@
 //!            └── delay match ──────────────────────────────────────────┘
 //! ```
 //!
-//! I and Q are decimated by `DECIMATE_TO_BAUD_RATIO × symbol_rate` so
-//! downstream bit sync sees a manageable sample count. The decimated
-//! stream is what the block emits today; bit/block/group decoding and
-//! JSON event emission arrive in subsequent commits.
+//! I and Q are decimated by `DECIMATE_TO_BAUD_RATIO × symbol_rate`
+//! before bit sync so the symbol tracker sees a manageable sample
+//! count. The `data` port still carries the decimated baseband stream
+//! for diagnostics; decoded RDS events go out the `events` port as
+//! newline-delimited JSON.
 //!
 //! ### Rate support
 //!
@@ -312,7 +316,6 @@ impl RdsDemod {
         self.pilot_nco.pll_step(phase_err);
         self.pilot_nco.step();
 
-        let phase19 = self.pilot_nco.phase();
         // 57 kHz LO = 3× pilot phase. `cos(3θ)` via the trig identity
         // `cos(3θ) = 4cos³θ − 3cosθ` avoids another sin/cos evaluation;
         // same for `sin(3θ) = 3sinθ − 4sin³θ`. Since we already have
@@ -321,7 +324,6 @@ impl RdsDemod {
         let s = ref_im;
         let cos3 = 4.0 * c * c * c - 3.0 * c;
         let sin3 = 3.0 * s - 4.0 * s * s * s;
-        let _ = phase19; // kept for future diagnostics
 
         // RDS path: delay-align with the pilot path, then BPF.
         let delayed = self.delay_line[self.delay_write];
@@ -463,20 +465,11 @@ impl Block for RdsDemod {
         // caps how many JSON bytes we can drain. We size consumption
         // against the data cap so the scheduler re-presents excess.
         let mut data_cap = usize::MAX;
-        let mut events_cap = 0_usize;
         for port in io.outputs.iter() {
-            match port.name {
-                "data" => {
-                    if let crate::block::OutBuf::RealF32(buf) = &port.buf {
-                        data_cap = buf.len();
-                    }
+            if port.name == "data" {
+                if let crate::block::OutBuf::RealF32(buf) = &port.buf {
+                    data_cap = buf.len();
                 }
-                "events" => {
-                    if let crate::block::OutBuf::Events(buf) = &port.buf {
-                        events_cap = buf.len();
-                    }
-                }
-                _ => {}
             }
         }
 
@@ -526,8 +519,6 @@ impl Block for RdsDemod {
             }
         }
 
-        let _ = events_cap; // retained for symmetry; drain logic
-                            // reads port length live above.
         let mut w = Work::new();
         w.consumed[0] = consumed;
         w.produced[0] = produced_data;
@@ -975,7 +966,10 @@ impl GroupParser {
             return None;
         };
         let d = self.slots[3]?;
-        let c_or_cprime = self.slots[2];
+        // Parsed but not yet surfaced — block C and the B0 variant bit
+        // are what RT / AF / CT group decoding will need once those
+        // group types are implemented.
+        let _c_or_cprime = self.slots[2];
 
         let mut update = GroupUpdate::empty();
 
@@ -987,7 +981,7 @@ impl GroupParser {
 
         // Block B parse.
         let group_type_code = (b >> 12) & 0x0F;
-        let variant_b = (b >> 11) & 0x01 == 1;
+        let _variant_b = (b >> 11) & 0x01 == 1;
         let tp = (b >> 10) & 0x01 == 1;
         let pty = ((b >> 5) & 0x1F) as u8;
         let b_low5 = (b & 0x1F) as u8;
@@ -1030,7 +1024,6 @@ impl GroupParser {
             }
         }
 
-        let _ = (variant_b, c_or_cprime); // future: RT, AF, CT
         if update.is_empty() {
             None
         } else {

@@ -6,9 +6,9 @@ Usage:
 
 The bin file is `frame_size`-byte windows of u8 dBFS-quantised FFT
 bins (see `LogMagU8`'s recording output). The sidecar JSON describes
-`frame_size`, `sample_rate_hz`, and (when the runtime starts plumbing
-it) `center_freq_hz`. We render time-on-Y, frequency-on-X, brightness =
-quantised power.
+`frame_size`, `sample_rate_hz`, and `center_freq_hz` (0.0 only for
+legacy captures recorded before PortMeta propagation). We render
+time-on-Y, frequency-on-X, brightness = quantised power.
 
 Default output is `<bin-path>.png` next to the source. The PNG is what
 Ferrite's AI assistant reads to "see" the spectrum — keep the output

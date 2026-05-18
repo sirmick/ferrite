@@ -1,8 +1,9 @@
 // Spawn / wait / kill helper for ferrited under a Playwright run.
-// Mirrors the spawn shape in run.sh: requires --flowgraph (uses a
-// placeholder, the pipeline isn't started until we POST /api/pipeline/start),
-// points FERRITE_STATIC_ROOT at the built SvelteKit bundle, and binds
-// to 127.0.0.1 on a port we pick at random.
+// Spawns ferrited with the built SvelteKit bundle mounted via
+// FERRITE_STATIC_ROOT (so the e2e exercises the real static-served UI,
+// not the vite dev server run.sh uses). Requires --flowgraph (a
+// placeholder; the pipeline isn't started until we POST
+// /api/pipeline/start), and binds to 127.0.0.1 on a random port.
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';

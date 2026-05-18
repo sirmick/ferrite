@@ -10,6 +10,25 @@ if [ -f soapysdr/env.sh ]; then
   . soapysdr/env.sh
 fi
 
+# Put emsdk on PATH if installed but not already sourced — otherwise
+# wasm:build:{fldigi,whisper} silently no-op and the subsequent vite
+# build hard-fails on the missing `./fldigi.mjs` dynamic import.
+# Honors $EMSDK, then the conventional ~/emsdk checkout.
+if ! command -v emcc >/dev/null 2>&1; then
+  for _emsdk_env in "${EMSDK:-}/emsdk_env.sh" "$HOME/emsdk/emsdk_env.sh"; do
+    if [ -f "$_emsdk_env" ]; then
+      # shellcheck disable=SC1090
+      . "$_emsdk_env" >/dev/null 2>&1
+      break
+    fi
+  done
+fi
+if ! command -v emcc >/dev/null 2>&1; then
+  echo "warning: emcc not found — fldigi/whisper wasm modules won't" >&2
+  echo "  build and 'vite build' will fail on the missing imports." >&2
+  echo "  Install emsdk (https://emscripten.org) or set \$EMSDK." >&2
+fi
+
 if [ "${BUILD_FORCE:-0}" != "1" ] && pgrep -x ferrited >/dev/null 2>&1; then
   echo "ferrited is still running — it's probably holding your SDR." >&2
   echo "Stop it first:  ./stop.sh" >&2

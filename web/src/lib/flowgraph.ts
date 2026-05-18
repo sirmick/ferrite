@@ -104,3 +104,68 @@ export function composeSource(
   }
   return { ...preset, blocks: srcBlocks };
 }
+
+/** Synthetic-block id prefix — must match Rust's
+ *  `inject_voice_transcribe::PREFIX` so the id the UI dispatches to
+ *  (`browser.<id>.mode`, derived from the server-composed
+ *  `pipeline.blocks`) is the same id the browser runtime knows. */
+const VOICE_TRANSCRIBE_PREFIX = '__voice_transcribe';
+
+/** Browser-side mirror of Rust `inject_voice_transcribe`
+ *  (`runtime/src/inject_voice_transcribe.rs`). The server splices a
+ *  `VoiceTranscribe` tap before every `AudioSink` at compose time, but
+ *  only into the doc the *node* runtime runs — the browser runtime
+ *  builds its graph from `composeSource` alone, so without this mirror
+ *  the tap would exist only node-side and never run in the browser.
+ *  The caller gates this on the `transcribe` profile bit (the
+ *  receiver's Audio control) and runs it after `composeSource`.
+ *
+ *  Idempotent and conservative: no-op if a `VoiceTranscribe` already
+ *  exists (hand-authored opt-in), if the synthetic id would collide,
+ *  or if an `AudioSink` has no producer wire. Returns a fresh doc;
+ *  does not mutate `doc`. */
+export function injectVoiceTranscribe(doc: FlowgraphDoc): FlowgraphDoc {
+  const blocks = doc.blocks ?? {};
+  const alreadyPresent =
+    Object.values(blocks).some((b) => b.type === 'VoiceTranscribe') ||
+    Object.keys(blocks).some((k) => k.startsWith(VOICE_TRANSCRIBE_PREFIX));
+  if (alreadyPresent) return doc;
+
+  const sinkIds = Object.entries(blocks)
+    .filter(([, b]) => b.type === 'AudioSink')
+    .map(([id]) => id);
+  if (sinkIds.length === 0) return doc;
+
+  const outBlocks: Record<string, BlockInstanceDecl> = { ...blocks };
+  const outWires: [string, string][] = (doc.wires ?? []).map(([s, d]) => [s, d]);
+
+  for (const sinkId of sinkIds) {
+    const vtId = `${VOICE_TRANSCRIBE_PREFIX}_${sinkId}`;
+    if (vtId in outBlocks) continue; // refuse to clobber
+
+    // Re-point the AudioSink's producer wire(s) through the tap:
+    // `<producer> → sink.in` becomes `<producer> → __vt.in`, then add
+    // `__vt.out → sink.in`.
+    const sinkIn = `${sinkId}.in`;
+    let repointed = false;
+    for (const w of outWires) {
+      if (w[1] === sinkIn) {
+        w[1] = `${vtId}.in`;
+        repointed = true;
+      }
+    }
+    if (!repointed) continue; // dangling AudioSink — nothing to tap
+    outWires.push([`${vtId}.out`, sinkIn]);
+
+    outBlocks[vtId] = {
+      type: 'VoiceTranscribe',
+      placement: 'browser',
+      // `on` (audio + STT) — callers only invoke this when the
+      // `transcribe` profile bit is set, so the tap is active on
+      // creation. Mirrors the Rust injector's `mode: "on"`.
+      params: { mode: 'on' },
+    };
+  }
+
+  return { ...doc, blocks: outBlocks, wires: outWires };
+}

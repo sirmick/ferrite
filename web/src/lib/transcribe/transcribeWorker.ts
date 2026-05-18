@@ -45,7 +45,7 @@ type OutMsg =
       noSpeechProb: number;
     };
 
-const POLL_MS = 250;
+const POLL_MS = 150;
 /** Ham-vocabulary `initial_prompt` base. Defaults to the dense corpus
  *  in hamPrompt.ts; overridden live by the Transcript tab's editable
  *  field (browserRuntime forwards a `prompt` message). The rolling
@@ -63,7 +63,17 @@ let droppedTotal = 0;
 let lastAvail = 0;
 const recentCalls: string[] = [];
 let curModel: WhisperModelDef = MODELS[0];
-let segBusy = false;
+
+// Closed utterances waiting for whisper. `whisper_full` is a blocking
+// WASM call (seconds for a multi-second clip) and this Worker is
+// single-threaded, so segments that close while one is running are
+// QUEUED, not dropped — continuous speech closes a fresh segment every
+// `maxSegmentMs`, and the old "drop if busy" lost whole sentences.
+// Bounded: a speaker faster than whisper sheds the OLDEST backlog so
+// latency can't balloon, counted as a glitch.
+const pendingSegs: Float32Array[] = [];
+const MAX_PENDING = 6;
+let draining = false;
 
 const scratch = new Float32Array(65536);
 
@@ -85,34 +95,66 @@ function rollingPrompt(): string {
   return promptBase + recentCalls.slice(-MAX_PROMPT_CALLS).join(' ');
 }
 
-async function onSegment(pcm16k: Float32Array): Promise<void> {
-  if (!engine?.loaded || segBusy) return;
-  segBusy = true;
+function transcribeOne(pcm16k: Float32Array): void {
+  if (!engine?.loaded) return;
+  status('transcribing');
+  const res = engine.transcribe(pcm16k, rollingPrompt());
+  const atMs = Date.now();
+  for (const seg of res.segments) {
+    const cleaned = applyHamPostProcess(seg.text);
+    if (!cleaned) continue;
+    for (const c of extractCallsigns(cleaned)) {
+      if (!recentCalls.includes(c)) recentCalls.push(c);
+    }
+    post({
+      type: 'segment',
+      atMs,
+      t0: seg.t0,
+      t1: seg.t1,
+      text: cleaned,
+      tokens: seg.tokens ?? [],
+      // avg log-prob → rough 0..1 confidence for the panel's dimming.
+      confidence: Math.max(0, Math.min(1, Math.exp(seg.avgLogprob))),
+      noSpeechProb: seg.noSpeechProb ?? 0,
+    });
+  }
+}
+
+function enqueueSegment(pcm16k: Float32Array): void {
+  if (!engine?.loaded) return;
+  if (pendingSegs.length >= MAX_PENDING) {
+    // Whisper is behind the speaker — shed the oldest utterance so
+    // latency stays bounded; surfaced as a glitch.
+    pendingSegs.shift();
+    droppedTotal += 1;
+    post({ type: 'dropped', total: droppedTotal });
+  }
+  pendingSegs.push(pcm16k);
+  void drainSegments();
+}
+
+// Synchronous in practice (no awaits — `engine.transcribe` is a
+// blocking WASM call). The `draining` guard makes the re-entrant
+// poll()→segmenter→enqueueSegment path safe: a segment closed *during*
+// drain just lands on the queue and the loop picks it up.
+async function drainSegments(): Promise<void> {
+  if (draining) return;
+  draining = true;
   try {
-    status('transcribing');
-    const res = engine.transcribe(pcm16k, rollingPrompt());
-    const atMs = Date.now();
-    for (const seg of res.segments) {
-      const cleaned = applyHamPostProcess(seg.text);
-      if (!cleaned) continue;
-      for (const c of extractCallsigns(cleaned)) {
-        if (!recentCalls.includes(c)) recentCalls.push(c);
+    while (pendingSegs.length > 0 && engine?.loaded) {
+      const pcm = pendingSegs.shift() as Float32Array;
+      try {
+        transcribeOne(pcm);
+      } catch (e) {
+        status('error', String(e));
       }
-      post({
-        type: 'segment',
-        atMs,
-        t0: seg.t0,
-        t1: seg.t1,
-        text: cleaned,
-        tokens: seg.tokens ?? [],
-        // avg log-prob → rough 0..1 confidence for the panel's dimming.
-        confidence: Math.max(0, Math.min(1, Math.exp(seg.avgLogprob))),
-        noSpeechProb: seg.noSpeechProb ?? 0,
-      });
+      // Drain the SAB between queued inferences so a backlog doesn't
+      // overflow the ring while we catch up.
+      poll();
     }
     status('listening');
   } finally {
-    segBusy = false;
+    draining = false;
   }
 }
 
@@ -139,7 +181,7 @@ function poll(): void {
 
 async function init(sab: SharedArrayBuffer): Promise<void> {
   reader = AudioRingReader.fromSab(sab);
-  segmenter = new EnergyVadSegmenter({}, (pcm) => void onSegment(pcm));
+  segmenter = new EnergyVadSegmenter({}, (pcm) => enqueueSegment(pcm));
   timer = setInterval(poll, POLL_MS);
 
   status('loading-model', `${curModel.label} (~${curModel.approxMB} MB, one-time)`);

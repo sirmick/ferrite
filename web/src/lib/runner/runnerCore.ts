@@ -39,9 +39,14 @@ export interface RunnerEnv {
 
 const DEFAULT_TICK_MS = 10;
 const DEFAULT_AUDIO_SINK_CAPACITY = 8192;
-/** Mirror of `VoiceTranscribe`'s Rust-side default tap-ring capacity
- *  (`DEFAULT_BUFFER_SAMPLES` = ~340 ms at 48 kHz). */
-const DEFAULT_TRANSCRIBE_CAPACITY = 16384;
+/** Tap-ring capacity for the transcription SAB. Sized to bridge a full
+ *  whisper inference stall: the transcribe Worker is single-threaded
+ *  and `whisper_full` is a blocking call (seconds for a multi-second
+ *  utterance), during which it can't drain this ring while the runner
+ *  keeps writing it. 262 144 samples ≈ 5.5 s @ 48 kHz / ~16 s @ 16 kHz
+ *  — comfortably longer than one inference, so continuous speech isn't
+ *  shredded by ring overflow. ~1 MB SAB; cheap for the robustness. */
+const DEFAULT_TRANSCRIBE_CAPACITY = 262144;
 
 interface AudioBinding {
   readonly blockId: string;

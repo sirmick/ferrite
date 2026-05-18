@@ -138,33 +138,10 @@ impl Drop for Recorder {
 #[cfg(test)]
 mod tests {
     use super::Recorder;
-    use std::io::{Cursor, Write};
+    use crate::test_support::{SharedBuf, SharedCursor};
 
-    struct SharedCursor {
-        inner: Cursor<Vec<u8>>,
-        shared: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
-    }
-    impl Write for SharedCursor {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let n = self.inner.write(buf)?;
-            *self.shared.borrow_mut() = self.inner.get_ref().clone();
-            Ok(n)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.inner.flush()
-        }
-    }
-    // SharedCursor never crosses thread boundaries in tests — needed
-    // because `Rc` is !Send and our `Box<dyn Write + Send>` bound would
-    // otherwise reject it.
-    unsafe impl Send for SharedCursor {}
-
-    fn make(max_bytes: Option<u64>) -> (Recorder, std::rc::Rc<std::cell::RefCell<Vec<u8>>>) {
-        let shared = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
-        let w = SharedCursor {
-            inner: Cursor::new(Vec::new()),
-            shared: shared.clone(),
-        };
+    fn make(max_bytes: Option<u64>) -> (Recorder, SharedBuf) {
+        let (w, shared) = SharedCursor::new();
         (Recorder::from_writer(Box::new(w), max_bytes), shared)
     }
 

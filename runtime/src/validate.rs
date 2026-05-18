@@ -13,8 +13,9 @@
 //!   * `dag` — the graph has no cycles
 //!   * `connectivity` — warn (non-fatal) on isolated blocks
 //!   * `wire_endpoints` — wire endpoints reference blocks that exist
-//!     (port existence + type match remain for the registry-dependent
-//!     pass in a later commit)
+//!     (port existence + type match are the registry-dependent
+//!     `wire_type_match` / `env_match` / `params` passes in
+//!     `instantiate.rs`)
 //!
 //! Errors accumulate inside a phase so a flowgraph author sees every
 //! problem at once, but we bail before the DAG pass if earlier phases
@@ -26,10 +27,9 @@ use thiserror::Error;
 
 use crate::doc::FlowgraphDoc;
 
-/// The validation phase a [`ValidationError`] came from. Matches the TS
-/// `ValidationError.phase` enum. Registry-dependent phases
-/// (`env_match`, `params`, `wire_type_match`, `rate_negotiation`) are
-/// reserved for the instantiator commit that introduces the registry.
+/// The validation phase a [`ValidationError`] came from. The
+/// registry-dependent phases (`env_match`, `params`, `wire_type_match`)
+/// are produced by `instantiate.rs`; the rest by this module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {

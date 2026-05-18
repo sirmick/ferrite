@@ -137,13 +137,6 @@ impl DeviceCache {
         Ok(caps)
     }
 
-    /// Drop one cached entry — call when a probe-derived stat looks
-    /// stale (e.g. a writeSetting changed available ranges).
-    #[allow(dead_code)]
-    pub async fn invalidate(&self, key: &str) {
-        self.inner.write().await.remove(key);
-    }
-
     /// Drop every entry whose key isn't in `present` — call after a
     /// fresh `enumerate` so unplugged devices vanish from the cache.
     pub async fn prune(&self, present: &HashSet<String>) {
@@ -304,17 +297,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn invalidate_forces_reprobe() {
-        let (probe, calls) = counting_probe();
-        let cache = DeviceCache::with_probe(probe, Duration::from_secs(1));
-        let i = info("hackrf", Some("b74865"));
-        let _ = cache.ensure(&i).await.unwrap();
-        cache.invalidate(&stable_device_key(&i)).await;
-        let _ = cache.ensure(&i).await.unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

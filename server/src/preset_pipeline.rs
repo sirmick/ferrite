@@ -36,13 +36,11 @@ use tokio::{
 
 use crate::{bridge_sink::BroadcastSink, frame_bus::FrameBus};
 
-/// Handle to a running preset pipeline. Callers can either drop the
-/// handle (which cancels the runtime task via the `oneshot` sender
-/// closing) or call [`PresetHandle::shutdown`] for a graceful signal
-/// and join that surfaces any tick error. The binary today relies on
-/// the drop path via `PresetMount`; the explicit `shutdown` is
-/// reserved for an axum graceful-shutdown hook.
-#[allow(dead_code)] // fields held for drop semantics
+/// Handle to a running preset pipeline. Held by [`PresetMount`].
+/// Dropping it cancels the runtime task (the `oneshot` sender closes,
+/// which the tick loop's `select!` observes); [`PresetHandle::shutdown`]
+/// does the same explicitly and then joins the task so tick errors
+/// surface to the caller. `AppState::stop` uses the latter.
 pub struct PresetHandle {
     shutdown: Option<oneshot::Sender<()>>,
     join: JoinHandle<Result<()>>,
@@ -127,7 +125,7 @@ impl PresetMount {
 impl PresetHandle {
     /// Signal the pipeline task to stop, then await its join. Returns
     /// the task's final `Result` so tick errors surface to the caller.
-    #[allow(dead_code)] // public API reserved for graceful shutdown hook
+    /// Called by `AppState::stop` for a graceful pipeline teardown.
     pub async fn shutdown(mut self) -> Result<()> {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());

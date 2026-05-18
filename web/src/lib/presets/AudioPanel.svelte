@@ -16,8 +16,11 @@
   // Persisted playback knobs live in the client store so they survive
   // preset reloads and page refreshes. Peak/RMS/peakHold still come
   // from `audioPanel` because they're worklet-driven, not user state.
+  //
+  // Audio engage (off / on / transcribe) lives on the receiver's Audio
+  // chip-group (ProfileChips) — it's a build-time profile axis, not a
+  // live worklet knob. This panel is just volume + meters.
   let volume = $derived(clientControls.get('client.audio.volume'));
-  let muted = $derived(clientControls.get('client.audio.muted'));
 
   // Scale the linear [0, 1] peak/rms to a 0..1 meter fraction over a
   // -60..0 dBFS range. Clipped peaks saturate the right side of the
@@ -87,7 +90,7 @@
     <label class="flex flex-col gap-1">
       <div class="flex items-baseline justify-between">
         <span class="text-[color:var(--color-muted)]">volume</span>
-        <span class="font-mono text-slate-300">{muted ? 'muted' : `${volumePct}%`}</span>
+        <span class="font-mono text-slate-300">{volumePct}%</span>
       </div>
       <input
         type="range"
@@ -96,18 +99,8 @@
         step="1"
         value={volumePct}
         oninput={onVolume}
-        disabled={muted}
         class="w-full"
       />
-      <label class="flex items-center gap-1">
-        <input
-          type="checkbox"
-          checked={muted}
-          onchange={(e) =>
-            void applyControl('client.audio.muted', (e.currentTarget as HTMLInputElement).checked)}
-        />
-        <span>mute</span>
-      </label>
     </label>
 
     {#if audioPanel.hasStereo}

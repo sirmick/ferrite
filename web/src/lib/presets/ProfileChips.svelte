@@ -1,6 +1,9 @@
 <script lang="ts">
   // Two compact segmented chip-groups next to the active preset name:
-  //   • Audio  — off | on
+  //   • Audio  — off | on | transcribe
+  //              (off strips the audio chain; on keeps it; transcribe
+  //               additionally splices a VoiceTranscribe tap — all
+  //               build-time, server profile, re-composed live)
   //   • Demod  — auto | server | browser
   //              (auto = follow the preset author's placement;
   //               server/browser override it. "server" maps to the
@@ -31,8 +34,15 @@
 
   let visible = $derived(hasAudioToggle || hasDemodToggle);
 
-  function pickAudio(on: boolean): void {
-    void pipeline.setProfile({ ...pipeline.profile, audio: on });
+  // Off | On | Transcribe — one tri-state over two profile bits.
+  // `transcribe` implies `audio` (the tap sits on the audio chain), so
+  // we never set transcribe without audio.
+  function pickAudioMode(mode: 'off' | 'on' | 'transcribe'): void {
+    void pipeline.setProfile({
+      ...pipeline.profile,
+      audio: mode !== 'off',
+      transcribe: mode === 'transcribe',
+    });
   }
 
   function pickDemod(side: 'node' | 'browser' | null): void {
@@ -55,7 +65,7 @@
           type="button"
           class="chip-segment"
           class:chip-segment-active={!pipeline.profile.audio}
-          onclick={() => pickAudio(false)}
+          onclick={() => pickAudioMode('off')}
           title="Strip the audio chain — saves WS bandwidth on decoder-only listening."
         >
           off
@@ -63,11 +73,20 @@
         <button
           type="button"
           class="chip-segment"
-          class:chip-segment-active={pipeline.profile.audio}
-          onclick={() => pickAudio(true)}
+          class:chip-segment-active={pipeline.profile.audio && !pipeline.profile.transcribe}
+          onclick={() => pickAudioMode('on')}
           title="Enable the audio chain (default)."
         >
           on
+        </button>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={pipeline.profile.audio && pipeline.profile.transcribe}
+          onclick={() => pickAudioMode('transcribe')}
+          title="Enable audio and splice a VoiceTranscribe tap — in-browser speech-to-text (Transcript advanced view)."
+        >
+          transcribe
         </button>
       </div>
     {/if}

@@ -71,6 +71,14 @@ class BrowserRuntime {
   /** Block ids currently instantiated on the browser side (for the
    *  audio panel and diagnostics). */
   loadedBlocks = $state<ReadonlyArray<string>>([]);
+  /** `VoiceTranscribe` tap block ids on the browser side (the
+   *  `transcribeSabs` keys). This is the *only* client-readable signal
+   *  that transcription is live: the block is server-injected then
+   *  env-split to the browser, so it appears in neither
+   *  `pipeline.flowgraph` (raw preset) nor `pipeline.blocks`
+   *  (`/api/pipeline/blocks` is node-only). The audio tri-state and the
+   *  Transcript advanced view gate on this. */
+  voiceTranscribeIds = $state<ReadonlyArray<string>>([]);
   /** Browser-side `ui:<name>` Events sinks from the last load (name +
    *  stream_id, matching the node half's allocation). `pipeline`
    *  merges these into `uiSinks` so advanced views attach when the
@@ -269,6 +277,7 @@ class BrowserRuntime {
       this.uiSinks = result.uiSinks;
       await this.attachAudioNodes(result.audioSabs);
       this.attachTranscribeWorkers(result.transcribeSabs);
+      this.voiceTranscribeIds = Object.keys(result.transcribeSabs);
       this.runnerState = 'loaded';
       const audioCount = Object.keys(result.audioSabs).length;
       logs.push(
@@ -526,6 +535,7 @@ class BrowserRuntime {
     this.audioState = 'suspended';
     this.lastStructuralFingerprint = undefined;
     this.loadedBlocks = [];
+    this.voiceTranscribeIds = [];
     this.uiSinks = [];
 
     // Slow cleanup on the captured refs — safe to interleave with a

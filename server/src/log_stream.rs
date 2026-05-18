@@ -73,7 +73,10 @@ impl LogBroadcast {
     /// Return entries with `at_ms > since_ms`, optionally filtered to a
     /// target prefix. Cheap copy — one Mutex lock + a single pass.
     pub fn recent(&self, since_ms: u64, target_prefix: Option<&str>) -> Vec<LogEntry> {
-        let g = self.history.lock().unwrap();
+        // Recover the guard on poison: a panicked writer leaves the
+        // history ring valid enough to read, and losing the log API
+        // because something else panicked would hide the cause.
+        let g = self.history.lock().unwrap_or_else(|e| e.into_inner());
         g.iter()
             .filter(|e| e.at_ms > since_ms)
             .filter(|e| target_prefix.is_none_or(|p| e.target.starts_with(p)))
@@ -162,7 +165,8 @@ where
             .duration_since(UNIX_EPOCH)
             .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0);
-        if let Ok(mut g) = self.history.lock() {
+        {
+            let mut g = self.history.lock().unwrap_or_else(|e| e.into_inner());
             g.push(LogEntry {
                 target: meta.target().to_string(),
                 level: meta.level().to_string(),

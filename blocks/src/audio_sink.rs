@@ -1,20 +1,14 @@
 //! `AudioSink` — browser-side terminal for demodulated audio.
 //!
-//! Receives `RealF32` samples and, in the browser, hands them to a
-//! `SharedArrayBuffer` ring that an `AudioWorklet` drains on its own
-//! 48 kHz clock. Mirrors the TS `AudioSink` in
-//! `web/src/lib/audio/audioSinkBlock.ts` byte-for-byte at the params /
-//! port level so a preset authored against the Rust registry parses
-//! today and runs natively once the M4 browser WASM host lands.
-//!
-//! ### Scope of this commit
+//! Receives `RealF32` samples and writes them into an internal
+//! [`AudioRing`], tracking overflow via `dropped_samples`. The browser
+//! drains the ring through `RuntimeHandle::drain_audio` (see
+//! `runtime/src/wasm.rs`) and feeds an `AudioWorklet` running on its
+//! own 48 kHz clock.
 //!
 //! `Placement::WasmOnly` means `env_split` carves this block out of the
-//! node-side doc entirely, so `ferrited` never instantiates it. The
-//! `process` impl now writes into an internal [`AudioRing`] and tracks
-//! overflow via `dropped_samples` — byte-compatible with the TS
-//! `AudioSink`. The SAB/`AudioWorklet` hand-off still needs a
-//! wasm-bindgen bridge; that lands in the next M4 slice.
+//! node-side doc entirely, so `ferrited` never instantiates it — it
+//! only ever runs in the browser WASM host.
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -25,9 +19,8 @@ use crate::block::{
 };
 use crate::spsc_ring::AudioRing;
 
-/// Ring capacity default — ~170 ms at 48 kHz. Matches the TS
-/// `AudioSink` default so presets carry the same numbers across the
-/// TS→Rust cut-over.
+/// Ring capacity default — ~170 ms at 48 kHz: enough underflow
+/// resilience for the `AudioWorklet` without adding audible latency.
 const DEFAULT_BUFFER_SAMPLES: usize = 8192;
 
 /// `f64` mirror of [`DEFAULT_BUFFER_SAMPLES`] for the param schema.
@@ -38,8 +31,7 @@ const DEFAULT_BUFFER_SAMPLES_F64: f64 = 8192.0;
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct AudioSinkParams {
-    /// Ring capacity in samples. Must be a power of two when the real
-    /// SAB ring lands; the placeholder does not enforce it today.
+    /// Ring capacity in samples.
     pub buffer_samples: usize,
 }
 
@@ -86,8 +78,7 @@ impl AudioSink {
     }
 
     /// Cumulative count of samples dropped because the ring was full.
-    /// Matches the TS `droppedSamples` getter. Consumer-facing in tests
-    /// and eventually in a diagnostics pane.
+    /// Consumer-facing in tests and the diagnostics pane.
     #[must_use]
     pub fn dropped_samples(&self) -> u64 {
         self.dropped_samples

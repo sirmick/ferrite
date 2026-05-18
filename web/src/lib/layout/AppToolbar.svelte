@@ -17,6 +17,7 @@
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { applyControl } from '$lib/control/dispatch';
   import { activeAdvancedView } from '$lib/advanced/registry';
+  import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
 
   // Channel-detail pane toggle. Disabled when the active preset has no
   // Channelizer (no runtime-injected `ui:fft_narrow` sink).
@@ -26,7 +27,12 @@
   // Advanced-view toggle. The active preset's registered view (or
   // null); when null the button is disabled. Independent of Channel —
   // Advanced replaces only the wide FFT/waterfall column.
-  let advancedView = $derived(activeAdvancedView(pipeline.uiSinks));
+  let advancedView = $derived(
+    activeAdvancedView({
+      uiSinks: pipeline.uiSinks,
+      voiceTranscribeIds: browserRuntime.voiceTranscribeIds,
+    }),
+  );
   let advancedVisible = $derived(clientControls.get('client.workspace.advancedVisible'));
 
   let frameRate = $state(0);

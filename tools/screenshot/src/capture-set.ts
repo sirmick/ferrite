@@ -19,8 +19,10 @@ const API_URL = process.env.FERRITE_API_URL ?? 'http://127.0.0.1:10001';
 const OUT_DIR = path.resolve(process.cwd(), '../../docs/images/screenshots');
 const VIEWPORT = { width: 1920, height: 1200 };
 
-// Found via `curl /api/devices` against the connected RSPdx.
-const SDRPLAY_ARGS = 'driver=sdrplay,label=SDRplay Dev0 RSPdx 224001D748,serial=224001D748';
+// Resolved at runtime from GET /api/devices (see resolveSdrplayArgs)
+// so the scenes run on any connected RSP, not just the one this file
+// was first written against. Override with FERRITE_SDRPLAY_ARGS.
+let SDRPLAY_ARGS = process.env.FERRITE_SDRPLAY_ARGS ?? '';
 
 async function api(method: string, route: string, body?: unknown): Promise<unknown> {
   const r = await fetch(`${API_URL}${route}`, {
@@ -31,6 +33,27 @@ async function api(method: string, route: string, body?: unknown): Promise<unkno
   if (!r.ok) throw new Error(`${method} ${route} → ${r.status}: ${await r.text()}`);
   const txt = await r.text();
   return txt ? JSON.parse(txt) : null;
+}
+
+// Build the SoapySDR args string for the connected SDRplay by reading
+// GET /api/devices. Every entry (available or not) carries `info`
+// with the driver + the raw arg map; we reconstruct the same
+// `k=v,k=v` form `DeviceInfo::args_string()` produces server-side.
+async function resolveSdrplayArgs(): Promise<string> {
+  if (SDRPLAY_ARGS) return SDRPLAY_ARGS;
+  const devices = (await api('GET', '/api/devices')) as Array<{
+    info?: { driver?: string; args?: Record<string, string> };
+  }>;
+  const sdrplay = devices.find((d) => d.info?.driver === 'sdrplay');
+  if (!sdrplay?.info?.args) {
+    throw new Error(
+      'no sdrplay device in GET /api/devices — connect an RSP or set FERRITE_SDRPLAY_ARGS',
+    );
+  }
+  SDRPLAY_ARGS = Object.entries(sdrplay.info.args)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(',');
+  return SDRPLAY_ARGS;
 }
 
 async function ensurePipeline(preset: string, source: {
@@ -174,6 +197,10 @@ async function runScene(name: string, n: number, fn: () => Promise<void>): Promi
 }
 
 async function main(): Promise<void> {
+  // Resolve the SDRplay device before any scene runs (scenes capture
+  // the module-level SDRPLAY_ARGS binding by reference).
+  await resolveSdrplayArgs();
+
   const browser = await chromium.launch({
     headless: true,
     args: ['--autoplay-policy=no-user-gesture-required', '--use-gl=swiftshader'],

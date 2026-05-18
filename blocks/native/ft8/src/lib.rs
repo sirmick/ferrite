@@ -170,6 +170,10 @@ extern "C" {
     fn ferrite_monitor_blocks_filled(mon: *const c_void) -> c_int;
     fn ferrite_monitor_blocks_max(mon: *const c_void) -> c_int;
     fn ferrite_monitor_waterfall(mon: *const c_void) -> *const ftx_waterfall_t;
+    fn ferrite_monitor_min_bin(mon: *const c_void) -> c_int;
+    fn ferrite_monitor_symbol_period(mon: *const c_void) -> c_float;
+    fn ferrite_monitor_freq_osr(mon: *const c_void) -> c_int;
+    fn ferrite_monitor_time_osr(mon: *const c_void) -> c_int;
 
     // --- decoder (vendor/ft8/decode.h) ---
     fn ftx_find_candidates(
@@ -201,6 +205,15 @@ extern "C" {
 pub struct Monitor {
     inner: NonNull<c_void>,
     block_size: usize,
+    /// Waterfall geometry captured at construction, used to resolve a
+    /// candidate's bin/sub indices into absolute audio Hz / seconds.
+    /// `ftx_decode_candidate` leaves `status.freq`/`status.time` at 0
+    /// on the public decode path, so we compute them ourselves the way
+    /// upstream's demo does.
+    min_bin: i32,
+    symbol_period: f32,
+    freq_osr: i32,
+    time_osr: i32,
 }
 
 unsafe impl Send for Monitor {}
@@ -209,8 +222,8 @@ unsafe impl Send for Monitor {}
 /// log line would carry plus the structured candidate metadata.
 #[derive(Debug, Clone)]
 pub struct Decoded {
-    /// Frequency offset within the analysis band (Hz). Add the source
-    /// centre + sideband knobs to recover absolute RF.
+    /// Audio-passband frequency of the signal (Hz), e.g. ~1500. Add
+    /// the receiver dial frequency to recover absolute RF.
     pub freq_hz: f32,
     /// Time offset of the first symbol within the slot (seconds).
     pub time_offset_s: f32,
@@ -239,7 +252,25 @@ impl Monitor {
         // is bounded and harmless.
         #[allow(clippy::cast_sign_loss)]
         let block_size = unsafe { ferrite_monitor_block_size(raw.cast_const()) } as usize;
-        Some(Self { inner, block_size })
+        // SAFETY: `raw` is the just-created monitor; these getters only
+        // read scalar fields off it and never retain the pointer.
+        let (min_bin, symbol_period, freq_osr, time_osr) = unsafe {
+            let r = raw.cast_const();
+            (
+                ferrite_monitor_min_bin(r),
+                ferrite_monitor_symbol_period(r),
+                ferrite_monitor_freq_osr(r),
+                ferrite_monitor_time_osr(r),
+            )
+        };
+        Some(Self {
+            inner,
+            block_size,
+            min_bin,
+            symbol_period,
+            freq_osr: freq_osr.max(1),
+            time_osr: time_osr.max(1),
+        })
     }
 
     /// Block size in `f32` samples. The monitor consumes one block at
@@ -293,7 +324,11 @@ impl Monitor {
     /// caps the candidate heap (40 is what upstream's demo uses; lower
     /// is faster, higher catches more weak signals).
     #[must_use]
-    #[allow(clippy::cast_sign_loss)] // n_found >= 0 verified before use.
+    #[allow(clippy::cast_sign_loss)]
+    // n_found >= 0 verified before use.
+    // min_bin (~hundreds) and the OSR factors (2) are tiny ints — the
+    // i32→f32 conversions in the freq/time formula are exact here.
+    #[allow(clippy::cast_precision_loss)]
     pub fn decode_slot(&self, max_candidates: usize) -> Vec<Decoded> {
         let wf = unsafe { ferrite_monitor_waterfall(self.inner.as_ptr().cast_const()) };
         if wf.is_null() {
@@ -367,21 +402,22 @@ impl Monitor {
             if text.is_empty() {
                 continue;
             }
-            // TODO[REVIEW]: status.freq + status.time read as 0.0
-            // across all decodes from a known-good WAV (see
-            // ft8_e2e). Upstream's demo computes freq from the
-            // candidate's `freq_offset` × FFT bin width directly
-            // rather than reading status — likely the status fields
-            // aren't populated by ftx_decode_candidate in the
-            // public-facing path. Fix is to mirror the demo's
-            // formula: `(monitor.min_bin + cand.freq_offset / freq_osr)
-            // × bin_width_hz`. Needs the Monitor wrapper to expose
-            // min_bin + bin_width via the glue, which today it
-            // doesn't. Decoded text is correct; only the displayed
-            // freq is wrong, hence non-blocking.
+            // `ftx_decode_candidate` leaves `status.freq`/`status.time`
+            // at 0 on this public path, so resolve them from the
+            // candidate's bin/sub indices exactly as upstream's demo
+            // does (vendor/decode_ft8_reference.c:153-154):
+            //   freq_hz  = (min_bin + freq_offset + freq_sub/freq_osr) / symbol_period
+            //   time_sec = (time_offset + time_sub/time_osr) * symbol_period
+            let freq_hz = (self.min_bin as f32
+                + f32::from(cand.freq_offset)
+                + f32::from(cand.freq_sub) / self.freq_osr as f32)
+                / self.symbol_period;
+            let time_offset_s = (f32::from(cand.time_offset)
+                + f32::from(cand.time_sub) / self.time_osr as f32)
+                * self.symbol_period;
             out.push(Decoded {
-                freq_hz: status.freq,
-                time_offset_s: status.time,
+                freq_hz,
+                time_offset_s,
                 // Convert candidate score into an SNR estimate the way
                 // upstream's printf path does (score / 2 - 24 dB).
                 snr_db: f32::from(cand.score) * 0.5 - 24.0,

@@ -254,8 +254,10 @@ impl AppState {
         let mut composed =
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
-        apply_profile(&mut composed, &*self.inner.profile.read().await);
-        inject_voice_transcribe(&mut composed);
+        let profile = self.inner.profile.read().await;
+        apply_profile(&mut composed, &profile);
+        inject_voice_transcribe(&mut composed, &profile);
+        drop(profile);
         let node_half = split_for_environment(&composed, Environment::Node, &InventorySpecRegistry)
             .map_err(|e| anyhow!("env_split: {e}"))?;
         let mut out = Vec::new();
@@ -311,8 +313,10 @@ impl AppState {
         let mut composed =
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
-        apply_profile(&mut composed, &*self.inner.profile.read().await);
-        inject_voice_transcribe(&mut composed);
+        let profile = self.inner.profile.read().await;
+        apply_profile(&mut composed, &profile);
+        inject_voice_transcribe(&mut composed, &profile);
+        drop(profile);
         let mut out = Vec::with_capacity(composed.blocks.len());
         for (id, decl) in &composed.blocks {
             let Some(entry) = registry::find(&decl.type_name) else {
@@ -411,11 +415,13 @@ impl AppState {
                 let plan = mount
                     .live_reconfigure_block(id, serde_json::Value::Object(delta_obj.clone()))
                     .await?;
-                drop(pipeline);
-                // Mirror the delta back into preset_doc so subsequent
-                // reads of /api/flowgraph and list_blocks see the new
-                // values — live_reconfigure_block updates the runtime's
-                // applied_doc, but the canonical preset_doc is AppState's.
+                // Hold `pipeline` across the preset_doc write (canonical
+                // lock order, same as reconfigure() below): the runtime's
+                // applied_doc and the canonical preset_doc must move
+                // together, or a concurrent apply/start could read one
+                // updated and the other not. Mirror the delta back so
+                // subsequent /api/flowgraph + list_blocks reads see the
+                // new values.
                 let mut new_doc = self.inner.preset_doc.write().await;
                 let block = new_doc
                     .blocks
@@ -514,8 +520,10 @@ impl AppState {
         let mut composed =
             compose_source(&new_doc, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
-        apply_profile(&mut composed, &*self.inner.profile.read().await);
-        inject_voice_transcribe(&mut composed);
+        let profile = self.inner.profile.read().await;
+        apply_profile(&mut composed, &profile);
+        inject_voice_transcribe(&mut composed, &profile);
+        drop(profile);
         let mut pipeline = self.inner.pipeline.lock().await;
         let plan = if let Some(mount) = pipeline.as_mut() {
             Some(mount.reconfigure(&composed).await?)
@@ -561,8 +569,10 @@ impl AppState {
         let mut composed = compose_source(&preset, &new_source)
             .map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
-        apply_profile(&mut composed, &*self.inner.profile.read().await);
-        inject_voice_transcribe(&mut composed);
+        let profile = self.inner.profile.read().await;
+        apply_profile(&mut composed, &profile);
+        inject_voice_transcribe(&mut composed, &profile);
+        drop(profile);
         let mut pipeline = self.inner.pipeline.lock().await;
         let plan = if let Some(mount) = pipeline.as_mut() {
             Some(mount.reconfigure(&composed).await?)
@@ -585,8 +595,10 @@ impl AppState {
         let mut composed =
             compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
-        apply_profile(&mut composed, &*self.inner.profile.read().await);
-        inject_voice_transcribe(&mut composed);
+        let profile = self.inner.profile.read().await;
+        apply_profile(&mut composed, &profile);
+        inject_voice_transcribe(&mut composed, &profile);
+        drop(profile);
         let mount = spawn_preset(&composed, self.inner.frames.clone(), self.inner.tick_period)?;
         *guard = Some(mount);
         Ok(())

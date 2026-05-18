@@ -31,7 +31,7 @@
 
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, MutexGuard,
 };
 use std::time::{Duration, Instant};
 
@@ -78,6 +78,16 @@ impl FrameBus {
         }
     }
 
+    /// Lock the subscriber list, recovering the guard if a previous
+    /// holder panicked. This is the IQ/FFT fan-out hot path; the
+    /// critical sections only push to / retain over a `Vec<Sub>`, so a
+    /// poisoned lock leaves no broken invariant — worst case a stale
+    /// subscriber that the next `send` prunes anyway. Recovering beats
+    /// panicking the whole fan-out on one unrelated panic.
+    fn subs(&self) -> MutexGuard<'_, Vec<Sub>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Subscribe with a per-subscriber bounded queue. The returned
     /// `Receiver` is dropped by the caller on disconnect, which signals
     /// the bus to prune the sender on the next send.
@@ -85,7 +95,7 @@ impl FrameBus {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(capacity);
-        self.inner.lock().expect("FrameBus lock").push(Sub {
+        self.subs().push(Sub {
             id,
             tx,
             dropped_since_log: 0,
@@ -99,7 +109,7 @@ impl FrameBus {
     /// the scheduler. Per-subscriber `try_send` — a full queue drops
     /// only *that* subscriber's copy. Closed senders are pruned.
     pub fn send(&self, bytes: FrameBytes) {
-        let mut subs = self.inner.lock().expect("FrameBus lock");
+        let mut subs = self.subs();
         subs.retain_mut(|sub| match sub.tx.try_send(bytes.clone()) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -126,11 +136,11 @@ impl FrameBus {
         });
     }
 
-    /// Count live subscribers. Cheap — for tests + status endpoints.
+    /// Count live subscribers. Test-only assertion helper.
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub fn subscriber_count(&self) -> usize {
-        self.inner.lock().expect("FrameBus lock").len()
+        self.subs().len()
     }
 }
 

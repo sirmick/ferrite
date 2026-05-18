@@ -1,7 +1,9 @@
 // REST client for `/api/profile` — the runtime knobs applied before
 // `split_for_environment` carves the doc. Today: `audio` (gates the
-// audio chain) and `demod_placement` (overrides where the
-// `placement_role: "demod"` block lives).
+// audio chain), `transcribe` (splices a VoiceTranscribe tap before
+// every AudioSink — same build-time mechanism as `audio`, implies it),
+// and `demod_placement` (overrides where the `placement_role: "demod"`
+// block lives).
 
 import { ApiError } from '$lib/api/errors';
 
@@ -9,11 +11,13 @@ export type DemodPlacement = 'node' | 'browser';
 
 export interface Profile {
   audio: boolean;
+  transcribe: boolean;
   demod_placement: DemodPlacement | null;
 }
 
 export const DEFAULT_PROFILE: Profile = {
   audio: true,
+  transcribe: false,
   demod_placement: null,
 };
 

@@ -7,9 +7,9 @@
 //! are two instances of this runtime, joined by `WsBridge` blocks on
 //! wires that cross the environment boundary.
 //!
-//! This is the Rust counterpart of the TS `packages/flowgraph-runtime`;
-//! the JSON doc shape is identical by design so one preset file parses
-//! on either side. The TS package will be deleted at milestone M4.
+//! This crate is the single, authoritative flowgraph runtime: the same
+//! `FlowgraphDoc` JSON parses identically in the native and browser
+//! builds, so one preset file drives both halves of a split graph.
 
 pub mod apply_profile;
 pub mod block_registry;

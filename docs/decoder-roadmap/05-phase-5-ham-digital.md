@@ -12,6 +12,36 @@ shipped earlier in Phase 1. The historical analysis below is kept as
 the decision record; the "Rust-from-scratch" ship list did **not**
 win — read it as superseded.
 
+## Follow-up: per-instance fldigi global isolation
+
+**Status: pending, not blocking.** The fldigi shim
+(`blocks/native/fldigi/shim/fldigi_shim.cxx`) mirrors upstream's
+file-scope globals: `progdefaults` (~852 fields), `progStatus`, and the
+single static waterfall stub `s_wf` are **process-shared** across all
+fldigi block instances. Output buffers are correctly per-`Bridge`; the
+shared structs are not.
+
+Consequence today: multiple fldigi blocks decode correctly when they
+want the *same* params (cooperative `g_active` dispatch handles
+sequential single-threaded execution — the runtime's actual model). But
+two instances of the same mode with **different** params (e.g. two RTTY
+at 170 vs 450 shift) collide — last `set_param` wins for both. True
+concurrent decode in one process is also unsafe (waterfall + modem
+class statics race).
+
+**Planned fix — snapshot/restore, not de-globalisation.** Buffer the
+~3 shared structs (`progdefaults`, `progStatus`, `wf` carrier/reverse)
+inside each `Bridge`; memcpy the instance's copy into the globals
+inside the existing `g_active` critical section around
+`fldigi_modem_rx()`, restore after. Localised to `fldigi_shim.cxx`,
+**no vendor edits**, no upstream re-port burden. Resolves the realistic
+failure mode (different params per block) and makes sequential
+multi-instance fully correct. Est. ~1 day.
+
+Rejected alternative: threading a `fldigi_ctx*` through 150+ vendored
+sources — weeks of work plus a permanent vendor-fork maintenance cost,
+and unnecessary for the single-threaded graph.
+
 ## Goal
 
 Ship the audio-domain ham digital modes: PSK31 / PSK63 / PSK125, RTTY,

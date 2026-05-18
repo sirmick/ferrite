@@ -38,12 +38,19 @@ or just plain text:
 ```
 what's at 100.5 MHz?
 ```
+or a control envelope to abort the in-flight turn:
+```json
+{"type": "stop"}
+```
 
 Server → browser: forwards every Agent SDK event verbatim (text
 deltas, tool uses, tool results) plus a few `ferrite_ai_*`-typed
 envelope events:
 - `ferrite_ai_hello` — sent on connect with the available modes.
 - `ferrite_ai_done` — turn complete.
+- `ferrite_ai_stopped` — turn aborted; `reason` is `"user"` (a
+  `{type:"stop"}` arrived mid-turn) or `"idle"` (stop with nothing
+  running).
 - `ferrite_ai_error` — turn failed; `message` field has the cause.
 
 ## Modes

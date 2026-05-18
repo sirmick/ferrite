@@ -1,8 +1,8 @@
 //! Ferrite DSP blocks — dual-compile crate (native + WebAssembly).
 //!
 //! The [`block`] module defines the trait and static descriptors every
-//! block implements; concrete blocks (`SineSource`, `FFT`, …) land in
-//! sibling modules as Phase B progresses.
+//! block implements; concrete blocks (`SineSource`, `FFT`, …) live in
+//! sibling modules.
 //!
 //! Each block impl is annotated with [`ferrite_block`] so it
 //! self-registers into [`registry`] at link time.
@@ -10,9 +10,6 @@
 // Lets the `#[ferrite_block]` macro emit `::ferrite_blocks::…` paths
 // that resolve both from downstream crates and from inside this crate.
 extern crate self as ferrite_blocks;
-
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "adsb")]
 pub mod adsb;
@@ -77,6 +74,8 @@ pub mod ssb_modulator;
 pub mod stereo_decoder;
 pub mod tee_iq_f32;
 pub mod tee_real_f32;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod voice_transcribe;
 pub mod wav;
 pub mod ws_bridge;
@@ -172,27 +171,14 @@ pub const fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Trivial placeholder — proves the Rust→WASM→Worker path. Replaced by
-/// real DSP blocks as Phase B progresses.
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
-#[must_use]
-pub fn demo_add(a: f32, b: f32) -> f32 {
-    a + b
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{demo_add, registry, version};
+    use super::{registry, version};
     use std::collections::HashSet;
 
     #[test]
     fn version_is_set() {
         assert!(!version().is_empty());
-    }
-
-    #[test]
-    fn demo_add_sums() {
-        assert!((demo_add(1.5, 2.25) - 3.75).abs() < f32::EPSILON);
     }
 
     #[test]

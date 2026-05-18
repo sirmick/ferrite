@@ -38,6 +38,7 @@
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { activeAdvancedView } from '$lib/advanced/registry';
+  import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
   import type { FrameClient } from '$lib/ws/client';
 
   interface Props {
@@ -54,7 +55,12 @@
   // toggled on (and the preset registers one). The Channel column is
   // independent — it still shows beside the advanced view if the
   // operator has it on.
-  let advancedView = $derived(activeAdvancedView(pipeline.uiSinks));
+  let advancedView = $derived(
+    activeAdvancedView({
+      uiSinks: pipeline.uiSinks,
+      voiceTranscribeIds: browserRuntime.voiceTranscribeIds,
+    }),
+  );
   let showAdvanced = $derived(
     advancedView !== null && clientControls.get('client.workspace.advancedVisible'),
   );

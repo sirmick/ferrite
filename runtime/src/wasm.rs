@@ -1,9 +1,10 @@
 //! wasm-bindgen facade.
 //!
 //! The browser-side flowgraph runner imports this crate as an ES module
-//! via wasm-pack. Everything exported from here is the surface the TS
-//! runner code reaches through — doc parsing, block registration, tick
-//! pump, lifecycle. Kept deliberately thin; the actual logic lives in
+//! via wasm-pack. Everything exported from here is the surface the
+//! SvelteKit/TS web app reaches through — doc parsing, block
+//! registration, tick pump, lifecycle. Kept deliberately thin; the
+//! actual logic lives in
 //! the env-agnostic modules and is shared with the native build.
 //!
 //! This module is gated on `feature = "wasm"`; `wasm-pack build` enables
@@ -46,9 +47,10 @@ pub fn version() -> String {
 /// doc's `name` on success; throws a `JsError` carrying the validation
 /// summary otherwise.
 ///
-/// Registry-dependent phases (env_match, wire_type_match, params) still
-/// require a block registry; a later commit exposes that path once the
-/// wasm-side registry shape is designed.
+/// This is the lightweight pre-flight only. The registry-dependent
+/// phases (env_match, wire_type_match, params) run against the linked-in
+/// `InventorySpecRegistry` when a `RuntimeHandle` is constructed or when
+/// `splitDocForEnvironment` resolves placement.
 #[wasm_bindgen(js_name = parseAndValidateDoc)]
 pub fn parse_and_validate_doc(json: &str) -> Result<String, JsError> {
     let doc = parse_doc(json)?;

@@ -1,10 +1,10 @@
 //! Flowgraph JSON document — serde shape.
 //!
-//! Mirrors `FlowgraphDoc` in `packages/flowgraph-runtime/src/types.ts`
-//! byte-for-byte so the same JSON file parses on either side. Field
-//! names stay camelCase-free (the JSON already uses snake-ish lowercase
-//! keys like `environments`, `blocks`, `wires`) — serde's default
-//! matches the TS shape without any `#[serde(rename)]` on this struct.
+//! This serde shape *is* the stable on-disk preset contract: the same
+//! JSON file must parse identically in the native and browser builds,
+//! so changing a field name/shape here breaks every existing preset.
+//! Keys stay snake-ish lowercase (`environments`, `blocks`, `wires`) so
+//! serde's default needs no `#[serde(rename)]` on this struct.
 
 use serde::{
     de::{Error as _, SeqAccess, Visitor},
@@ -22,9 +22,9 @@ use std::fmt;
 /// Where a flowgraph (or half of one) runs.
 ///
 /// `Browser` = WASM runtime in the browser. `Node` = native runtime
-/// (today that's `ferrited`; the name is historical and tracks the TS
-/// enum value for JSON compatibility — a rename to `native` is a
-/// migration we'll do when both sides update together).
+/// (`ferrited`); the `node` wire value is historical and kept for
+/// preset-file compatibility — renaming it to `native` is a preset
+/// migration, not a code-only change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
@@ -348,10 +348,10 @@ mod tests {
     }
 
     #[test]
-    fn environment_json_values_match_ts() {
+    fn environment_json_values_are_stable() {
         // Must serialise as the lowercase strings `"browser"` / `"node"`
-        // so the Rust side round-trips files authored against the TS
-        // types. Any drift here breaks cross-env preset loading.
+        // — these are the on-disk preset wire values. Any drift here
+        // breaks cross-env preset loading.
         let browser = serde_json::to_string(&Environment::Browser).unwrap();
         let node = serde_json::to_string(&Environment::Node).unwrap();
         assert_eq!(browser, "\"browser\"");

@@ -24,7 +24,12 @@ export interface VadConfig {
   readonly hangoverMs: number;
   /** Drop segments shorter than this (ms) — keys clicks, splatter. */
   readonly minSpeechMs: number;
-  /** Hard cap so a stuck-open gate still flushes (ms). */
+  /** Hard cap so a stuck-open gate still flushes (ms). Doubles as the
+   *  worst-case latency on *continuous* speech (no pauses → the gate
+   *  only closes here): output appears every `maxSegmentMs`. Kept well
+   *  under whisper.cpp's 30 s mel window, and short enough that one
+   *  inference is quick — a long monologue would otherwise produce no
+   *  text for ~30 s then one lagging giant chunk. */
   readonly maxSegmentMs: number;
 }
 
@@ -33,7 +38,7 @@ export const DEFAULT_VAD: VadConfig = {
   openRatio: 3.0,
   hangoverMs: 700,
   minSpeechMs: 350,
-  maxSegmentMs: 28_000,
+  maxSegmentMs: 10_000,
 };
 
 const FRAME = 320; // 20 ms @ 16 kHz — VAD analysis granularity

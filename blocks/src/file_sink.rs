@@ -26,7 +26,7 @@
 
 use std::{
     fs::OpenOptions,
-    io::{BufWriter, Seek, SeekFrom, Write},
+    io::{BufWriter, Seek, Write},
     path::{Path, PathBuf},
 };
 
@@ -181,7 +181,11 @@ impl FileIqSink {
         let mut writer = BufWriter::new(writer);
         let wav_data_size_pos = match format {
             IqSinkFormat::Cf32 => None,
-            IqSinkFormat::WavS16 => Some(write_wav_stub_header(&mut writer, params.rate_hz)?),
+            IqSinkFormat::WavS16 => Some(crate::wav::write_pcm_s16_stub_header(
+                &mut writer,
+                params.rate_hz,
+                2, // stereo: L=I, R=Q
+            )?),
         };
         Ok(Self {
             format,
@@ -286,7 +290,7 @@ impl FileIqSink {
             let inner = writer
                 .into_inner()
                 .map_err(|e| anyhow!("FileIqSink: unwrap writer: {}", e.into_error()))?;
-            patch_wav_sizes(inner, data_size_pos, data_bytes)?;
+            crate::wav::patch_wav_sizes(inner, data_size_pos, data_bytes)?;
         }
         Ok(())
     }
@@ -399,50 +403,6 @@ fn clip_to_i16(x: f32) -> i16 {
     scaled as i16
 }
 
-/// Writes the WAV header with zero placeholders for the RIFF chunk size
-/// and data chunk size. Returns the byte offset of the data chunk size
-/// u32 so [`patch_wav_sizes`] can seek to it on finalise.
-fn write_wav_stub_header<W: Write + Seek>(w: &mut W, rate_hz: f64) -> Result<u64> {
-    if !(rate_hz > 0.0) || rate_hz > f64::from(u32::MAX) {
-        bail!("FileIqSink: rate_hz out of WAV range: {rate_hz}");
-    }
-    let rate = rate_hz.round() as u32;
-    let byte_rate = rate.saturating_mul(4);
-
-    w.write_all(b"RIFF").context("RIFF")?;
-    w.write_all(&0u32.to_le_bytes()).context("RIFF size stub")?; // patched on finalise
-    w.write_all(b"WAVE").context("WAVE")?;
-
-    w.write_all(b"fmt ").context("fmt id")?;
-    w.write_all(&16u32.to_le_bytes()).context("fmt size")?;
-    w.write_all(&1u16.to_le_bytes()).context("PCM tag")?; // PCM
-    w.write_all(&2u16.to_le_bytes()).context("channels")?; // stereo
-    w.write_all(&rate.to_le_bytes()).context("sample rate")?;
-    w.write_all(&byte_rate.to_le_bytes()).context("byte rate")?;
-    w.write_all(&4u16.to_le_bytes()).context("block align")?; // 2 ch * 2 B
-    w.write_all(&16u16.to_le_bytes()).context("bits")?;
-
-    w.write_all(b"data").context("data id")?;
-    let data_size_pos = w.stream_position().context("tell data size pos")?;
-    w.write_all(&0u32.to_le_bytes()).context("data size stub")?; // patched on finalise
-    Ok(data_size_pos)
-}
-
-fn patch_wav_sizes<W: Write + Seek>(mut w: W, data_size_pos: u64, data_bytes: u32) -> Result<()> {
-    w.seek(SeekFrom::Start(data_size_pos))
-        .context("seek data size")?;
-    w.write_all(&data_bytes.to_le_bytes())
-        .context("patch data size")?;
-    // RIFF chunk size = 36 + data_bytes (header is 44 B; RIFF size
-    // excludes the first 8 B).
-    let riff_size = data_bytes.saturating_add(36);
-    w.seek(SeekFrom::Start(4)).context("seek riff size")?;
-    w.write_all(&riff_size.to_le_bytes())
-        .context("patch riff size")?;
-    w.flush().context("flush after patch")?;
-    Ok(())
-}
-
 fn write_sidecar(
     path: &Path,
     format: IqSinkFormat,
@@ -489,6 +449,7 @@ mod tests {
     use super::{clip_to_i16, sidecar_path, FileIqSink, FileIqSinkParams, IqSinkFormat};
     use crate::block::{Block, BlockIo, InBuf, InputPort, PortMeta};
     use crate::file_source::{FileIqSource, FileIqSourceParams};
+    use crate::test_support::{SharedBuf, SharedCursor};
     use num_complex::Complex;
     use std::io::Cursor;
     use std::path::PathBuf;
@@ -507,44 +468,11 @@ mod tests {
         work.consumed[0]
     }
 
-    fn cf32_sink() -> (FileIqSink, std::rc::Rc<std::cell::RefCell<Vec<u8>>>) {
-        let shared = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
-        let w = SharedCursor {
-            inner: Cursor::new(Vec::new()),
-            shared: shared.clone(),
-        };
+    fn cf32_sink() -> (FileIqSink, SharedBuf) {
+        let (w, shared) = SharedCursor::new();
         let sink = FileIqSink::from_writer(IqSinkFormat::Cf32, 48_000.0, Box::new(w)).unwrap();
         (sink, shared)
     }
-
-    struct SharedCursor {
-        inner: Cursor<Vec<u8>>,
-        shared: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
-    }
-    impl std::io::Write for SharedCursor {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let n = self.inner.write(buf)?;
-            *self.shared.borrow_mut() = self.inner.get_ref().clone();
-            Ok(n)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.inner.flush()
-        }
-    }
-    impl std::io::Seek for SharedCursor {
-        fn seek(&mut self, p: std::io::SeekFrom) -> std::io::Result<u64> {
-            self.inner.seek(p)
-        }
-    }
-    // SharedCursor is constructed on one thread in tests; `Rc` is !Send
-    // so we mark it as logically Send for the trait object. Not shared
-    // across threads, so this is sound for the test use. We provide
-    // `unsafe impl Send` here and keep the raw test-only type local.
-    // `Rc` is !Send, so the blanket `WriteSeek` impl (which requires
-    // `Send`) does not cover `SharedCursor` by default. The test runs on
-    // one thread — no samples cross a thread boundary — so marking it
-    // Send by fiat is sound for this fixture.
-    unsafe impl Send for SharedCursor {}
 
     #[test]
     fn spec_is_native_only_iq_in() {
@@ -626,11 +554,7 @@ mod tests {
 
     #[test]
     fn wav_round_trip_through_file_iq_source() {
-        let shared = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
-        let w = SharedCursor {
-            inner: Cursor::new(Vec::new()),
-            shared: shared.clone(),
-        };
+        let (w, shared) = SharedCursor::new();
         let mut sink = FileIqSink::from_writer(IqSinkFormat::WavS16, 8_000.0, Box::new(w)).unwrap();
 
         let samples: Vec<Complex<f32>> =

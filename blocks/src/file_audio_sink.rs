@@ -19,7 +19,7 @@
 
 use std::{
     fs::OpenOptions,
-    io::{BufWriter, Seek, SeekFrom, Write},
+    io::{BufWriter, Write},
     path::PathBuf,
 };
 
@@ -95,7 +95,7 @@ impl FileAudioSink {
             bail!("FileAudioSink: rate_hz must be positive");
         }
         let mut writer = BufWriter::new(writer);
-        let data_size_pos = write_mono_wav_stub_header(&mut writer, rate_hz)?;
+        let data_size_pos = crate::wav::write_pcm_s16_stub_header(&mut writer, rate_hz, 1)?;
         Ok(Self {
             rate_hz,
             max_samples: None,
@@ -165,7 +165,7 @@ impl FileAudioSink {
         let inner = writer
             .into_inner()
             .map_err(|e| anyhow!("FileAudioSink: unwrap writer: {}", e.into_error()))?;
-        patch_mono_wav_sizes(inner, self.data_size_pos, data_bytes)?;
+        crate::wav::patch_wav_sizes(inner, self.data_size_pos, data_bytes)?;
         Ok(())
     }
 }
@@ -271,81 +271,12 @@ fn clip_to_i16(x: f32) -> i16 {
     scaled as i16
 }
 
-/// Writes the mono-PCM WAV header with stub sizes. Returns the offset
-/// of the data chunk size u32 so [`patch_mono_wav_sizes`] can fix it up
-/// on finalise.
-fn write_mono_wav_stub_header<W: Write + Seek>(w: &mut W, rate_hz: f64) -> Result<u64> {
-    if rate_hz > f64::from(u32::MAX) {
-        bail!("FileAudioSink: rate_hz out of WAV range: {rate_hz}");
-    }
-    let rate = rate_hz.round() as u32;
-    let byte_rate = rate.saturating_mul(2);
-
-    w.write_all(b"RIFF").context("RIFF")?;
-    w.write_all(&0u32.to_le_bytes()).context("RIFF size stub")?;
-    w.write_all(b"WAVE").context("WAVE")?;
-
-    w.write_all(b"fmt ").context("fmt id")?;
-    w.write_all(&16u32.to_le_bytes()).context("fmt size")?;
-    w.write_all(&1u16.to_le_bytes()).context("PCM tag")?;
-    w.write_all(&1u16.to_le_bytes()).context("channels")?;
-    w.write_all(&rate.to_le_bytes()).context("sample rate")?;
-    w.write_all(&byte_rate.to_le_bytes()).context("byte rate")?;
-    w.write_all(&2u16.to_le_bytes()).context("block align")?;
-    w.write_all(&16u16.to_le_bytes()).context("bits")?;
-
-    w.write_all(b"data").context("data id")?;
-    let data_size_pos = w.stream_position().context("tell data size pos")?;
-    w.write_all(&0u32.to_le_bytes()).context("data size stub")?;
-    Ok(data_size_pos)
-}
-
-fn patch_mono_wav_sizes<W: Write + Seek>(
-    mut w: W,
-    data_size_pos: u64,
-    data_bytes: u32,
-) -> Result<()> {
-    w.seek(SeekFrom::Start(data_size_pos))
-        .context("seek data size")?;
-    w.write_all(&data_bytes.to_le_bytes())
-        .context("patch data size")?;
-    let riff_size = data_bytes.saturating_add(36);
-    w.seek(SeekFrom::Start(4)).context("seek riff size")?;
-    w.write_all(&riff_size.to_le_bytes())
-        .context("patch riff size")?;
-    w.flush().context("flush after patch")?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{clip_to_i16, FileAudioSink, FileAudioSinkParams};
     use crate::block::{Block, BlockIo, InBuf, InputPort, PortMeta};
-    use std::io::Cursor;
+    use crate::test_support::{SharedBuf, SharedCursor};
     use std::path::PathBuf;
-
-    struct SharedCursor {
-        inner: Cursor<Vec<u8>>,
-        shared: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
-    }
-    impl std::io::Write for SharedCursor {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let n = self.inner.write(buf)?;
-            *self.shared.borrow_mut() = self.inner.get_ref().clone();
-            Ok(n)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.inner.flush()
-        }
-    }
-    impl std::io::Seek for SharedCursor {
-        fn seek(&mut self, p: std::io::SeekFrom) -> std::io::Result<u64> {
-            self.inner.seek(p)
-        }
-    }
-    // `Rc` is !Send, but SharedCursor never crosses threads in tests —
-    // mark it Send so the blanket `WriteSeek` bound is satisfied.
-    unsafe impl Send for SharedCursor {}
 
     fn run_process(sink: &mut FileAudioSink, samples: &[f32]) -> usize {
         let mut inputs = [InputPort {
@@ -361,12 +292,8 @@ mod tests {
         work.consumed[0]
     }
 
-    fn in_memory_sink(rate: f64) -> (FileAudioSink, std::rc::Rc<std::cell::RefCell<Vec<u8>>>) {
-        let shared = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
-        let w = SharedCursor {
-            inner: Cursor::new(Vec::new()),
-            shared: shared.clone(),
-        };
+    fn in_memory_sink(rate: f64) -> (FileAudioSink, SharedBuf) {
+        let (w, shared) = SharedCursor::new();
         let sink = FileAudioSink::from_writer(rate, Box::new(w)).unwrap();
         (sink, shared)
     }
