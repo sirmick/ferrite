@@ -29,10 +29,10 @@
 //! caller can pass any chunk size.
 
 use rustfft::{num_complex::Complex, FftPlanner};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SpectralMethod {
     /// 1979 Boll spectral subtraction — cheap, audible musical-noise
     /// artefacts at aggressive β.
@@ -147,6 +147,23 @@ impl SpectralStage {
         for v in &mut self.prior_snr {
             *v = 1.0;
         }
+    }
+
+    /// Live-update the scalar params without touching the FFT plan,
+    /// OLA buffers or the tracked noise model — `run()` reads these
+    /// fields each frame, so the change takes effect gap-free.
+    /// `block_size` is structural and intentionally not settable here.
+    pub fn set_params(
+        &mut self,
+        method: SpectralMethod,
+        oversub: f32,
+        floor: f32,
+        noise_alpha: f32,
+    ) {
+        self.method = method;
+        self.oversub = oversub;
+        self.floor = floor;
+        self.noise_alpha = noise_alpha;
     }
 
     /// Run the spectral NR stage in place. One sample in → one sample

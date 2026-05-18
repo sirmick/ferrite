@@ -103,7 +103,20 @@ Capture / record: `capture_fm`, `capture-aprs`, `capture-pager`,
 In [`blocks/src/audio_nr/`](../blocks/src/audio_nr/) — de-emphasis →
 impulse blanker → adaptive notch → spectral subtraction (MMSE-LSA /
 Wiener) → DFN3 neural denoiser. Per-preset tuned (AM doesn't get the
-WBFM stack; SSB uses a different neural threshold).
+WBFM stack; SSB uses a different neural threshold). Selectable NR
+presets (auto/off/voice/ssb/am/fm) ride the receiver's Off|On|
+Transcribe Audio chip; "transcribe" auto-selects voice; live picks
+loop back into `<BlockParams>` via the node+browser `pipeline.blocks`
+merge (shipped 2026-05-18).
+
+**Follow-up (deferred): live AGC-gain readout.** The AGC stage's
+instantaneous gain drifts continuously but isn't observable —
+`audio_nr/agc.rs` computes `gain = min(target/env, max_gain)`
+per-sample and discards it (no field, no accessor). A UI readout needs
+the block to expose current gain + a per-tick drain channel (mirror
+the AudioSink level-meter / VoiceTranscribe-tap telemetry pattern) →
+reactive store → Transcript/NR panel. ~2 h; blocks+runtime wasm
+rebuild + ferrited restart.
 
 ### Packaging
 

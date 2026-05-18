@@ -98,6 +98,18 @@ impl NeuralStage {
         self.input_rate_hz = input_rate_hz;
     }
 
+    /// Live-update the wet/dry mix from a new attenuation floor without
+    /// resetting the denoiser state or accumulators — `run()` reads
+    /// `self.wet` each sample, so the change is gap-free. Same formula
+    /// as `new()`.
+    pub fn set_attenuation_db(&mut self, attenuation_db: f32) {
+        self.wet = if attenuation_db.is_finite() && attenuation_db > 0.0 {
+            1.0 - 10.0_f32.powf(-attenuation_db / 20.0)
+        } else {
+            1.0
+        };
+    }
+
     pub fn reset(&mut self) {
         self.inner = DenoiseState::new();
         self.frame_filled = 0;

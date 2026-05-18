@@ -39,7 +39,7 @@
 //!   when the real stages land in tasks #37 and #38.
 
 use anyhow::{bail, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort, ParamKind, ParamSpec,
@@ -59,7 +59,7 @@ pub use spectral::SpectralMethod;
 // Params
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioNrParams {
     /// Declared input sample rate — construction-time hint; `init()`
@@ -203,6 +203,50 @@ impl AudioNrParams {
         }
         Ok(())
     }
+}
+
+/// Params this block's stages cannot hot-patch — their FFT plan / FIR
+/// taps / resampler are sized at construction. They're still
+/// `SelfBlock` per the param spec (no source/graph restart), so when
+/// one is in a delta we bow out and the runtime does a *block-scoped*
+/// rebuild. This is the block asserting its own live limits, which is
+/// exactly what the `apply_live_params` contract asks for — distinct
+/// from (and finer than) the spec's `reconfig_scope`.
+const STRUCTURAL_PARAMS: &[&str] = &[
+    "sample_rate_hz",
+    "notch_taps",
+    "notch_delay",
+    "spectral_block_size",
+];
+
+/// Merge a live-reconfigure `delta` onto the current params, returning
+/// the validated next params, or `None` when the delta touches a
+/// structural or unknown key (caller then returns `Ok(false)` and the
+/// runtime rebuilds atomically — the `apply_live_params` contract:
+/// never partially apply).
+///
+/// Same shape as `RuntimeHandle::reconfigure_block`'s merge — splat the
+/// delta onto a serde `Value` of the params, then re-deserialize — so
+/// partial JSON, enums and types resolve exactly like `construct()`.
+/// Serialising the current params first also yields the authoritative
+/// valid-key set, so unknown keys are caught without a hand-kept list.
+fn try_merge_live(cur: &AudioNrParams, delta: &serde_json::Value) -> Result<Option<AudioNrParams>> {
+    let Some(obj) = delta.as_object() else {
+        return Ok(None);
+    };
+    let mut v = serde_json::to_value(cur)?;
+    let Some(map) = v.as_object_mut() else {
+        return Ok(None);
+    };
+    for (k, val) in obj {
+        if STRUCTURAL_PARAMS.contains(&k.as_str()) || !map.contains_key(k) {
+            return Ok(None);
+        }
+        map.insert(k.clone(), val.clone());
+    }
+    let next: AudioNrParams = serde_json::from_value(v)?;
+    next.validate()?;
+    Ok(Some(next))
 }
 
 // Static parameter metadata for both Mono and Stereo block specs.
@@ -513,6 +557,46 @@ impl Chain {
         );
     }
 
+    /// Push live-tunable params into the stages in place, preserving
+    /// every stage's running state (AGC envelope, spectral noise
+    /// model, notch taps, neural accumulators). `*_enable` flags aren't
+    /// pushed — `run()` reads them off `p` each call. Structural params
+    /// (taps/delay/block_size/rate) are NOT handled here; the caller
+    /// (`apply_live_params`) rejects a delta containing them so the
+    /// runtime rebuilds atomically instead.
+    fn apply(&mut self, p: &AudioNrParams) -> Result<()> {
+        let rate = f64::from(p.sample_rate_hz);
+        self.deemph.recompute(p.deemph_tau_us, rate);
+        self.blanker
+            .recompute(p.blanker_threshold_db, p.blanker_hold_ms, rate);
+        self.spectral.set_params(
+            p.spectral_method,
+            p.spectral_oversub,
+            p.spectral_floor,
+            p.spectral_noise_alpha,
+        );
+        self.neural.set_attenuation_db(p.neural_attenuation_db);
+        self.agc
+            .recompute(p.agc_target_dbfs, p.agc_release_ms, p.agc_max_gain_db, rate);
+        // Notch is `Option` — built lazily when enabled. A preset that
+        // turns it on (taps/delay unchanged, guaranteed by the
+        // structural-key rejection) needs the stage materialised once;
+        // thereafter just the LMS step. Disabling leaves the stage in
+        // place; `run()` skips it on `!notch_enable`.
+        if p.notch_enable {
+            match self.notch.as_mut() {
+                Some(n) => n.set_mu(p.notch_mu),
+                None => {
+                    self.notch = Some(
+                        notch::NotchStage::new(p.notch_taps, p.notch_mu, p.notch_delay)
+                            .map_err(anyhow::Error::msg)?,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn run(&mut self, p: &AudioNrParams, buf: &mut [f32]) {
         if p.deemph_enable {
             self.deemph.run(buf);
@@ -617,6 +701,15 @@ impl Block for AudioNrMono {
         w.consumed[0] = n;
         w.produced[0] = n;
         Ok(w)
+    }
+
+    fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+        let Some(next) = try_merge_live(&self.params, delta)? else {
+            return Ok(false);
+        };
+        self.chain.apply(&next)?;
+        self.params = next;
+        Ok(true)
     }
 }
 
@@ -777,6 +870,16 @@ impl Block for AudioNrStereo {
         w.produced[0] = n;
         w.produced[1] = n;
         Ok(w)
+    }
+
+    fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+        let Some(next) = try_merge_live(&self.params, delta)? else {
+            return Ok(false);
+        };
+        self.left.apply(&next)?;
+        self.right.apply(&next)?;
+        self.params = next;
+        Ok(true)
     }
 }
 
@@ -977,6 +1080,53 @@ mod tests {
         // test defends against a *non-functional* neural path — real
         // speech-in-noise gets 10–15 dB.
         assert!(db > 1.0, "expected ≥1 dB RNNoise suppression, got {db:.1}");
+    }
+
+    #[test]
+    fn apply_live_params_in_place_vs_structural() {
+        use crate::block::Block;
+        let mut b = AudioNrMono::new(AudioNrParams {
+            sample_rate_hz: 16_000.0,
+            neural_enable: true,
+            neural_attenuation_db: 18.0,
+            ..AudioNrParams::default()
+        })
+        .unwrap();
+
+        // Live scalar → applied in place, returns true, params updated.
+        assert!(b
+            .apply_live_params(&serde_json::json!({ "neural_attenuation_db": 24.0 }))
+            .unwrap());
+        assert_eq!(b.params.neural_attenuation_db, 24.0);
+
+        // Enable toggle is live too (run() reads it off params).
+        assert!(b
+            .apply_live_params(&serde_json::json!({ "agc_enable": true }))
+            .unwrap());
+        assert!(b.params.agc_enable);
+
+        // Structural key → Ok(false) (runtime rebuilds atomically),
+        // params left untouched.
+        assert!(!b
+            .apply_live_params(&serde_json::json!({ "spectral_block_size": 1024 }))
+            .unwrap());
+        assert_eq!(b.params.neural_attenuation_db, 24.0);
+
+        // Unknown key → also Ok(false), no partial apply.
+        assert!(!b
+            .apply_live_params(&serde_json::json!({ "bogus": 1, "agc_target_dbfs": -3.0 }))
+            .unwrap());
+
+        // Stereo path mirrors mono.
+        let mut s = AudioNrStereo::new(AudioNrParams {
+            sample_rate_hz: 16_000.0,
+            ..AudioNrParams::default()
+        })
+        .unwrap();
+        assert!(s
+            .apply_live_params(&serde_json::json!({ "blanker_enable": true }))
+            .unwrap());
+        assert!(s.params.blanker_enable);
     }
 
     #[test]
