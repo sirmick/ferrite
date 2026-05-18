@@ -65,6 +65,11 @@ export const CLIENT_DEFAULTS = {
   // Audio playback
   'client.audio.volume': 1.0,
   'client.audio.muted': false,
+  // Noise-reduction preset for `audio_nr` — see presets/nrPresets.ts.
+  // 'auto' = leave the preset's authored NR untouched (default).
+  // Re-applied to the browser block after every flowgraph (re)load so
+  // it survives the transcribe-triggered re-compose.
+  'client.audio.nrPreset': 'auto',
 
   // Workspace layout — when the active preset has a Channelizer the
   // runtime auto-injects a `ui:fft_narrow` tap (see

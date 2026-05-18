@@ -31,6 +31,13 @@ export interface VadConfig {
    *  inference is quick — a long monologue would otherwise produce no
    *  text for ~30 s then one lagging giant chunk. */
   readonly maxSegmentMs: number;
+  /** Audio (ms) carried from the end of a *max-cut* segment into the
+   *  start of the next, so a word straddling the hard 10 s boundary
+   *  still has lead-in context and decodes intact. Zero on
+   *  silence-closed segments (those cut in a pause — no word to save).
+   *  The worker drops the redundant re-decoded lead via whisper's
+   *  per-segment timestamps. */
+  readonly overlapMs: number;
 }
 
 export const DEFAULT_VAD: VadConfig = {
@@ -39,6 +46,7 @@ export const DEFAULT_VAD: VadConfig = {
   hangoverMs: 700,
   minSpeechMs: 350,
   maxSegmentMs: 10_000,
+  overlapMs: 750,
 };
 
 const FRAME = 320; // 20 ms @ 16 kHz — VAD analysis granularity
@@ -58,10 +66,29 @@ export class EnergyVadSegmenter {
   private silenceMs = 0;
   private acc: number[] = [];
   private heldFrame: number[] = [];
+  /** RMS of the most recent frame — for the UI gate/level meter. */
+  private lastLevel = 0;
+  /** Overlap (ms) currently sitting at the *front* of `acc`, carried
+   *  from the previous max-cut. Passed out so the worker can drop the
+   *  redundant re-decoded lead. 0 unless a max-cut just happened. */
+  private leadOverlapMs = 0;
+
+  /** Snapshot for the live gate/level meter: current frame RMS, the
+   *  adaptive open threshold, and whether an utterance is being
+   *  accumulated (gate open or in hangover). Pure read. */
+  meterState(): { level: number; threshold: number; speaking: boolean } {
+    return {
+      level: this.lastLevel,
+      threshold: this.noiseFloor * this.cfg.openRatio,
+      speaking: this.speaking,
+    };
+  }
 
   constructor(
     cfg: Partial<VadConfig>,
-    private readonly onSegment: (pcm16k: Float32Array) => void,
+    /** `leadOverlapMs` = ms at the start of `pcm16k` carried from the
+     *  previous max-cut (0 for silence-closed / first segments). */
+    private readonly onSegment: (pcm16k: Float32Array, leadOverlapMs: number) => void,
   ) {
     this.cfg = { ...DEFAULT_VAD, ...cfg };
   }
@@ -80,6 +107,7 @@ export class EnergyVadSegmenter {
 
   private processFrame(data: Float32Array, off: number): void {
     const level = rms(data, off, off + FRAME);
+    this.lastLevel = level;
     const frameMs = (FRAME / this.cfg.rateHz) * 1000;
     const open = level > this.noiseFloor * this.cfg.openRatio;
 
@@ -89,27 +117,52 @@ export class EnergyVadSegmenter {
       for (let i = off; i < off + FRAME; i++) this.acc.push(data[i]);
     } else if (this.speaking) {
       // Keep accumulating through the hangover so trailing consonants
-      // and short inter-word gaps stay in the same segment.
+      // and short inter-word gaps stay in the same segment. Do NOT
+      // adapt the noise floor here: the hangover is soft speech /
+      // inter-word dips, not silence — adapting toward it creeps the
+      // floor up and the gate then misses the next *soft* passage
+      // (a dropped chunk = a big gap).
       for (let i = off; i < off + FRAME; i++) this.acc.push(data[i]);
       this.silenceMs += frameMs;
-      if (this.silenceMs >= this.cfg.hangoverMs) this.flush();
+      // Silence close — it cut in a pause, no straddling word to save.
+      if (this.silenceMs >= this.cfg.hangoverMs) this.flush(false);
     } else {
-      // Silence while idle — adapt the noise-floor estimate slowly.
+      // True idle: no utterance in progress and below threshold —
+      // genuine noise. The only safe place to learn the floor.
       this.noiseFloor = this.noiseFloor * 0.97 + level * 0.03;
     }
 
+    // Hard cap on continuous speech — cut mid-word, so carry a tail.
     if (this.acc.length / this.cfg.rateHz >= this.cfg.maxSegmentMs / 1000) {
-      this.flush();
+      this.flush(true);
     }
   }
 
-  private flush(): void {
+  private flush(maxCut: boolean): void {
     const ms = (this.acc.length / this.cfg.rateHz) * 1000;
     const pcm = Float32Array.from(this.acc);
-    this.acc = [];
-    this.speaking = false;
-    this.silenceMs = 0;
-    if (ms >= this.cfg.minSpeechMs) this.onSegment(pcm);
+    const emittedLeadMs = this.leadOverlapMs;
+
+    if (maxCut) {
+      // Still mid-utterance: keep talking, and seed the next segment
+      // with the last `overlapMs` so a word on the boundary has lead-in
+      // context (the worker drops the redundant re-decode by timestamp).
+      const tailN = Math.min(
+        this.acc.length,
+        Math.round((this.cfg.overlapMs / 1000) * this.cfg.rateHz),
+      );
+      this.acc = this.acc.slice(this.acc.length - tailN);
+      this.leadOverlapMs = (this.acc.length / this.cfg.rateHz) * 1000;
+      this.silenceMs = 0;
+      // `speaking` stays true — we never stopped.
+    } else {
+      this.acc = [];
+      this.leadOverlapMs = 0;
+      this.speaking = false;
+      this.silenceMs = 0;
+    }
+
+    if (ms >= this.cfg.minSpeechMs) this.onSegment(pcm, emittedLeadMs);
   }
 
   reset(): void {
@@ -118,5 +171,7 @@ export class EnergyVadSegmenter {
     this.acc = [];
     this.heldFrame = [];
     this.noiseFloor = 1e-4;
+    this.lastLevel = 0;
+    this.leadOverlapMs = 0;
   }
 }

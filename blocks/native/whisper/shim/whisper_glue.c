@@ -79,7 +79,13 @@ char *wsp_transcribe(const float *pcm, int n_samples, const char *prompt) {
   p.temperature_inc = 0.2f;        // fallback on low-confidence decodes
   p.suppress_blank = true;
   p.token_timestamps = true;
-  p.no_context = false;
+  // no_context = true: do NOT carry one internal segment's decoded
+  // text as context for the next. Each call is already one VAD'd
+  // utterance, so cross-segment conditioning buys nothing and is the
+  // classic whisper repetition-loop amplifier on long / noisy audio
+  // (it locks onto a repeated n-gram and keeps feeding it back). The
+  // `initial_prompt` vocab bias is unaffected.
+  p.no_context = true;
   if (prompt && prompt[0]) p.initial_prompt = prompt;
 
   // Silero VAD inside whisper.cpp when the model shipped — far better

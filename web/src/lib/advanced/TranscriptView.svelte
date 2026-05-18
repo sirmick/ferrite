@@ -61,6 +61,17 @@
     idle: 'text-slate-500',
   };
 
+  // Map a linear RMS amplitude to a 0..1 meter fraction over a
+  // -60..0 dBFS window — same visual scale as the audio level meter.
+  function dbFrac(x: number): number {
+    if (!(x > 0)) return 0;
+    const db = 20 * Math.log10(x);
+    return Math.max(0, Math.min(1, (db + 60) / 60));
+  }
+  let armed = $derived(transcript.status === 'listening' || transcript.status === 'transcribing');
+  let lvlFrac = $derived(dbFrac(transcript.level));
+  let thrFrac = $derived(dbFrac(transcript.threshold));
+
   function exportText(): string {
     return transcript.segments
       .map((s: TranscriptSegment) => `[${fmtTime(s.atMs)}] ${fmtFreq(s.vfoHz)}  ${s.text}`)
@@ -134,6 +145,40 @@
       >
     </span>
   </header>
+
+  <!-- Live behaviour strip: VAD gate/level meter + backlog. Only while
+       armed, so it never shows stale values when idle/unavailable. -->
+  {#if armed}
+    <div
+      class="flex items-center gap-2 border-b border-slate-800 px-2 py-1 font-mono text-[10px] text-slate-500"
+    >
+      <span class="text-[color:var(--color-muted)]">gate</span>
+      <div
+        class="relative h-1.5 w-24 overflow-hidden rounded-sm border border-slate-800 bg-slate-950"
+        title="Input level vs the adaptive VAD threshold. Bar lights when the gate is open (capturing speech)."
+      >
+        <div
+          class="absolute inset-y-0 left-0 transition-[width] duration-100"
+          class:bg-emerald-500={transcript.gateOpen}
+          class:bg-slate-600={!transcript.gateOpen}
+          style:width="{lvlFrac * 100}%"
+        ></div>
+        <div class="absolute inset-y-0 w-px bg-slate-400" style:left="{thrFrac * 100}%"></div>
+      </div>
+      <span class={transcript.gateOpen ? 'text-emerald-400' : 'text-slate-600'}>
+        {transcript.gateOpen ? 'capturing' : 'listening'}
+      </span>
+      <span class="ml-auto">
+        {#if transcript.queued > 0 || transcript.lagMs > 800}
+          <span class={transcript.lagMs > 4000 ? 'text-amber-500' : 'text-slate-500'}>
+            queue {transcript.queued} · ~{(transcript.lagMs / 1000).toFixed(1)}s behind
+          </span>
+        {:else}
+          <span class="text-slate-600">live</span>
+        {/if}
+      </span>
+    </div>
+  {/if}
 
   <!-- whisper initial_prompt — vocabulary bias (collapsible). -->
   <details class="border-b border-slate-800">

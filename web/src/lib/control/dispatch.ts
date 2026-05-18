@@ -88,6 +88,9 @@ export async function applyControl(path: string, value: unknown): Promise<void> 
       // transcription Worker) — push it live, same fan-out shape.
       else if (path === 'client.transcribe.prompt')
         browserRuntime.setTranscribePrompt(value as string);
+      // NR preset → push the param bundle to the live `audio_nr`
+      // block (browserRuntime reads the just-set store value).
+      else if (path === 'client.audio.nrPreset') browserRuntime.applyNrPreset();
       return;
     }
     default:

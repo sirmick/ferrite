@@ -58,6 +58,19 @@ class TranscriptStore {
   /** Model the worker is using, for the panel header. */
   modelName = $state<string>('');
 
+  // Live behaviour for the gate/level meter + backlog readout. Updated
+  // ~7×/s from the worker; the panel only renders these while armed.
+  /** VAD gate open (an utterance is being captured). */
+  gateOpen = $state<boolean>(false);
+  /** Most-recent frame RMS (linear). */
+  level = $state<number>(0);
+  /** Adaptive open threshold the gate fires above (linear). */
+  threshold = $state<number>(0);
+  /** Utterances queued for whisper (whisper behind the speaker). */
+  queued = $state<number>(0);
+  /** Audio captured but not yet transcribed (ms): ring + queue. */
+  lagMs = $state<number>(0);
+
   private nextId = 1;
 
   push(seg: Omit<TranscriptSegment, 'id'>): void {
@@ -75,6 +88,20 @@ class TranscriptStore {
     this.statusDetail = detail;
   }
 
+  setTelemetry(t: {
+    gateOpen: boolean;
+    level: number;
+    threshold: number;
+    queued: number;
+    lagMs: number;
+  }): void {
+    this.gateOpen = t.gateOpen;
+    this.level = t.level;
+    this.threshold = t.threshold;
+    this.queued = t.queued;
+    this.lagMs = t.lagMs;
+  }
+
   clear(): void {
     this.segments = [];
     this.nextId = 1;
@@ -86,6 +113,11 @@ class TranscriptStore {
     this.statusDetail = '';
     this.droppedSamples = 0;
     this.modelName = '';
+    this.gateOpen = false;
+    this.level = 0;
+    this.threshold = 0;
+    this.queued = 0;
+    this.lagMs = 0;
   }
 }
 

@@ -131,14 +131,19 @@ export function injectVoiceTranscribe(doc: FlowgraphDoc): FlowgraphDoc {
     Object.keys(blocks).some((k) => k.startsWith(VOICE_TRANSCRIBE_PREFIX));
   if (alreadyPresent) return doc;
 
+  // Sorted to match the Rust injector (`blocks` is a BTreeMap there):
+  // both halves must tap the *same* single sink — `audio` for mono,
+  // `audio_l` for the stereo presets.
   const sinkIds = Object.entries(blocks)
     .filter(([, b]) => b.type === 'AudioSink')
-    .map(([id]) => id);
+    .map(([id]) => id)
+    .sort();
   if (sinkIds.length === 0) return doc;
 
   const outBlocks: Record<string, BlockInstanceDecl> = { ...blocks };
   const outWires: [string, string][] = (doc.wires ?? []).map(([s, d]) => [s, d]);
 
+  // Tap the first usable sink and stop — exactly one VoiceTranscribe.
   for (const sinkId of sinkIds) {
     const vtId = `${VOICE_TRANSCRIBE_PREFIX}_${sinkId}`;
     if (vtId in outBlocks) continue; // refuse to clobber
@@ -165,6 +170,7 @@ export function injectVoiceTranscribe(doc: FlowgraphDoc): FlowgraphDoc {
       // creation. Mirrors the Rust injector's `mode: "on"`.
       params: { mode: 'on' },
     };
+    break; // one tap is enough — leave any other sinks untouched
   }
 
   return { ...doc, blocks: outBlocks, wires: outWires };

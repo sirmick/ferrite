@@ -35,6 +35,16 @@ type OutMsg =
   | { type: 'status'; status: string; detail: string; model: string; vad: 'silero' | 'energy' }
   | { type: 'dropped'; total: number }
   | {
+      // Live behaviour for the panel's gate/level meter + backlog
+      // readout. Posted every poll (~150 ms) once armed.
+      type: 'telemetry';
+      gateOpen: boolean;
+      level: number;
+      threshold: number;
+      queued: number;
+      lagMs: number;
+    }
+  | {
       type: 'segment';
       atMs: number;
       t0: number;
@@ -60,7 +70,7 @@ let segmenter: EnergyVadSegmenter | undefined;
 let engine: WhisperEngine | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
 let droppedTotal = 0;
-let lastAvail = 0;
+let srcRateHz = 0;
 const recentCalls: string[] = [];
 let curModel: WhisperModelDef = MODELS[0];
 
@@ -71,7 +81,13 @@ let curModel: WhisperModelDef = MODELS[0];
 // `maxSegmentMs`, and the old "drop if busy" lost whole sentences.
 // Bounded: a speaker faster than whisper sheds the OLDEST backlog so
 // latency can't balloon, counted as a glitch.
-const pendingSegs: Float32Array[] = [];
+interface PendingSeg {
+  pcm: Float32Array;
+  /** ms at the start of `pcm` carried from the previous max-cut —
+   *  whisper segments fully inside this were already emitted. */
+  leadMs: number;
+}
+const pendingSegs: PendingSeg[] = [];
 const MAX_PENDING = 6;
 let draining = false;
 
@@ -95,16 +111,34 @@ function rollingPrompt(): string {
   return promptBase + recentCalls.slice(-MAX_PROMPT_CALLS).join(' ');
 }
 
-function transcribeOne(pcm16k: Float32Array): void {
+function transcribeOne(pcm16k: Float32Array, leadMs: number): void {
   if (!engine?.loaded) return;
   status('transcribing');
   const res = engine.transcribe(pcm16k, rollingPrompt());
-  const atMs = Date.now();
+  // The clip just ended (~now). Whisper segment times (`t1`, seconds
+  // into the clip) place each segment in real wall-clock relative to
+  // that end — otherwise every segment of a 10 s utterance shares one
+  // timestamp and the band log loses intra-utterance ordering.
+  const endMs = Date.now();
+  const lastT1 = res.segments.length ? (res.segments[res.segments.length - 1].t1 ?? 0) : 0;
+  // Carried-over max-cut lead: whisper segments that end inside it were
+  // already emitted by the previous chunk — drop them. A segment that
+  // straddles the boundary (t1 past the lead) is kept: that's the word
+  // we re-decoded *with* its lead-in context, the whole point.
+  const leadSec = leadMs / 1000;
   for (const seg of res.segments) {
+    if (leadSec > 0 && (seg.t1 ?? 0) <= leadSec) continue;
     const cleaned = applyHamPostProcess(seg.text);
     if (!cleaned) continue;
+    const atMs = Math.round(endMs - Math.max(0, lastT1 - (seg.t1 ?? lastT1)) * 1000);
     for (const c of extractCallsigns(cleaned)) {
-      if (!recentCalls.includes(c)) recentCalls.push(c);
+      if (!recentCalls.includes(c)) {
+        recentCalls.push(c);
+        // Bound it: only the last MAX_PROMPT_CALLS feed the prompt, and
+        // an ever-growing array is both a leak and (via the prompt) a
+        // whisper repetition trigger. Keep a little history headroom.
+        if (recentCalls.length > MAX_PROMPT_CALLS * 3) recentCalls.shift();
+      }
     }
     post({
       type: 'segment',
@@ -120,7 +154,7 @@ function transcribeOne(pcm16k: Float32Array): void {
   }
 }
 
-function enqueueSegment(pcm16k: Float32Array): void {
+function enqueueSegment(pcm16k: Float32Array, leadMs: number): void {
   if (!engine?.loaded) return;
   if (pendingSegs.length >= MAX_PENDING) {
     // Whisper is behind the speaker — shed the oldest utterance so
@@ -129,7 +163,7 @@ function enqueueSegment(pcm16k: Float32Array): void {
     droppedTotal += 1;
     post({ type: 'dropped', total: droppedTotal });
   }
-  pendingSegs.push(pcm16k);
+  pendingSegs.push({ pcm: pcm16k, leadMs });
   void drainSegments();
 }
 
@@ -142,9 +176,9 @@ async function drainSegments(): Promise<void> {
   draining = true;
   try {
     while (pendingSegs.length > 0 && engine?.loaded) {
-      const pcm = pendingSegs.shift() as Float32Array;
+      const item = pendingSegs.shift() as PendingSeg;
       try {
-        transcribeOne(pcm);
+        transcribeOne(item.pcm, item.leadMs);
       } catch (e) {
         status('error', String(e));
       }
@@ -159,29 +193,44 @@ async function drainSegments(): Promise<void> {
 }
 
 function poll(): void {
-  if (!reader) return;
-  // Drain everything available; the ring is small and the producer
-  // (runner tick) is faster than this poll, so empty it each pass.
+  // Don't touch the ring until the resampler exists. The `rate`
+  // message arrives a few runner ticks after `init` (the runner only
+  // knows the negotiated input rate once the block has run), so
+  // draining here pre-rate would *consume and discard* the first
+  // ~hundreds of ms of speech. The SAB ring is large (≈ seconds), so
+  // leaving the audio buffered until `rate` lands loses nothing.
+  if (!reader || !resampler || !segmenter) return;
   let n = reader.read(scratch);
   while (n > 0) {
-    if (resampler && segmenter) {
-      const r = resampler.feed(scratch.subarray(0, n));
-      if (r.length > 0) segmenter.feed(r);
-    }
+    const r = resampler.feed(scratch.subarray(0, n));
+    if (r.length > 0) segmenter.feed(r);
     if (n < scratch.length) break;
     n = reader.read(scratch);
   }
-  // Surface ring-overflow as the panel's glitch counter. The producer
-  // tracks drops Rust-side; we approximate from the high-water gap.
-  const avail = reader.availableRead();
-  if (avail < lastAvail) droppedTotal += 0; // overflow is counted Rust-side
-  lastAvail = avail;
+  // `droppedTotal` reflects pending-queue shedding (whisper behind the
+  // speaker). Ring overflow isn't separately surfaced — the big ring +
+  // queue make it rare, and the Rust side doesn't expose a count.
   post({ type: 'dropped', total: droppedTotal });
+
+  // Live behaviour for the panel. `lagMs` = audio captured but not yet
+  // transcribed: still-in-ring backlog + queued utterances' duration.
+  const m = segmenter.meterState();
+  const ringMs = srcRateHz > 0 ? (reader.availableRead() / srcRateHz) * 1000 : 0;
+  let queuedMs = 0;
+  for (const s of pendingSegs) queuedMs += (s.pcm.length / 16_000) * 1000;
+  post({
+    type: 'telemetry',
+    gateOpen: m.speaking,
+    level: m.level,
+    threshold: m.threshold,
+    queued: pendingSegs.length,
+    lagMs: Math.round(ringMs + queuedMs),
+  });
 }
 
 async function init(sab: SharedArrayBuffer): Promise<void> {
   reader = AudioRingReader.fromSab(sab);
-  segmenter = new EnergyVadSegmenter({}, (pcm) => enqueueSegment(pcm));
+  segmenter = new EnergyVadSegmenter({}, (pcm, leadMs) => enqueueSegment(pcm, leadMs));
   timer = setInterval(poll, POLL_MS);
 
   status('loading-model', `${curModel.label} (~${curModel.approxMB} MB, one-time)`);
@@ -210,6 +259,7 @@ self.onmessage = (ev: MessageEvent<InMsg>) => {
       void init(msg.sab);
       break;
     case 'rate':
+      srcRateHz = msg.rateHz;
       resampler = new LinearResampler(msg.rateHz);
       break;
     case 'model': {

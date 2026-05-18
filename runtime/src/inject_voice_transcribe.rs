@@ -39,8 +39,14 @@ use crate::doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
 /// and `inject_narrow_fft` already use; no registry block starts `__`.
 const PREFIX: &str = "__voice_transcribe";
 
-/// Splice a `VoiceTranscribe` before every `AudioSink` in `doc` when
-/// `profile.transcribe` is set.
+/// Splice **one** `VoiceTranscribe` immediately before a single
+/// `AudioSink` in `doc` when `profile.transcribe` is set.
+///
+/// Transcription only needs one mono feed of post-NR audio, so we tap
+/// exactly one sink — the first by id (`blocks` is a `BTreeMap`, so
+/// this is deterministic: `audio` for mono, `audio_l` for the stereo
+/// presets). Tapping *every* sink would put a mono passthrough in each
+/// split channel and spawn a worker per sink — wrong for stereo.
 ///
 /// No-op when transcription isn't engaged (`!profile.transcribe`), when
 /// the preset has no `AudioSink` (no audio chain — e.g. a pure
@@ -70,6 +76,8 @@ pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc, profile: &Profile) {
         return;
     }
 
+    // Walk sinks in (deterministic) id order; tap the first usable one
+    // and stop — exactly one VoiceTranscribe per graph.
     for sink_id in sink_ids {
         let vt_id = format!("{PREFIX}_{sink_id}");
         if doc.blocks.contains_key(&vt_id) {
@@ -111,6 +119,7 @@ pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc, profile: &Profile) {
                 ..Default::default()
             },
         );
+        break; // one tap is enough — leave any other sinks untouched
     }
 }
 
@@ -214,6 +223,54 @@ mod tests {
             .wires
             .iter()
             .any(|w| w.src == "nr.out" && w.dst == "audio.in"));
+    }
+
+    #[test]
+    fn taps_only_one_sink_on_stereo() {
+        // Two AudioSinks (the stereo presets: audio_l / audio_r). Only
+        // ONE VoiceTranscribe, on the first sink by id (audio_l); the
+        // right channel is left wired straight through.
+        let mut doc = parse(
+            br#"{
+                "name": "stereo",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src":     {"type": "SineSource"},
+                    "nr":      {"type": "AudioNrMono", "placement": "browser"},
+                    "audio_l": {"type": "AudioSink", "placement": "browser"},
+                    "audio_r": {"type": "AudioSink", "placement": "browser"}
+                },
+                "wires": [
+                    ["src.out", "nr.in"],
+                    ["nr.left", "audio_l.in"],
+                    ["nr.right", "audio_r.in"]
+                ]
+            }"#,
+        );
+        inject_voice_transcribe(&mut doc, &engaged());
+
+        let vt_count = doc
+            .blocks
+            .values()
+            .filter(|b| b.type_name == "VoiceTranscribe")
+            .count();
+        assert_eq!(vt_count, 1, "exactly one tap for a multi-sink graph");
+        assert!(doc.blocks.contains_key("__voice_transcribe_audio_l"));
+        assert!(!doc.blocks.contains_key("__voice_transcribe_audio_r"));
+        // Right channel untouched: nr.right still feeds audio_r directly.
+        assert!(doc
+            .wires
+            .iter()
+            .any(|w| w.src == "nr.right" && w.dst == "audio_r.in"));
+        // Left channel goes through the tap.
+        assert!(doc
+            .wires
+            .iter()
+            .any(|w| w.src == "nr.left" && w.dst == "__voice_transcribe_audio_l.in"));
+        assert!(doc
+            .wires
+            .iter()
+            .any(|w| w.src == "__voice_transcribe_audio_l.out" && w.dst == "audio_l.in"));
     }
 
     #[test]

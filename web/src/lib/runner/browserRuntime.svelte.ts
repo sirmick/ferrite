@@ -26,6 +26,7 @@ import { AUDIO_RING_PROCESSOR_NAME } from '$lib/audio/audioRingProcessor';
 import audioWorkletUrl from '$lib/audio/audioRingProcessor?worker&url';
 import { logs } from '$lib/logs/store.svelte';
 import { clientControls } from '$lib/control/clientStore.svelte';
+import { nrBundle } from '$lib/presets/nrPresets';
 import { transcript } from '$lib/transcribe/store.svelte';
 import type { FlowgraphDoc } from '$lib/flowgraph';
 
@@ -79,6 +80,10 @@ class BrowserRuntime {
    *  (`/api/pipeline/blocks` is node-only). The audio tri-state and the
    *  Transcript advanced view gate on this. */
   voiceTranscribeIds = $state<ReadonlyArray<string>>([]);
+  /** Id of the `audio_nr` block (AudioNrMono/Stereo) in the loaded
+   *  graph, or null. Used to push the persisted NR preset after every
+   *  (re)load so it survives the transcribe-triggered re-compose. */
+  private audioNrId: string | null = null;
   /** Browser-side `ui:<name>` Events sinks from the last load (name +
    *  stream_id, matching the node half's allocation). `pipeline`
    *  merges these into `uiSinks` so advanced views attach when the
@@ -238,6 +243,16 @@ class BrowserRuntime {
     }
   }
 
+  /** Push the persisted NR preset (`client.audio.nrPreset`) to the
+   *  `audio_nr` block. Called post-load (re-applies over the preset's
+   *  authored params, surviving every re-compose) and by ProfileChips
+   *  on a live pick. `auto`/no block → no-op (keep authored NR). */
+  applyNrPreset(): void {
+    if (!this.audioNrId) return;
+    const bundle = nrBundle(clientControls.get('client.audio.nrPreset') as string);
+    if (bundle) void this.reconfigureBlock(this.audioNrId, bundle);
+  }
+
   /** Called by the page when `pipeline.status` changes. Idempotent.
    *
    *  Stores the desired state so a later reload can auto-start if the
@@ -278,6 +293,14 @@ class BrowserRuntime {
       await this.attachAudioNodes(result.audioSabs);
       this.attachTranscribeWorkers(result.transcribeSabs);
       this.voiceTranscribeIds = Object.keys(result.transcribeSabs);
+      this.audioNrId =
+        Object.entries(plain.blocks ?? {}).find(([, b]) =>
+          (b.type ?? '').startsWith('AudioNr'),
+        )?.[0] ?? null;
+      // Re-apply the persisted NR preset on top of the preset's
+      // authored params (same post-load fan-out as the transcribe
+      // prompt) so it survives this and every re-compose.
+      this.applyNrPreset();
       this.runnerState = 'loaded';
       const audioCount = Object.keys(result.audioSabs).length;
       logs.push(
@@ -499,6 +522,14 @@ class BrowserRuntime {
       transcript.modelName = String(msg.model ?? '');
     } else if (msg.type === 'dropped') {
       transcript.droppedSamples = msg.total as number;
+    } else if (msg.type === 'telemetry') {
+      transcript.setTelemetry({
+        gateOpen: msg.gateOpen as boolean,
+        level: msg.level as number,
+        threshold: msg.threshold as number,
+        queued: msg.queued as number,
+        lagMs: msg.lagMs as number,
+      });
     }
   }
 
@@ -536,6 +567,7 @@ class BrowserRuntime {
     this.lastStructuralFingerprint = undefined;
     this.loadedBlocks = [];
     this.voiceTranscribeIds = [];
+    this.audioNrId = null;
     this.uiSinks = [];
 
     // Slow cleanup on the captured refs — safe to interleave with a

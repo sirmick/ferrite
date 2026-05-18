@@ -22,7 +22,7 @@ const audioPreset = (): FlowgraphDoc => ({
 });
 
 describe('injectVoiceTranscribe', () => {
-  test('splices a VoiceTranscribe tap before every AudioSink', () => {
+  test('splices one VoiceTranscribe tap before the AudioSink', () => {
     const out = injectVoiceTranscribe(audioPreset());
 
     const vtId = '__voice_transcribe_audio';
@@ -79,5 +79,33 @@ describe('injectVoiceTranscribe', () => {
     const out = injectVoiceTranscribe(dangling);
     expect(Object.keys(out.blocks ?? {})).toEqual(['audio']);
     expect(out.wires).toEqual([]);
+  });
+
+  test('taps exactly one sink on a stereo (multi-AudioSink) preset', () => {
+    // Mirrors the Rust `taps_only_one_sink_on_stereo` case — same
+    // single-tap-on-first-sink contract so the two halves agree.
+    const stereo: FlowgraphDoc = {
+      blocks: {
+        src: { type: 'SoapySource' },
+        nr: { type: 'AudioNrMono' },
+        // Declared r-before-l to prove ordering isn't insertion order.
+        audio_r: { type: 'AudioSink' },
+        audio_l: { type: 'AudioSink' },
+      },
+      wires: [
+        ['src.out', 'nr.in'],
+        ['nr.left', 'audio_l.in'],
+        ['nr.right', 'audio_r.in'],
+      ],
+    };
+    const out = injectVoiceTranscribe(stereo);
+    const vt = Object.entries(out.blocks ?? {}).filter(([, b]) => b.type === 'VoiceTranscribe');
+    expect(vt).toHaveLength(1);
+    expect(out.blocks?.['__voice_transcribe_audio_l']).toBeDefined();
+    expect(out.blocks?.['__voice_transcribe_audio_r']).toBeUndefined();
+    // Right channel passes straight through; left goes via the tap.
+    expect(out.wires).toContainEqual(['nr.right', 'audio_r.in']);
+    expect(out.wires).toContainEqual(['nr.left', '__voice_transcribe_audio_l.in']);
+    expect(out.wires).toContainEqual(['__voice_transcribe_audio_l.out', 'audio_l.in']);
   });
 });

@@ -177,13 +177,17 @@ export class WhisperEngine {
     const jsonPtr = M._wsp_transcribe(pcmPtr, pcm16k.length, promptPtr);
     M._free(pcmPtr);
     M._free(promptPtr);
-    if (!jsonPtr) return { segments: [] };
+    // A genuine "no speech" result is still valid JSON (`{segments:[]}`);
+    // a null pointer or unparseable blob is an engine/ABI fault — throw
+    // so the worker flips to `error` instead of silently looking like
+    // permanent silence.
+    if (!jsonPtr) throw new Error('whisper: _wsp_transcribe returned null');
     const json = M.UTF8ToString(jsonPtr);
     M._free(jsonPtr);
     try {
       return JSON.parse(json) as WhisperResult;
-    } catch {
-      return { segments: [] };
+    } catch (e) {
+      throw new Error(`whisper: result not JSON (${String(e)})`);
     }
   }
 }

@@ -1,20 +1,18 @@
 <script lang="ts">
-  // Two compact segmented chip-groups next to the active preset name:
-  //   • Audio  — off | on | transcribe
-  //              (off strips the audio chain; on keeps it; transcribe
-  //               additionally splices a VoiceTranscribe tap — all
-  //               build-time, server profile, re-composed live)
+  // Compact segmented chip-groups next to the active preset name:
+  //   • Audio  — off | on | transcribe  (build-time server profile)
+  //   • NR     — auto | off | voice | ssb | am | fm  (live audio_nr
+  //              preset; "transcribe" auto-selects voice)
   //   • Demod  — auto | server | browser
-  //              (auto = follow the preset author's placement;
-  //               server/browser override it. "server" maps to the
-  //               `node` API value — kept terse for the UI.)
   //
-  // Each chip self-hides on presets that don't declare the
-  // corresponding tag (`when: { audio: ... }` for audio,
-  // `placement_role: "demod"` for demod), so ADS-B/AIS show neither
-  // and digital-with-decoder presets only show audio. Clicking a
-  // segment PATCHes the server's profile and re-composes live.
+  // Audio/Demod self-hide on presets that don't declare the matching
+  // tag (`when: { audio }`, `placement_role: "demod"`); NR rides with
+  // the audio chain. Audio/Demod PATCH the server profile + re-compose;
+  // NR is a client knob pushed live to the browser `audio_nr` block.
   import { pipeline } from '$lib/pipeline.svelte';
+  import { applyControl } from '$lib/control/dispatch';
+  import { clientControls } from '$lib/control/clientStore.svelte';
+  import { NR_PRESETS } from '$lib/presets/nrPresets';
 
   let hasAudioToggle = $derived.by(() => {
     const blocks = pipeline.flowgraph?.blocks ?? {};
@@ -36,13 +34,22 @@
 
   // Off | On | Transcribe — one tri-state over two profile bits.
   // `transcribe` implies `audio` (the tap sits on the audio chain), so
-  // we never set transcribe without audio.
+  // we never set transcribe without audio. Selecting transcribe also
+  // switches NR to `voice` (best signal for whisper); the post-load
+  // re-apply in browserRuntime makes it stick across the re-compose.
   function pickAudioMode(mode: 'off' | 'on' | 'transcribe'): void {
+    if (mode === 'transcribe') void applyControl('client.audio.nrPreset', 'voice');
     void pipeline.setProfile({
       ...pipeline.profile,
       audio: mode !== 'off',
       transcribe: mode === 'transcribe',
     });
+  }
+
+  let nrPreset = $derived(clientControls.get('client.audio.nrPreset'));
+  function pickNr(id: string): void {
+    // dispatch fans out to the live audio_nr block (see dispatch.ts).
+    void applyControl('client.audio.nrPreset', id);
   }
 
   function pickDemod(side: 'node' | 'browser' | null): void {
@@ -88,6 +95,23 @@
         >
           transcribe
         </button>
+      </div>
+    {/if}
+
+    {#if hasAudioToggle}
+      <div class="chip-group" role="group" aria-label="Noise reduction">
+        <span class="chip-label">NR</span>
+        {#each NR_PRESETS as p (p.id)}
+          <button
+            type="button"
+            class="chip-segment"
+            class:chip-segment-active={nrPreset === p.id}
+            onclick={() => pickNr(p.id)}
+            title={p.title}
+          >
+            {p.label}
+          </button>
+        {/each}
       </div>
     {/if}
 

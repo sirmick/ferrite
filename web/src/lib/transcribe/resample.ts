@@ -10,7 +10,6 @@
 export const WHISPER_RATE = 16_000;
 
 export class LinearResampler {
-  private readonly ratio: number;
   /** Fractional read position into the *input* stream, carried across
    *  feed() calls so chunk boundaries don't glitch. */
   private pos = 0;
@@ -19,9 +18,7 @@ export class LinearResampler {
   private prev = 0;
   private primed = false;
 
-  constructor(private srcRate: number) {
-    this.ratio = srcRate > 0 ? WHISPER_RATE / srcRate : 1;
-  }
+  constructor(private srcRate: number) {}
 
   /** True when the source already is 16 kHz (passthrough). */
   get isIdentity(): boolean {
