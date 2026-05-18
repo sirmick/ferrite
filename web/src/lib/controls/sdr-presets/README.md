@@ -18,7 +18,6 @@ Schema (per file):
   "sample_rate_hz": 2000000,
   "sample_rate_choices_hz": [500000, 1000000, 2000000, 4000000, 6000000, 8000000, 10000000],
   "max_sample_rate_hz": 10000000,
-  "if_filter_ladder_hz": [200000, 300000, 600000, 1536000, 5000000, 6000000, 7000000, 8000000],
   "notes": "<freeform; no UI use yet>"
 }
 ```
@@ -40,14 +39,28 @@ All fields except `driver_key` and `sample_rate_hz` are optional:
   twice (e.g. SDRplay's `rfgain_sel` duplicates the `RFGR` gain
   element). Keeps "one control per capability" without device-specific
   code in the UI.
-- `if_filter_ladder_hz` — for drivers whose IF filter behaviour needs
-  an explicit pick. When present the UI chooses the largest ladder
-  entry ≤ `sample_rate_hz` and forwards it as `bandwidth_hz`; when
-  absent no `set_bandwidth` call is made and the driver default
-  stands. Cases today:
-  - `sdrplay` — ladder present. Driver default is 200 kHz (brick-walls
-    anything wider); a filter wider than Fs makes the driver silently
-    upclock Fs. Deriving from the ladder avoids both.
-  - `hackrf` — ladder omitted. Driver auto-selects ~0.75·Fs, which is
-    correct.
-  - `rtlsdr` — ladder omitted. R820T has no real IF filter.
+
+## IF-filter ladders are NOT here
+
+The per-driver IF-filter ladder used to live in these files as
+`if_filter_ladder_hz`, hand-duplicated against the Rust CLI's own copy
+(which only knew `sdrplay`, so a HackRF rate change via `ferrite-ctl`
+silently skipped the bandwidth). It's now a **single source of truth in
+Rust**: [`tools/ferrite-ctl/src/sdr_tables.rs`](../../../../../tools/ferrite-ctl/src/sdr_tables.rs).
+
+- The CLI reads the table directly.
+- The web copy is generated to
+  [`../if-filter-ladders.generated.json`](../if-filter-ladders.generated.json)
+  and consumed by `optionsModel.ts` (`ladderFor`): largest ladder
+  entry ≤ `sample_rate_hz` is forwarded as `bandwidth_hz`; a driver
+  absent from the map makes no `set_bandwidth` call (RTL-SDR's R820T
+  has no real IF filter; etc).
+
+Regenerate after editing the Rust table (the one-liner):
+
+```sh
+cargo run -p ferrite-ctl -- gen-tables
+```
+
+The Rust workspace `cargo test` fails if the committed artifact is
+stale, so the two copies cannot drift again.

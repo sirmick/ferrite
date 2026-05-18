@@ -95,9 +95,9 @@ describe('defaultsFor — SDRPlay', () => {
     expect(state.gains.map((g) => g.name)).toEqual(['IFGR', 'RFGR']);
   });
 
-  it('picks the IF filter from the preset ladder (largest ≤ Fs)', () => {
-    // sdrplay.json carries an `if_filter_ladder_hz` ending …1.536M, 5M.
-    // At the preset Fs of 2 Ms/s, 1.536 MHz is the largest entry ≤ Fs.
+  it('picks the IF filter from the driver ladder (largest ≤ Fs)', () => {
+    // The Rust-owned sdrplay ladder ends …1.536M, 5M. At the preset Fs
+    // of 2 Ms/s, 1.536 MHz is the largest entry ≤ Fs.
     expect(state.bandwidth_hz).toBe(1_536_000);
     expect(state.bandwidth_choices).toContain(5_000_000);
     expect(state.bandwidth_choices).toContain(1_536_000);
@@ -176,17 +176,17 @@ describe('toSourceConfig', () => {
     expect(toSourceConfig(SDRPLAY_CAPS, state).params.gain_db).toBe(43);
   });
 
-  it('omits bandwidth_hz for drivers without a preset ladder', () => {
-    // rtlsdr.json has no if_filter_ladder_hz — defaultsFor leaves
-    // bandwidth_hz null, toSourceConfig skips the field, and the
-    // server never calls set_bandwidth.
+  it('omits bandwidth_hz for drivers without a ladder', () => {
+    // rtlsdr is absent from the generated ladder map — defaultsFor
+    // leaves bandwidth_hz null, toSourceConfig skips the field, and
+    // the server never calls set_bandwidth.
     expect(
       toSourceConfig(RTLSDR_CAPS, defaultsFor(RTLSDR_CAPS)!).params.bandwidth_hz,
     ).toBeUndefined();
   });
 
   it('forwards the ladder-derived bandwidth for SDRplay', () => {
-    // sdrplay.json has a ladder; defaultsFor picks 1.536 MHz at 2 Ms/s,
+    // sdrplay has a ladder; defaultsFor picks 1.536 MHz at 2 Ms/s,
     // toSourceConfig sends it on to the server.
     const cfg = toSourceConfig(SDRPLAY_CAPS, defaultsFor(SDRPLAY_CAPS)!);
     expect(cfg.params.bandwidth_hz).toBe(1_536_000);

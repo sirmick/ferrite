@@ -1,7 +1,9 @@
 // Build-time validation for the SDR preset JSON files. Catches typos
-// (`driver_keyt`) and schema drift (`bandwidth_hz` instead of the new
-// `if_filter_ladder_hz`) at `pnpm test` rather than at runtime when a
-// user opens the device dialog.
+// (`driver_keyt`) and schema drift (an unknown field, a non-numeric
+// sample rate) at `pnpm test` rather than at runtime when a user opens
+// the device dialog. The IF-filter ladders are NOT here — they're the
+// Rust-owned single source of truth, validated by `ifFilterLadders
+// .test.ts` against the generated artifact.
 
 import { describe, expect, it } from 'vitest';
 
@@ -26,7 +28,6 @@ interface Preset {
   sample_rate_hz: number;
   sample_rate_choices_hz?: number[];
   max_sample_rate_hz?: number;
-  if_filter_ladder_hz?: number[];
   hidden_settings?: string[];
   setting_overrides?: Record<string, SettingOverride>;
   auto_settings?: AutoSetting[];
@@ -43,7 +44,6 @@ const KNOWN_FIELDS = new Set([
   'sample_rate_hz',
   'sample_rate_choices_hz',
   'max_sample_rate_hz',
-  'if_filter_ladder_hz',
   'hidden_settings',
   'setting_overrides',
   'auto_settings',
@@ -124,18 +124,6 @@ describe('sdr-presets schema', () => {
         for (const k of p.hidden_settings) {
           expect(typeof k).toBe('string');
           expect(k.length).toBeGreaterThan(0);
-        }
-      });
-
-      it('if_filter_ladder_hz (if present) is sorted-ascending unique positives', () => {
-        if (p.if_filter_ladder_hz === undefined) return;
-        expect(Array.isArray(p.if_filter_ladder_hz)).toBe(true);
-        expect(p.if_filter_ladder_hz.length).toBeGreaterThan(0);
-        for (let i = 0; i < p.if_filter_ladder_hz.length; i++) {
-          expect(p.if_filter_ladder_hz[i]).toBeGreaterThan(0);
-          if (i > 0) {
-            expect(p.if_filter_ladder_hz[i]).toBeGreaterThan(p.if_filter_ladder_hz[i - 1]);
-          }
         }
       });
 

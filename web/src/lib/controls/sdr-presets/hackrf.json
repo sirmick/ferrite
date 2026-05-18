@@ -4,10 +4,6 @@
   "sample_rate_hz": 8000000,
   "sample_rate_choices_hz": [2000000, 4000000, 8000000, 10000000, 16000000, 20000000],
   "max_sample_rate_hz": 20000000,
-  "if_filter_ladder_hz": [
-    1750000, 2500000, 3500000, 5000000, 5500000, 6000000, 7000000, 8000000, 9000000, 10000000,
-    12000000, 14000000, 15000000, 20000000, 24000000
-  ],
   "gain_label": "gain (dB)",
   "gain_description": "Unified front-end gain across HackRF's three stages (RF amp 0/14 dB + LNA 0–40 dB in 8 dB steps + VGA 0–62 dB in 2 dB steps). The SoapyHackRF driver maps this single knob to LNA + VGA; the RF amp is a separate `amp_en` setting (off by default — flip for weak HF / VHF only). Practical effective range is **0–62 dB**; values above ~62 are rejected by the driver as out-of-range. No AGC — gain is always manual on HackRF.",
   "setting_overrides": {

@@ -13,6 +13,11 @@ src/lib/wasm/whisper/whisper.mjs
 # byte-for-byte so upstream re-syncs are a one-file copy with no
 # formatter drift.
 src/lib/presets/bandplan-usa.json
+# Generated from the Rust single source of truth
+# (tools/ferrite-ctl/src/sdr_tables.rs) by `cargo run -p ferrite-ctl --
+# gen-tables`; its byte shape is pinned by a Rust CI equality test, so
+# prettier must not reflow it.
+src/lib/controls/if-filter-ladders.generated.json
 # Vendored Natural Earth polygons (public domain) — used by StationMap;
 # keep byte-for-byte so upstream re-syncs are a one-file copy with no
 # formatter drift.

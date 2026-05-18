@@ -22,6 +22,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
+mod sdr_tables;
+use sdr_tables::recommended_bandwidth_for;
+
 const DEFAULT_CONNECT: &str = "http://127.0.0.1:10001";
 
 #[derive(Parser, Debug)]
@@ -173,6 +176,13 @@ enum Cmd {
         #[arg(long)]
         out: Option<String>,
     },
+    /// Dev codegen: regenerate `web/src/lib/controls/
+    /// if-filter-ladders.generated.json` from the Rust single source of
+    /// truth in `sdr_tables`. Purely local — does not touch a running
+    /// ferrited. Hidden from `--help`; CI's `cargo test` fails if the
+    /// committed artifact is stale.
+    #[command(hide = true)]
+    GenTables,
 }
 
 #[derive(Subcommand, Debug)]
@@ -423,6 +433,7 @@ fn command_summary(cmd: &Cmd) -> &'static str {
         Cmd::Tail { .. } => "tail",
         Cmd::Decoder(DecoderCmd::Recent { .. }) => "decoder-recent",
         Cmd::View { .. } => "view",
+        Cmd::GenTables => "gen-tables",
     }
 }
 
@@ -462,6 +473,9 @@ impl Driver {
                 limit,
             }) => self.decoder_recent(&category, lookback, limit).await,
             Cmd::View { pane, out } => self.view(&pane, out.as_deref()).await,
+            // Local codegen — no network. The client is still built
+            // above (harmless; no request is made).
+            Cmd::GenTables => sdr_tables::write_web_ladders(),
         }
     }
 
@@ -1388,33 +1402,6 @@ fn driver_key_from_args(args: &str) -> String {
     String::new()
 }
 
-/// Largest IF-filter ladder entry ≤ `rate_hz` for the given driver,
-/// matching the rule the web UI's `bandwidthForRate` uses. Returns
-/// `None` when the driver has no known ladder — the web side falls
-/// back to the device probe in that case; we just leave bandwidth
-/// alone so the driver keeps whatever it already had.
-///
-/// **DUPLICATE-OF**: `web/src/lib/controls/sdr-presets/<driver>.json`
-/// `if_filter_ladder_hz`. TODO: move the per-driver ladder data into
-/// a shared file the server, the CLI, and the web all read, instead
-/// of three copies in three languages.
-fn recommended_bandwidth_for(driver: &str, rate_hz: f64) -> Option<f64> {
-    let ladder: &[f64] = match driver {
-        "sdrplay" => &[
-            200_000.0,
-            300_000.0,
-            600_000.0,
-            1_536_000.0,
-            5_000_000.0,
-            6_000_000.0,
-            7_000_000.0,
-            8_000_000.0,
-        ],
-        _ => return None,
-    };
-    ladder.iter().rev().find(|&&x| x <= rate_hz).copied()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1429,30 +1416,5 @@ mod tests {
         );
         assert_eq!(driver_key_from_args(""), "");
         assert_eq!(driver_key_from_args("   "), "");
-    }
-
-    #[test]
-    fn recommended_bandwidth_picks_largest_le_rate() {
-        // Mirrors the web side's `bandwidthForRate` for the SDRplay
-        // ladder. Anything below the smallest ladder entry returns
-        // None (no entry ≤ rate).
-        assert_eq!(
-            recommended_bandwidth_for("sdrplay", 10_000_000.0),
-            Some(8_000_000.0)
-        );
-        assert_eq!(
-            recommended_bandwidth_for("sdrplay", 8_000_000.0),
-            Some(8_000_000.0)
-        );
-        assert_eq!(
-            recommended_bandwidth_for("sdrplay", 6_000_000.0),
-            Some(6_000_000.0)
-        );
-        assert_eq!(
-            recommended_bandwidth_for("sdrplay", 2_000_000.0),
-            Some(1_536_000.0)
-        );
-        assert_eq!(recommended_bandwidth_for("sdrplay", 100_000.0), None);
-        assert_eq!(recommended_bandwidth_for("rtlsdr", 2_000_000.0), None);
     }
 }
