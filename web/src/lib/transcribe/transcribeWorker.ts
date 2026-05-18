@@ -33,7 +33,16 @@ type InMsg =
 
 type OutMsg =
   | { type: 'status'; status: string; detail: string; model: string; vad: 'silero' | 'energy' }
-  | { type: 'dropped'; total: number }
+  | { type: 'dropped'; total: number; shedS: number }
+  | {
+      // Per-utterance instrumentation → backend log (one line per
+      // segment, not the 150 ms telemetry). Lets us spot whisper
+      // falling behind / shedding from `/tmp/ferrite-run.log`.
+      type: 'stat';
+      segS: number;
+      inferMs: number;
+      queued: number;
+    }
   | {
       // Live behaviour for the panel's gate/level meter + backlog
       // readout. Posted every poll (~150 ms) once armed.
@@ -124,7 +133,17 @@ function rollingPrompt(): string {
 function transcribeOne(pcm16k: Float32Array, leadMs: number, gapMs: number): void {
   if (!engine?.loaded) return;
   status('transcribing');
+  const _t0 = performance.now();
   const res = engine.transcribe(pcm16k, rollingPrompt());
+  // Instrument: real wasm inference time vs the clip's own duration.
+  // realtime-factor = inferMs / (segS*1000); >1 ⇒ whisper can't keep
+  // up ⇒ the bounded queue will shed = "missing sections".
+  post({
+    type: 'stat',
+    segS: pcm16k.length / 16_000,
+    inferMs: Math.round(performance.now() - _t0),
+    queued: pendingSegs.length,
+  });
   // The clip just ended (~now). Whisper segment times (`t1`, seconds
   // into the clip) place each segment in real wall-clock relative to
   // that end — otherwise every segment of a 10 s utterance shares one
@@ -180,10 +199,11 @@ function enqueueSegment(pcm16k: Float32Array, leadMs: number, gapMs: number): vo
   if (!engine?.loaded) return;
   if (pendingSegs.length >= MAX_PENDING) {
     // Whisper is behind the speaker — shed the oldest utterance so
-    // latency stays bounded; surfaced as a glitch.
-    pendingSegs.shift();
+    // latency stays bounded; surfaced as a glitch (and a loud backend
+    // log line — this is the "missing section" smoking gun).
+    const shed = pendingSegs.shift();
     droppedTotal += 1;
-    post({ type: 'dropped', total: droppedTotal });
+    post({ type: 'dropped', total: droppedTotal, shedS: (shed?.pcm.length ?? 0) / 16_000 });
   }
   pendingSegs.push({ pcm: pcm16k, leadMs, gapMs });
   void drainSegments();
@@ -229,10 +249,8 @@ function poll(): void {
     if (n < scratch.length) break;
     n = reader.read(scratch);
   }
-  // `droppedTotal` reflects pending-queue shedding (whisper behind the
-  // speaker). Ring overflow isn't separately surfaced — the big ring +
-  // queue make it rare, and the Rust side doesn't expose a count.
-  post({ type: 'dropped', total: droppedTotal });
+  // `dropped` is posted on the actual shed event (with the shed
+  // duration) — no need to re-post the counter every poll.
 
   // Live behaviour for the panel. `lagMs` = audio captured but not yet
   // transcribed: still-in-ring backlog + queued utterances' duration.

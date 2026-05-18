@@ -167,6 +167,42 @@ unfamiliar fields as needed (callsigns, message types, station IDs).
 When the decoder is silent, distinguish between "no signal" and
 "signal but pipeline stuck" — those want different fixes.
 
+## Voice → text (in-browser transcription)
+
+For a **voice** signal the user wants transcribed (AM/SSB/NBFM speech,
+NOAA weather radio, etc.), enable it with the dedicated verb:
+
+```
+{{FERRITE_CTL}} --note "enable transcription"  transcribe on
+```
+
+(`transcribe off` disables it. It flips a build-time profile axis —
+`transcribe` implies `audio` — that splices a `VoiceTranscribe` tap
+before the AudioSink.) Whisper runs **in the browser**, so a UI tab
+must be connected for text to flow — you set it up, the browser
+produces it.
+
+Use a *listen* preset that has an audio chain (e.g. `nbfm` for NWR,
+`usb`/`lsb` for SSB, `wbam` for AM) — not a headless `*-record` preset
+(those have no AudioSink, so nothing to tap).
+
+Read the transcription back like any other decoder — it's filed under
+its own category:
+
+```
+{{FERRITE_CTL}} decoder recent --category decoder::transcribe
+```
+
+Lines tagged `[transcribe] seg=… rtf=… queue=…` are throughput
+instrumentation (rtf>1 or rising queue ⇒ whisper falling behind);
+`[transcribe] DROP …` means an utterance was shed (a missing section);
+`[transcribe] <freq> <text>` is the recognised speech. Lead your
+report with the `<text>` lines.
+
+Narrowband voice (NWR/SSB) still needs the DC-spike offset-tune (see
+the tuning notes): exact-centre lands on the spike → noise → garbage
+transcript.
+
 ## CLI reference (`ferrite-ctl --help`, captured at sidecar startup)
 
 ```

@@ -537,9 +537,10 @@ class BrowserRuntime {
    *  renders. */
   private onTranscribeMessage(msg: { type: string; [k: string]: unknown }): void {
     if (msg.type === 'segment') {
+      const vfoHz = this.vfoHzProvider?.() ?? null;
       transcript.push({
         atMs: msg.atMs as number,
-        vfoHz: this.vfoHzProvider?.() ?? null,
+        vfoHz,
         t0: msg.t0 as number,
         t1: msg.t1 as number,
         text: msg.text as string,
@@ -549,11 +550,34 @@ class BrowserRuntime {
         cont: msg.cont as boolean,
         gapMs: msg.gapMs as number,
       });
+      // The recognised text itself → decoder log (server files
+      // `[transcribe]`-prefixed client lines under `decoder::transcribe`)
+      // so the embedded AI / `ferrite-ctl decoder recent` can read the
+      // transcription with no screenshot or DOM access.
+      const fLbl = vfoHz != null ? `${(vfoHz / 1e6).toFixed(4)}MHz` : '—';
+      logs.push('client', 'info', `[transcribe] ${fLbl} ${(msg.text as string).trim()}`);
     } else if (msg.type === 'status') {
       transcript.setStatus(msg.status as never, String(msg.detail ?? ''));
       transcript.modelName = String(msg.model ?? '');
     } else if (msg.type === 'dropped') {
       transcript.droppedSamples = msg.total as number;
+      // Loud, greppable backend line — this is "a section went missing".
+      logs.push(
+        'client',
+        'warn',
+        `[transcribe] DROP ${(msg.shedS as number).toFixed(1)}s utterance — ` +
+          `whisper behind, queue full; total_shed=${msg.total as number}`,
+      );
+    } else if (msg.type === 'stat') {
+      const segS = msg.segS as number;
+      const inferMs = msg.inferMs as number;
+      const rtf = segS > 0 ? inferMs / (segS * 1000) : 0;
+      logs.push(
+        'client',
+        rtf > 1 ? 'warn' : 'info',
+        `[transcribe] seg=${segS.toFixed(1)}s infer=${inferMs}ms ` +
+          `rtf=${rtf.toFixed(2)}x queue=${msg.queued as number}`,
+      );
     } else if (msg.type === 'telemetry') {
       transcript.setTelemetry({
         gateOpen: msg.gateOpen as boolean,

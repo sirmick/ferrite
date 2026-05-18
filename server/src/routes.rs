@@ -751,6 +751,25 @@ pub async fn browser_log(Json(entry): Json<BrowserLogEntry>) -> StatusCode {
             }
             _ => tracing::info!(target: "flowdiag::browser", source = src, "{}", entry.message),
         }
+    } else if entry.message.starts_with("[transcribe]") {
+        // In-browser STT is the one decoder that runs browser-side, so
+        // its output never reached the node decoder log the embedded
+        // AI / `ferrite-ctl decoder recent` reads. File it under a
+        // literal `decoder::transcribe` target (same branch-on-content
+        // trick as flowdiag — `tracing` needs a literal `target:`) so
+        // it's first-class observable without a screenshot/DOM.
+        match entry.level.as_str() {
+            "error" => {
+                tracing::error!(target: "decoder::transcribe", source = src, "{}", entry.message)
+            }
+            "warn" => {
+                tracing::warn!(target: "decoder::transcribe", source = src, "{}", entry.message)
+            }
+            "debug" => {
+                tracing::debug!(target: "decoder::transcribe", source = src, "{}", entry.message)
+            }
+            _ => tracing::info!(target: "decoder::transcribe", source = src, "{}", entry.message),
+        }
     } else {
         match entry.level.as_str() {
             "error" => tracing::error!(target: "browser", source = src, "{}", entry.message),

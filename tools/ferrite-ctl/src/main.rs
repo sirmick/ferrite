@@ -101,6 +101,19 @@ enum Cmd {
     Start,
     /// Stop the pipeline.
     Stop,
+    /// Toggle in-browser speech-to-text. Splices a `VoiceTranscribe`
+    /// tap before the AudioSink via the runtime profile (`transcribe`
+    /// implies `audio`). Whisper runs in the browser, so a UI tab must
+    /// be connected for text to flow — set it up here, the browser
+    /// produces it. Read the result back with
+    /// `decoder recent --category decoder::transcribe`. Use a *listen*
+    /// preset with an audio chain (`nbfm`, `usb`, `lsb`, `wbam`), not a
+    /// headless `*-record` preset.
+    Transcribe {
+        /// `on` to enable transcription, `off` to disable.
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
     /// One-shot snapshot: pipeline status, source config, ui sinks,
     /// active flowgraph name. Useful for the AI's "what's the world
     /// look like" tool.
@@ -402,6 +415,7 @@ fn command_summary(cmd: &Cmd) -> &'static str {
         Cmd::Param { .. } => "param",
         Cmd::Start => "pipeline-start",
         Cmd::Stop => "pipeline-stop",
+        Cmd::Transcribe { .. } => "transcribe",
         Cmd::Status => "status",
         Cmd::Capture(CaptureCmd::Iq { .. }) => "capture-iq",
         Cmd::Capture(CaptureCmd::Audio { .. }) => "capture-audio",
@@ -434,6 +448,7 @@ impl Driver {
             Cmd::Param { block, kv } => self.param(&block, kv).await,
             Cmd::Start => self.pipeline_start().await,
             Cmd::Stop => self.pipeline_stop().await,
+            Cmd::Transcribe { state } => self.transcribe(&state).await,
             Cmd::Status => self.status().await,
             Cmd::Capture(c) => self.capture(c).await,
             Cmd::Tail {
@@ -660,6 +675,40 @@ impl Driver {
                 "patched {block}: {} key(s)",
                 v.as_object().map_or(0, serde_json::Map::len)
             );
+        }
+        Ok(())
+    }
+
+    async fn transcribe(&self, state: &str) -> Result<()> {
+        // PATCH /api/profile replaces the whole profile, so read the
+        // current one and flip just `transcribe` (forcing `audio` on
+        // when enabling — the tap rides the audio chain). `off` leaves
+        // `audio` / `demod_placement` as they were.
+        let on = state == "on";
+        let cur = self.get("/api/profile").await?;
+        let audio = if on {
+            true
+        } else {
+            cur.get("audio").and_then(Value::as_bool).unwrap_or(true)
+        };
+        let demod = cur.get("demod_placement").cloned().unwrap_or(Value::Null);
+        let body = json!({
+            "audio": audio,
+            "transcribe": on,
+            "demod_placement": demod,
+        });
+        let v = self.patch("/api/profile", body).await?;
+        let status = self.pipeline_status().await;
+        if self.json {
+            print_json(&v);
+        } else {
+            println!(
+                "transcribe {}: profile audio={audio} transcribe={on} \u{2014} \
+                 whisper runs in the browser (a UI tab must be connected); \
+                 read it back with `decoder recent --category decoder::transcribe`",
+                if on { "ON" } else { "OFF" },
+            );
+            self.warn_if_stopped(&status);
         }
         Ok(())
     }

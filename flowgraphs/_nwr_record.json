@@ -1,0 +1,70 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "_nwr_record",
+  "label": "NBFM weather-radio record (headless)",
+  "description": "All-native NBFM receiver that writes demodulated mono voice audio to a WAV. Source -> Channelizer (-> 25 kHz channel) -> FmDemod (NBFM, +/-5 kHz) -> AudioShaper (300-3400 Hz voice band, DC block) -> RealF32Resamp (48 kHz) -> FileAudioSink. Tuned to NOAA weather radio (162.400-162.550 MHz) for a continuous spoken-word corpus; no squelch or NR so the captured audio is the raw demod the reference STT and the Ferrite pipeline both consume in the differential test.",
+  "ai_notes": "Headless all-native narrowband-FM receiver that writes demodulated mono voice audio to a WAV file. Intended for unattended recording of a continuous-speech NBFM station (NOAA weather radio at 162.4-162.55 MHz) over a defined window; the demod runs entirely on the server with no browser involvement. Not a listen preset: there is no AudioSink so the UI will not play audio while this is loaded. The voice-band shaper plus 48 kHz resample produce a clean WAV suitable for speech-to-text reference transcription.",
+  "environments": ["node"],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 162550000.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "freq_shift_hz": 250000.0,
+        "output_rate_hz": 25000.0
+      }
+    },
+    "demod": {
+      "type": "FmDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 25000,
+        "max_deviation_hz": 5000
+      }
+    },
+    "shaper": {
+      "type": "AudioShaper",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 25000.0,
+        "lpf_hz": 3400.0,
+        "dc_block": true
+      }
+    },
+    "resamp": {
+      "type": "RealF32Resamp",
+      "placement": "node",
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio": {
+      "type": "FileAudioSink",
+      "placement": "node",
+      "params": {
+        "path": "/tmp/ferrite-nwr-audio.wav",
+        "rate_hz": 48000.0,
+        "max_seconds": 60.0
+      }
+    }
+  },
+  "wires": [
+    ["src.out", "chan.in"],
+    ["chan.out", "demod.in"],
+    ["demod.out", "shaper.in"],
+    ["shaper.out", "resamp.in"],
+    ["resamp.out", "audio.in"]
+  ],
+  "catalog_visible": false
+}

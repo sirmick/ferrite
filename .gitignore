@@ -69,3 +69,6 @@ blocks/native/whisper/build-em/
 # large ggml models (fetched into static/, not committed)
 web/static/models/
 run.log
+
+# Large local capture corpora (STT differential); regenerate via ferrite-ctl capture
+/samples/*.wav
