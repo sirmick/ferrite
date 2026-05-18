@@ -109,6 +109,17 @@ impl PresetMount {
         Ok(plan)
     }
 
+    /// Snapshot the doc the runtime is *actually* executing (the
+    /// node-half, with every live param edit `live_reconfigure_block`
+    /// has folded in). This is the reader-of-record while the pipeline
+    /// is up: `AppState::list_blocks` / `get_flowgraph` overlay these
+    /// params so a caller sees what's running, not the last value
+    /// staged in `preset_doc`. `None` only for a `from_parts` runtime
+    /// (no doc to diff — not a path `spawn_preset` takes).
+    pub async fn applied_doc_snapshot(&self) -> Option<FlowgraphDoc> {
+        self.runtime.lock().await.applied_doc().cloned()
+    }
+
     /// Query the live driver state for the `src` block. Returns `None`
     /// when the source is not a `SoapySource` (software sources like
     /// `SineSource` have no hardware state to read back) or when the

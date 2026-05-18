@@ -222,8 +222,27 @@ impl AppState {
         }
     }
 
+    /// The doc the running runtime is actually executing, or `None`
+    /// when stopped. The single reader-of-record while live — callers
+    /// overlay these params via [`overlay_live_params`] so reads
+    /// reflect the runtime, not the staged `preset_doc`.
+    async fn applied_doc_if_running(&self) -> Option<FlowgraphDoc> {
+        let guard = self.inner.pipeline.lock().await;
+        match guard.as_ref() {
+            Some(mount) => mount.applied_doc_snapshot().await,
+            None => None,
+        }
+    }
+
     pub async fn get_flowgraph(&self) -> FlowgraphDoc {
-        self.inner.preset_doc.read().await.clone()
+        // Drop the preset_doc read guard before touching the pipeline
+        // lock — canonical order is pipeline → preset_doc, never the
+        // reverse.
+        let mut doc = self.inner.preset_doc.read().await.clone();
+        if let Some(applied) = self.applied_doc_if_running().await {
+            overlay_live_params(&mut doc, &applied);
+        }
+        doc
     }
 
     pub async fn get_source(&self) -> SourceConfig {
@@ -317,6 +336,12 @@ impl AppState {
         apply_profile(&mut composed, &profile);
         inject_voice_transcribe(&mut composed, &profile);
         drop(profile);
+        // While the pipeline is live the runtime is the reader-of-
+        // record: overlay its applied node-block params so an
+        // interactive edit shows here without a preset_doc mirror-back.
+        if let Some(applied) = self.applied_doc_if_running().await {
+            overlay_live_params(&mut composed, &applied);
+        }
         let mut out = Vec::with_capacity(composed.blocks.len());
         for (id, decl) in &composed.blocks {
             let Some(entry) = registry::find(&decl.type_name) else {
@@ -348,11 +373,17 @@ impl AppState {
     ///
     /// - `id == "src"` — merge delta into `SourceConfig.params` and
     ///   delegate to [`patch_source`], which picks hot-apply vs rebuild.
-    /// - any other id — merge delta into `preset_doc.blocks[id].params`
-    ///   and, if the pipeline is running, try the block's
-    ///   `apply_live_params` hot path via
-    ///   [`PresetMount::live_reconfigure_block`]. Only fall back to a
-    ///   full [`patch_flowgraph`] when the hot path can't apply.
+    /// - any other id — while the pipeline is **running**, apply the
+    ///   delta to the runtime only via
+    ///   [`PresetMount::live_reconfigure_block`] (which itself falls
+    ///   back to a block-scoped rebuild when the block can't hot-apply).
+    ///   The runtime's `applied_doc` is the single writer while live;
+    ///   there is no `preset_doc` mirror-back (reads go through
+    ///   `applied_doc` — see [`Self::list_blocks`] / [`get_flowgraph`]
+    ///   — and [`Self::stop`] folds the final live state back into
+    ///   `preset_doc` once). While **stopped**, stage the delta into
+    ///   `preset_doc` via [`patch_flowgraph`] so the next start composes
+    ///   with it.
     ///
     /// The delta is a JSON object; keys present replace, keys absent
     /// stay. Returns the same reconfigure plan shape as the other patch
@@ -412,29 +443,15 @@ impl AppState {
         if !is_browser_block {
             let pipeline = self.inner.pipeline.lock().await;
             if let Some(mount) = pipeline.as_ref() {
+                // Single writer while live: the runtime's applied_doc.
+                // The old per-edit preset_doc mirror-back (a nested
+                // write held under the pipeline lock) was the desync
+                // window / lock-order hazard the cleanup audit hit —
+                // it's gone. Reads go through applied_doc; stop() folds
+                // the final live state back into preset_doc once.
                 let plan = mount
                     .live_reconfigure_block(id, serde_json::Value::Object(delta_obj.clone()))
                     .await?;
-                // Hold `pipeline` across the preset_doc write (canonical
-                // lock order, same as reconfigure() below): the runtime's
-                // applied_doc and the canonical preset_doc must move
-                // together, or a concurrent apply/start could read one
-                // updated and the other not. Mirror the delta back so
-                // subsequent /api/flowgraph + list_blocks reads see the
-                // new values.
-                let mut new_doc = self.inner.preset_doc.write().await;
-                let block = new_doc
-                    .blocks
-                    .get_mut(id)
-                    .ok_or_else(|| anyhow!("no block {id:?} in preset"))?;
-                let mut merged = match block.params.take() {
-                    Some(serde_json::Value::Object(m)) => m,
-                    _ => serde_json::Map::new(),
-                };
-                for (k, v) in delta_obj {
-                    merged.insert(k, v);
-                }
-                block.params = Some(serde_json::Value::Object(merged));
                 return Ok(Some(plan));
             }
         }
@@ -613,11 +630,23 @@ impl AppState {
         let Some(mount) = guard.take() else {
             return false;
         };
+        // Fold the runtime's live param edits back into preset_doc —
+        // the single deliberate writer that replaces the per-edit
+        // mirror-back removed from apply_block_params. Snapshot before
+        // teardown drops the runtime. Canonical lock order is preserved
+        // (pipeline guard held, then preset_doc write, same as
+        // patch_flowgraph), and this is the stop transition, not the
+        // hot interactive path, so there is no lock-order hazard.
+        let applied = mount.applied_doc_snapshot().await;
         // Destructure to take ownership of the handle for a graceful
         // shutdown; the other fields drop when the block ends.
         let PresetMount { handle, .. } = mount;
         if let Err(err) = handle.shutdown().await {
             tracing::warn!(?err, "preset pipeline shutdown returned error");
+        }
+        if let Some(applied) = applied {
+            let mut doc = self.inner.preset_doc.write().await;
+            overlay_live_params(&mut doc, &applied);
         }
         true
     }
@@ -641,6 +670,32 @@ fn merge_into_params(
     }
     cfg.params = serde_json::Value::Object(merged);
     cfg
+}
+
+/// Overlay the live param values from a running runtime's `applied`
+/// doc onto `base`, for every block id present in both. This is how
+/// the running pipeline becomes the single reader-of-record: `base`
+/// (composed from `preset_doc`) supplies structure + browser-side
+/// params, while the runtime supplies the live truth for the node
+/// blocks it actually executes — so a reader sees what's running, not
+/// the last value staged in `preset_doc`.
+///
+/// `SOURCE_ID` is skipped: the source's persisted authority is
+/// `source_config` (via [`AppState::patch_source`]), and `base`'s
+/// `src` is the `Source` placeholder whose `type` the browser's
+/// client-side `composeSource` keys off. Synthetic node blocks the
+/// env-split injected (bridge Tx, FFT taps) aren't in `base`, so they
+/// drop out naturally; browser blocks aren't in `applied`, so they
+/// keep their authored params.
+fn overlay_live_params(base: &mut FlowgraphDoc, applied: &FlowgraphDoc) {
+    for (id, decl) in &mut base.blocks {
+        if id == SOURCE_ID {
+            continue;
+        }
+        if let Some(live) = applied.blocks.get(id) {
+            decl.params.clone_from(&live.params);
+        }
+    }
 }
 
 /// Compute a shallow top-level delta between two source configs. Returns
@@ -1177,6 +1232,96 @@ mod tests {
             .await
             .expect("reconfigure ok");
         assert!(plan.is_some(), "running pipeline must return a plan");
+        state.stop().await;
+    }
+
+    /// Preset with a node-side DSP block (`dec`) between the source and
+    /// a browser sink — gives `apply_block_params` a non-source node
+    /// block to drive the live-reconfigure path against.
+    fn node_dsp_preset() -> FlowgraphDoc {
+        serde_json::from_value(json!({
+            "name": "t",
+            "environments": ["node", "browser"],
+            "blocks": {
+                "src":  { "type": "Source", "placement": "node",
+                          "params": { "center_freq_hz": 0.0, "sample_rate_hz": 1000.0 } },
+                "dec":  { "type": "Decimator", "placement": "node",
+                          "params": { "factor": 2, "num_taps": 17,
+                                      "cutoff_normalized": 0.2 } },
+                "sink": { "type": "Decimator", "placement": "browser",
+                          "params": { "factor": 2, "num_taps": 17,
+                                      "cutoff_normalized": 0.2 } }
+            },
+            "wires": [["src.out", "dec.in"], ["dec.out", "sink.in"]]
+        }))
+        .unwrap()
+    }
+
+    fn block_factor(blocks: &[PipelineBlock], id: &str) -> i64 {
+        blocks
+            .iter()
+            .find(|b| b.id == id)
+            .unwrap_or_else(|| panic!("block {id} missing"))
+            .values["factor"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("block {id} factor not an int"))
+    }
+
+    /// The running pipeline is the single doc authority: a live
+    /// non-source node edit is visible through `list_blocks` /
+    /// `get_flowgraph` via the runtime's `applied_doc` (no per-edit
+    /// preset_doc mirror-back), and `stop()` folds it back so it
+    /// survives a restart. Browser blocks keep their authored params
+    /// throughout (they have no runtime authority).
+    #[tokio::test]
+    async fn running_pipeline_is_single_doc_authority() {
+        let state = AppState::new(node_dsp_preset(), test_source(), Duration::from_millis(5));
+        state.start().await.unwrap();
+
+        let plan = state
+            .apply_block_params("dec", json!({ "factor": 4 }))
+            .await
+            .expect("live reconfigure ok");
+        assert!(plan.is_some(), "running pipeline must return a plan");
+
+        // Reader-of-record while live = the runtime's applied_doc.
+        let blocks = state.list_blocks().await.unwrap();
+        assert_eq!(
+            block_factor(&blocks, "dec"),
+            4,
+            "list_blocks sees live edit"
+        );
+        assert_eq!(
+            block_factor(&blocks, "sink"),
+            2,
+            "browser block keeps authored params (no runtime authority)"
+        );
+        let fg = state.get_flowgraph().await;
+        assert_eq!(
+            fg.blocks["dec"].params.as_ref().unwrap()["factor"].as_i64(),
+            Some(4),
+            "get_flowgraph reads through applied_doc while running"
+        );
+
+        // stop() is the single deliberate writer: it folds the live
+        // state back into preset_doc (proven by the *stopped* read,
+        // which has no overlay).
+        assert!(state.stop().await);
+        let fg = state.get_flowgraph().await;
+        assert_eq!(
+            fg.blocks["dec"].params.as_ref().unwrap()["factor"].as_i64(),
+            Some(4),
+            "stop() folded the live edit into preset_doc"
+        );
+
+        // Survives a restart — start() recomposes from preset_doc.
+        state.start().await.unwrap();
+        let blocks = state.list_blocks().await.unwrap();
+        assert_eq!(
+            block_factor(&blocks, "dec"),
+            4,
+            "live edit persists across stop→start"
+        );
         state.stop().await;
     }
 
