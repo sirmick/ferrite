@@ -63,8 +63,18 @@ echo "[run] open the vite URL in a browser; pick preset + source from the UI"
 echo "[run] first visit will show a self-signed cert warning — bypass once per browser profile"
 echo
 
+# Persist Screenshot-button PNGs (POST /api/screenshot) into a
+# repo-local dir (gitignored) so they survive reboots instead of
+# vanishing from /tmp. Overridable; ferrited's CWD is the repo root
+# (cd above). NB: `ferrite-ctl view` writes client-side to its own
+# --out (default /tmp/ferrite-views) — that path is unaffected.
+FERRITE_SCREENSHOTS_DIR="${FERRITE_SCREENSHOTS_DIR:-$(pwd)/screenshots}"
+mkdir -p "$FERRITE_SCREENSHOTS_DIR"
+echo "[run] shots    → $FERRITE_SCREENSHOTS_DIR  (Screenshot button)"
+
 # ferrited on 0.0.0.0:10001, logs prefixed via process substitution
 RUST_LOG="${RUST_LOG:-info}" \
+  FERRITE_SCREENSHOTS_DIR="$FERRITE_SCREENSHOTS_DIR" \
   ./target/release/ferrited \
     --bind 0.0.0.0:10001 \
     --flowgraph "$PLACEHOLDER_FLOWGRAPH" \

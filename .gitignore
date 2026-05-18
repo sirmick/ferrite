@@ -72,3 +72,6 @@ run.log
 
 # Large local capture corpora (STT differential); regenerate via ferrite-ctl capture
 /samples/*.wav
+
+# Repo-local screenshot artifacts (Screenshot button / ferrite-ctl view)
+/screenshots/
