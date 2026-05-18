@@ -88,6 +88,32 @@ End-to-end, working today against live RF:
   every prompt so the AI routes around physical layout.
 - Reverse-log surfaces every AI command in the UI activity panel.
 
+**Follow-up (deferred): single-authority AI conversation state.** Today
+the visible transcript and the LLM reasoning context have independent
+lifetimes and no binding: the browser owns the rendered turns
+(`web/src/lib/ai/store.svelte.ts`, localStorage, 200-turn cap) while
+the sidecar owns the SDK `session_id` (per-connection, memory-only).
+Resetting either (sidecar restart, mode change, UI `/clear`) silently
+desyncs the other, and the browser keeps replaying a stale
+`resume_session_id`. Fix: make the **sidecar the sole authority** with
+the `session_id` as the single lifetime key — persist the raw event
+transcript per session (`${FERRITE_AI_STATE_DIR}/<session_id>.jsonl`,
+co-located with where the SDK session lives), so the log and context
+reset together and resume together by construction. ferrited stays a
+transparent `/ws/chat` proxy (no second store). On connect (and via an
+explicit `request_snapshot`) the sidecar replays the *complete*
+current-session transcript as a `conversation_snapshot`; the browser
+folds it with its existing reducer and *replaces* local state
+(localStorage demoted to a first-paint cache). Unresumable session →
+`session_reset` so the UI clears coherently with an honest banner
+instead of showing a stale log. Phased: P1 sidecar authority +
+snapshot-on-connect + honest reset (kills the desync); P2 on-disk
+persistence + boot reload + `FERRITE_AI_STATE_DIR` (run.sh, gitignored,
+mirrors `FERRITE_SCREENSHOTS_DIR`); P3 unified reset endpoint, browser
+stops sending `resume_session_id`. Adjacent to the live-AGC-gain
+readout below — both feed the Transcript/NR panel — but independent;
+the AGC gauge can ride P1's authoritative-state plumbing afterward.
+
 ### Shipped flowgraph presets — 21 in [`flowgraphs/`](../flowgraphs/)
 
 Voice / music: `wbfm`, `wbfm_stereo`, `wbam`, `nbfm`, `lsb`, `usb`,
