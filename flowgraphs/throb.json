@@ -1,8 +1,9 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "throb",
-  "label": "Throb (slow MFSK QRP)",
-  "description": "Throb is a slow, narrow MFSK keyboard mode for weak-signal QRP work \u2014 a small set of dual-tone symbols at a few baud. THROB4 sends 4 symbols/sec in ~72 Hz. On the waterfall it's a sparse pattern of short tone pairs. Very rare on the air. Decoded text streams under decoder::fldigi (vendored fldigi throb core). Tune so the signal sits ~1500 Hz in the USB audio (dial \u2248 signal \u2212 1.5 kHz).",
+  "category": "HF digital modes",
+  "label": "Throb",
+  "description": "Throb \u2014 a slow, narrow MFSK keyboard mode for weak-signal QRP work. Rare on the air.",
   "ai_notes": "Throb (slow dual-tone MFSK, vendored fldigi throb core). THROB4 default; variants via ThrobDemod mode: throb1/2/4, throbx1/2/4. Very low activity \u2014 niche QRP. Tune dial \u2248 signal \u2212 1500 Hz. Output: `tail decoder --category fldigi`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/THROB",
   "sample_path": "samples/sigidwiki/THROB4.mp3",
@@ -10,6 +11,42 @@
   "environments": [
     "node",
     "browser"
+  ],
+  "variants": [
+    {
+      "id": "4",
+      "label": "Throb 4",
+      "default": true,
+      "patch": {}
+    },
+    {
+      "id": "2",
+      "label": "Throb 2",
+      "patch": {
+        "throb": {
+          "tones": 2
+        }
+      }
+    },
+    {
+      "id": "1",
+      "label": "Throb 1",
+      "patch": {
+        "throb": {
+          "tones": 1
+        }
+      }
+    },
+    {
+      "id": "x4",
+      "label": "ThrobX 4",
+      "patch": {
+        "throb": {
+          "tones": 4,
+          "extended": true
+        }
+      }
+    }
   ],
   "blocks": {
     "src": {
@@ -101,7 +138,6 @@
       "type": "ThrobDemod",
       "placement": "node",
       "params": {
-        "variant": "throb4",
         "afc": true
       }
     }

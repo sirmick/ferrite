@@ -519,12 +519,10 @@ impl AppState {
                 "invalid preset name {name:?}: must match [A-Za-z0-9_-]+"
             ));
         }
-        let file = dir.join(format!("{name}.json"));
-        let bytes = tokio::task::spawn_blocking(move || std::fs::read(&file))
+        let slug = name.to_string();
+        let doc = tokio::task::spawn_blocking(move || resolve_preset_doc(&dir, &slug))
             .await
-            .map_err(|e| anyhow!("preset read task panicked: {e}"))?
-            .map_err(|e| anyhow!("read preset {name:?}: {e}"))?;
-        let doc = FlowgraphDoc::from_json(&bytes).map_err(|e| anyhow!("parse preset: {e:#}"))?;
+            .map_err(|e| anyhow!("preset resolve task panicked: {e}"))??;
         let plan = self.patch_flowgraph(doc.clone()).await?;
         Ok((doc, plan))
     }
@@ -748,6 +746,56 @@ fn is_valid_preset_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Resolve a catalog `slug` to its `FlowgraphDoc` (the runtime mirror
+/// of the browser catalog expansion; see
+/// `docs/14-fldigi-catalog-variants.md`).
+///
+///  * `slug.json` exists *and* declares no variants → that singleton.
+///  * `slug.json` exists *and* declares variants → error: a base with
+///    variants is never addressable bare (hard cut, D-V4).
+///  * else `slug == "${base}-${variantId}"` for some `base.json` whose
+///    `variants` contains `variantId` → base with that variant's
+///    `patch` overlaid. Global slug uniqueness (validator D-V4) makes
+///    the split unambiguous in practice; the first base file that both
+///    exists and declares the suffix wins.
+fn resolve_preset_doc(dir: &std::path::Path, slug: &str) -> Result<FlowgraphDoc> {
+    let read = |stem: &str| -> Result<Option<FlowgraphDoc>> {
+        let f = dir.join(format!("{stem}.json"));
+        match std::fs::read(&f) {
+            Ok(b) => Ok(Some(
+                FlowgraphDoc::from_json(&b).map_err(|e| anyhow!("parse preset {stem:?}: {e:#}"))?,
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(anyhow!("read preset {stem:?}: {e}")),
+        }
+    };
+
+    if let Some(doc) = read(slug)? {
+        if doc.variants.is_empty() {
+            return Ok(doc);
+        }
+        return Err(anyhow!(
+            "preset {slug:?} has variants — address a specific variant as \
+             {slug}-<id> (a base with variants is not loadable bare)"
+        ));
+    }
+
+    // `slug` must be `${base}-${variantId}`. Try every `-` split.
+    for (i, _) in slug.match_indices('-') {
+        let (base, rest) = (&slug[..i], &slug[i + 1..]);
+        if base.is_empty() || rest.is_empty() {
+            continue;
+        }
+        let Some(mut doc) = read(base)? else { continue };
+        if let Some(v) = doc.variants.iter().find(|v| v.id == rest).cloned() {
+            doc.apply_variant_patch(&v.patch);
+            return Ok(doc);
+        }
+    }
+
+    Err(anyhow!("unknown preset {slug:?}"))
 }
 
 fn scan_presets(dir: &std::path::Path) -> Result<Vec<PresetEntry>> {
@@ -1420,5 +1468,62 @@ mod tests {
         let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
         let err = state.load_preset_by_name("wbfm").await.unwrap_err();
         assert!(format!("{err:#}").contains("not configured"));
+    }
+
+    #[test]
+    fn resolve_preset_doc_singleton_base_variant_and_errors() {
+        let dir = tempdir().unwrap();
+        let write = |name: &str, json: serde_json::Value| {
+            std::fs::write(
+                dir.path().join(format!("{name}.json")),
+                serde_json::to_vec(&json).unwrap(),
+            )
+            .unwrap();
+        };
+
+        // Singleton — and one whose own name contains '-' (must resolve
+        // directly, not be mistaken for a `${base}-${id}` split).
+        write(
+            "rtl433-433",
+            json!({ "name": "rtl433-433", "environments": ["node"],
+                    "blocks": { "a": { "type": "X" } }, "wires": [] }),
+        );
+        // Base with variants: default keeps base params, `wide` patches.
+        write(
+            "olivia",
+            json!({
+                "name": "olivia", "environments": ["node"],
+                "blocks": { "demod": { "type": "OliviaDemod",
+                                       "params": { "variant": "olivia-8-500", "afc": true } } },
+                "wires": [],
+                "variants": [
+                    { "id": "8-500", "default": true, "patch": {} },
+                    { "id": "16-500", "patch": { "demod": { "variant": "olivia-16-500" } } }
+                ]
+            }),
+        );
+
+        let d = resolve_preset_doc(dir.path(), "rtl433-433").unwrap();
+        assert_eq!(d.name, "rtl433-433");
+
+        // Bare base with variants is not loadable (hard cut, D-V4).
+        let err = resolve_preset_doc(dir.path(), "olivia").unwrap_err();
+        assert!(format!("{err:#}").contains("has variants"), "{err:#}");
+
+        // Variant slug resolves and applies the patch.
+        let d = resolve_preset_doc(dir.path(), "olivia-16-500").unwrap();
+        let v = d.blocks["demod"].params.as_ref().unwrap();
+        assert_eq!(v["variant"], "olivia-16-500");
+        assert_eq!(v["afc"], true, "base params preserved under merge");
+
+        // Default variant slug resolves to base params unchanged.
+        let d = resolve_preset_doc(dir.path(), "olivia-8-500").unwrap();
+        assert_eq!(
+            d.blocks["demod"].params.as_ref().unwrap()["variant"],
+            "olivia-8-500"
+        );
+
+        assert!(resolve_preset_doc(dir.path(), "nope").is_err());
+        assert!(resolve_preset_doc(dir.path(), "olivia-9999").is_err());
     }
 }

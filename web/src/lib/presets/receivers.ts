@@ -93,10 +93,12 @@ export function presetSlugForMode(mode: string | undefined): string | null {
       return 'lsb';
     case 'CW':
       return 'cw';
+    // FT8/FT4 folded into one variant-family preset (ft8.json); the
+    // base isn't loadable bare (hard cut) — address the variants.
     case 'FT8':
-      return 'ft8';
+      return 'ft8-ft8';
     case 'FT4':
-      return 'ft4';
+      return 'ft8-ft4';
     case 'WSPR':
       return 'wspr';
     case 'APRS':

@@ -33,7 +33,7 @@ import { DEFAULT_PROFILE, fetchProfile, patchProfile, type Profile } from '$lib/
 import { replaceState } from '$app/navigation';
 import { fetchSourceCapabilities, type SourceCapabilitiesResponse } from '$lib/api/sourceCaps';
 import { defaultsFor, toSourceConfig } from '$lib/controls/optionsModel';
-import { catalog } from '$lib/presets/catalog';
+import { presetDocBySlug } from '$lib/presets/catalog';
 import { FrameClient, type ClientStatus } from '$lib/ws/client';
 import { initFrameDecoder } from '$lib/ws/frame';
 import { logs } from '$lib/logs/store.svelte';
@@ -596,8 +596,8 @@ function numberOrNull(v: unknown): number | null {
  *  isn't in the catalog or the preset doesn't declare a centre
  *  frequency. */
 function presetSrcFreqHint(slug: string): number | null {
-  const entry = catalog.find((c) => c.slug === slug);
-  const params = entry?.doc.blocks?.src?.params as Record<string, unknown> | undefined;
+  const doc = presetDocBySlug.get(slug);
+  const params = doc?.blocks?.src?.params as Record<string, unknown> | undefined;
   return numberOrNull(params?.center_freq_hz);
 }
 
@@ -605,11 +605,11 @@ function presetSrcFreqHint(slug: string): number | null {
  *  the VFO offset the preset's author intended as the starting
  *  point. Same caveat as [`presetSrcFreqHint`]: hint, not state. */
 function presetVfoHint(slug: string): number | null {
-  const entry = catalog.find((c) => c.slug === slug);
-  if (!entry) return null;
+  const doc = presetDocBySlug.get(slug);
+  if (!doc) return null;
   // Find any block in the preset declaring freq_shift_hz — typically
   // `chan` / Channelizer.
-  for (const block of Object.values(entry.doc.blocks ?? {})) {
+  for (const block of Object.values(doc.blocks ?? {})) {
     const params = block.params as Record<string, unknown> | undefined;
     const v = numberOrNull(params?.freq_shift_hz);
     if (v !== null) return v;

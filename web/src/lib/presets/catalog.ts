@@ -8,13 +8,38 @@
 // performs the authoritative validation at load time, so the catalog
 // only filters out shapes that would fail to even reach the runtime.
 
-import type { FlowgraphDoc } from '../flowgraph.js';
+import type { FlowgraphDoc, VariantDecl } from '../flowgraph.js';
+
+/** Apply a variant `patch` (`blockId → { paramKey: value }`) over a
+ *  base doc, returning a new doc with per-block params shallow-merged
+ *  (patch wins). The base is not mutated. This is the build-time mirror
+ *  of the server's runtime slug resolver (`load_preset_by_name`); the
+ *  two must stay behaviourally identical (see
+ *  `docs/14-fldigi-catalog-variants.md`). */
+export function applyVariantPatch(base: FlowgraphDoc, patch: VariantDecl['patch']): FlowgraphDoc {
+  if (!patch || !base.blocks) return base;
+  const blocks: Record<string, (typeof base.blocks)[string]> = { ...base.blocks };
+  for (const [blockId, paramPatch] of Object.entries(patch)) {
+    const block = blocks[blockId];
+    if (!block) continue; // validator (D-V5) rejects unknown-block patches
+    blocks[blockId] = {
+      ...block,
+      params: { ...(block.params ?? {}), ...paramPatch },
+    };
+  }
+  return { ...base, blocks };
+}
 
 export interface CatalogEntry {
-  /** Filename minus `.json` — stable slug for addressing the preset. */
+  /** `${name}` for a singleton, `${name}-${variantId}` for a variant
+   *  — the stable slug for addressing the preset (hard cut: a base
+   *  with variants is never addressable bare). */
   readonly slug: string;
   /** Human label; falls back to the slug when the doc omits one. */
   readonly label: string;
+  /** 2-level catalog grouping key. `undefined` until the doc is
+   *  authored with `category` (Phase 2 backfill). */
+  readonly category?: string;
   readonly description?: string;
   readonly environments: ReadonlyArray<string>;
   /** sigidwiki page URL, drawn as a link in the catalog row. */
@@ -26,6 +51,19 @@ export interface CatalogEntry {
   /** Resolved URL of the spectrum / waterfall image, when the preset
    *  declares `signal_wiki_image`. */
   readonly signalWikiImageUrl?: string;
+  /** Singleton: this preset's doc. Family: the default variant's
+   *  resolved doc (preview / freq-hint parity). */
+  readonly doc: FlowgraphDoc;
+  /** Present iff this is a variant family. The parent row owns the
+   *  shared assets above and is not itself loadable — these children
+   *  are the load targets (slug `${name}-${id}`). */
+  readonly variants?: ReadonlyArray<VariantChild>;
+}
+
+export interface VariantChild {
+  readonly slug: string;
+  readonly label: string;
+  readonly isDefault: boolean;
   readonly doc: FlowgraphDoc;
 }
 
@@ -37,9 +75,14 @@ export interface CatalogEntry {
 export function buildCatalog(modules: Readonly<Record<string, unknown>>): {
   entries: CatalogEntry[];
   errors: Array<{ path: string; message: string }>;
+  /** Every *loadable* slug → its resolved doc: singleton slugs and
+   *  every variant slug (not the family base, which isn't loadable).
+   *  Drives freq-hint lookups and the Bands `+RX` install check. */
+  docsBySlug: Map<string, FlowgraphDoc>;
 } {
   const entries: CatalogEntry[] = [];
   const errors: Array<{ path: string; message: string }> = [];
+  const docsBySlug = new Map<string, FlowgraphDoc>();
 
   for (const [path, mod] of Object.entries(modules)) {
     const slug =
@@ -68,23 +111,58 @@ export function buildCatalog(modules: Readonly<Record<string, unknown>>): {
       // `catalog_visible: false` so they stay loadable by name from
       // the CLI / `/api/preset` without cluttering the UI list.
       if (d.catalog_visible === false) continue;
-      entries.push({
-        slug: d.name ?? slug,
-        label: d.label ?? d.name ?? slug,
+      const base = d.name ?? slug;
+      // Shared per-doc fields. Variants inherit the base's sample /
+      // thumbnail / sigwiki ref (D-V1) — only label, slug and resolved
+      // params differ.
+      const common = {
+        category: d.category,
         description: d.description,
         environments: envs,
         signalWikiUrl: d.signal_wiki_url,
         sampleUrl: resolveAsset(AUDIO_URL_BY_REPO_PATH, d.sample_path),
         signalWikiImageUrl: resolveAsset(IMAGE_URL_BY_REPO_PATH, d.signal_wiki_image),
-        doc: d,
-      });
+      };
+      if (d.variants && d.variants.length > 0) {
+        // Family: ONE parent row owning the shared assets; variants
+        // nested as the load targets (slug `${name}-${id}`). The base
+        // is never loadable bare (hard cut, D-V4). Authored order is
+        // preserved; the default child is flagged for the UI.
+        const children: VariantChild[] = d.variants.map((v) => {
+          const cdoc = applyVariantPatch(d, v.patch);
+          const cslug = `${base}-${v.id}`;
+          docsBySlug.set(cslug, cdoc);
+          return {
+            slug: cslug,
+            label: v.label ?? `${d.label ?? base} ${v.id}`,
+            isDefault: v.default === true,
+            doc: cdoc,
+          };
+        });
+        const def = children.find((c) => c.isDefault) ?? children[0];
+        entries.push({
+          ...common,
+          slug: base,
+          label: d.label ?? base,
+          doc: def.doc,
+          variants: children,
+        });
+      } else {
+        docsBySlug.set(base, d);
+        entries.push({
+          ...common,
+          slug: base,
+          label: d.label ?? base,
+          doc: d,
+        });
+      }
     } catch (err) {
       errors.push({ path, message: err instanceof Error ? err.message : String(err) });
     }
   }
 
   entries.sort((a, b) => a.label.localeCompare(b.label));
-  return { entries, errors };
+  return { entries, errors, docsBySlug };
 }
 
 function shapeError(doc: unknown): string | null {
@@ -152,4 +230,9 @@ function resolveAsset(
   return map[repoPath];
 }
 
-export const catalog: ReadonlyArray<CatalogEntry> = buildCatalog(modules).entries;
+const built = buildCatalog(modules);
+export const catalog: ReadonlyArray<CatalogEntry> = built.entries;
+/** Every loadable slug → resolved doc (singletons + every variant).
+ *  Use this, not `catalog.find(c => c.slug === …)`, to resolve a
+ *  loaded preset: family parents aren't in here (not loadable). */
+export const presetDocBySlug: ReadonlyMap<string, FlowgraphDoc> = built.docsBySlug;

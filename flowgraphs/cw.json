@@ -1,13 +1,17 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "cw",
+  "category": "HF digital modes",
   "label": "CW / Morse decode (HF)",
-  "description": "Auto-decode Morse on HF CW bands (14.030 / 7.030 / 10.115 / 21.030 / 28.030 MHz). Tune so the CW tone sits at 600\u2013800 Hz in audio.",
+  "description": "Auto-decoded Morse on the HF CW calling frequencies (3.5\u201328 MHz).",
   "ai_notes": "Morse / CW decoder for HF ham bands. Standard calling frequencies: 14.030 / 7.030 / 10.115 / 21.030 / 28.030 MHz. Tune so the CW tone sits at 600\u2013800 Hz audio (USB demod, dial freq slightly below the carrier). The auto-WPM detector handles ~5\u201340 wpm. Output: `tail decoder --category cw`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Morse_Code_(CW)",
   "sample_path": "samples/sigidwiki/Cw_morse.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/CW.jpg",
-  "environments": ["node", "browser"],
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -77,7 +81,9 @@
     "audio_resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "output_rate_hz": 48000.0,
         "stopband_db": 60.0
@@ -86,7 +92,9 @@
     "audio_nr": {
       "type": "AudioNrMono",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "sample_rate_hz": 48000.0,
         "blanker_enable": true,
@@ -97,24 +105,62 @@
     "audio": {
       "type": "AudioSink",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "buffer_samples": 8192
       }
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
-    ["demod.out", "audio_tee.in"],
-    ["audio_tee.out0", "resamp.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["resamp.out", "morse.in"],
-    ["audio_tee.out1", "audio_resamp.in"],
-    ["audio_resamp.out", "audio_nr.in"],
-    ["audio_nr.out", "audio.in"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "resamp.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "resamp.out",
+      "morse.in"
+    ],
+    [
+      "audio_tee.out1",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ]
   ]
 }

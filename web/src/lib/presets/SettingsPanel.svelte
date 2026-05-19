@@ -1,5 +1,6 @@
 <script lang="ts">
   import { pipeline } from '$lib/pipeline.svelte';
+  import type { PipelineBlock } from '$lib/api/pipelineBlocks';
   import BlockParams from '$lib/controls/BlockParams.svelte';
   import InputControls from '$lib/controls/InputControls.svelte';
   import AudioPanel from './AudioPanel.svelte';
@@ -19,6 +20,14 @@
   // loads the matching flowgraph in one click and is the single source
   // of truth for "what mode am I in".
   const DEMOD_ID = 'demod';
+  // Digital-mode decoders carry their defining knobs (baud/shift,
+  // tones/bandwidth, speed, …) on a block whose id is the mode name
+  // (`rtty`, `olivia`, …), NOT `demod` — the `demod` block is the SSB
+  // front-end. A decoder is structurally the block with an `events`
+  // output port (the one a `ui:fldigi`/`ui:ft8`/… sink consumes), so
+  // detect it that way rather than by an allow-list of type names —
+  // any future decoder is picked up for free.
+  const isDecoder = (b: PipelineBlock) => b.spec.outputs.some((o) => o.port_type === 'events');
   // Noise-reduction section looks up the single audio_nr block that
   // ships in every analog-mode preset (AudioNrMono or AudioNrStereo,
   // same id so the UI binds once). If a preset doesn't have an NR
@@ -27,6 +36,7 @@
   const AUDIO_NR_ID = 'audio_nr';
 
   let demodBlock = $derived(pipeline.blocks[DEMOD_ID]);
+  let decoderBlock = $derived(Object.values(pipeline.blocks).find(isDecoder));
   let audioNrBlock = $derived(pipeline.blocks[AUDIO_NR_ID]);
   let presetLabel = $derived(pipeline.flowgraph?.label ?? pipeline.flowgraph?.name ?? '—');
 </script>
@@ -69,6 +79,25 @@
           <p class="text-[10px] text-slate-600">
             no demod block — pick a preset from the Catalog tab.
           </p>
+        {/if}
+        {#if decoderBlock}
+          <section class="flex flex-col gap-1">
+            <header class="flex items-baseline justify-between">
+              <span class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]"
+                >decoder</span
+              >
+              <span class="font-mono text-[10px] text-slate-500">{decoderBlock.type_name}</span>
+            </header>
+            {#if decoderBlock.spec.params.length === 0}
+              <p class="text-[10px] text-slate-600">no params</p>
+            {:else}
+              <!-- No hideSourceRestart: the defining knobs (baud/shift,
+                   tones/bandwidth, …) are source-restart scoped and ARE
+                   the point of this section — changing one reconfigures
+                   the decoder. -->
+              <BlockParams block={decoderBlock} />
+            {/if}
+          </section>
         {/if}
         <RdsReadout />
       </div>

@@ -3,12 +3,12 @@
   import { pipeline } from '$lib/pipeline.svelte';
   import { applyControl } from '$lib/control/dispatch';
   import { presetSlugForMode } from './receivers';
-  import { catalog } from './catalog';
+  import { presetDocBySlug } from './catalog';
 
   // Receiver presets that actually shipped in this build. `+RX` is
   // only offered when the mode's canonical preset is installed —
   // otherwise the button would 404 at load time.
-  const installedSlugs = new Set(catalog.map((c) => c.slug));
+  const installedSlugs = new Set(presetDocBySlug.keys());
   function rxSlug(mode: string | undefined): string | null {
     const slug = presetSlugForMode(mode);
     return slug && installedSlugs.has(slug) ? slug : null;
@@ -114,9 +114,6 @@
       >
         Signal Wiki ↗
       </a>
-      <span class="text-[10px] text-[color:var(--color-muted)]"
-        >Tune = freq · +RX = freq + receiver preset</span
-      >
     </div>
   </div>
   <div class="min-h-0 flex-1 overflow-y-auto">

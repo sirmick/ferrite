@@ -56,8 +56,10 @@ export const ADVANCED_VIEWS: AdvancedView[] = [
   { sink: 'adsb', label: 'ADS-B', component: AdsbView },
   // APRS (AX.25 packet) — station map + table + packet console.
   { sink: 'aprs', label: 'APRS', component: AprsView },
-  // fldigi family (RTTY/PSK31/CW/MT63/Olivia/…/RSID) — text console.
-  { sink: 'fldigi', label: 'fldigi', component: FldigiView },
+  // fldigi family (RTTY/PSK31/CW/MT63/Olivia/…/RSID) — RX-text log.
+  // `sink` stays 'fldigi' (the ui:fldigi wire key); only the
+  // user-facing label changed — it's just a log of decoded text.
+  { sink: 'fldigi', label: 'Log', component: FldigiView },
   // Speech-to-text. Listed last so a mode-specific decoder view wins
   // if both ever co-exist. Worker-fed, so it matches on the presence
   // of a VoiceTranscribe block rather than a `ui:` sink — true on

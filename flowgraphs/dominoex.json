@@ -1,8 +1,9 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "dominoex",
-  "label": "DominoEX (incremental MFSK)",
-  "description": "DominoEX is an incremental-frequency-keying MFSK mode (IFK+) \u2014 robust against multipath and tuning error, popular for HF NVIS and weak-signal chat. DominoEX 16 is a common amateur variant (~16 baud, ~316 Hz wide). On the waterfall it's a lively staircase of tones. Decoded text streams under decoder::fldigi (vendored fldigi dominoex core). DominoEX is forgiving of mistuning; get the signal roughly into the USB passband and it locks.",
+  "category": "HF digital modes",
+  "label": "DominoEX",
+  "description": "DominoEX \u2014 incremental-FSK MFSK, robust against multipath and mistuning; HF NVIS and weak-signal chat.",
   "ai_notes": "DominoEX (incremental MFSK / IFK+, vendored fldigi dominoex core). dominoex16 default; variants via DominoexDemod mode: dominoex4/8/11/16/22/44. Activity ~14.070\u201314.078 MHz and on NVIS nets. Tune dial \u2248 signal \u2212 1500 Hz; tolerant of mistuning. Output: `tail decoder --category fldigi`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/DominoEX",
   "sample_path": "samples/sigidwiki/DominoEX_16Bd.mp3",
@@ -10,6 +11,41 @@
   "environments": [
     "node",
     "browser"
+  ],
+  "variants": [
+    {
+      "id": "16",
+      "label": "DominoEX 16",
+      "default": true,
+      "patch": {}
+    },
+    {
+      "id": "8",
+      "label": "DominoEX 8",
+      "patch": {
+        "dominoex": {
+          "speed": 8
+        }
+      }
+    },
+    {
+      "id": "11",
+      "label": "DominoEX 11",
+      "patch": {
+        "dominoex": {
+          "speed": 11
+        }
+      }
+    },
+    {
+      "id": "22",
+      "label": "DominoEX 22",
+      "patch": {
+        "dominoex": {
+          "speed": 22
+        }
+      }
+    }
   ],
   "blocks": {
     "src": {
@@ -101,7 +137,6 @@
       "type": "DominoexDemod",
       "placement": "node",
       "params": {
-        "variant": "dominoex16",
         "afc": true
       }
     }

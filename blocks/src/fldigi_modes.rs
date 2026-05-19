@@ -254,12 +254,49 @@ const REVERSE_PARAM: ParamSpec = ParamSpec {
 };
 
 // ---------------------------------------------------------------------
-// RttyDemod — Baudot/ITA2 RTTY (45.45 baud, 170 Hz shift).
+// RttyDemod — Baudot/ITA2 RTTY. `baud` + `shift` are exposed as real
+// numeric params (Bd / Hz); presets pin the common combos (docs/14:
+// expose the knobs, ship presets for the usual values — supersedes the
+// block-owned-taxonomy idea).
+//
+// fldigi's API is index-based: `rtty45/50/75/100` all build the one
+// `MODE_RTTY` modem, and `RTTYBAUD`/`RTTYSHIFT` are *indices* into
+// fixed vendored tables (`rtty.cxx`), not Hz. So the block does a thin
+// value→index adapter against mirrors of those tables — that's a
+// mechanical translation, not a curated taxonomy.
 // ---------------------------------------------------------------------
+
+/// Mirror of `rtty::BAUD[]` (rtty.cxx) — `RTTYBAUD` is an index here.
+const RTTY_BAUD_TABLE: &[f64] = &[
+    45.0, 45.45, 50.0, 56.0, 75.0, 100.0, 110.0, 150.0, 200.0, 300.0,
+];
+/// Mirror of `rtty::SHIFT[]` (rtty.cxx) — `RTTYSHIFT` is an index here.
+const RTTY_SHIFT_TABLE: &[f64] = &[
+    23.0, 85.0, 160.0, 170.0, 182.0, 200.0, 240.0, 350.0, 425.0, 850.0,
+];
+
+/// Baud values surfaced as the `baud` enum (the on-air-real subset).
+const RTTY_BAUDS: &[f64] = &[45.45, 50.0, 75.0, 100.0];
+/// Shift values surfaced as the `shift` enum.
+const RTTY_SHIFTS: &[f64] = &[170.0, 425.0, 850.0];
+
+/// Find the fldigi table index for `v` (exact-ish match — these are
+/// fixed catalog values, not measured). Errors list the valid set.
+fn table_index(table: &[f64], v: f64, what: &str) -> Result<i32> {
+    table
+        .iter()
+        .position(|t| (t - v).abs() < 0.01)
+        .map(|i| i32::try_from(i).unwrap_or(0))
+        .ok_or_else(|| anyhow::anyhow!("RttyDemod: unsupported {what} {v}"))
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct RttyDemodParams {
+    /// Symbol rate (Bd). 45.45 = classic amateur Baudot RTTY.
+    pub baud: f64,
+    /// Mark/space shift (Hz). 170 = amateur; 425/850 = commercial.
+    pub shift: f64,
     pub afc: bool,
     pub rx_freq_hz: f32,
     /// Swap mark/space. RTTY RX polarity is genuinely ambiguous —
@@ -272,6 +309,8 @@ pub struct RttyDemodParams {
 impl Default for RttyDemodParams {
     fn default() -> Self {
         Self {
+            baud: 45.45,
+            shift: 170.0,
             afc: true,
             rx_freq_hz: 0.0,
             reverse: false,
@@ -285,9 +324,16 @@ pub struct RttyDemod {
 
 impl RttyDemod {
     pub fn new(p: RttyDemodParams) -> Result<Self> {
-        let mut core = FldigiCore::new("rtty45", "rtty45")?;
+        let baud_idx = table_index(RTTY_BAUD_TABLE, p.baud, "baud")?;
+        let shift_idx = table_index(RTTY_SHIFT_TABLE, p.shift, "shift")?;
+        // All RTTY baud/shift combos share the one `rtty` modem; baud
+        // and shift come from the config TAGs below.
+        let label = format!("rtty {}/{}", p.baud, p.shift);
+        let mut core = FldigiCore::new("rtty", label)?;
         core.apply_common(p.afc, p.rx_freq_hz);
         core.apply_reverse(p.reverse);
+        core.set("RTTYBAUD", f64::from(baud_idx));
+        core.set("RTTYSHIFT", f64::from(shift_idx));
         Ok(Self { core })
     }
 }
@@ -301,6 +347,28 @@ impl Block for RttyDemod {
             inputs: FLDIGI_IN,
             outputs: FLDIGI_OUT,
             params: &[
+                ParamSpec {
+                    key: "baud",
+                    label: "Baud",
+                    kind: ParamKind::EnumNumeric {
+                        values: RTTY_BAUDS,
+                        default: 45.45,
+                        unit: "Bd",
+                    },
+                    reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "Symbol rate. 45.45 Bd is classic amateur Baudot RTTY; 50/75/100 are commercial/military.",
+                },
+                ParamSpec {
+                    key: "shift",
+                    label: "Shift",
+                    kind: ParamKind::EnumNumeric {
+                        values: RTTY_SHIFTS,
+                        default: 170.0,
+                        unit: "Hz",
+                    },
+                    reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "Mark/space frequency separation. 170 Hz is amateur standard; 425/850 are commercial.",
+                },
                 ParamSpec {
                     key: "afc",
                     label: "AFC",
@@ -329,7 +397,7 @@ impl Block for RttyDemod {
                     ai_notes: "Swap mark/space. RTTY polarity inverts with TX/RX sideband — flip if the tones are there but text is garbage.",
                 },
             ],
-            ai_notes: "RTTY (Baudot 45.45 bd / 170 Hz shift) via the curated fldigi rtty core. Tune so the two tones straddle the audio carrier; `reverse` if inverted. Output: `tail decoder --category fldigi`.",
+            ai_notes: "RTTY (Baudot/ITA2) via the curated fldigi rtty core; `baud`+`shift` are real params (45.45 Bd / 170 Hz = amateur standard). Tune so the two tones straddle the audio carrier; `reverse` if inverted. Output: `tail decoder --category fldigi`.",
         }
     }
 
@@ -369,12 +437,21 @@ impl BlockFactory for RttyDemod {
 }
 
 // ---------------------------------------------------------------------
-// Psk31Demod — BPSK31. Wide capture / AFC: no extra knobs.
+// Psk31Demod — BPSK, `baud` selectable (31 / 63 / 125). Each baud is a
+// distinct fldigi make_modem id (Kind-1): the block composes the id
+// from the real `baud` param; presets pin the common ones (docs/14).
+// Type name kept `Psk31Demod` for preset/wire back-compat even though
+// it now covers 63/125.
 // ---------------------------------------------------------------------
+
+/// Surfaced `baud` values; each maps 1:1 to a `make_modem` id.
+const PSK_BAUDS: &[f64] = &[31.0, 63.0, 125.0];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Psk31DemodParams {
+    /// BPSK symbol rate: 31 (PSK31), 63 (PSK63) or 125 (PSK125).
+    pub baud: f64,
     pub afc: bool,
     pub rx_freq_hz: f32,
 }
@@ -382,6 +459,7 @@ pub struct Psk31DemodParams {
 impl Default for Psk31DemodParams {
     fn default() -> Self {
         Self {
+            baud: 31.0,
             afc: true,
             rx_freq_hz: 0.0,
         }
@@ -394,7 +472,17 @@ pub struct Psk31Demod {
 
 impl Psk31Demod {
     pub fn new(p: Psk31DemodParams) -> Result<Self> {
-        let mut core = FldigiCore::new("psk31", "psk31")?;
+        // psk31 / psk63 / psk125 are the make_modem ids.
+        let id = match p.baud as i64 {
+            31 => "psk31",
+            63 => "psk63",
+            125 => "psk125",
+            _ => bail!(
+                "Psk31Demod: baud must be one of {PSK_BAUDS:?}, got {}",
+                p.baud
+            ),
+        };
+        let mut core = FldigiCore::new(id, id)?;
         core.apply_common(p.afc, p.rx_freq_hz);
         Ok(Self { core })
     }
@@ -408,8 +496,22 @@ impl Block for Psk31Demod {
             placement: Placement::Either,
             inputs: FLDIGI_IN,
             outputs: FLDIGI_OUT,
-            params: &[AFC_PARAM, RX_FREQ_PARAM],
-            ai_notes: "BPSK31 via the curated fldigi psk core. Narrow, AFC pulls it in. Output: `tail decoder --category fldigi`.",
+            params: &[
+                ParamSpec {
+                    key: "baud",
+                    label: "Baud",
+                    kind: ParamKind::EnumNumeric {
+                        values: PSK_BAUDS,
+                        default: 31.0,
+                        unit: "Bd",
+                    },
+                    reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "BPSK rate: 31 (keyboard chat), 63/125 (faster, wider).",
+                },
+                AFC_PARAM,
+                RX_FREQ_PARAM,
+            ],
+            ai_notes: "BPSK (31/63/125) via the curated fldigi psk core. Narrow, AFC pulls it in. Output: `tail decoder --category fldigi`.",
         }
     }
 
@@ -642,20 +744,19 @@ impl BlockFactory for FldigiAuto {
 // Mt63Demod — MT63, variant-selected (64-tone DBPSK + interleave/FEC).
 // ---------------------------------------------------------------------
 
-const MT63_VARIANTS: &[&str] = &[
-    "mt63-500S",
-    "mt63-500L",
-    "mt63-1000S",
-    "mt63-1000L",
-    "mt63-2000S",
-    "mt63-2000L",
-];
+/// MT63 bandwidths (Hz) surfaced as the `bandwidth` enum.
+const MT63_BANDWIDTHS: &[f64] = &[500.0, 1000.0, 2000.0];
+/// Interleave depth — fldigi's `S`(hort) / `L`(ong) id suffix.
+const MT63_INTERLEAVES: &[&str] = &["short", "long"];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Mt63DemodParams {
-    /// One of [`MT63_VARIANTS`]. Bandwidth-S/L = short/long interleave.
-    pub variant: String,
+    /// Signal bandwidth in Hz: 500 / 1000 / 2000.
+    pub bandwidth: f64,
+    /// Interleaver depth: `"short"` or `"long"` (long = more robust,
+    /// more latency — the EmComm/MARS default).
+    pub interleave: String,
     pub afc: bool,
     pub rx_freq_hz: f32,
 }
@@ -663,7 +764,8 @@ pub struct Mt63DemodParams {
 impl Default for Mt63DemodParams {
     fn default() -> Self {
         Self {
-            variant: "mt63-1000L".to_string(),
+            bandwidth: 1000.0,
+            interleave: "long".to_string(),
             afc: true,
             rx_freq_hz: 0.0,
         }
@@ -676,13 +778,25 @@ pub struct Mt63Demod {
 
 impl Mt63Demod {
     pub fn new(p: Mt63DemodParams) -> Result<Self> {
-        if !MT63_VARIANTS.contains(&p.variant.as_str()) {
-            bail!(
-                "Mt63Demod: variant must be one of {MT63_VARIANTS:?}, got {:?}",
-                p.variant
-            );
-        }
-        let mut core = FldigiCore::new(&p.variant, p.variant.clone())?;
+        // Each (bandwidth, interleave) is a distinct make_modem id
+        // (Kind-1) — compose `mt63-{bw}{S|L}` from the real params.
+        let bw = match p.bandwidth as i64 {
+            500 | 1000 | 2000 => p.bandwidth as i64,
+            _ => bail!(
+                "Mt63Demod: bandwidth must be one of {MT63_BANDWIDTHS:?}, got {}",
+                p.bandwidth
+            ),
+        };
+        let suffix = match p.interleave.as_str() {
+            "short" => "S",
+            "long" => "L",
+            _ => bail!(
+                "Mt63Demod: interleave must be one of {MT63_INTERLEAVES:?}, got {:?}",
+                p.interleave
+            ),
+        };
+        let id = format!("mt63-{bw}{suffix}");
+        let mut core = FldigiCore::new(&id, id.clone())?;
         core.apply_common(p.afc, p.rx_freq_hz);
         Ok(Self { core })
     }
@@ -698,14 +812,25 @@ impl Block for Mt63Demod {
             outputs: FLDIGI_OUT,
             params: &[
                 ParamSpec {
-                    key: "variant",
-                    label: "Variant",
-                    kind: ParamKind::EnumString {
-                        values: MT63_VARIANTS,
-                        default: "mt63-1000L",
+                    key: "bandwidth",
+                    label: "Bandwidth",
+                    kind: ParamKind::EnumNumeric {
+                        values: MT63_BANDWIDTHS,
+                        default: 1000.0,
+                        unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "Bandwidth + interleave: 500/1000/2000 Hz, S(hort)/L(ong) interleave. 1000L is the EmComm/MARS workhorse.",
+                    ai_notes: "Signal width. 1000 Hz is the EmComm/MARS workhorse.",
+                },
+                ParamSpec {
+                    key: "interleave",
+                    label: "Interleave",
+                    kind: ParamKind::EnumString {
+                        values: MT63_INTERLEAVES,
+                        default: "long",
+                    },
+                    reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "Interleaver depth. long = more robust + more latency (the net default); short = faster.",
                 },
                 AFC_PARAM,
                 RX_FREQ_PARAM,
@@ -746,22 +871,29 @@ impl BlockFactory for Mt63Demod {
 }
 
 // ---------------------------------------------------------------------
-// Variant-selected MFSK/FSK families. Structurally identical wrappers
-// (variant + afc + rx_freq + reverse → FldigiCore), so generated from
-// one macro rather than five near-duplicate copies. Variant ids are
-// the shim `make_modem` strings verbatim.
+// MFSK/FSK families. Real decode params are exposed (tones/bandwidth/
+// speed/…) and the block composes the fldigi `make_modem` id from them
+// (Kind-1: every combo is a distinct id, so no config TAGs and no
+// decode-path change vs. the old variant strings — the e2e gate is
+// preserved). Presets pin the common combos (docs/14).
+//
+// Boilerplate (FldigiCore wrap, Block/Factory impls, afc/rx/reverse
+// live-params) is shared via the macro below; the per-family bits are
+// the params struct, the id composer, and the extra ParamSpecs.
 // ---------------------------------------------------------------------
 
-macro_rules! family_demod {
-    ($params:ident, $block:ident, $type_name:literal,
-     $variants:ident = [$($v:literal),+ $(,)?], $default:literal, $ai:literal) => {
-        const $variants: &[&str] = &[$($v),+];
-
+macro_rules! fldigi_family {
+    (
+        $params:ident, $block:ident, $type_name:literal,
+        fields { $($field:ident : $fty:ty = $fdefault:expr),+ $(,)? },
+        params_extra: $extra:expr,
+        compose: $compose:expr,
+        ai: $ai:literal $(,)?
+    ) => {
         #[derive(Debug, Clone, Deserialize)]
         #[serde(default)]
         pub struct $params {
-            /// One of the family's `make_modem` ids.
-            pub variant: String,
+            $(pub $field: $fty,)+
             pub afc: bool,
             pub rx_freq_hz: f32,
             pub reverse: bool,
@@ -769,33 +901,28 @@ macro_rules! family_demod {
         impl Default for $params {
             fn default() -> Self {
                 Self {
-                    variant: $default.to_string(),
+                    $($field: $fdefault,)+
                     afc: true,
                     rx_freq_hz: 0.0,
                     reverse: false,
                 }
             }
         }
-
         pub struct $block {
             core: FldigiCore,
         }
         impl $block {
             pub fn new(p: $params) -> Result<Self> {
-                if !$variants.contains(&p.variant.as_str()) {
-                    bail!(
-                        concat!($type_name, ": variant must be one of {:?}, got {:?}"),
-                        $variants,
-                        p.variant
-                    );
-                }
-                let mut core = FldigiCore::new(&p.variant, p.variant.clone())?;
+                // `$compose` is `fn(&$params) -> Result<String>` — the
+                // make_modem id built from the real params.
+                let composer: fn(&$params) -> Result<String> = $compose;
+                let id = composer(&p)?;
+                let mut core = FldigiCore::new(&id, id.clone())?;
                 core.apply_common(p.afc, p.rx_freq_hz);
                 core.apply_reverse(p.reverse);
                 Ok(Self { core })
             }
         }
-
         #[ferrite_blocks_macros::ferrite_block]
         impl Block for $block {
             fn spec() -> BlockSpec {
@@ -804,21 +931,7 @@ macro_rules! family_demod {
                     placement: Placement::Either,
                     inputs: FLDIGI_IN,
                     outputs: FLDIGI_OUT,
-                    params: &[
-                        ParamSpec {
-                            key: "variant",
-                            label: "Variant",
-                            kind: ParamKind::EnumString {
-                                values: $variants,
-                                default: $default,
-                            },
-                            reconfig_scope: ReconfigureScope::SourceRestart,
-                            ai_notes: "Mode variant (bandwidth / tones / interleave).",
-                        },
-                        AFC_PARAM,
-                        RX_FREQ_PARAM,
-                        REVERSE_PARAM,
-                    ],
+                    params: $extra,
                     ai_notes: $ai,
                 }
             }
@@ -846,7 +959,6 @@ macro_rules! family_demod {
                 Ok(changed)
             }
         }
-
         impl BlockFactory for $block {
             fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
                 Ok(Box::new($block::new(crate::block::deserialize_params(params)?)?))
@@ -855,37 +967,126 @@ macro_rules! family_demod {
     };
 }
 
-family_demod!(
+// Olivia / Contestia: `tones` × `bandwidth`, composed to the discrete
+// `{prefix}-{tones}-{bw}` make_modem id. Surfaced value sets are the
+// combos that actually have a discrete id (no generic-mode fallback,
+// so decode == the pre-existing path).
+const OLIVIA_TONES: &[f64] = &[8.0, 16.0, 32.0];
+const OLIVIA_BW: &[f64] = &[500.0, 1000.0];
+const CONTESTIA_TONES: &[f64] = &[8.0, 16.0];
+const CONTESTIA_BW: &[f64] = &[250.0, 500.0];
+
+fn tones_bw_id(prefix: &str, allowed: &[&str], tones: f64, bw: f64) -> Result<String> {
+    let id = format!("{prefix}-{}-{}", tones as i64, bw as i64);
+    if allowed.contains(&id.as_str()) {
+        Ok(id)
+    } else {
+        bail!("{prefix}: unsupported tones/bandwidth combo {tones}/{bw} (valid: {allowed:?})")
+    }
+}
+
+fldigi_family!(
     OliviaDemodParams, OliviaDemod, "OliviaDemod",
-    OLIVIA_VARIANTS = ["olivia", "olivia-8-500", "olivia-16-500", "olivia-32-1000"],
-    "olivia-8-500",
-    "Olivia (MFSK + Reed-Solomon FEC) via the curated fldigi olivia core. Very robust, slow. Tolerant of mistuning; AFC usually pulls it in. Output: `tail decoder --category fldigi`."
-);
-family_demod!(
-    ContestiaDemodParams, ContestiaDemod, "ContestiaDemod",
-    CONTESTIA_VARIANTS = ["contestia", "contestia-8-250", "contestia-8-500", "contestia-16-500"],
-    "contestia-8-500",
-    "Contestia (Olivia-derivative MFSK+FEC) via the curated fldigi contestia core. Tolerant of mistuning. Output: `tail decoder --category fldigi`."
-);
-family_demod!(
-    DominoexDemodParams, DominoexDemod, "DominoexDemod",
-    DOMINOEX_VARIANTS = [
-        "dominoex4", "dominoex8", "dominoex11", "dominoex16", "dominoex22", "dominoex44"
+    fields { tones: f64 = 8.0, bandwidth: f64 = 500.0 },
+    params_extra: &[
+        ParamSpec { key: "tones", label: "Tones",
+            kind: ParamKind::EnumNumeric { values: OLIVIA_TONES, default: 8.0, unit: "" },
+            reconfig_scope: ReconfigureScope::SourceRestart,
+            ai_notes: "MFSK tone count. More tones = more robust, slower." },
+        ParamSpec { key: "bandwidth", label: "Bandwidth",
+            kind: ParamKind::EnumNumeric { values: OLIVIA_BW, default: 500.0, unit: "Hz" },
+            reconfig_scope: ReconfigureScope::SourceRestart,
+            ai_notes: "Signal width. 8/500 is the common amateur Olivia." },
+        AFC_PARAM, RX_FREQ_PARAM, REVERSE_PARAM,
     ],
-    "dominoex16",
-    "DominoEX (incremental-frequency MFSK) via the curated fldigi dominoex core. Sideband-sensitive — try `reverse` if garbled. Output: `tail decoder --category fldigi`."
+    compose: |p| tones_bw_id("olivia",
+        &["olivia-8-500", "olivia-16-500", "olivia-32-1000"], p.tones, p.bandwidth),
+    ai: "Olivia (MFSK + Reed-Solomon FEC) via the curated fldigi olivia core. Very robust, slow. Tolerant of mistuning; AFC usually pulls it in. Output: `tail decoder --category fldigi`.",
 );
-family_demod!(
+fldigi_family!(
+    ContestiaDemodParams, ContestiaDemod, "ContestiaDemod",
+    fields { tones: f64 = 8.0, bandwidth: f64 = 500.0 },
+    params_extra: &[
+        ParamSpec { key: "tones", label: "Tones",
+            kind: ParamKind::EnumNumeric { values: CONTESTIA_TONES, default: 8.0, unit: "" },
+            reconfig_scope: ReconfigureScope::SourceRestart,
+            ai_notes: "MFSK tone count." },
+        ParamSpec { key: "bandwidth", label: "Bandwidth",
+            kind: ParamKind::EnumNumeric { values: CONTESTIA_BW, default: 500.0, unit: "Hz" },
+            reconfig_scope: ReconfigureScope::SourceRestart,
+            ai_notes: "Signal width. 8/500 is the common amateur Contestia." },
+        AFC_PARAM, RX_FREQ_PARAM, REVERSE_PARAM,
+    ],
+    compose: |p| tones_bw_id("contestia",
+        &["contestia-8-250", "contestia-8-500", "contestia-16-500"], p.tones, p.bandwidth),
+    ai: "Contestia (Olivia-derivative MFSK+FEC) via the curated fldigi contestia core. Tolerant of mistuning. Output: `tail decoder --category fldigi`.",
+);
+
+const DOMINOEX_SPEEDS: &[f64] = &[4.0, 8.0, 11.0, 16.0, 22.0, 44.0];
+fldigi_family!(
+    DominoexDemodParams, DominoexDemod, "DominoexDemod",
+    fields { speed: f64 = 16.0 },
+    params_extra: &[
+        ParamSpec { key: "speed", label: "Speed",
+            kind: ParamKind::EnumNumeric { values: DOMINOEX_SPEEDS, default: 16.0, unit: "" },
+            reconfig_scope: ReconfigureScope::SourceRestart,
+            ai_notes: "DominoEX speed code (baud class). 16 is the common HF setting." },
+        AFC_PARAM, RX_FREQ_PARAM, REVERSE_PARAM,
+    ],
+    compose: |p| {
+        if DOMINOEX_SPEEDS.contains(&p.speed) {
+            Ok(format!("dominoex{}", p.speed as i64))
+        } else {
+            bail!("DominoexDemod: speed must be one of {DOMINOEX_SPEEDS:?}, got {}", p.speed)
+        }
+    },
+    ai: "DominoEX (incremental-frequency MFSK) via the curated fldigi dominoex core. Sideband-sensitive — try `reverse` if garbled. Output: `tail decoder --category fldigi`.",
+);
+
+const THROB_TONES: &[f64] = &[1.0, 2.0, 4.0];
+fldigi_family!(
     ThrobDemodParams, ThrobDemod, "ThrobDemod",
-    THROB_VARIANTS = ["throb1", "throb2", "throb4", "throbx1", "throbx2", "throbx4"],
-    "throb4",
-    "Throb / ThrobX (slow MFSK) via the curated fldigi throb core. Output: `tail decoder --category fldigi`."
+    fields { tones: f64 = 4.0, extended: bool = false },
+    params_extra: &[
+        ParamSpec { key: "tones", label: "Tones",
+            kind: ParamKind::EnumNumeric { values: THROB_TONES, default: 4.0, unit: "" },
+            reconfig_scope: ReconfigureScope::SourceRestart,
+            ai_notes: "Throb tone count (1/2/4)." },
+        ParamSpec { key: "extended", label: "ThrobX",
+            kind: ParamKind::Toggle { default: false },
+            reconfig_scope: ReconfigureScope::SourceRestart,
+            ai_notes: "Use the ThrobX variant (wider, faster) instead of plain Throb." },
+        AFC_PARAM, RX_FREQ_PARAM, REVERSE_PARAM,
+    ],
+    compose: |p| {
+        if THROB_TONES.contains(&p.tones) {
+            Ok(format!("throb{}{}", if p.extended { "x" } else { "" }, p.tones as i64))
+        } else {
+            bail!("ThrobDemod: tones must be one of {THROB_TONES:?}, got {}", p.tones)
+        }
+    },
+    ai: "Throb / ThrobX (slow MFSK) via the curated fldigi throb core. Output: `tail decoder --category fldigi`.",
 );
-family_demod!(
+
+const NAVTEX_STANDARDS: &[&str] = &["navtex", "sitorb"];
+fldigi_family!(
     NavtexDemodParams, NavtexDemod, "NavtexDemod",
-    NAVTEX_VARIANTS = ["navtex", "sitorb"],
-    "navtex",
-    "NAVTEX / SITOR-B (CCIR-476, 100 bd / 170 Hz shift, time-diversity FEC) via the curated fldigi navtex core. 518 kHz maritime safety. Output: `tail decoder --category fldigi`."
+    fields { standard: String = "navtex".to_string() },
+    params_extra: &[
+        ParamSpec { key: "standard", label: "Standard",
+            kind: ParamKind::EnumString { values: NAVTEX_STANDARDS, default: "navtex" },
+            reconfig_scope: ReconfigureScope::SourceRestart,
+            ai_notes: "navtex (518 kHz maritime safety broadcast) or sitorb (SITOR-B / CCIR-476 ARQ-B)." },
+        AFC_PARAM, RX_FREQ_PARAM, REVERSE_PARAM,
+    ],
+    compose: |p| {
+        if NAVTEX_STANDARDS.contains(&p.standard.as_str()) {
+            Ok(p.standard.clone())
+        } else {
+            bail!("NavtexDemod: standard must be one of {NAVTEX_STANDARDS:?}, got {:?}", p.standard)
+        }
+    },
+    ai: "NAVTEX / SITOR-B (CCIR-476, 100 bd / 170 Hz shift, time-diversity FEC) via the curated fldigi navtex core. 518 kHz maritime safety. Output: `tail decoder --category fldigi`.",
 );
 
 #[cfg(test)]
@@ -921,9 +1122,9 @@ mod tests {
     }
 
     #[test]
-    fn mt63_rejects_unknown_variant() {
+    fn mt63_rejects_unknown_bandwidth() {
         let p = Mt63DemodParams {
-            variant: "mt63-9999X".to_string(),
+            bandwidth: 9999.0,
             ..Default::default()
         };
         assert!(Mt63Demod::new(p).is_err());
@@ -934,5 +1135,14 @@ mod tests {
         let p = Psk31DemodParams::default();
         assert!(p.afc);
         assert!(p.rx_freq_hz.abs() < 1e-6, "default rx_freq is 0 (AFC)");
+    }
+
+    #[test]
+    fn rtty_rejects_off_table_values() {
+        let p = super::RttyDemodParams {
+            baud: 33.0,
+            ..Default::default()
+        };
+        assert!(super::RttyDemod::new(p).is_err());
     }
 }

@@ -1,13 +1,17 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "usb",
+  "category": "Voice (SSB/NBFM)",
   "label": "Upper sideband (voice)",
-  "description": "Upper-sideband SSB voice \u2014 amateur 20 / 17 / 15 m DX, 6 / 10 m calling. Tune the VFO precisely so voices sound natural, not squeaky.",
+  "description": "Upper-sideband SSB voice \u2014 amateur 20 / 17 / 15 m DX and 6 / 10 m calling.",
   "ai_notes": "Upper-sideband SSB voice. Amateur convention: USB above 10 MHz (20 m DX 14.150-14.350, 17 m, 15 m, 6 m, 10 m). Tune the VFO precisely - SSB mistuning pitch-shifts voices. Audio NR: `blanker` + `notch` + `spectral` + `neural@24dB` (HF SSB is noisy).",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Single_Sideband_Voice",
   "sample_path": "samples/sigidwiki/USB_Sound.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/USB_Waterfall.png",
-  "environments": ["node", "browser"],
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -59,7 +63,9 @@
     "audio": {
       "type": "AudioSink",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "buffer_samples": 8192
       }
@@ -67,7 +73,9 @@
     "resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "output_rate_hz": 48000.0,
         "stopband_db": 60.0
@@ -76,7 +84,9 @@
     "audio_nr": {
       "type": "AudioNrMono",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "sample_rate_hz": 48000.0,
         "blanker_enable": true,
@@ -97,14 +107,41 @@
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["demod.out", "resamp.in"],
-    ["resamp.out", "audio_nr.in"],
-    ["audio_nr.out", "audio.in"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "demod.out",
+      "resamp.in"
+    ],
+    [
+      "resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ]
   ]
 }

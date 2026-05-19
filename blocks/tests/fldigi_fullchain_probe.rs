@@ -204,7 +204,7 @@ fn probe_fullchain_all_modes() {
     sweep("dominoex16", &format!("{dir}/DominoEX_16Bd.wav"), &|| {
         Box::new(
             DominoexDemod::new(DominoexDemodParams {
-                variant: "dominoex16".to_string(),
+                speed: 16.0,
                 afc: true,
                 rx_freq_hz: 0.0,
                 reverse: true,

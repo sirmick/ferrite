@@ -247,6 +247,12 @@ pub fn split_for_environment(
         description: doc.description.clone(),
         ai_notes: doc.ai_notes.clone(),
         environments: vec![env],
+        category: doc.category.clone(),
+        variants: doc.variants.clone(),
+        sample_path: doc.sample_path.clone(),
+        signal_wiki_image: doc.signal_wiki_image.clone(),
+        signal_wiki_url: doc.signal_wiki_url.clone(),
+        catalog_visible: doc.catalog_visible,
         blocks: new_blocks,
         wires: new_wires,
     })

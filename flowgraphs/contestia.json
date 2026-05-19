@@ -1,8 +1,9 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "contestia",
-  "label": "Contestia 8/500 (robust MFSK)",
-  "description": "Contestia is an Olivia derivative \u2014 robust MFSK with FEC and a compact alphabet, decoding under conditions that defeat PSK/RTTY but a bit faster/narrower than Olivia. The 8/500 variant uses 8 tones in 500 Hz. On the waterfall it's a clean block of hopping tones. Decoded text streams under decoder::fldigi (vendored fldigi contestia core, Ja\u0142ocha MFSK engine). Like Olivia it's very tolerant of mistuning \u2014 get it roughly into the USB passband and it locks; expect a couple seconds of latency from the FEC interleaver.",
+  "category": "HF digital modes",
+  "label": "Contestia",
+  "description": "Contestia \u2014 robust Olivia-derivative MFSK with FEC; decodes below the noise floor, faster and narrower than Olivia.",
   "ai_notes": "Contestia 8/500 (Olivia-derivative MFSK+FEC, vendored fldigi contestia core). Variants via ContestiaDemod mode: contestia, contestia-8-250, contestia-8-500, contestia-16-500. Tolerant of mistuning; tune dial \u2248 signal \u2212 1500 Hz. ~2 s decode latency (interleaver). Activity: 20 m ~14.072\u201314.078 and on nets. Output: `tail decoder --category fldigi`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Contestia",
   "sample_path": "samples/sigidwiki/Contestia_8-500.mp3",
@@ -10,6 +11,34 @@
   "environments": [
     "node",
     "browser"
+  ],
+  "variants": [
+    {
+      "id": "8-500",
+      "label": "8/500",
+      "default": true,
+      "patch": {}
+    },
+    {
+      "id": "8-250",
+      "label": "8/250",
+      "patch": {
+        "contestia": {
+          "tones": 8,
+          "bandwidth": 250
+        }
+      }
+    },
+    {
+      "id": "16-500",
+      "label": "16/500",
+      "patch": {
+        "contestia": {
+          "tones": 16,
+          "bandwidth": 500
+        }
+      }
+    }
   ],
   "blocks": {
     "src": {
@@ -101,7 +130,6 @@
       "type": "ContestiaDemod",
       "placement": "node",
       "params": {
-        "variant": "contestia-8-500",
         "afc": true
       }
     }

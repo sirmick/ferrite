@@ -1,13 +1,43 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "psk31",
-  "label": "PSK31 (BPSK keyboard chat)",
-  "description": "PSK31 is the most popular HF keyboard-to-keyboard mode: 31.25 baud binary phase-shift keying with a Varicode alphabet, occupying only ~60 Hz. Tiny power goes a long way — a ragchew QSO at 25 W is routine. On the waterfall it's a thin clean carrier with two faint sidebands; multiple QSOs stack a few hundred Hz apart in the sub-band. Decoded text streams under the decoder::fldigi log target (vendored fldigi PSK core). Tune so the signal sits ~1500 Hz in the USB audio (dial ≈ signal − 1.5 kHz); the modem's AFC locks the carrier. Activity clusters tightly: 14.070, 7.070, 3.580, 21.070, 28.120 MHz (±~3 kHz). Audio is teed alongside so you can listen.",
-  "ai_notes": "PSK31 (BPSK 31.25 baud Varicode, vendored fldigi psk core). Watering holes (USB dial): 3.580 / 7.070 / 14.070 / 21.070 / 28.120 MHz — tune dial ≈ centre − 1500 Hz so the sub-band lands on the 1500 Hz PSK sweetspot; click into individual signals on the waterfall. Output: `tail decoder --category fldigi`. Bursty QSO traffic, not a beacon — wait for activity. psk63/psk125 modes also available via the Psk31Demod `mode` param.",
+  "category": "HF digital modes",
+  "label": "PSK",
+  "description": "PSK31 \u2014 the most popular HF keyboard mode: 31-baud BPSK in ~60 Hz, big results on tiny power.",
+  "ai_notes": "PSK31 (BPSK 31.25 baud Varicode, vendored fldigi psk core). Watering holes (USB dial): 3.580 / 7.070 / 14.070 / 21.070 / 28.120 MHz \u2014 tune dial \u2248 centre \u2212 1500 Hz so the sub-band lands on the 1500 Hz PSK sweetspot; click into individual signals on the waterfall. Output: `tail decoder --category fldigi`. Bursty QSO traffic, not a beacon \u2014 wait for activity. psk63/psk125 modes also available via the Psk31Demod `mode` param.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/PSK31",
   "sample_path": "samples/sigidwiki/BPSK31.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/PSK31.jpg",
-  "environments": ["node", "browser"],
+  "environments": [
+    "node",
+    "browser"
+  ],
+  "variants": [
+    {
+      "id": "31",
+      "label": "PSK31",
+      "default": true,
+      "patch": {}
+    },
+    {
+      "id": "63",
+      "label": "PSK63",
+      "patch": {
+        "psk": {
+          "baud": 63
+        }
+      }
+    },
+    {
+      "id": "125",
+      "label": "PSK125",
+      "patch": {
+        "psk": {
+          "baud": 125
+        }
+      }
+    }
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -18,43 +48,72 @@
         "bandwidth_hz": 2000000.0
       }
     },
-    "tee": { "type": "TeeIqF32", "placement": "node" },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
     "chan": {
       "type": "Channelizer",
       "placement": "node",
-      "params": { "input_rate_hz": 2400000.0, "output_rate_hz": 8000.0 }
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 8000.0
+      }
     },
     "fft": {
       "type": "FFT",
       "placement": "node",
-      "params": { "size": 16384, "window": "hann", "max_frames_per_second": 30 }
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
     },
     "logmag": {
       "type": "LogMagU8",
       "placement": "node",
-      "params": { "size": 16384, "alpha": 0.3 }
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
     },
     "demod": {
       "type": "SsbDemod",
       "placement": "node",
-      "params": { "sample_rate_hz": 8000, "sideband": "usb", "audio_gain": 30.0 }
+      "params": {
+        "sample_rate_hz": 8000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
     },
-    "audio_tee": { "type": "TeeRealF32", "placement": "node" },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
     "psk": {
       "type": "Psk31Demod",
       "placement": "node",
-      "params": { "afc": true }
+      "params": {
+        "afc": true
+      }
     },
     "audio_resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
-      "when": { "audio": true },
-      "params": { "output_rate_hz": 48000.0, "stopband_db": 60.0 }
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
     },
     "audio_nr": {
       "type": "AudioNrMono",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "sample_rate_hz": 48000.0,
         "neural_enable": false,
@@ -65,22 +124,62 @@
     "audio": {
       "type": "AudioSink",
       "placement": "browser",
-      "when": { "audio": true },
-      "params": { "buffer_samples": 8192 }
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "buffer_samples": 8192
+      }
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
-    ["demod.out", "audio_tee.in"],
-    ["audio_tee.out0", "psk.in"],
-    ["audio_tee.out1", "audio_resamp.in"],
-    ["audio_resamp.out", "audio_nr.in"],
-    ["audio_nr.out", "audio.in"],
-    ["fft.out", "logmag.in"],
-    ["psk.events", "ui:fldigi"],
-    ["logmag.out", "ui:fft"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "psk.in"
+    ],
+    [
+      "audio_tee.out1",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "psk.events",
+      "ui:fldigi"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ]
   ]
 }

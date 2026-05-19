@@ -114,6 +114,14 @@ struct Args {
     #[arg(long = "presets-dir", value_name = "PATH")]
     presets_dir: Option<PathBuf>,
 
+    /// Run the corpus cross-reference validator over the presets
+    /// directory at boot and `warn!` every finding (same checks as the
+    /// `flowgraph_corpus` PR gate, minus asset-file existence which
+    /// needs the repo `samples/` tree). Opt-in; off by default so a
+    /// deployed binary doesn't scan on every start.
+    #[arg(long = "validate-presets", default_value_t = false)]
+    validate_presets: bool,
+
     /// Runtime tick period, in microseconds. Defaults to 400µs
     /// (2.5kHz) which is fine for any source at 2MHz or below given
     /// `DEFAULT_FRAMES_HINT` of 1024 samples per tick.
@@ -314,6 +322,21 @@ async fn main() -> Result<()> {
         .or_else(|| flowgraph_path.parent().map(std::path::Path::to_path_buf))
     {
         tracing::info!(path = %dir.display(), "presets browser enabled");
+        if args.validate_presets {
+            let findings = ferrite_runtime::validate_corpus(&dir, None);
+            if findings.is_empty() {
+                tracing::info!(target: "validation", path = %dir.display(), "preset corpus clean");
+            } else {
+                for f in &findings {
+                    tracing::warn!(target: "validation", kind = f.kind, slug = %f.slug, "{}", f.message);
+                }
+                tracing::warn!(
+                    target: "validation",
+                    count = findings.len(),
+                    "preset corpus has cross-reference problems (see --validate-presets findings above)"
+                );
+            }
+        }
         state = state.with_presets_dir(dir);
     }
 

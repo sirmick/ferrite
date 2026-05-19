@@ -89,6 +89,10 @@
   // when the source caps are available, instead of a generic "soapy"
   // tag — at a glance you want to see which radio is plugged in, not
   // just which abstraction layer it talks through.
+  // The active decoder/preset, shown next to the SDR so it's always
+  // clear what's being decoded. Falls back to name, then nothing.
+  let presetLabel = $derived(pipeline.flowgraph?.label ?? pipeline.flowgraph?.name ?? null);
+
   let sourceLabel = $derived.by(() => {
     const s = pipeline.source;
     if (!s) return '';
@@ -164,6 +168,11 @@
   </span>
   {#if sourceLabel}
     <span class="font-mono text-[11px]">{sourceLabel}</span>
+  {/if}
+  {#if presetLabel}
+    <span class="font-mono text-[11px] text-slate-300" title="active decoder / preset"
+      >▸ {presetLabel}</span
+    >
   {/if}
   {#if pipeline.errorMessage}
     <span class="text-rose-400" title={pipeline.errorMessage}>error</span>

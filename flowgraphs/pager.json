@@ -1,13 +1,17 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "pager",
+  "category": "Paging & ISM",
   "label": "Pagers (POCSAG / FLEX)",
-  "description": "Pager messages on the 929\u2013932 MHz US carrier band \u2014 POCSAG (512/1200/2400 bps) and FLEX (1600/3200/6400 bps 4-FSK) in parallel.",
+  "description": "Pager traffic on the US 929\u2013932 MHz band \u2014 POCSAG (512/1200/2400) and FLEX decoded in parallel.",
   "ai_notes": "POCSAG + FLEX pager decoder. Default centre 929.614206 MHz \u2014 US commercial paging block. Coverage varies regionally (US: 929\u2013932 MHz, 152\u2013162 MHz; UK: 153 MHz; check sigidwiki). Output: `tail decoder --category pocsag` and `--category flex`. Hospital / commercial paging traffic is plentiful in most metros.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/POCSAG",
   "sample_path": "samples/sigidwiki/POCSAG_Sound.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/POCSAG_Waterfallthmb.png",
-  "environments": ["node", "browser"],
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -76,7 +80,9 @@
     "audio_resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "output_rate_hz": 48000.0,
         "stopband_db": 60.0
@@ -85,7 +91,9 @@
     "audio_nr": {
       "type": "AudioNrMono",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "sample_rate_hz": 48000.0,
         "blanker_enable": true,
@@ -96,24 +104,62 @@
     "audio": {
       "type": "AudioSink",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "buffer_samples": 8192
       }
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
-    ["demod.out", "audio_tee.in"],
-    ["audio_tee.out0", "resamp.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["resamp.out", "pager.in"],
-    ["audio_tee.out1", "audio_resamp.in"],
-    ["audio_resamp.out", "audio_nr.in"],
-    ["audio_nr.out", "audio.in"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "resamp.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "resamp.out",
+      "pager.in"
+    ],
+    [
+      "audio_tee.out1",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ]
   ]
 }

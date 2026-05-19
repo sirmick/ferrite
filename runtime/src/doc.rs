@@ -153,6 +153,26 @@ impl<'de> Deserialize<'de> for Wire {
     }
 }
 
+/// One catalog variant of a base flowgraph (see
+/// `docs/14-fldigi-catalog-variants.md`, D-V1). A variant shares the
+/// base's sample / thumbnail / sigwiki ref and overlays `patch` —
+/// `block_id → { param_key: value, … }` — onto the base blocks. The
+/// resolved slug is `${doc.name}-${id}` (hard cut, no bare fallback).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VariantDecl {
+    /// Stable per-variant id; slug suffix. Unique within the doc.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Exactly one variant per doc is the default; its resolved params
+    /// must equal the base's inline `blocks.*.params` (validator D-V5).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
+    /// `block_id → { param_key: value }` overlaid on the base blocks.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub patch: BTreeMap<String, serde_json::Value>,
+}
+
 /// Top-level flowgraph document. Use [`FlowgraphDoc::from_json`] to load
 /// from a slice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +193,31 @@ pub struct FlowgraphDoc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_notes: Option<String>,
     pub environments: Vec<Environment>,
+    /// Catalog grouping key (2-level catalog, D-V6). Optional during
+    /// rollout; the validator will require it on catalog-visible docs
+    /// in Phase 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Catalog variants (D-V1). Empty = a singleton preset (no
+    /// expansion). When non-empty, exactly one carries `default: true`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<VariantDecl>,
+    /// Repo-relative path to the audio sample surfaced in the catalog.
+    /// Previously silent-dropped by serde (Rust never modelled it) —
+    /// modelled now so the corpus validator can assert it resolves and
+    /// so a Rust round-trip no longer destroys it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_path: Option<String>,
+    /// Repo-relative path to the spectrum/waterfall thumbnail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_wiki_image: Option<String>,
+    /// sigidwiki page URL drawn as a catalog link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_wiki_url: Option<String>,
+    /// `false` keeps a doc loadable by name but out of the UI catalog
+    /// (test canaries / dev graphs). Absent = visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_visible: Option<bool>,
     /// Block id → declaration. `BTreeMap` keeps iteration deterministic
     /// (important for scheduler output ordering and for snapshot tests).
     pub blocks: BTreeMap<String, BlockInstanceDecl>,
@@ -189,6 +234,34 @@ impl FlowgraphDoc {
     /// diffs. Production callers usually want `serde_json::to_vec`.
     pub fn to_json_pretty(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Overlay a variant `patch` (`block_id → { param_key: value }`)
+    /// onto this doc's blocks, shallow-merging each touched block's
+    /// `params` (patch wins). Patches on a block this doc doesn't
+    /// declare are ignored — the corpus validator (D-V5) rejects those
+    /// at PR time, so reaching one here means a hand-loaded preset; do
+    /// the safe thing rather than panic. Behaviourally identical to
+    /// the browser `applyVariantPatch` (the two must not drift).
+    pub fn apply_variant_patch(&mut self, patch: &BTreeMap<String, serde_json::Value>) {
+        for (block_id, param_patch) in patch {
+            let Some(block) = self.blocks.get_mut(block_id) else {
+                continue;
+            };
+            let Some(patch_obj) = param_patch.as_object() else {
+                continue;
+            };
+            let base = block
+                .params
+                .get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(base_obj) = base.as_object_mut() {
+                for (k, v) in patch_obj {
+                    base_obj.insert(k.clone(), v.clone());
+                }
+            } else {
+                *base = serde_json::Value::Object(patch_obj.clone());
+            }
+        }
     }
 }
 

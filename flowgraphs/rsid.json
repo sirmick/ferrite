@@ -1,11 +1,15 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "rsid",
+  "category": "Auto / RSID",
   "label": "RSID (automatic digital-mode ID)",
-  "description": "RSID (RSID / Reed-Solomon Identifier) is fldigi's automatic mode-detection beacon: a short, robust 16-tone burst many digital-mode operators transmit just before their traffic to announce which mode and centre frequency follow. This preset runs the fldigi RSID detector continuously and, the moment it recognises a burst, hot-swaps the decoder to the announced mode (RTTY, PSK31, MT63, Olivia, Contestia, DominoEX, Throb, …) — no manual mode picking. It starts in RTTY (rtty45) until the first RSID fires. Tune so the signal sits around the 1500 Hz audio sweet spot (dial ≈ signal − 1.5 kHz); AFC tracks. Park it on a busy 20 m digimode watering hole (14.070–14.100 MHz USB; also 7.040–7.100, 3.580–3.600, 10.130–10.150, 21.070–21.100, 28.070–28.120) and it will follow whatever mode shows up. Decoded text streams under the decoder::fldigi log target; mode switches under decoder::rsid. Audio is teed alongside so you can listen.",
-  "ai_notes": "RSID auto digital-mode detect (vendored fldigi, FldigiAuto block). Starts in rtty45; on an RSID burst it rebuilds the inner modem to the detected mode in place (same block id/wiring) and logs the switch to `decoder::rsid`. Decoded text: `tail decoder --category fldigi`; detections: `tail decoder --category rsid`. Best on busy digimode watering holes (USB): 14.070–14.100 / 7.040–7.100 / 3.580–3.600 / 10.130–10.150 / 21.070–21.100 / 28.070–28.120 MHz. Output is continuous (no slots); many ops send RSID before each over, so detections are bursty — wait for activity. Weak copy is usually antenna/AGC, not the detector — fixed gain + AGC off helps on quiet bands. Not every mode RSIDs; silent operators won't auto-switch.",
+  "description": "Auto digital-mode decoder \u2014 fldigi's RSID detector hot-swaps to whatever mode (RTTY/PSK/Olivia/\u2026) is announced on the band.",
+  "ai_notes": "RSID auto digital-mode detect (vendored fldigi, FldigiAuto block). Starts in rtty45; on an RSID burst it rebuilds the inner modem to the detected mode in place (same block id/wiring) and logs the switch to `decoder::rsid`. Decoded text: `tail decoder --category fldigi`; detections: `tail decoder --category rsid`. Best on busy digimode watering holes (USB): 14.070\u201314.100 / 7.040\u20137.100 / 3.580\u20133.600 / 10.130\u201310.150 / 21.070\u201321.100 / 28.070\u201328.120 MHz. Output is continuous (no slots); many ops send RSID before each over, so detections are bursty \u2014 wait for activity. Weak copy is usually antenna/AGC, not the detector \u2014 fixed gain + AGC off helps on quiet bands. Not every mode RSIDs; silent operators won't auto-switch.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/RSID",
-  "environments": ["node", "browser"],
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -16,43 +20,73 @@
         "bandwidth_hz": 2000000.0
       }
     },
-    "tee": { "type": "TeeIqF32", "placement": "node" },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
     "chan": {
       "type": "Channelizer",
       "placement": "node",
-      "params": { "input_rate_hz": 2400000.0, "output_rate_hz": 8000.0 }
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 8000.0
+      }
     },
     "fft": {
       "type": "FFT",
       "placement": "node",
-      "params": { "size": 16384, "window": "hann", "max_frames_per_second": 30 }
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
     },
     "logmag": {
       "type": "LogMagU8",
       "placement": "node",
-      "params": { "size": 16384, "alpha": 0.3 }
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
     },
     "demod": {
       "type": "SsbDemod",
       "placement": "node",
-      "params": { "sample_rate_hz": 8000, "sideband": "usb", "audio_gain": 30.0 }
+      "params": {
+        "sample_rate_hz": 8000,
+        "sideband": "usb",
+        "audio_gain": 30.0
+      }
     },
-    "audio_tee": { "type": "TeeRealF32", "placement": "node" },
+    "audio_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
     "rsid": {
       "type": "FldigiAuto",
       "placement": "node",
-      "params": { "start_mode": "rtty45", "afc": true }
+      "params": {
+        "start_mode": "rtty45",
+        "afc": true
+      }
     },
     "audio_resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
-      "when": { "audio": true },
-      "params": { "output_rate_hz": 48000.0, "stopband_db": 60.0 }
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
     },
     "audio_nr": {
       "type": "AudioNrMono",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "sample_rate_hz": 48000.0,
         "neural_enable": false,
@@ -63,22 +97,62 @@
     "audio": {
       "type": "AudioSink",
       "placement": "browser",
-      "when": { "audio": true },
-      "params": { "buffer_samples": 8192 }
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "buffer_samples": 8192
+      }
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
-    ["demod.out", "audio_tee.in"],
-    ["audio_tee.out0", "rsid.in"],
-    ["audio_tee.out1", "audio_resamp.in"],
-    ["audio_resamp.out", "audio_nr.in"],
-    ["audio_nr.out", "audio.in"],
-    ["rsid.events", "ui:fldigi"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "rsid.in"
+    ],
+    [
+      "audio_tee.out1",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ],
+    [
+      "rsid.events",
+      "ui:fldigi"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ]
   ]
 }

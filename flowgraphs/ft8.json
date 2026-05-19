@@ -1,13 +1,37 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "ft8",
-  "label": "FT8 (HF weak-signal digital)",
-  "description": "FT8 is the dominant HF digital mode \u2014 15-second slots aligned to UTC, 8-FSK at 6.25 Hz tone spacing, callsigns + grid squares + reports in 13 characters per slot. Signature on the waterfall is the tone-grid: many discrete horizontal bars at fixed audio frequencies, each spanning one slot. Common dial frequencies (USB demod): 1.840 / 3.573 / 7.074 / 10.136 / 14.074 / 18.100 / 21.074 / 24.915 / 28.074 / 50.313 MHz. Tune slightly off the dial (DC-spike rule); the channelizer's `freq_shift_hz` recovers the carrier offset. Decoded messages stream under the `decoder::ft8` log target every 15 s. Audio is teed alongside so the user can listen for activity.",
+  "category": "FT8 / FT4 / WSPR",
+  "label": "FT8 / FT4",
+  "description": "FT8 / FT4 \u2014 dominant HF weak-signal modes: short UTC-aligned slots exchanging callsign, grid and report.",
   "ai_notes": "FT8 (HF weak-signal digital, 15 s UTC-aligned slots). Standard dial frequencies (USB demod, listen +1500 Hz audio offset): 1.840 / 3.573 / 7.074 / 10.136 / 14.074 / 18.100 / 21.074 / 24.915 / 28.074 / 50.313 MHz. Decodes appear every 15 s \u2014 wait \u226530 s before declaring \"no traffic.\" Output: `tail decoder --category ft8` (or `ft4` if you switch the demod mode). Mode switch via `param ft8 mode=ft4`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/FT8",
   "sample_path": "samples/sigidwiki/FT8_websdr_test.wav",
   "signal_wiki_image": "samples/sigidwiki/images/FT8_signal.png",
-  "environments": ["node", "browser"],
+  "environments": [
+    "node",
+    "browser"
+  ],
+  "variants": [
+    {
+      "id": "ft8",
+      "label": "FT8",
+      "default": true,
+      "patch": {}
+    },
+    {
+      "id": "ft4",
+      "label": "FT4",
+      "patch": {
+        "ft8": {
+          "mode": "ft4"
+        },
+        "src": {
+          "center_freq_hz": 14080000.0
+        }
+      }
+    }
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -72,7 +96,9 @@
     "audio_resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "output_rate_hz": 48000.0,
         "stopband_db": 60.0
@@ -81,7 +107,9 @@
     "audio_nr": {
       "type": "AudioNrMono",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "sample_rate_hz": 48000.0,
         "neural_enable": false,
@@ -92,24 +120,62 @@
     "audio": {
       "type": "AudioSink",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "buffer_samples": 8192
       }
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
-    ["demod.out", "audio_tee.in"],
-    ["audio_tee.out0", "ft8.in"],
-    ["audio_tee.out1", "audio_resamp.in"],
-    ["audio_resamp.out", "audio_nr.in"],
-    ["audio_nr.out", "audio.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["ft8.events", "ui:ft8"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "ft8.in"
+    ],
+    [
+      "audio_tee.out1",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "ft8.events",
+      "ui:ft8"
+    ]
   ]
 }

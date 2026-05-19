@@ -1,13 +1,17 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "nbfm",
+  "category": "Voice (SSB/NBFM)",
   "label": "Narrowband FM (voice)",
-  "description": "Narrowband FM voice \u2014 25 kHz channels: NOAA weather, marine VHF, public-safety, FRS/GMRS, 2 m / 70 cm amateur. \u00b15 kHz deviation.",
+  "description": "Narrowband FM voice \u2014 25 kHz channels: marine VHF, public-safety, FRS/GMRS, 2 m / 70 cm amateur.",
   "ai_notes": "Narrowband FM voice, 25 kHz channels: 2 m / 70 cm repeaters, marine VHF (156-162 MHz), public-safety, FRS/GMRS (462-467 MHz). +-5 kHz deviation. Squelch, 3.4 kHz voice LPF, 75 us de-emphasis, impulse blanker. `neural`/`spectral` selectable in the UI for weak/hissy channels.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/NFM_Voice",
   "sample_path": "samples/sigidwiki/Nfm_voice.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Sintitulo.png",
-  "environments": ["node", "browser"],
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -68,7 +72,9 @@
     "audio": {
       "type": "AudioSink",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "buffer_samples": 8192
       }
@@ -76,7 +82,9 @@
     "shaper": {
       "type": "AudioShaper",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "sample_rate_hz": 25000.0,
         "lpf_hz": 3400.0,
@@ -86,7 +94,9 @@
     "resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "output_rate_hz": 48000.0,
         "stopband_db": 60.0
@@ -95,7 +105,9 @@
     "audio_nr": {
       "type": "AudioNrMono",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "sample_rate_hz": 48000.0,
         "deemph_enable": true,
@@ -107,16 +119,49 @@
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "squelch.in"],
-    ["squelch.out", "demod.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["demod.out", "shaper.in"],
-    ["shaper.out", "resamp.in"],
-    ["resamp.out", "audio_nr.in"],
-    ["audio_nr.out", "audio.in"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "squelch.in"
+    ],
+    [
+      "squelch.out",
+      "demod.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "demod.out",
+      "shaper.in"
+    ],
+    [
+      "shaper.out",
+      "resamp.in"
+    ],
+    [
+      "resamp.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ]
   ]
 }

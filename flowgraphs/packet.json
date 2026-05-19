@@ -1,13 +1,17 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "packet",
+  "category": "Packet / APRS",
   "label": "Packet radio (APRS / AX.25)",
-  "description": "Generic AX.25 packet radio \u2014 the on-the-air format used by APRS (144.39 MHz NA, 144.800 EU, 145.175 AU), BBS / mailbox forwarding, and amateur-satellite digipeating. Five multimon decoders run in parallel: AFSK1200, AFSK2400 \u00d73, FSK9600 G3RUH. APRS is the most common payload but the block decodes any AX.25-framed traffic at those rates.",
+  "description": "AX.25 packet radio \u2014 APRS and BBS/satellite traffic; AFSK1200, AFSK2400 and FSK9600 decoded in parallel.",
   "ai_notes": "AX.25 packet decoder. Most common use is APRS on 144.39 MHz (NA), 144.800 MHz (EU), 145.175 MHz (AU), but anything AX.25-framed at AFSK1200 / AFSK2400 / FSK9600 (e.g. legacy BBS, AMSAT digipeaters) decodes here too. Five multimon decoders run in parallel so the user doesn't need to pick a PHY variant manually. Output: `tail decoder --category packet`. For diagnostic side-by-side with a WAV recording see `packet-debug`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Packet_Reporting_System_(APRS)",
   "sample_path": "samples/sigidwiki/AFSK1200_Sound.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/AFSK1200_Waterfall.png",
-  "environments": ["node", "browser"],
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -76,7 +80,9 @@
     "audio_resamp": {
       "type": "RealF32Resamp",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "output_rate_hz": 48000.0,
         "stopband_db": 60.0
@@ -85,24 +91,62 @@
     "audio": {
       "type": "AudioSink",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "buffer_samples": 8192
       }
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "demod.in"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["demod.out", "audio_tee.in"],
-    ["audio_tee.out0", "resamp.in"],
-    ["resamp.out", "packet.in"],
-    ["packet.events", "ui:aprs"],
-    ["audio_tee.out1", "audio_resamp.in"],
-    ["audio_resamp.out", "audio.in"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "resamp.in"
+    ],
+    [
+      "resamp.out",
+      "packet.in"
+    ],
+    [
+      "packet.events",
+      "ui:aprs"
+    ],
+    [
+      "audio_tee.out1",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio.in"
+    ]
   ]
 }

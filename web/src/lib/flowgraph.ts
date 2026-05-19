@@ -56,6 +56,22 @@ export interface FlowgraphDoc {
    *  diagnostic flowgraphs, and other internal-only presets so they
    *  stay loadable from the CLI / API without cluttering the UI. */
   readonly catalog_visible?: boolean;
+  /** 2-level catalog grouping key (e.g. "RTTY", "Olivia", "WSPR"). See
+   *  `docs/14-fldigi-catalog-variants.md`. Optional during rollout. */
+  readonly category?: string;
+  /** Catalog variants of this base preset. Empty/absent = a singleton.
+   *  Each variant overlays `patch` (`blockId → { paramKey: value }`)
+   *  onto the base; the resolved slug is `${name}-${id}`. Exactly one
+   *  variant carries `default: true` and its resolved params must
+   *  equal the base's inline block params. */
+  readonly variants?: ReadonlyArray<VariantDecl>;
+}
+
+export interface VariantDecl {
+  readonly id: string;
+  readonly label?: string;
+  readonly default?: boolean;
+  readonly patch?: Readonly<Record<string, Record<string, unknown>>>;
 }
 
 /** Canonical `Source` placeholder id + sentinel type. Must match the

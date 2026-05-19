@@ -1,13 +1,17 @@
 {
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "wbfm",
+  "category": "FM/AM broadcast",
   "label": "FM broadcast (mono)",
-  "description": "Wideband FM broadcast \u2014 commercial radio, 87.9\u2013107.9 MHz. Mono playback; pick the stereo preset if you want pilot-locked L/R.",
+  "description": "Wideband FM broadcast \u2014 commercial radio, 87.9\u2013107.9 MHz, mono playback.",
   "ai_notes": "Wideband FM broadcast, mono. Pick for commercial radio (87.9\u2013107.9 MHz). Includes RdsDemod \u2014 RDS station name + program type show in the UI RdsReadout. Audio chain: 15 kHz LPF, 75 \u00b5s de-emphasis. `wbfm_stereo` for pilot-locked stereo.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/FM_Broadcast_Radio",
   "sample_path": "samples/sigidwiki/WFM.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Broadcast_FM.jpg",
-  "environments": ["node", "browser"],
+  "environments": [
+    "node",
+    "browser"
+  ],
   "blocks": {
     "src": {
       "type": "Source",
@@ -79,7 +83,9 @@
     "shaper": {
       "type": "AudioShaper",
       "placement": "node",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "sample_rate_hz": 240000.0,
         "lpf_hz": 15000.0,
@@ -89,7 +95,9 @@
     "decim": {
       "type": "RealF32Resamp",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "output_rate_hz": 48000.0,
         "stopband_db": 60.0
@@ -98,7 +106,9 @@
     "audio_nr": {
       "type": "AudioNrMono",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "sample_rate_hz": 48000.0,
         "deemph_enable": true,
@@ -108,27 +118,74 @@
     "audio": {
       "type": "AudioSink",
       "placement": "browser",
-      "when": { "audio": true },
+      "when": {
+        "audio": true
+      },
       "params": {
         "buffer_samples": 8192
       }
     }
   },
   "wires": [
-    ["src.out", "tee.in"],
-    ["tee.out0", "chan.in"],
-    ["tee.out1", "fft.in"],
-    ["chan.out", "rssi.in"],
-    ["rssi.out", "demod.in"],
-    ["rssi.events", "ui:rssi"],
-    ["demod.out", "audio_tee.in"],
-    ["audio_tee.out0", "rds.in"],
-    ["rds.events", "ui:rds"],
-    ["fft.out", "logmag.in"],
-    ["logmag.out", "ui:fft"],
-    ["audio_tee.out1", "shaper.in"],
-    ["shaper.out", "decim.in"],
-    ["decim.out", "audio_nr.in"],
-    ["audio_nr.out", "audio.in"]
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "chan.out",
+      "rssi.in"
+    ],
+    [
+      "rssi.out",
+      "demod.in"
+    ],
+    [
+      "rssi.events",
+      "ui:rssi"
+    ],
+    [
+      "demod.out",
+      "audio_tee.in"
+    ],
+    [
+      "audio_tee.out0",
+      "rds.in"
+    ],
+    [
+      "rds.events",
+      "ui:rds"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "audio_tee.out1",
+      "shaper.in"
+    ],
+    [
+      "shaper.out",
+      "decim.in"
+    ],
+    [
+      "decim.out",
+      "audio_nr.in"
+    ],
+    [
+      "audio_nr.out",
+      "audio.in"
+    ]
   ]
 }

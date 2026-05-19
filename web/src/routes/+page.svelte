@@ -219,7 +219,7 @@
             {:else if leftTab === 'catalog'}
               <SignalCatalog
                 activeSlug={pipeline.flowgraph?.name ?? null}
-                onPick={(entry) => void pipeline.loadPreset(entry.slug)}
+                onPick={(slug) => void pipeline.loadPreset(slug)}
               />
             {:else if leftTab === 'settings'}
               <SettingsPanel />
