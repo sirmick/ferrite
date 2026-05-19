@@ -58,25 +58,34 @@ describe('conversation-state single authority', () => {
     expect(store.sessionId).toBe('sess-A');
   });
 
-  it('session_reset clears coherently with a single honest banner', () => {
+  it('session_reset preserves visible history, drops the binding, appends one banner', () => {
     const store = new AiStore();
+    // A real prior conversation the user can still see.
     store.ingestEvent({ type: 'ferrite_ai_user_turn', text: 'q', t: 1 });
-    expect(store.turns.length).toBeGreaterThan(0);
+    const before = store.turns.length;
+    expect(before).toBeGreaterThan(0);
     store.sessionId = 'doomed';
 
     store.ingestEvent({ type: 'session_reset', reason: 'clear' });
 
+    // History is the user's record — it must NOT be wiped (that looked
+    // like the panel vanished). Binding dropped + one honest banner.
     expect(store.sessionId).toBeNull();
-    expect(store.turns).toHaveLength(1);
-    const only = store.turns[0] as {
+    expect(store.turns).toHaveLength(before + 1);
+    const banner = store.turns[store.turns.length - 1] as {
       role: string;
       chunks: Array<{ kind: string; label?: string }>;
     };
-    expect(only.role).toBe('assistant');
-    expect(only.chunks).toHaveLength(1);
-    expect(only.chunks[0].kind).toBe('meta');
-    expect(only.chunks[0].label).toContain('reasoning context reset');
-    expect(only.chunks[0].label).toContain('clear');
+    expect(banner.role).toBe('assistant');
+    expect(banner.chunks).toHaveLength(1);
+    expect(banner.chunks[0].kind).toBe('meta');
+    expect(banner.chunks[0].label).toContain('reasoning context reset');
+    expect(banner.chunks[0].label).toContain('history preserved');
+    expect(banner.chunks[0].label).toContain('clear');
+
+    // Reconnect storms must not stack banners.
+    store.ingestEvent({ type: 'session_reset', reason: 'clear' });
+    expect(store.turns).toHaveLength(before + 1);
   });
 
   it('an empty snapshot just clears (no prior turns survive)', () => {

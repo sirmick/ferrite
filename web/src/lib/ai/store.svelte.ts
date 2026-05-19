@@ -559,28 +559,34 @@ export class AiStore {
       return;
     }
 
-    // The session the browser tried to continue is gone (sidecar
-    // restarted, transcript rolled, never existed). Clear coherently
-    // and show one honest banner instead of a stale log the assistant
-    // has no memory of.
+    // The session the browser tried to continue is unresumable on the
+    // sidecar (sidecar restarted, transcript rolled, or it predates
+    // persistence). The visible transcript is the *user's* local
+    // record — preserve it (do NOT wipe history; that's the opposite
+    // of "history preserved" and looks like the panel vanished).
+    // Just drop the dead session binding and append ONE honest banner
+    // so the boundary is explicit: the assistant won't remember what's
+    // above. Deduped so reconnects don't stack banners.
     if (t === 'session_reset') {
       const reason = typeof event['reason'] === 'string' ? event['reason'] : 'reset';
-      this.turns = [];
       this.sessionId = null;
-      this.nextId = 1;
-      this.pushTurn({
-        id: this.nextId++,
-        role: 'assistant',
-        t: Date.now(),
-        chunks: [
-          {
-            kind: 'meta',
-            label: `── reasoning context reset (${reason}) — history preserved, assistant won't remember the above`,
-          },
-        ],
-        status: 'complete',
-      });
       if (typeof localStorage !== 'undefined') localStorage.removeItem(LS_SESSION);
+      const label = `── reasoning context reset (${reason}) — history preserved, assistant won't remember the above`;
+      const last = this.turns[this.turns.length - 1];
+      const alreadyBannered =
+        last?.role === 'assistant' &&
+        last.chunks.length === 1 &&
+        last.chunks[0].kind === 'meta' &&
+        last.chunks[0].label === label;
+      if (!alreadyBannered) {
+        this.pushTurn({
+          id: this.nextId++,
+          role: 'assistant',
+          t: Date.now(),
+          chunks: [{ kind: 'meta', label }],
+          status: 'complete',
+        });
+      }
       this.persist();
       return;
     }
