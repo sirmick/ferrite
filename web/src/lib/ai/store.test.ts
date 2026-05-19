@@ -13,6 +13,18 @@ import { AiStore } from './store.svelte';
 const LS_TURNS = 'ferrite-ai.turns';
 const LS_SESSION = 'ferrite-ai.session_id';
 
+/** Attach a fake OPEN socket so the unified reset path takes its
+ *  online branch (sends a `reset_session` control instead of the
+ *  offline local-banner fallback). */
+function attachFakeSocket(store: AiStore): { sent: string[] } {
+  const sent: string[] = [];
+  (store as unknown as { ws: unknown }).ws = {
+    readyState: WebSocket.OPEN,
+    send: (m: string) => sent.push(m),
+  };
+  return { sent };
+}
+
 beforeEach(() => {
   localStorage.clear();
 });
@@ -97,5 +109,49 @@ describe('conversation-state single authority', () => {
 
     expect(store.turns).toHaveLength(0);
     expect(store.sessionId).toBe('sess-B');
+  });
+
+  it('/reset, Clear, setMode all drop the sidecar binding (unified path)', () => {
+    // Online: every reset entry point must send the authoritative
+    // `reset_session` control — nulling only the browser id would
+    // leave the sidecar resuming the old context (the bug).
+    const store = new AiStore();
+    const { sent } = attachFakeSocket(store);
+    store.sessionId = 'live';
+
+    store.resetSession({ reason: 'reset' });
+    store.clear();
+    store.setMode('decoder');
+
+    const reasons = sent
+      .map((m) => JSON.parse(m))
+      .filter((m) => m.type === 'reset_session')
+      .map((m) => m.reason as string);
+    expect(reasons).toHaveLength(3);
+    expect(reasons[0]).toBe('reset');
+    expect(reasons[1]).toBe('clear');
+    expect(reasons[2]).toContain('decoder');
+    expect(store.sessionId).toBeNull();
+  });
+
+  it('/reset offline keeps history, drops binding, appends one banner', () => {
+    // No socket → local fallback. The visible transcript is the
+    // user's record; it must survive (this is the regression that
+    // made the panel look gone).
+    const store = new AiStore();
+    store.ingestEvent({ type: 'ferrite_ai_user_turn', text: 'q', t: 1 });
+    const before = store.turns.length;
+    store.sessionId = 'doomed';
+
+    store.resetSession({ reason: 'reset' });
+
+    expect(store.sessionId).toBeNull();
+    expect(store.turns).toHaveLength(before + 1);
+    const banner = store.turns[store.turns.length - 1] as {
+      chunks: Array<{ kind: string; label?: string }>;
+    };
+    expect(banner.chunks[0].kind).toBe('meta');
+    expect(banner.chunks[0].label).toContain('reasoning context reset');
+    expect(banner.chunks[0].label).toContain('reset');
   });
 });

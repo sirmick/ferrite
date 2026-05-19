@@ -197,48 +197,65 @@ export class AiStore {
     this.connection = 'closed';
   }
 
-  setMode(mode: AiMode): void {
-    if (this.mode === mode) return;
-    this.mode = mode;
-    // Mode switch resets server-side conversation state — different
-    // system prompt means the old conversation history would re-prime
-    // under wrong context. Drop the sessionId too so the next turn
-    // starts fresh rather than trying to resume the wrong-mode
-    // conversation.
+  /** Honest banner text for a context reset. Identical online (the
+   *  sidecar's `session_reset` echo) and offline (local fallback) so
+   *  the marker reads the same and the `session_reset` dedupe works. */
+  private resetBannerLabel(reason: string): string {
+    return `── reasoning context reset (${reason}) — history preserved, assistant won't remember the above`;
+  }
+
+  /** Single authoritative reset path: tell the sidecar (the authority)
+   *  to drop the SDK session binding so the LLM context resets *with*
+   *  the transcript, never independently. The sidecar nulls its
+   *  connection session and echoes `session_reset` (which appends the
+   *  banner, deduped). Returns false when offline so the caller can
+   *  fall back to a local marker. Every reset entry point — `/reset`,
+   *  the Clear button, mode change, setup edit — routes through here,
+   *  so they can't drift apart again. */
+  private requestSidecarReset(reason: string): boolean {
     this.sessionId = null;
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(LS_SESSION);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'reset_session', reason }));
+      return true;
+    }
+    return false;
+  }
+
+  /** Append the reset banner locally — offline fallback for the reset
+   *  entry points (online, the sidecar's `session_reset` echo does
+   *  it). History is preserved either way. */
+  private localResetBanner(reason: string): void {
     this.pushTurn({
       id: this.nextId++,
       role: 'assistant',
       t: Date.now(),
-      chunks: [{ kind: 'meta', label: `mode → ${mode} (conversation reset)` }],
+      chunks: [{ kind: 'meta', label: this.resetBannerLabel(reason) }],
       status: 'complete',
     });
+  }
+
+  setMode(mode: AiMode): void {
+    if (this.mode === mode) return;
+    this.mode = mode;
+    // A different mode is a different system prompt — resuming would
+    // re-prime under the wrong context. Route through the unified
+    // reset so the *sidecar* actually drops the SDK session (nulling
+    // only the browser id would leave the sidecar resuming the old
+    // context — the bug this path closes).
+    if (!this.requestSidecarReset(`mode → ${mode}`)) this.localResetBanner(`mode → ${mode}`);
     this.persist();
   }
 
   /** Edit the operator-supplied radio setup description. Same
    *  reasoning as `setMode`: the system prompt changes so resuming
-   *  the SDK session would re-prime under stale facts. Drops the
-   *  sessionId; the next turn starts a fresh conversation with the
-   *  updated setup in the system prompt. */
+   *  the SDK session would re-prime under stale facts — route through
+   *  the unified reset so the sidecar actually drops the binding. */
   setSetupDescription(text: string): void {
     if (text === this.setupDescription) return;
     this.setupDescription = text;
-    this.sessionId = null;
-    this.pushTurn({
-      id: this.nextId++,
-      role: 'assistant',
-      t: Date.now(),
-      chunks: [
-        {
-          kind: 'meta',
-          label: text.trim()
-            ? 'radio setup updated (conversation reset)'
-            : 'radio setup cleared (conversation reset)',
-        },
-      ],
-      status: 'complete',
-    });
+    const reason = text.trim() ? 'radio setup updated' : 'radio setup cleared';
+    if (!this.requestSidecarReset(reason)) this.localResetBanner(reason);
     this.persist();
   }
 
@@ -352,44 +369,32 @@ export class AiStore {
     this.ws.send(JSON.stringify(payload));
   }
 
+  /** Hard clear: wipe the *visible* panel as well as drop the SDK
+   *  context. (`/reset` keeps the visible history; this empties it —
+   *  that's the only difference between the two.) Both route through
+   *  the unified sidecar reset so the LLM context is actually dropped,
+   *  not just the browser id. Offline, the local wipe stands and the
+   *  next connect's request_snapshot reconciles the absent session. */
   clear(): void {
     this.turns = [];
-    this.sessionId = null;
-    this.persist();
     if (typeof localStorage !== 'undefined') {
       localStorage.removeItem(LS_TURNS);
-      localStorage.removeItem(LS_SESSION);
       localStorage.removeItem(LS_NEXT_ID);
     }
-    // Unified reset: tell the sidecar (the authority) to drop the SDK
-    // session binding so transcript + context roll together — not
-    // independently. It echoes a `session_reset` that re-clears
-    // coherently and adds the honest banner. When offline the local
-    // wipe above stands; the next connect's request_snapshot then
-    // gets a session_reset for the now-absent session anyway.
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'reset_session', reason: 'clear' }));
-    }
+    this.requestSidecarReset('clear');
+    this.persist();
   }
 
-  /** Drop the SDK session id but keep the transcript intact (visible
-   *  history of the prior conversation). The next user message starts
-   *  a fresh session — the sidecar rebuilds the system prompt from
-   *  scratch and re-feeds the operator context (driver_notes,
-   *  setup_description, local_time / time_zone, active mode), which
-   *  the chat store ships on every turn payload. A meta line in the
-   *  transcript marks the reset boundary so the user can see where
-   *  the AI's memory ends. */
+  /** `/reset` (and `/clear`, `/new`): drop the SDK context but keep
+   *  the visible history. Routes through the unified sidecar reset so
+   *  the sidecar actually drops its session binding — previously this
+   *  only nulled the browser id, leaving the sidecar to resume the old
+   *  context on the next turn (the banner said "context will reload"
+   *  while it silently didn't). The sidecar's `session_reset` echo
+   *  appends the honest banner; offline we append it locally. */
   resetSession(opts: { reason?: string } = {}): void {
-    this.sessionId = null;
-    const tag = opts.reason ? `reset: ${opts.reason}` : 'reset';
-    this.pushTurn({
-      id: this.nextId++,
-      role: 'assistant',
-      t: Date.now(),
-      chunks: [{ kind: 'meta', label: `── ${tag} — context will reload on next turn` }],
-      status: 'complete',
-    });
+    const reason = opts.reason?.trim() || 'reset';
+    if (!this.requestSidecarReset(reason)) this.localResetBanner(reason);
     this.persist();
   }
 
@@ -571,7 +576,7 @@ export class AiStore {
       const reason = typeof event['reason'] === 'string' ? event['reason'] : 'reset';
       this.sessionId = null;
       if (typeof localStorage !== 'undefined') localStorage.removeItem(LS_SESSION);
-      const label = `── reasoning context reset (${reason}) — history preserved, assistant won't remember the above`;
+      const label = this.resetBannerLabel(reason);
       const last = this.turns[this.turns.length - 1];
       const alreadyBannered =
         last?.role === 'assistant' &&
