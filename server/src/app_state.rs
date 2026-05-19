@@ -130,6 +130,12 @@ struct Inner {
     /// `/api/devices` and `/api/source/capabilities`; pruned when a
     /// device disappears from `enumerate`.
     device_cache: DeviceCache,
+    /// Latest node-side flow-diagnostics snapshot, refreshed ~1 Hz by
+    /// the running pipeline's diag loop. Served verbatim by
+    /// `GET /api/flowdiag` — a dedicated channel so flowdiag is always
+    /// available regardless of `RUST_LOG` and never clutters the log
+    /// stream. `None` until the first snapshot (or while stopped).
+    latest_diag: Arc<RwLock<Option<ferrite_runtime::DiagSnapshot>>>,
 }
 
 #[derive(Clone)]
@@ -164,12 +170,20 @@ impl AppState {
                 pipeline: Mutex::new(None),
                 tick_period,
                 device_cache: DeviceCache::new(),
+                latest_diag: Arc::new(RwLock::new(None)),
             }),
             logs: None,
             presets_dir: None,
             captures_dir: None,
             view_bridge: crate::view_bridge::ViewBridge::default(),
         }
+    }
+
+    /// Latest node-side [`ferrite_runtime::DiagSnapshot`], or `None`
+    /// when the pipeline is stopped / hasn't produced one yet. Backs
+    /// `GET /api/flowdiag`.
+    pub async fn flowdiag(&self) -> Option<ferrite_runtime::DiagSnapshot> {
+        self.inner.latest_diag.read().await.clone()
     }
 
     #[must_use]
@@ -614,7 +628,12 @@ impl AppState {
         apply_profile(&mut composed, &profile);
         inject_voice_transcribe(&mut composed, &profile);
         drop(profile);
-        let mount = spawn_preset(&composed, self.inner.frames.clone(), self.inner.tick_period)?;
+        let mount = spawn_preset(
+            &composed,
+            self.inner.frames.clone(),
+            self.inner.tick_period,
+            Arc::clone(&self.inner.latest_diag),
+        )?;
         *guard = Some(mount);
         Ok(())
     }
@@ -628,6 +647,9 @@ impl AppState {
         let Some(mount) = guard.take() else {
             return false;
         };
+        // Drop the stale snapshot so `GET /api/flowdiag` reports
+        // "stopped" (empty) rather than a frozen last frame.
+        *self.inner.latest_diag.write().await = None;
         // Fold the runtime's live param edits back into preset_doc —
         // the single deliberate writer that replaces the per-edit
         // mirror-back removed from apply_block_params. Snapshot before

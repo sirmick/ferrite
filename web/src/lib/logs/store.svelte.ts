@@ -2,7 +2,9 @@
 // sources: the `/ws/logs` stream (server tracing), the browser console
 // (patched in `init()`), and explicit calls from session/WS code paths.
 
-import { flow, parseFlowdiagLine } from './flowStore.svelte';
+// flowdiag no longer rides the log stream — it has its own channel
+// (GET /api/flowdiag for node, in-process for browser; see flowStore /
+// FlowPanel). The log store stays log-only.
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace';
 export type LogSource = 'server' | 'client' | 'vite';
@@ -94,12 +96,6 @@ class LogStore {
   }
 
   push(source: LogSource, level: LogLevel, text: string): void {
-    // Peel off `flowdiag side=… {json}` lines and feed the Flow store.
-    // The line then continues into `entries` like any other log under
-    // the `flowdiag` category — the per-category mute dropdown is the
-    // way to hide them, and that mute persists across reloads.
-    const flowdiag = parseFlowdiagLine(text);
-    if (flowdiag) flow.ingest(flowdiag.side, flowdiag.snap);
     const category = categoryOfText(text);
     if (category && !this.knownCategories.has(category)) {
       // Mutate via fresh Set so $state tracks the change.

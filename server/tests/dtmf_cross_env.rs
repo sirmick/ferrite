@@ -113,8 +113,13 @@ async fn dtmf_e2e_preset_round_trips_digits_across_cross_env_bridge() {
     // frames so this test's sub never drops under its own pump latency.
     let frames = frame_bus::FrameBus::new();
     let mut rx = frames.subscribe(1024);
-    let mount = preset_pipeline::spawn_preset(&doc, frames, Duration::from_millis(5))
-        .expect("node half spawns");
+    let mount = preset_pipeline::spawn_preset(
+        &doc,
+        frames,
+        Duration::from_millis(5),
+        std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+    )
+    .expect("node half spawns");
 
     // --- Pump loop ----------------------------------------------------
     // Alternate between:

@@ -482,6 +482,19 @@ pub async fn list_block_schemas() -> Json<Vec<crate::block_schema::BlockSchemaDt
     Json(crate::block_schema::all_block_schemas())
 }
 
+/// `GET /api/flowdiag` — the latest node-side flow-diagnostics
+/// snapshot (per-block sample throughput / process-time / ring fill),
+/// or `null` when the pipeline is stopped or hasn't produced one yet.
+/// A dedicated channel (not the log stream): always available
+/// regardless of `RUST_LOG`, never clutters the LogPanel. The browser
+/// Flow view polls this ~1 Hz for the `node` side; the `browser` side
+/// is fed locally in-browser.
+pub async fn get_flowdiag(
+    State(state): State<AppState>,
+) -> Json<Option<ferrite_runtime::DiagSnapshot>> {
+    Json(state.flowdiag().await)
+}
+
 /// `GET /api/pipeline/blocks` — every block in the currently-loaded
 /// composed preset, with its full spec and current param values.
 /// Source for the generic `<BlockParams>` UI component. See D24 in
@@ -726,32 +739,10 @@ pub struct BrowserLogEntry {
 /// DevTools. Fire-and-forget on the client side.
 pub async fn browser_log(Json(entry): Json<BrowserLogEntry>) -> StatusCode {
     let src = entry.source.as_deref().unwrap_or("browser");
-    // Browser-side flowdiag rides through here too — route it under
-    // the same `flowdiag` target the node-side runtime emits with, so
-    // `RUST_LOG=flowdiag=info` continues to isolate every flow snapshot
-    // regardless of which runtime side produced it. `tracing` requires
-    // `target:` to be a string literal, so we branch on the route
-    // rather than computing a runtime string.
-    // Browser-side flowdiag is now tagged with the `flowdiag::browser`
-    // category prefix at source. It still carries the legacy
-    // `flowdiag side=browser` substring so the receiving regex on
-    // either side keeps parsing it; the `contains` check finds either
-    // shape so we route correctly even if the prefix gets stripped.
-    let is_flowdiag = entry.message.contains("flowdiag side=");
-    if is_flowdiag {
-        match entry.level.as_str() {
-            "error" => {
-                tracing::error!(target: "flowdiag::browser", source = src, "{}", entry.message)
-            }
-            "warn" => {
-                tracing::warn!(target: "flowdiag::browser", source = src, "{}", entry.message)
-            }
-            "debug" => {
-                tracing::debug!(target: "flowdiag::browser", source = src, "{}", entry.message)
-            }
-            _ => tracing::info!(target: "flowdiag::browser", source = src, "{}", entry.message),
-        }
-    } else if entry.message.starts_with("[transcribe]") {
+    // (Browser-side flowdiag no longer comes through here — it feeds
+    // the Flow store directly in-browser via a dedicated worker
+    // message, never touching the log stream or this round-trip.)
+    if entry.message.starts_with("[transcribe]") {
         // In-browser STT is the one decoder that runs browser-side, so
         // its output never reached the node decoder log the embedded
         // AI / `ferrite-ctl decoder recent` reads. File it under a

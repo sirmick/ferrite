@@ -48,6 +48,11 @@ export class FlowgraphRunner {
      *  transcription Worker so it can resample to 16 kHz. Same
      *  optional-callback pattern as `onEvents`. */
     private readonly onTranscribeRate?: (blockId: string, rateHz: number) => void,
+    /** Browser-side flow-diagnostics snapshot (raw `DiagSnapshot`
+     *  JSON), fed straight to the Flow store — a dedicated channel,
+     *  never the log stream / server round-trip. Same optional-callback
+     *  pattern as `onEvents`. */
+    private readonly onFlowdiag?: (json: string) => void,
   ) {
     this.worker.onmessage = (ev) => this.onResponse(ev.data);
   }
@@ -108,8 +113,12 @@ export class FlowgraphRunner {
   }
 
   private onResponse(
-    resp: RunnerResponse | DiagMessage | EventsMessage | TranscribeRateMessage,
+    resp: RunnerResponse | DiagMessage | EventsMessage | TranscribeRateMessage | FlowdiagMessage,
   ): void {
+    if ((resp as FlowdiagMessage).kind === 'flowdiag') {
+      this.onFlowdiag?.((resp as FlowdiagMessage).json);
+      return;
+    }
     // Unsolicited diagnostic log from the worker — threaded out
     // through an optional callback rather than a new protocol kind,
     // so test doubles that don't care about diags stay unaffected.
@@ -154,6 +163,12 @@ interface TranscribeRateMessage {
   readonly kind: 'transcribeRate';
   readonly blockId: string;
   readonly rateHz: number;
+}
+
+interface FlowdiagMessage {
+  readonly kind: 'flowdiag';
+  /** Raw `DiagSnapshot` JSON from the worker's `rt.diagSnapshot()`. */
+  readonly json: string;
 }
 
 type SuccessResp = Extract<RunnerResponse, { ok: true }>;

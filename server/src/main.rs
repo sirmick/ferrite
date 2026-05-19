@@ -396,6 +396,7 @@ async fn main() -> Result<()> {
         .route("/api/pipeline", get(routes::pipeline_status))
         .route("/api/pipeline/start", post(routes::pipeline_start))
         .route("/api/pipeline/stop", post(routes::pipeline_stop))
+        .route("/api/flowdiag", get(routes::get_flowdiag))
         .route("/api/pipeline/blocks", get(routes::list_pipeline_blocks))
         .route(
             "/api/pipeline/blocks/:id/params",

@@ -323,15 +323,9 @@ export class RunnerCore {
           return `${a.blockId}=${a.drained}${dropTag}`;
         })
         .join(' ');
-      // Lines are emitted with a category prefix so the Logs panel
-      // parses them into the same category-tagged badges that
-      // server-side tracing lines arrive with. The Flow tab's parser
-      // looks for `flowdiag side=` anywhere in the text, so the
-      // leading category prefix doesn't break ingestion. Browser-
-      // side flowdiag uses its own `flowdiag::browser` category so
-      // it can be muted separately from server-side `flowdiag::node`.
-      // When the graph is entirely node-side (the common case) there
-      // are no browser bridges/audio, so this line is a constant
+      // A human log line (not flowdiag — that's the dedicated channel
+      // below). When the graph is entirely node-side (the common case)
+      // there are no browser bridges/audio, so this would be a constant
       // `rx[] audio[]` once a second — pure noise. Only emit it when
       // there's something bound on the browser side to report on.
       if (state.bridges.length > 0 || state.audio.length > 0) {
@@ -341,17 +335,18 @@ export class RunnerCore {
       try {
         const json = state.rt.diagSnapshot();
         // Skip the empty `{"blocks":[]}` snapshot a node-only graph
-        // produces every tick — the Flow tab has nothing to show for
-        // it and it just floods the log stream.
+        // produces every tick — nothing for the Flow view to show.
         let hasBlocks = false;
         try {
           hasBlocks = (JSON.parse(json) as { blocks?: unknown[] }).blocks?.length ? true : false;
         } catch {
-          // Unparseable snapshot — forward it so the anomaly is visible.
-          hasBlocks = true;
+          hasBlocks = true; // unparseable — forward so the anomaly is visible
         }
         if (hasBlocks) {
-          postDiag(`flowdiag::browser: flowdiag side=browser ${json}`);
+          // Dedicated flowdiag channel → Flow store directly. NOT the
+          // log stream: no LogPanel clutter, no server round-trip,
+          // independent of `RUST_LOG`.
+          postFlowdiag(json);
         }
       } catch {
         /* best-effort */
@@ -395,6 +390,20 @@ function postDiag(text: string): void {
   };
   if (typeof g.postMessage === 'function') {
     g.postMessage({ kind: 'diag', text });
+  }
+}
+
+/** Out-of-band flow-diagnostics snapshot (same channel shape as
+ *  `postDiag`): `FlowgraphRunner` recognises `kind: 'flowdiag'` and
+ *  forwards the raw `DiagSnapshot` JSON to its `onFlowdiag` callback,
+ *  which feeds the Flow store directly — never the log stream. No-op
+ *  outside a Worker (tests). */
+function postFlowdiag(json: string): void {
+  const g = globalThis as {
+    postMessage?: (msg: unknown) => void;
+  };
+  if (typeof g.postMessage === 'function') {
+    g.postMessage({ kind: 'flowdiag', json });
   }
 }
 

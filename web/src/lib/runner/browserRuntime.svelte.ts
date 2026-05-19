@@ -25,6 +25,7 @@ import { AUDIO_RING_PROCESSOR_NAME } from '$lib/audio/audioRingProcessor';
 // the page JS without a hand-written build step.
 import audioWorkletUrl from '$lib/audio/audioRingProcessor?worker&url';
 import { logs } from '$lib/logs/store.svelte';
+import { flow, type DiagSnapshot } from '$lib/logs/flowStore.svelte';
 import { clientControls } from '$lib/control/clientStore.svelte';
 import { nrBundle } from '$lib/presets/nrPresets';
 import { transcript } from '$lib/transcribe/store.svelte';
@@ -148,6 +149,15 @@ class BrowserRuntime {
         },
         (streamId, lines) => this.onDecodedEvents?.(streamId, lines),
         (blockId, rateHz) => this.forwardTranscribeRate(blockId, rateHz),
+        (json) => {
+          // Browser-side flow snapshot → Flow store directly. Never
+          // logs.push / the server: a dedicated in-process channel.
+          try {
+            flow.ingest('browser', JSON.parse(json) as DiagSnapshot);
+          } catch {
+            /* ignore an unparseable snapshot */
+          }
+        },
       );
     } catch (err) {
       this.errorMessage = errorMessage(err);

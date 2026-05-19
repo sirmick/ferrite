@@ -161,6 +161,7 @@ pub fn spawn_preset(
     doc: &FlowgraphDoc,
     frames: FrameBus,
     tick_period: Duration,
+    latest_diag: Arc<tokio::sync::RwLock<Option<ferrite_runtime::DiagSnapshot>>>,
 ) -> Result<PresetMount> {
     let node_half = split_for_environment(doc, Environment::Node, &InventorySpecRegistry)
         .map_err(|e| anyhow!("env_split: {e}"))?;
@@ -181,7 +182,12 @@ pub fn spawn_preset(
 
     let runtime = Arc::new(Mutex::new(runtime));
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(drive(Arc::clone(&runtime), tick_period, shutdown_rx));
+    let join = tokio::spawn(drive(
+        Arc::clone(&runtime),
+        tick_period,
+        shutdown_rx,
+        latest_diag,
+    ));
     Ok(PresetMount {
         handle: PresetHandle {
             shutdown: Some(shutdown_tx),
@@ -300,6 +306,7 @@ async fn drive(
     runtime: Arc<Mutex<Runtime>>,
     tick_period: Duration,
     shutdown: oneshot::Receiver<()>,
+    latest_diag: Arc<tokio::sync::RwLock<Option<ferrite_runtime::DiagSnapshot>>>,
 ) -> Result<()> {
     let mut interval = tokio::time::interval(tick_period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -314,13 +321,6 @@ async fn drive(
     // Skip the immediate tick so the first sample covers a real 1-sec
     // window rather than the sliver between `start` and now.
     diag_interval.tick().await;
-    // Previous cumulative `process_ns` per block, keyed by block id.
-    // Lets the reporter emit a per-block "% of wall-clock spent in
-    // process()" alongside the raw JSON — the same thing the UI will
-    // compute from successive JSON snapshots, but pre-baked into the log
-    // line so an operator doesn't have to diff two JSON blobs by hand.
-    let mut prev_ns: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    let mut prev_instant = std::time::Instant::now();
 
     // AFC: close AutoTune's estimate onto the channelizer shift via the
     // same live-reconfigure the UI uses for a manual VFO retune — a
@@ -385,37 +385,14 @@ async fn drive(
                 let rt = runtime.lock().await;
                 let snap = rt.diag_snapshot();
                 drop(rt);
-                let now = std::time::Instant::now();
-                let window_ns = now.duration_since(prev_instant).as_nanos() as u64;
-                prev_instant = now;
-                // Per-block delta process_ns → % of wall-clock in a
-                // short summary line. Skip on the very first sample
-                // where prev is empty (no delta yet).
-                if window_ns > 0 {
-                    let mut parts = Vec::with_capacity(snap.blocks.len());
-                    for b in &snap.blocks {
-                        let prev = prev_ns.get(&b.id).copied().unwrap_or(b.process_ns_cum);
-                        let delta = b.process_ns_cum.saturating_sub(prev);
-                        prev_ns.insert(b.id.clone(), b.process_ns_cum);
-                        #[allow(clippy::cast_precision_loss)]
-                        let pct = (delta as f64) * 100.0 / (window_ns as f64);
-                        if pct >= 0.1 {
-                            parts.push(format!("{}={:.1}%", b.id, pct));
-                        }
-                    }
-                    if !parts.is_empty() {
-                        tracing::info!(target: "flowdiag::node", "flowcpu side=node {}", parts.join(" "));
-                    }
-                }
-                // Canonical flow snapshot line. Same format the browser
-                // runner emits via `postDiag`; the browser-side
-                // `parseFlowdiagLine` picks either up with one regex.
-                // Tagged `flowdiag::node` so it can be muted separately
-                // from browser-side `flowdiag::browser`.
-                match serde_json::to_string(&snap) {
-                    Ok(json) => tracing::info!(target: "flowdiag::node", "flowdiag side=node {json}"),
-                    Err(err) => tracing::warn!(?err, "flowdiag serialize"),
-                }
+                // Publish the snapshot on the dedicated flowdiag
+                // channel (served by `GET /api/flowdiag`) instead of
+                // the tracing/log stream — always available regardless
+                // of `RUST_LOG`, and never clutters the LogPanel. The
+                // UI derives per-block CPU% from successive snapshots'
+                // `process_ns_cum`, so the old periodic `flowcpu` log
+                // line is gone too (was the other 1 Hz log offender).
+                *latest_diag.write().await = Some(snap);
             }
             _ = afc_interval.tick() => {
                 let mut rt = runtime.lock().await;
@@ -452,7 +429,13 @@ mod tests {
         let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
         let frames = FrameBus::new();
         let mut rx = frames.subscribe(32);
-        let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
+        let mount = spawn_preset(
+            &doc,
+            frames,
+            Duration::from_millis(5),
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        )
+        .unwrap();
         // First crossing gets CROSS_ENV_STREAM_BASE = 1000.
         let bytes = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -493,7 +476,13 @@ mod tests {
         .unwrap();
         let frames = FrameBus::new();
         let mut rx = frames.subscribe(4);
-        let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
+        let mount = spawn_preset(
+            &doc,
+            frames,
+            Duration::from_millis(5),
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        )
+        .unwrap();
         // Give the task a couple of ticks to run.
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(
@@ -508,7 +497,13 @@ mod tests {
         let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
         let frames = FrameBus::new();
         let _rx = frames.subscribe(8);
-        let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
+        let mount = spawn_preset(
+            &doc,
+            frames,
+            Duration::from_millis(5),
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        )
+        .unwrap();
         let t0 = std::time::Instant::now();
         mount.handle.shutdown().await.unwrap();
         // A clean shutdown returns promptly — well under the per-tick
@@ -524,7 +519,13 @@ mod tests {
         let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
         let frames = FrameBus::new();
         let mut rx = frames.subscribe(32);
-        let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
+        let mount = spawn_preset(
+            &doc,
+            frames,
+            Duration::from_millis(5),
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        )
+        .unwrap();
 
         // Drain at least one frame so we know the bridge is alive.
         let _ = tokio::time::timeout(Duration::from_secs(1), rx.recv())
@@ -574,7 +575,13 @@ mod tests {
         let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
         let frames = FrameBus::new();
         let _rx = frames.subscribe(8);
-        let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
+        let mount = spawn_preset(
+            &doc,
+            frames,
+            Duration::from_millis(5),
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        )
+        .unwrap();
         let plan = mount.reconfigure(&doc).await.unwrap();
         assert!(plan.is_noop());
         mount.handle.shutdown().await.unwrap();
@@ -588,7 +595,13 @@ mod tests {
         let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
         let frames = FrameBus::new();
         let mut rx = frames.subscribe(32);
-        let mount = spawn_preset(&doc, frames, Duration::from_millis(5)).unwrap();
+        let mount = spawn_preset(
+            &doc,
+            frames,
+            Duration::from_millis(5),
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        )
+        .unwrap();
         // Wait for one frame first.
         let _ = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await

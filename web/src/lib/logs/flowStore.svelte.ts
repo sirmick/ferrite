@@ -177,23 +177,7 @@ function snapshotMatchesPrev(snap: DiagSnapshot, prev: PrevSnap): boolean {
 
 export const flow = new FlowStore();
 
-// Parse the `flowdiag side=… {json}` line format emitted on both sides.
-// Server-side lines have a `target: ` prefix inserted by the tracing
-// broadcast layer and may carry trailing structured fields (e.g.
-// `source="client"` when the browser-side line round-trips through
-// /api/debug/log). The regex finds the marker anywhere in the line
-// and grabs the JSON object greedily — `\{.*\}` extends to the LAST
-// `}` in the string, so any trailing tracing fields are tolerated as
-// long as they don't contain a `}` themselves (none of ours do).
-const FLOWDIAG_RE = /flowdiag\s+side=(node|browser)\s+(\{.*\})/s;
-
-export function parseFlowdiagLine(text: string): { side: Side; snap: DiagSnapshot } | null {
-  const m = FLOWDIAG_RE.exec(text);
-  if (!m) return null;
-  try {
-    const snap = JSON.parse(m[2]) as DiagSnapshot;
-    return { side: m[1] as Side, snap };
-  } catch {
-    return null;
-  }
-}
+// flowdiag no longer travels as a log line — the node side is served
+// by `GET /api/flowdiag` (polled by FlowPanel) and the browser side
+// is fed straight from the runner via `flow.ingest('browser', …)`.
+// The old `parseFlowdiagLine` log-stream peel is gone.
