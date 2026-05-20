@@ -21,6 +21,7 @@
     gainLabelFor,
     gainRawValue,
     hiddenSettingsFor,
+    overallGainRangeFor,
     settingOverridesFor,
     type SettingOverride,
   } from './optionsModel';
@@ -60,7 +61,7 @@
   }
 
   let freqRange = $derived(channel?.frequency_ranges_hz[0] ?? null);
-  let overallGainRange = $derived(channel?.overall_gain_range_db ?? null);
+  let overallGainRange = $derived(caps ? overallGainRangeFor(caps) : null);
   let antennas = $derived(channel?.antennas ?? []);
   let hasAgc = $derived(channel?.has_agc ?? false);
   let hasDcOffset = $derived(channel?.has_dc_offset_mode ?? false);

@@ -34,6 +34,7 @@ interface Preset {
   gain_label?: string;
   gain_description?: string;
   gain_inverted?: boolean;
+  overall_gain_max_db?: number;
   ai_operator_notes?: string;
   notes?: string;
 }
@@ -50,6 +51,7 @@ const KNOWN_FIELDS = new Set([
   'gain_label',
   'gain_description',
   'gain_inverted',
+  'overall_gain_max_db',
   'ai_operator_notes',
   'notes',
 ]);

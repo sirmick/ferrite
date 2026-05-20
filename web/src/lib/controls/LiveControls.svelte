@@ -14,6 +14,7 @@
     gainInvertedFor,
     gainLabelFor,
     gainRawValue,
+    overallGainRangeFor,
   } from './optionsModel';
 
   let caps = $derived(
@@ -22,7 +23,7 @@
   let channel = $derived(caps?.rx_channels[0] ?? null);
   let params = $derived((pipeline.source?.params ?? {}) as Record<string, unknown>);
 
-  let overallRange = $derived(channel?.overall_gain_range_db ?? null);
+  let overallRange = $derived(caps ? overallGainRangeFor(caps) : null);
   let antennas = $derived(channel?.antennas ?? []);
   let hasAgc = $derived(channel?.has_agc ?? false);
   let hasDcOffset = $derived(channel?.has_dc_offset_mode ?? false);

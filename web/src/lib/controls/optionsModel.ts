@@ -245,6 +245,22 @@ export function gainDescriptionFor(caps: DeviceCapabilities): string | undefined
   return lookupPreset(caps.driver_key)?.gain_description;
 }
 
+/** Practical gain-slider range for the active driver. Starts from the
+ *  device's advertised `overall_gain_range_db` and clamps `max` down to
+ *  the per-driver `overall_gain_max_db` when the preset has one — the
+ *  HackRF case where libhackrf rejects setGain(N) for N above ~62 even
+ *  though the Soapy "overall" element reports max=116. Returns `null`
+ *  when the device exposes no overall gain element. */
+export function overallGainRangeFor(caps: DeviceCapabilities): RangeSpec | null {
+  const range = caps.rx_channels[0]?.overall_gain_range_db;
+  if (!range) return null;
+  const cap = lookupPreset(caps.driver_key)?.overall_gain_max_db;
+  if (cap !== undefined && cap < range.max) {
+    return { min: range.min, max: cap, step: range.step };
+  }
+  return range;
+}
+
 /** Historically: whether to flip the slider for drivers whose Soapy
  *  "overall gain" element is in reduction terms (high raw = quiet,
  *  notably SDRplay's SoapySDRPlay3). The flip now lives server-side in
@@ -459,6 +475,17 @@ interface SdrPreset {
    *  the master gain slider. Use to call out cross-stage knobs the
    *  user must set separately (e.g. SDRplay's LNA attenuation). */
   gain_description?: string;
+  /**
+   * Practical ceiling for the overall gain slider, tighter than the
+   * device's advertised `overall_gain_range_db.max`. SoapyHackRF reports
+   * a sum-of-elements ceiling (LNA 40 + VGA 62 + amp 14 = 116 dB) but
+   * the master `setGain` distribution refuses any value above ~62 dB
+   * with `setGain(N) returned invalid parameter(s)`. Setting this lets
+   * the slider stop at the value the driver will actually accept, so a
+   * full-right drag doesn't fail server-side. Other drivers can leave
+   * it unset and the device's advertised max applies.
+   */
+  overall_gain_max_db?: number;
   /**
    * Invert the master gain slider's displayed value vs the raw
    * `gain_db` param. SoapySDRPlay3 reports per-element ranges as
