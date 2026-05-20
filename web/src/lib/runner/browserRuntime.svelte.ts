@@ -381,11 +381,21 @@ class BrowserRuntime {
     if (!this.runner) return;
     if (this.runnerState === 'idle' || this.runnerState === 'error') return;
     try {
-      await this.runner.stop();
+      // Pause, not stop: keeps the worker's Rust runtime, frame
+      // subscribers, and audio SAB writers alive so a subsequent
+      // start resumes in milliseconds. The full-teardown `stop` is
+      // reserved for `reload` (which has to call it before `load`,
+      // since `load` rejects when something is already loaded).
+      // Without this distinction, a fast Stop→Start cycle (or a
+      // source-restart that briefly toggled status) would land here,
+      // tear down the runtime, leave runnerState='loaded' (a lie),
+      // and the next startInner would call runner.start() on an
+      // unloaded worker → "RunnerCore: no flowgraph loaded".
+      await this.runner.pause();
       this.runnerState = 'loaded';
     } catch (err) {
       this.errorMessage = errorMessage(err);
-      logs.push('client', 'warn', `runner stop: ${this.errorMessage}`);
+      logs.push('client', 'warn', `runner pause: ${this.errorMessage}`);
     }
   }
 

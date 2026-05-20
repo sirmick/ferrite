@@ -23,6 +23,14 @@ export type RunnerRequest =
       readonly wsUrl: string;
     }
   | { readonly id: number; readonly kind: 'start' }
+  /** Pause the tick loop without tearing the runtime down. The loaded
+   *  graph + frame subscribers + audio SAB writers all stay alive, so
+   *  a subsequent `start` resumes in milliseconds. Distinct from `stop`
+   *  (which is a terminal teardown — frees the Rust runtime, closes
+   *  the WS client, drops `this.loaded`). Used by browserRuntime's
+   *  stopInner so the runner state stays honestly `loaded` after a
+   *  user-initiated pause. */
+  | { readonly id: number; readonly kind: 'pause' }
   | { readonly id: number; readonly kind: 'stop' }
   | { readonly id: number; readonly kind: 'state' }
   | {
@@ -62,7 +70,7 @@ export interface LoadResult {
 
 export type RunnerResponse =
   | { readonly id: number; readonly ok: true; readonly kind: 'load'; readonly data: LoadResult }
-  | { readonly id: number; readonly ok: true; readonly kind: 'start' | 'stop' }
+  | { readonly id: number; readonly ok: true; readonly kind: 'start' | 'stop' | 'pause' }
   | {
       readonly id: number;
       readonly ok: true;

@@ -73,6 +73,13 @@ export class FlowgraphRunner {
     assertKind(resp, 'stop');
   }
 
+  /** Pause the tick loop without tearing the runtime down. See
+   *  `RunnerRequest`'s `pause` variant for the contract. */
+  async pause(): Promise<void> {
+    const resp = await this.send({ id: this.nextId++, kind: 'pause' });
+    assertKind(resp, 'pause');
+  }
+
   async state(): Promise<RuntimeState> {
     const resp = await this.send({ id: this.nextId++, kind: 'state' });
     assertKind(resp, 'state');

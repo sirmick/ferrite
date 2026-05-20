@@ -121,7 +121,7 @@ function makeEnv(overrides: Partial<RunnerEnv> = {}): {
   return { env, clients };
 }
 
-function req(kind: 'start' | 'stop' | 'state', id = 1): RunnerRequest {
+function req(kind: 'start' | 'stop' | 'pause' | 'state', id = 1): RunnerRequest {
   return { id, kind };
 }
 
@@ -183,6 +183,30 @@ describe('RunnerCore', () => {
     await core.handle(req('stop', 5));
     s = await core.handle(req('state', 6));
     expect(s.ok && s.kind === 'state' && s.data.state).toBe('stopped');
+  });
+
+  it('pause keeps the runtime loaded so start can resume', async () => {
+    // The transient "no flowgraph loaded" bug: stopInner used to call
+    // runner.stop() (full teardown) but leave runnerState='loaded',
+    // so the next startInner would call runner.start() on an unloaded
+    // worker. The fix split stop from pause — pause keeps the loaded
+    // state intact, only the JS-side tick + diag timers are cleared.
+    const { env } = makeEnv();
+    const core = new RunnerCore(env);
+    await core.handle({ id: 1, kind: 'load', doc: SINE_DOC, wsUrl: 'ws://x' });
+    await core.handle(req('start', 2));
+    let s = await core.handle(req('state', 3));
+    expect(s.ok && s.kind === 'state' && s.data.state).toBe('running');
+
+    await core.handle(req('pause', 4));
+    // Worker reports 'running' even paused — the Rust runtime stays
+    // Running; only the JS tick driver was halted.
+    s = await core.handle(req('state', 5));
+    expect(s.ok && s.kind === 'state' && s.data.state).toBe('running');
+
+    // Resume — must NOT error with "expected Initialized".
+    const resume = await core.handle(req('start', 6));
+    expect(resume.ok).toBe(true);
   });
 
   it('stop closes the FrameClient and leaves the core reusable', async () => {

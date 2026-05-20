@@ -145,6 +145,9 @@ export class RunnerCore {
         case 'stop':
           this.doStop();
           return { id: req.id, ok: true, kind: 'stop' };
+        case 'pause':
+          this.doPause();
+          return { id: req.id, ok: true, kind: 'pause' };
         case 'state':
           return {
             id: req.id,
@@ -234,10 +237,38 @@ export class RunnerCore {
 
   private doStart(): void {
     const state = this.loaded ?? throwNoRuntime();
-    state.rt.start();
+    // Resuming from a pause: the Rust runtime stays Running internally
+    // (only the JS-side tick timer was cleared), so `rt.start()` would
+    // error with "expected Initialized". Skip it when already Running
+    // — re-scheduling the tick is enough. The post-load path still
+    // needs the rt.start() to transition Initialized → Running.
+    if (this.currentState() !== 'running') {
+      state.rt.start();
+    }
     state.running = true;
     this.scheduleTick(state);
     this.startDiagTimer(state);
+  }
+
+  /** Pause the tick loop without tearing the runtime down. The Rust
+   *  runtime stays in `Running` state; only the JS-side tick timer +
+   *  diag timer are cleared and `state.running` is flipped false (so
+   *  `scheduleTick`'s self-rescheduling exit-guard fires next time the
+   *  current iteration unwinds). Subscribers, audio SAB writers, WS
+   *  client all stay alive — a subsequent `doStart` re-arms the tick
+   *  in milliseconds. Contrast `doStop` which is terminal. */
+  private doPause(): void {
+    const state = this.loaded;
+    if (!state || !state.running) return;
+    state.running = false;
+    if (state.tickTimer !== null) {
+      clearTimeout(state.tickTimer);
+      state.tickTimer = null;
+    }
+    if (state.diagTimer !== null) {
+      clearInterval(state.diagTimer);
+      state.diagTimer = null;
+    }
   }
 
   private scheduleTick(state: LoadedState): void {
