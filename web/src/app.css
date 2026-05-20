@@ -92,3 +92,21 @@ input[type='range']:disabled::-webkit-slider-thumb {
 input[type='range']:disabled::-moz-range-thumb {
   cursor: not-allowed;
 }
+
+/* Workspace panel header — the small uppercase chrome strip atop every
+ * Spectrum / Waterfall / Channel / Decoder pane. Lives in global CSS so
+ * every pane component gets it without redefining the rule in scoped
+ * styles (and forgetting one — looking at you, the old FldigiView). */
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 8px;
+  border-bottom: 1px solid rgb(30 41 59);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}

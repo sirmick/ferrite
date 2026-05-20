@@ -33,6 +33,12 @@ import TranscriptView from './TranscriptView.svelte';
 export interface AdvancedCtx {
   uiSinks: Record<string, unknown>;
   voiceTranscribeIds: ReadonlyArray<string>;
+  /** Whether the active preset declares an `AudioSink` block — i.e.
+   *  is a voice/audio preset that *could* be transcribed. Lets the
+   *  Transcript entry advertise itself before transcribe is actually
+   *  on (the toolbar flips `profile.transcribe` the moment the user
+   *  picks it). */
+  hasAudioSink: boolean;
 }
 
 export interface AdvancedView {
@@ -51,24 +57,29 @@ export interface AdvancedView {
 
 export const ADVANCED_VIEWS: AdvancedView[] = [
   // FT8, FT4 and WSPR all wire `ui:ft8` and share Ft8View.
-  { sink: 'ft8', label: 'FT8 / WSPR', component: Ft8View },
+  { sink: 'ft8', label: 'FT8 / FT4 / WSPR', component: Ft8View },
   // ADS-B (Mode-S, 1090 MHz) — live aircraft map + table.
   { sink: 'adsb', label: 'ADS-B', component: AdsbView },
   // APRS (AX.25 packet) — station map + table + packet console.
   { sink: 'aprs', label: 'APRS', component: AprsView },
-  // fldigi family (RTTY/PSK31/CW/MT63/Olivia/…/RSID) — RX-text log.
-  // `sink` stays 'fldigi' (the ui:fldigi wire key); only the
-  // user-facing label changed — it's just a log of decoded text.
-  { sink: 'fldigi', label: 'Log', component: FldigiView },
+  // fldigi family (RTTY/PSK31/CW/MT63/Olivia/…/RSID) — RX-text Journal.
+  // `sink` stays 'fldigi' (the ui:fldigi wire key); the user-facing
+  // label is "Journal" — the streaming decoded-text view that every
+  // streaming-digital preset falls into.
+  { sink: 'fldigi', label: 'Journal', component: FldigiView },
   // Speech-to-text. Listed last so a mode-specific decoder view wins
-  // if both ever co-exist. Worker-fed, so it matches on the presence
-  // of a VoiceTranscribe block rather than a `ui:` sink — true on
-  // every audio preset (auto-injected before each AudioSink).
+  // if both ever co-exist. Advertised whenever the active preset has
+  // an `AudioSink` (i.e. could be transcribed), NOT only when the
+  // VoiceTranscribe block is already present — the toolbar dropdown
+  // flips `profile.transcribe` on the moment the user picks this,
+  // which re-composes and injects the tap. That keeps the
+  // "every audio preset has an advanced view" promise without paying
+  // the whisper-worker cost up front.
   {
     sink: 'transcribe',
     label: 'Transcript',
     component: TranscriptView,
-    present: (ctx) => ctx.voiceTranscribeIds.length > 0,
+    present: (ctx) => ctx.hasAudioSink,
   },
 ];
 

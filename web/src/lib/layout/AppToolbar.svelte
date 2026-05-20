@@ -29,13 +29,17 @@
   // Advanced-view toggle. The active preset's registered view (or
   // null); when null the button is disabled. Independent of Channel —
   // Advanced replaces only the wide FFT/waterfall column.
+  let hasAudioSink = $derived(
+    Object.values(pipeline.flowgraph?.blocks ?? {}).some((b) => b.type === 'AudioSink'),
+  );
   let advancedView = $derived(
     activeAdvancedView({
       uiSinks: pipeline.uiSinks,
       voiceTranscribeIds: browserRuntime.voiceTranscribeIds,
+      hasAudioSink,
     }),
   );
-  let advancedVisible = $derived(clientControls.get('client.workspace.advancedVisible'));
+  let mainPane = $derived(clientControls.get('client.workspace.mainPane'));
 
   let frameRate = $state(0);
   let wsBwBps = $state(0);
@@ -181,36 +185,67 @@
        actions (mutate global state), the status chips on the left stay
        at the natural reading position. -->
   <div class="ml-auto flex flex-wrap items-center gap-x-2 gap-y-1">
-    <button
-      type="button"
-      class="cursor-pointer rounded border bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:text-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-      class:channel-on={hasNarrow && narrowVisible}
-      class:border-slate-500={!(hasNarrow && narrowVisible)}
-      disabled={!hasNarrow}
+    <!-- Main-pane selector: wide FFT/Waterfall vs the active preset's
+         mode-specific view (Journal / FT8-FT4-WSPR / ADS-B / APRS /
+         Transcript). Always two options — `activeAdvancedView`
+         resolves to something on every catalog preset (Transcript is
+         the analog-voice fallback). Resets to `wide` on preset load. -->
+    <label class="flex items-center gap-1 text-[11px] text-[color:var(--color-muted)]">
+      <span class="hidden md:inline">Main:</span>
+      <select
+        class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-1 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:text-slate-50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+        disabled={!advancedView}
+        value={advancedView && mainPane === 'advanced' ? 'advanced' : 'wide'}
+        onchange={(e) => {
+          const v = (e.target as HTMLSelectElement).value;
+          void applyControl('client.workspace.mainPane', v);
+          // Auto-enable transcription when the user picks Transcript on
+          // a preset where it isn't on yet — keeps the "Transcript is
+          // always offered for audio presets" promise (registry D-V)
+          // without paying the whisper-worker cost up front. Server
+          // re-composes; voiceTranscribeIds populates; TranscriptView
+          // mounts on the next refresh — no extra dance for the user.
+          if (
+            v === 'advanced' &&
+            advancedView?.sink === 'transcribe' &&
+            !pipeline.profile.transcribe
+          ) {
+            void pipeline.setProfile({ ...pipeline.profile, transcribe: true });
+          }
+        }}
+        title={advancedView
+          ? `Pick the main column: wide FFT/Waterfall or ${advancedView.label}.`
+          : 'Active preset has no advanced view'}
+      >
+        <option value="wide">FFT / Waterfall</option>
+        {#if advancedView}
+          <option value="advanced">{advancedView.label}</option>
+        {/if}
+      </select>
+    </label>
+    <!-- Channel checkbox: independent of Main; pairs a narrow detail
+         spectrum/waterfall alongside whichever Main pane is up. Greyed
+         when the active preset has no Channelizer (`ui:fft_narrow`). -->
+    <label
+      class="flex items-center gap-1 text-[11px] text-slate-200"
+      class:opacity-40={!hasNarrow}
       title={hasNarrow
-        ? narrowVisible
-          ? 'Hide channel-detail FFT / waterfall'
-          : 'Show channel-detail FFT / waterfall'
+        ? 'Show / hide the channel-detail FFT + waterfall'
         : 'Active preset has no channelizer — no channel-detail pane available'}
-      onclick={() => void applyControl('client.workspace.narrowVisible', !narrowVisible)}
     >
+      <input
+        type="checkbox"
+        class="cursor-pointer accent-sky-400 disabled:cursor-not-allowed"
+        checked={hasNarrow && narrowVisible}
+        disabled={!hasNarrow}
+        onchange={(e) =>
+          void applyControl(
+            'client.workspace.narrowVisible',
+            (e.target as HTMLInputElement).checked,
+          )}
+      />
       Channel
-    </button>
-    <button
-      type="button"
-      class="cursor-pointer rounded border bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:text-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-      class:channel-on={advancedView && advancedVisible}
-      class:border-slate-500={!(advancedView && advancedVisible)}
-      disabled={!advancedView}
-      title={advancedView
-        ? advancedVisible
-          ? `Hide ${advancedView.label} advanced view — show spectrum`
-          : `Show ${advancedView.label} advanced view — replaces the wide FFT / waterfall`
-        : 'Active preset has no advanced view'}
-      onclick={() => void applyControl('client.workspace.advancedVisible', !advancedVisible)}
-    >
-      {advancedView ? advancedView.label : 'Advanced'}
-    </button>
+    </label>
     <button
       type="button"
       class="rounded border px-2 py-0.5 text-[11px] font-semibold disabled:opacity-50"
@@ -277,12 +312,7 @@
   .stopped:hover {
     border-color: rgb(187 247 208);
   }
-  /* Sky-blue accent matches the VFO/channel marker on the spectrum. */
-  .channel-on {
-    border-color: rgb(125 211 252);
-    color: rgb(125 211 252);
-  }
-  .channel-on:hover {
-    border-color: rgb(186 230 253);
-  }
+  /* .channel-on removed with the old Channel/Advanced toggles — the
+     new Main: dropdown + Channel checkbox don't need a custom "on"
+     state (the native controls show it). */
 </style>

@@ -198,10 +198,34 @@ export function applyHamPostProcess(raw: string): string {
     return t;
   });
 
-  return finalTokens
-    .join(' ')
-    .replace(/\s+([.,!?;:])/g, '$1')
-    .trim();
+  return stripTailRepeats(
+    finalTokens
+      .join(' ')
+      .replace(/\s+([.,!?;:])/g, '$1')
+      .trim(),
+  );
+}
+
+/**
+ * Trim whisper's classic short-clip tail-loop artefacts: a single
+ * character repeated 4+ times at the end ("okayyyyy", "hello....")
+ * collapses to one; an identical word repeated 3+ times in a row at
+ * the end ("the the the the") collapses to one. Whisper hallucinates
+ * these when the VAD-gated clip has trailing silence — entropy_thold
+ * + no_speech_thold in the glue catch most cases; this is the
+ * belt-and-braces cleanup on whatever still slips through.
+ */
+function stripTailRepeats(s: string): string {
+  if (!s) return s;
+  let out = s;
+  // Trailing word-repeat: ≥3 occurrences of the same case-insensitive
+  // word at the end, optionally followed by terminal punctuation.
+  // Keep the first; drop the rest.
+  out = out.replace(/(\b\w+\b)(?:\s+\1\b){2,}(\s*[.,!?;:]*)\s*$/i, '$1$2');
+  // Trailing single-character run: 4+ of the same character at the
+  // end (any character — letters, dots, dashes). Keep one.
+  out = out.replace(/(.)\1{3,}\s*$/u, '$1');
+  return out.trimEnd();
 }
 
 /** Extract callsign-shaped tokens from a cleaned segment. The Worker
@@ -217,4 +241,4 @@ export function extractCallsigns(cleaned: string): string[] {
 }
 
 /** Exposed for unit tests. */
-export const __test = { collapseRun, foldNumbers, CALLSIGN_RE };
+export const __test = { collapseRun, foldNumbers, CALLSIGN_RE, stripTailRepeats };

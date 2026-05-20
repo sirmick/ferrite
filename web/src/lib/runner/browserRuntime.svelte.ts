@@ -502,8 +502,11 @@ class BrowserRuntime {
         w.onmessage = (ev: MessageEvent) => this.onTranscribeMessage(ev.data);
         w.onerror = (ev) => transcript.setStatus('error', `worker: ${ev.message || 'load failed'}`);
         w.postMessage({ type: 'init', sab, blockId });
-        // Seed the worker with the persisted prompt override (empty →
-        // it uses its built-in ham corpus).
+        // Model + prompt are seeded from the `VoiceTranscribe` block's
+        // params via `pipeline.reseedTranscribeWorker(blockId)` after
+        // the composed-blocks fetch lands — the block schema is the
+        // canonical source. The legacy client-control prompt is kept
+        // as a fallback while the block-params path stabilises.
         const p = clientControls.get('client.transcribe.prompt');
         if (p) w.postMessage({ type: 'prompt', text: p });
         this.transcribeWorkers.set(blockId, w);
@@ -542,6 +545,15 @@ class BrowserRuntime {
     }
   }
 
+  /** Switch the whisper model on every live transcription Worker.
+   *  Called by `applyControl` when `client.transcribe.modelId` changes.
+   *  The worker no-ops if the id is unknown or already loaded. */
+  setTranscribeModel(modelId: string): void {
+    for (const w of this.transcribeWorkers.values()) {
+      w.postMessage({ type: 'model', modelId });
+    }
+  }
+
   /** Worker → store bridge. Segment / status / glitch-counter messages
    *  land here and update the reactive transcript store the panel
    *  renders. */
@@ -559,6 +571,7 @@ class BrowserRuntime {
         noSpeechProb: msg.noSpeechProb as number,
         cont: msg.cont as boolean,
         gapMs: msg.gapMs as number,
+        speakerTurn: msg.speakerTurn === true,
       });
       // The recognised text itself → decoder log (server files
       // `[transcribe]`-prefixed client lines under `decoder::transcribe`)

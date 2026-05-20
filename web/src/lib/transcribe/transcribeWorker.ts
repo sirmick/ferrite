@@ -70,6 +70,10 @@ type OutMsg =
        *  an utterance carries it; 0 otherwise. The rolling transcript
        *  starts a new paragraph when it exceeds the threshold. */
       gapMs: number;
+      /** tinydiarize speaker-turn flag (only meaningful on tdrz
+       *  models; always false otherwise). True ⇒ the model thinks the
+       *  talker changed at this segment. */
+      speakerTurn?: boolean;
     };
 
 const POLL_MS = 150;
@@ -191,6 +195,7 @@ function transcribeOne(pcm16k: Float32Array, leadMs: number, gapMs: number): voi
       noSpeechProb: seg.noSpeechProb ?? 0,
       cont,
       gapMs: segGapMs,
+      speakerTurn: seg.speakerTurn === true,
     });
   }
 }

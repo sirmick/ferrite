@@ -59,3 +59,34 @@ describe('foldNumbers', () => {
     expect(__test.foldNumbers(['five', 'nine', 'and', 'seven'])).toEqual(['59', 'and', '7']);
   });
 });
+
+describe('stripTailRepeats — whisper short-clip tail-loop guard', () => {
+  const trim = __test.stripTailRepeats;
+
+  it('collapses a trailing character run (≥4) to one', () => {
+    expect(trim('okayyyyyy')).toBe('okay');
+    expect(trim('hello............')).toBe('hello.');
+    expect(trim('roger--------')).toBe('roger-');
+  });
+
+  it("doesn't touch a short trailing run (≤3)", () => {
+    expect(trim('hmmm')).toBe('hmmm'); // 3 m's — legitimate
+    expect(trim('woo')).toBe('woo');
+  });
+
+  it('collapses a trailing word repetition (≥3) to one', () => {
+    expect(trim('this is the the the the')).toBe('this is the');
+    expect(trim('over over over over.')).toBe('over.');
+    expect(trim('YES YES YES YES YES')).toBe('YES');
+  });
+
+  it('leaves a single legitimate repeat alone', () => {
+    expect(trim('go go racers')).toBe('go go racers'); // not trailing
+    expect(trim('bye bye')).toBe('bye bye'); // only 2 reps
+  });
+
+  it('is composed into applyHamPostProcess', () => {
+    expect(applyHamPostProcess('seventy three.....')).toBe('73.');
+    expect(applyHamPostProcess('cq cq cq cq cq')).toBe('CQ');
+  });
+});

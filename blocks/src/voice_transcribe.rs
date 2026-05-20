@@ -78,6 +78,16 @@ impl Mode {
     }
 }
 
+/// Whisper ggml model ids — must match the keys in `MODELS`
+/// (`web/src/lib/transcribe/whisperEngine.ts`). The block doesn't use
+/// these directly (the actual model fetch + inference happens in the
+/// JS transcription Worker), but it carries them as a typed param so
+/// the value rides the same Settings-panel / preset-JSON pipe as
+/// every other block knob — and when transcription eventually moves
+/// server-side the interface is already correct.
+const MODEL_IDS: &[&str] = &["tiny.en-q5", "base.en-q5", "small.en-q5", "small.en-tdrz"];
+const DEFAULT_MODEL_ID: &str = "tiny.en-q5";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct VoiceTranscribeParams {
@@ -85,6 +95,12 @@ pub struct VoiceTranscribeParams {
     pub mode: String,
     /// Tap-ring capacity in samples (power of two).
     pub buffer_samples: usize,
+    /// Whisper ggml model id — see [`MODEL_IDS`]. The transcription
+    /// Worker (or future server-side transcriber) loads this model.
+    pub model_id: String,
+    /// Whisper `initial_prompt` override — vocab bias for the decoder.
+    /// Empty = use the built-in ham corpus (see `hamPrompt.ts`).
+    pub prompt: String,
 }
 
 impl Default for VoiceTranscribeParams {
@@ -92,6 +108,8 @@ impl Default for VoiceTranscribeParams {
         Self {
             mode: "off".to_string(),
             buffer_samples: DEFAULT_BUFFER_SAMPLES,
+            model_id: DEFAULT_MODEL_ID.to_string(),
+            prompt: String::new(),
         }
     }
 }
@@ -107,6 +125,26 @@ const MODE_PARAM: ParamSpec = ParamSpec {
     // source — it's the whole point of a "leave it running" control.
     reconfig_scope: ReconfigureScope::SelfBlock,
     ai_notes: "Speech-to-text engagement. 'off' = audio passes through untouched, no transcription (zero cost). 'on' = audio plays AND is transcribed. 'muted' = transcribed only, audio silenced — for logging a frequency you're not listening to.",
+};
+
+const MODEL_ID_PARAM: ParamSpec = ParamSpec {
+    key: "model_id",
+    label: "Model",
+    kind: ParamKind::EnumString {
+        values: MODEL_IDS,
+        default: DEFAULT_MODEL_ID,
+    },
+    // The JS worker handles the reload internally; no source teardown.
+    reconfig_scope: ReconfigureScope::SelfBlock,
+    ai_notes: "Whisper ggml model id. tiny is fast and bundled by default; small is better on noisy SSB; small.en-tdrz adds tinydiarize speaker-turn detection. The .bin must exist under web/static/models/.",
+};
+
+const PROMPT_PARAM: ParamSpec = ParamSpec {
+    key: "prompt",
+    label: "Prompt",
+    kind: ParamKind::Text { default: "" },
+    reconfig_scope: ReconfigureScope::SelfBlock,
+    ai_notes: "Whisper initial_prompt override — vocab bias steering the decoder. Empty = use the built-in dense ham corpus. The single biggest accuracy lever for ham voice.",
 };
 
 const BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
@@ -192,7 +230,7 @@ impl Block for VoiceTranscribe {
                 name: "out",
                 port_type: PortType::RealF32,
             }],
-            params: &[MODE_PARAM, BUFFER_SAMPLES_PARAM],
+            params: &[MODE_PARAM, MODEL_ID_PARAM, PROMPT_PARAM, BUFFER_SAMPLES_PARAM],
             ai_notes: "Browser-only passthrough tap that feeds demodulated voice to an in-browser speech-to-text worker (Silero VAD + whisper.cpp). Insert it between AudioNr and AudioSink. Audio is passed through unchanged ('off'/'on') or silenced ('muted'); it never degrades the signal. Tri-state 'mode' engages transcription. Built for noisy SSB/AM voice with a 'set it and leave it' workflow — accuracy over latency.",
         }
     }
@@ -202,6 +240,32 @@ impl Block for VoiceTranscribe {
         self.ring.reset();
         self.dropped_samples = 0;
         Ok(())
+    }
+
+    fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+        let mut changed = false;
+        if let Some(m) = delta.get("mode").and_then(serde_json::Value::as_str) {
+            self.params.mode = m.to_string();
+            self.mode = Mode::parse(m);
+            changed = true;
+        }
+        // `model_id` + `prompt` don't affect this block's audio path
+        // (the JS worker / future server transcriber consumes them).
+        // Recording into `self.params` keeps the block-schema readback
+        // truthful; the fan-out to the worker is the dispatcher's job
+        // (see `web/src/lib/control/dispatch.ts`).
+        if let Some(v) = delta.get("model_id").and_then(serde_json::Value::as_str) {
+            if !MODEL_IDS.contains(&v) {
+                anyhow::bail!("VoiceTranscribe: model_id must be one of {MODEL_IDS:?}, got {v:?}");
+            }
+            self.params.model_id = v.to_string();
+            changed = true;
+        }
+        if let Some(v) = delta.get("prompt").and_then(serde_json::Value::as_str) {
+            self.params.prompt = v.to_string();
+            changed = true;
+        }
+        Ok(changed)
     }
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
@@ -320,6 +384,7 @@ mod tests {
         let mut vt = VoiceTranscribe::new(VoiceTranscribeParams {
             mode: "on".into(),
             buffer_samples: 16,
+            ..Default::default()
         });
         let out = run(&mut vt, &[0.5, -0.5, 0.25]);
         assert_eq!(out, vec![0.5, -0.5, 0.25], "audio passes through");
@@ -333,6 +398,7 @@ mod tests {
         let mut vt = VoiceTranscribe::new(VoiceTranscribeParams {
             mode: "muted".into(),
             buffer_samples: 16,
+            ..Default::default()
         });
         let out = run(&mut vt, &[0.5, -0.5, 0.25]);
         assert_eq!(out, vec![0.0, 0.0, 0.0], "output silenced");
@@ -346,6 +412,7 @@ mod tests {
         let mut vt = VoiceTranscribe::new(VoiceTranscribeParams {
             mode: "on".into(),
             buffer_samples: 4,
+            ..Default::default()
         });
         run(&mut vt, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(vt.dropped_samples(), 2);
@@ -357,6 +424,7 @@ mod tests {
         let mut vt = VoiceTranscribe::new(VoiceTranscribeParams {
             mode: "on".into(),
             buffer_samples: 8,
+            ..Default::default()
         });
         run(&mut vt, &[1.0, 2.0]);
         let inputs_meta = [(
@@ -382,6 +450,7 @@ mod tests {
         let vt = VoiceTranscribe::new(VoiceTranscribeParams {
             mode: "off".into(),
             buffer_samples: 5000,
+            ..Default::default()
         });
         // 5000 → 8192; SpscRing requires a power of two.
         let mut vt = vt;

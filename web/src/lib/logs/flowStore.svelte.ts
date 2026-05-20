@@ -178,6 +178,25 @@ function snapshotMatchesPrev(snap: DiagSnapshot, prev: PrevSnap): boolean {
 export const flow = new FlowStore();
 
 // flowdiag no longer travels as a log line — the node side is served
-// by `GET /api/flowdiag` (polled by FlowPanel) and the browser side
+// by `GET /api/flowdiag` (polled here, app-wide) and the browser side
 // is fed straight from the runner via `flow.ingest('browser', …)`.
-// The old `parseFlowdiagLine` log-stream peel is gone.
+// The poll must run regardless of which UI tab is open: `HealthDots`
+// (always visible in the toolbar) depends on `flow.node.lastUpdate`,
+// so gating the poll on `FlowPanel` visibility — as the first cut did
+// — turned two of the three status dots red whenever you left the
+// Flow tab. Browser-only guard so SSR / node-vitest doesn't try to
+// start a `fetch` interval at import time.
+if (typeof window !== 'undefined') {
+  const tick = async () => {
+    try {
+      const r = await fetch('/api/flowdiag');
+      if (!r.ok) return;
+      const snap = (await r.json()) as DiagSnapshot | null;
+      if (snap) flow.ingest('node', snap);
+    } catch {
+      /* network blip — the next tick will retry */
+    }
+  };
+  void tick();
+  setInterval(() => void tick(), 1000);
+}

@@ -17,6 +17,9 @@
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { transcript, type TranscriptSegment } from '$lib/transcribe/store.svelte';
   import { DEFAULT_HAM_PROMPT } from '$lib/transcribe/hamPrompt';
+  // Whisper model + prompt are now block params on `VoiceTranscribe`
+  // (see `blocks/src/voice_transcribe.rs`); the SettingsPanel's
+  // Decoder section is the canonical UI. This view focuses on output.
   import Split from '$lib/layout/Split.svelte';
 
   // whisper initial_prompt — the single biggest accuracy lever for ham
@@ -113,7 +116,15 @@
     const segs = transcript.segments;
     let out = '';
     for (let i = 0; i < segs.length; i++) {
-      if (i > 0) out += segs[i].gapMs >= PARA_SILENCE_MS ? '\n\n' : ' ';
+      if (i > 0) {
+        // tinydiarize speaker change → blank line + "— speaker —"
+        // marker so the rolling prose makes the turn visible without
+        // a literal `[SPEAKER_TURN]` token. Falls back to the
+        // silence-based paragraph break otherwise.
+        if (segs[i].speakerTurn) out += '\n\n— speaker —\n';
+        else if (segs[i].gapMs >= PARA_SILENCE_MS) out += '\n\n';
+        else out += ' ';
+      }
       out += segs[i].text;
     }
     return out;
@@ -266,6 +277,18 @@
               </p>
             {:else}
               {#each transcript.segments as seg (seg.id)}
+                {#if seg.speakerTurn}
+                  <!-- tinydiarize speaker-turn marker — small divider so
+                       the eye catches the talker change without losing
+                       segment timestamps. -->
+                  <div
+                    class="my-1 flex items-center gap-2 text-[9px] uppercase tracking-wide text-slate-600"
+                  >
+                    <span class="h-px flex-1 bg-slate-800"></span>
+                    <span>speaker change</span>
+                    <span class="h-px flex-1 bg-slate-800"></span>
+                  </div>
+                {/if}
                 <div class="border-b border-slate-900/60 py-1">
                   <div class="flex gap-2 font-mono text-[10px] text-slate-600">
                     <span>{fmtTime(seg.atMs)}</span>
@@ -310,18 +333,4 @@
   </div>
 </div>
 
-<style>
-  .panel-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 3px 8px;
-    border-bottom: 1px solid rgb(30 41 59);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--color-muted);
-  }
-</style>
+<style></style>

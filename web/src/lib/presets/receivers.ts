@@ -101,6 +101,21 @@ export function presetSlugForMode(mode: string | undefined): string | null {
       return 'ft8-ft4';
     case 'WSPR':
       return 'wspr';
+    case 'NAVTEX':
+      return 'navtex';
+    // Data-only signals whose decoder ships as a singleton preset.
+    // Without these the bandplan `+RX` was disabled on the very
+    // entries that most need the decoder (no useful audio fallback).
+    case 'AIS':
+      return 'ais';
+    case 'ADS-B':
+      return 'adsb';
+    case 'ISM':
+      return 'rtl433-433';
+    case 'WX':
+      // NOAA Weather Radio preset adds SAME/EAS alert decoding on top
+      // of the NBFM voice the plain `nbfm` preset would give.
+      return 'nwr';
     case 'APRS':
       return 'packet';
     default:

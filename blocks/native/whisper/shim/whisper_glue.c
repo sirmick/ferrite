@@ -87,6 +87,23 @@ char *wsp_transcribe(const float *pcm, int n_samples, const char *prompt) {
   // `initial_prompt` vocab bias is unaffected.
   p.no_context = true;
   if (prompt && prompt[0]) p.initial_prompt = prompt;
+  // Short-clip tail-loop guards. Whisper's autoregressive decoder
+  // loves to lock into a repeated token when the VAD-gated clip has
+  // trailing silence (the famous "..." / "thank you for watching" /
+  // single-character echo). Tighter thresholds detect the loop and
+  // engage the temperature fallback sooner, AND drop segments that
+  // are mostly silence outright.
+  //   entropy_thold:    default 2.4 → 1.8 (catch loops earlier)
+  //   no_speech_thold:  default 0.6 → 0.7 (cull decoded silence)
+  p.entropy_thold = 1.8f;
+  p.no_speech_thold = 0.7f;
+  // tinydiarize: on the `*-tdrz` fine-tunes whisper.cpp emits a per-
+  // segment speaker-turn flag (queryable via
+  // `whisper_full_get_segment_speaker_turn_next`). The flag is a
+  // no-op on non-tdrz models, so enable it unconditionally — the
+  // engine surfaces `speakerTurn:true|false` per segment and the UI
+  // renders a divider when the model thinks the talker changed.
+  p.tdrz_enable = true;
 
   // Silero VAD inside whisper.cpp when the model shipped — far better
   // than energy gating on noisy SSB. The JS side also VAD-gates, so
@@ -132,7 +149,11 @@ char *wsp_transcribe(const float *pcm, int n_samples, const char *prompt) {
 #ifdef WHISPER_HAS_NO_SPEECH_PROB
     no_speech = whisper_full_get_segment_no_speech_prob(g_ctx, s);
 #endif
-    APPEND("{\"t0\":%.2f,\"t1\":%.2f,\"text\":", t0, t1);
+    // Speaker-turn flag from tinydiarize. Always false on non-tdrz
+    // models (the whisper.cpp API stays defined but returns false).
+    const int spk_turn = whisper_full_get_segment_speaker_turn_next(g_ctx, s) ? 1 : 0;
+    APPEND("{\"t0\":%.2f,\"t1\":%.2f,\"speakerTurn\":%s,\"text\":",
+           t0, t1, spk_turn ? "true" : "false");
 
     // JSON-escape the segment text.
     APPEND("\"");

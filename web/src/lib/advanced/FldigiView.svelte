@@ -27,7 +27,7 @@
 <div class="flex h-full w-full min-h-0 flex-col bg-[color:var(--color-bg)]">
   <header class="panel-head">
     <span>
-      <span class="rounded-sm bg-sky-900/50 px-1 font-mono text-sky-300">fldigi</span>
+      <span class="rounded-sm bg-sky-900/50 px-1 font-mono text-sky-300">Journal</span>
       <span class="ml-2 text-[color:var(--color-muted)]">
         {fldigi.mode || 'waiting'} · {fldigi.lines.length} lines
       </span>

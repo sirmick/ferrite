@@ -108,18 +108,4 @@
   </div>
 </div>
 
-<style>
-  .panel-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 3px 8px;
-    border-bottom: 1px solid rgb(30 41 59);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--color-muted);
-  }
-</style>
+<style></style>

@@ -55,14 +55,18 @@
   // toggled on (and the preset registers one). The Channel column is
   // independent — it still shows beside the advanced view if the
   // operator has it on.
+  let hasAudioSink = $derived(
+    Object.values(pipeline.flowgraph?.blocks ?? {}).some((b) => b.type === 'AudioSink'),
+  );
   let advancedView = $derived(
     activeAdvancedView({
       uiSinks: pipeline.uiSinks,
       voiceTranscribeIds: browserRuntime.voiceTranscribeIds,
+      hasAudioSink,
     }),
   );
   let showAdvanced = $derived(
-    advancedView !== null && clientControls.get('client.workspace.advancedVisible'),
+    advancedView !== null && clientControls.get('client.workspace.mainPane') === 'advanced',
   );
 
   // Channel-detail header label: "Channel · 240 kHz @ 100.001 MHz" so
@@ -205,17 +209,5 @@
     border-bottom: 1px solid rgb(30 41 59);
     background: var(--color-bg);
   }
-  .panel-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 3px 8px;
-    border-bottom: 1px solid rgb(30 41 59);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--color-muted);
-  }
+  /* .panel-head moved to app.css (shared with every pane view). */
 </style>

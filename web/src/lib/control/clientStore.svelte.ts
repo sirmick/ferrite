@@ -14,6 +14,11 @@
 
 const STORAGE_KEY = 'ferrite.clientControls';
 
+/** Which view occupies the workspace's main column (the toolbar's
+ *  Main: dropdown). Exported so the dispatcher / consumers can refer
+ *  to the union by name. */
+export type WorkspaceMainPane = 'wide' | 'advanced';
+
 /** Full list of known client paths and their defaults. The defaults
  *  object also declares the *type* of each knob (by its JavaScript
  *  value shape); anything persisted that doesn't match is dropped on
@@ -80,14 +85,15 @@ export const CLIENT_DEFAULTS = {
   // is hidden automatically when no `fft_narrow` sink is present.
   'client.workspace.narrowVisible': true,
 
-  // Advanced-view toggle. Some presets (FT8/FT4/WSPR, later ADS-B)
-  // register a mode-specific "advanced" workspace — a station map +
-  // decode table — that *replaces* the wide FFT/waterfall column
-  // when on. The Channel column is independent and unaffected. The
-  // toolbar button is disabled (and this has no effect) on presets
-  // with no registered advanced view. Off by default so the familiar
-  // spectrum view is what you see on first load.
-  'client.workspace.advancedVisible': false,
+  // What occupies the main (wide) workspace column: `"wide"` shows the
+  // wide Spectrum+Waterfall; `"advanced"` shows the active preset's
+  // mode-specific view (FT8 spots / ADS-B map / APRS map / Journal /
+  // Transcript — whatever `activeAdvancedView` returns). The toolbar
+  // exposes this as a two-option dropdown. Defaults to `"wide"` and
+  // resets to `"wide"` on every preset load (`pipeline.loadPreset`)
+  // so a stale "advanced" selection from a previous preset never
+  // surprises you on the next one.
+  'client.workspace.mainPane': 'wide' as WorkspaceMainPane,
 
   // Operator's own Maidenhead grid locator (e.g. "FN42" / "IO91wm").
   // Not in any decode stream — it's the origin of the station-map

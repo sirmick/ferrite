@@ -51,6 +51,16 @@ export const MODELS: ReadonlyArray<WhisperModelDef> = [
     approxMB: 182,
   },
   {
+    // tinydiarize fine-tune: emits a per-segment speaker-turn flag,
+    // which `TranscriptView` renders as a divider between speakers.
+    // English-only `small` size; drop the .bin into web/static/models
+    // (see blocks/native/whisper/README.md).
+    id: 'small.en-tdrz',
+    label: 'small.en-tdrz (speaker-turn detection)',
+    url: '/models/ggml-small.en-tdrz.bin',
+    approxMB: 465,
+  },
+  {
     id: 'base.en-q5',
     label: 'base.en (q5 · faster, lighter)',
     url: '/models/ggml-base.en-q5_1.bin',
@@ -72,6 +82,10 @@ export interface WhisperSegment {
   readonly tokens: WhisperToken[];
   readonly avgLogprob: number;
   readonly noSpeechProb: number;
+  /** tinydiarize speaker-turn flag — true when whisper.cpp's
+   *  `whisper_full_get_segment_speaker_turn_next` fires for this
+   *  segment. Always false on non-tdrz models. */
+  readonly speakerTurn?: boolean;
 }
 export interface WhisperResult {
   readonly segments: WhisperSegment[];

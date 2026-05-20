@@ -19,10 +19,16 @@ gracefully (audio passes through untouched; the transcript panel shows
 2. Install emsdk and `source emsdk_env.sh` (~/emsdk is present).
 
 3. Fetch ggml models into web/static/models/ :
-     ggml-small.en-q5_1.bin   default (best on noisy SSB)
-     ggml-base.en-q5_1.bin    lighter, panel-selectable
-     ggml-silero-v5.1.2.bin   VAD (optional, recommended)
+     ggml-small.en-q5_1.bin    default (best on noisy SSB)
+     ggml-base.en-q5_1.bin     lighter, panel-selectable
+     ggml-silero-v5.1.2.bin    VAD (optional, recommended)
+     ggml-small.en-tdrz.bin    tinydiarize speaker-turn detection,
+                               optional — pick from the model dropdown
    from https://huggingface.co/ggerganov/whisper.cpp (q5_1 quant).
+   The tdrz model is unquantised (~465 MB) and English-only; it emits
+   a per-segment speaker-turn flag the Transcript view renders as a
+   divider. `tdrz_enable` is on unconditionally in the glue (no-op on
+   non-tdrz models — swapping the .bin is the only switch).
 
 4. pnpm wasm:build:whisper   (wired into pnpm wasm:build)
 

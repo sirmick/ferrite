@@ -27,7 +27,13 @@
   // output port (the one a `ui:fldigi`/`ui:ft8`/… sink consumes), so
   // detect it that way rather than by an allow-list of type names —
   // any future decoder is picked up for free.
-  const isDecoder = (b: PipelineBlock) => b.spec.outputs.some((o) => o.port_type === 'events');
+  // A decoder is either: (a) any block with an `events` output port
+  // (the structural rule — every ui:fldigi/ui:ft8/etc. sink consumes
+  // one), or (b) `VoiceTranscribe` (an audio-passthrough tap with no
+  // events port whose model_id/prompt knobs nonetheless belong in
+  // this same section).
+  const isDecoder = (b: PipelineBlock) =>
+    b.type_name === 'VoiceTranscribe' || b.spec.outputs.some((o) => o.port_type === 'events');
   // Noise-reduction section looks up the single audio_nr block that
   // ships in every analog-mode preset (AudioNrMono or AudioNrStereo,
   // same id so the UI binds once). If a preset doesn't have an NR
@@ -36,6 +42,14 @@
   const AUDIO_NR_ID = 'audio_nr';
 
   let demodBlock = $derived(pipeline.blocks[DEMOD_ID]);
+  // True iff the running pipeline actually has an audio chain.
+  // Driven by the Audio chip ("off" strips AudioSink via apply_profile)
+  // and by the preset itself (decoder-only presets like ADS-B never
+  // have one). Gates the entire Audio/Noise-Reduction UI: no point
+  // showing volume/NR knobs when there's nothing to drive.
+  let hasAudioChain = $derived(
+    Object.values(pipeline.blocks).some((b) => b.type_name === 'AudioSink'),
+  );
   let decoderBlock = $derived(Object.values(pipeline.blocks).find(isDecoder));
   let audioNrBlock = $derived(pipeline.blocks[AUDIO_NR_ID]);
   let presetLabel = $derived(pipeline.flowgraph?.label ?? pipeline.flowgraph?.name ?? '—');
@@ -103,16 +117,18 @@
       </div>
     </details>
 
-    <details open class="settings-section">
-      <summary
-        class="cursor-pointer select-none text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-fg)]"
-      >
-        Audio
-      </summary>
-      <div class="mt-2 pl-1">
-        <AudioPanel />
-      </div>
-    </details>
+    {#if hasAudioChain}
+      <details open class="settings-section">
+        <summary
+          class="cursor-pointer select-none text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-fg)]"
+        >
+          Audio
+        </summary>
+        <div class="mt-2 pl-1">
+          <AudioPanel />
+        </div>
+      </details>
+    {/if}
 
     {#if audioNrBlock}
       <details class="settings-section">

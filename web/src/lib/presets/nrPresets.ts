@@ -60,7 +60,7 @@ export const NR_PRESETS: readonly NrPreset[] = [
       notch_enable: false,
       spectral_enable: false,
       neural_enable: true,
-      neural_attenuation_db: 18,
+      neural_attenuation_db: 49,
       agc_enable: true,
       agc_target_dbfs: -6,
       agc_release_ms: 500,

@@ -10,29 +10,16 @@
   // data yet, shows a "waiting for flowdiag…" placeholder so the user
   // knows the plumbing is wired but the pipeline hasn't started.
 
-  import { onMount } from 'svelte';
   import { flow, type FlowSide } from '$lib/logs/flowStore.svelte';
-  import { fetchFlowdiag } from '$lib/api/flowdiag';
 
   // The node-side snapshot comes over its own channel (GET
-  // /api/flowdiag), not the log stream — always available regardless
-  // of RUST_LOG and never in the LogPanel. Poll 1 Hz only while this
-  // panel is mounted (it's only mounted when the Flow tab is open, so
-  // the poll is implicitly visibility-gated). The browser side feeds
-  // `flow` directly from the runner; nothing to poll there.
-  onMount(() => {
-    let alive = true;
-    const tick = async () => {
-      const snap = await fetchFlowdiag().catch(() => null);
-      if (alive && snap) flow.ingest('node', snap);
-    };
-    void tick();
-    const t = setInterval(() => void tick(), 1000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  });
+  // /api/flowdiag), not the log stream. The 1 Hz poll lives at the
+  // store layer (`flowStore.svelte.ts`) so it runs whenever the app
+  // is up — not just when this panel is mounted. Gating it on
+  // FlowPanel visibility broke `HealthDots`, which depends on the
+  // freshness of `flow.node` regardless of which tab is open.
+  // The browser side is fed directly from the runner; nothing to
+  // poll there.
 
   function fmtSps(n: number): string {
     if (!Number.isFinite(n) || n === 0) return '—';

@@ -41,6 +41,10 @@ export interface TranscriptSegment {
   /** Silence (ms) before this utterance; 0 mid-utterance. The rolling
    *  transcript breaks a paragraph when this exceeds the threshold. */
   readonly gapMs: number;
+  /** tinydiarize speaker-turn flag — true when the model thinks the
+   *  talker changed at this segment. Only meaningful on the
+   *  `small.en-tdrz` model; false on others. */
+  readonly speakerTurn?: boolean;
 }
 
 export type EngineStatus =

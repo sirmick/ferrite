@@ -34,6 +34,7 @@ import { replaceState } from '$app/navigation';
 import { fetchSourceCapabilities, type SourceCapabilitiesResponse } from '$lib/api/sourceCaps';
 import { defaultsFor, toSourceConfig } from '$lib/controls/optionsModel';
 import { presetDocBySlug } from '$lib/presets/catalog';
+import { clientControls } from '$lib/control/clientStore.svelte';
 import { FrameClient, type ClientStatus } from '$lib/ws/client';
 import { initFrameDecoder } from '$lib/ws/frame';
 import { logs } from '$lib/logs/store.svelte';
@@ -289,6 +290,17 @@ class PipelineStore {
     return this.withBusy(async () => {
       const resp = await patchBlockParams(id, { [key]: value });
       await this.refreshComposed();
+      // `VoiceTranscribe` keeps its `model_id` / `prompt` knobs as
+      // block params (canonical declared interface, surfaced in
+      // SettingsPanel), but the actual whisper engine lives in a JS
+      // Worker — fan the change there so the operator's pick takes
+      // effect immediately. Future server-side transcriber will read
+      // the block params directly and this hop disappears.
+      const b = this.blocks[id];
+      if (b?.type_name === 'VoiceTranscribe') {
+        if (key === 'model_id') browserRuntime.setTranscribeModel(value as string);
+        else if (key === 'prompt') browserRuntime.setTranscribePrompt(value as string);
+      }
       return resp;
     }, `set ${id}.${key}`);
   }
@@ -355,6 +367,11 @@ class PipelineStore {
       this.flowgraph = await fetchFlowgraph();
       await this.refreshComposed();
       this.restoreVfo(name, oldVfo);
+      // Reset the workspace main pane to the wide spectrum on every
+      // preset change so a stale "advanced" selection from a previous
+      // preset doesn't surprise you on the next one (D-mainPane Q1).
+      // Channel checkbox is preset-independent and stays sticky.
+      clientControls.set('client.workspace.mainPane', 'wide');
       return resp.reconfigure;
     }, `load preset ${name}`);
   }
