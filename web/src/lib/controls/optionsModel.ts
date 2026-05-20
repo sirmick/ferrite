@@ -261,6 +261,14 @@ export function overallGainRangeFor(caps: DeviceCapabilities): RangeSpec | null 
   return range;
 }
 
+/** DC-spike dodge ratio for the active driver. Caller passes this to
+ *  `POST /api/tune` as `offset_ratio`; the server uses it to compute
+ *  the source-centre snap on out-of-range tunes. Returns 0 when the
+ *  driver has no preset entry — meaning "no dodge, just tune". */
+export function tuneOffsetRatioFor(caps: DeviceCapabilities): number {
+  return lookupPreset(caps.driver_key)?.tune_offset_ratio ?? 0;
+}
+
 /** Historically: whether to flip the slider for drivers whose Soapy
  *  "overall gain" element is in reduction terms (high raw = quiet,
  *  notably SDRplay's SoapySDRPlay3). The flip now lives server-side in
@@ -486,6 +494,19 @@ interface SdrPreset {
    * it unset and the device's advertised max applies.
    */
   overall_gain_max_db?: number;
+  /**
+   * DC-spike dodge: fraction of the channelizer's output rate to keep
+   * between the source's centre and the operator's tune target. Used by
+   * `POST /api/tune` — when the target is outside the keepout window of
+   * the current src centre, the server snaps `src_center = target -
+   * ratio × chan.output_rate_hz` and sets `chan.freq_shift_hz = +ratio
+   * × chan.output_rate_hz` so the LO leakage spike lands well outside
+   * the demodulated passband. Zero-IF radios with no built-in
+   * cancellation (notably HackRF) need ~0.4; drivers with a tuned RF
+   * stage and DC tracking (SDRplay, RTL-SDR) can leave it unset
+   * (default 0 → no dodge, target lands at `src_center`).
+   */
+  tune_offset_ratio?: number;
   /**
    * Invert the master gain slider's displayed value vs the raw
    * `gain_db` param. SoapySDRPlay3 reports per-element ranges as

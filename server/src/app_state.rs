@@ -676,6 +676,126 @@ impl AppState {
         }
         true
     }
+
+    /// Single tuning intent — "listen at `freq_hz`". Encodes the
+    /// DC-spike dodge (zero-IF radios produce a bright line at the
+    /// source's centre; HackRF has nothing to remove it) and the
+    /// channelizer-aware "already in range" check, so every caller (UI
+    /// tuner-Enter, band-preset rx/tune, ferrite-ctl tune, AI tune)
+    /// gets identical behaviour without re-implementing the math.
+    ///
+    /// Behaviour:
+    /// 1. If `span_hz` is given and exceeds the current sample rate,
+    ///    raise the source rate to span. Drivers clamp/snap to their
+    ///    own ladders inside `SoapySource::apply_live_params`.
+    /// 2. Find the first `Channelizer` in the composed preset and read
+    ///    its `output_rate_hz` (channel passband). If none exists the
+    ///    dodge is skipped and `src.center_freq_hz` is just set to the
+    ///    target directly.
+    /// 3. Keepout = `0.4 × output_rate_hz`. If `|freq_hz - src_center|
+    ///    ≤ keepout`, keep `src_center` parked and only retune
+    ///    `chan.freq_shift_hz`. Otherwise snap `src_center` so the
+    ///    target sits `offset_ratio × output_rate_hz` off centre — i.e.
+    ///    the spike lands outside the demodulated channel.
+    ///
+    /// `offset_ratio` is supplied by the caller from per-driver config
+    /// (HackRF: ~0.4 — see `web/src/lib/controls/sdr-presets/hackrf.json`;
+    /// most drivers: 0). When 0, the dodge collapses to "just retune".
+    ///
+    /// Two reconfigures (source delta + channelizer live param) — the
+    /// channelizer hot-applies, the source hot-applies via the
+    /// `apply_live_params` whitelist when only `center_freq_hz` changes,
+    /// or rebuilds when `sample_rate_hz` changes too. The brief window
+    /// where the spike is at the requested freq before the shift lands
+    /// is acceptable (a tune is an explicit operator action, not a
+    /// continuous control loop). Returns the channelizer-side plan when
+    /// it applied, else the source plan, else `None`.
+    pub async fn tune(
+        &self,
+        freq_hz: f64,
+        span_hz: Option<f64>,
+        offset_ratio: f64,
+    ) -> Result<Option<ReconfigurePlan>> {
+        if !freq_hz.is_finite() {
+            return Err(anyhow!("tune: freq_hz must be finite, got {freq_hz}"));
+        }
+        let preset = self.inner.preset_doc.read().await.clone();
+        let source = self.inner.source_config.read().await.clone();
+        let composed = self.compose_full(&preset, &source).await?;
+
+        // First channelizer in the composed graph (preset convention:
+        // there's exactly one; AFC's `first_id_typed::<Channelizer>` makes
+        // the same assumption). Without a channelizer the dodge has no
+        // landing zone — fall back to writing src.center_freq_hz directly.
+        let chan: Option<(String, f64)> = composed
+            .blocks
+            .iter()
+            .find(|(_, b)| b.type_name == "Channelizer")
+            .and_then(|(id, b)| {
+                let rate = b
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("output_rate_hz"))
+                    .and_then(serde_json::Value::as_f64)?;
+                Some((id.clone(), rate))
+            });
+
+        let cur_src_center = source
+            .params
+            .get("center_freq_hz")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(freq_hz);
+        let cur_rate = source
+            .params
+            .get("sample_rate_hz")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+
+        // Compute new src_center + chan.freq_shift_hz from the dodge math.
+        let (new_src_center, new_freq_shift) = match &chan {
+            Some((_, chan_rate)) => {
+                let keepout = 0.4 * chan_rate;
+                let dodge = offset_ratio * chan_rate;
+                if (freq_hz - cur_src_center).abs() <= keepout {
+                    // Sticky: keep source parked, just retune chan.
+                    (cur_src_center, freq_hz - cur_src_center)
+                } else {
+                    // Snap: source low of target by dodge_offset.
+                    (freq_hz - dodge, dodge)
+                }
+            }
+            None => (freq_hz, 0.0),
+        };
+
+        // Build source-side delta. 0.5 Hz floor on the centre delta so a
+        // round-trip readback noise doesn't trigger a reconfigure.
+        let mut src_delta = serde_json::Map::new();
+        if (new_src_center - cur_src_center).abs() > 0.5 {
+            src_delta.insert("center_freq_hz".into(), serde_json::json!(new_src_center));
+        }
+        if let Some(span) = span_hz {
+            if span > cur_rate {
+                src_delta.insert("sample_rate_hz".into(), serde_json::json!(span));
+            }
+        }
+
+        let mut last_plan: Option<ReconfigurePlan> = None;
+        if !src_delta.is_empty() {
+            let merged = merge_into_params(source, src_delta);
+            last_plan = self.patch_source(merged).await?;
+        }
+
+        // Channelizer hot-retune. apply_block_params routes non-`src` ids
+        // through PresetMount::live_reconfigure_block, which the
+        // Channelizer's `apply_live_params` honours for freq_shift_hz.
+        if let Some((chan_id, _)) = chan {
+            let chan_delta = serde_json::json!({ "freq_shift_hz": new_freq_shift });
+            if let Some(plan) = self.apply_block_params(&chan_id, chan_delta).await? {
+                last_plan = Some(plan);
+            }
+        }
+        Ok(last_plan)
+    }
 }
 
 /// Merge a partial params delta into `cfg`, producing a new config.

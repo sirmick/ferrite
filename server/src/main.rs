@@ -394,6 +394,7 @@ async fn main() -> Result<()> {
             get(routes::get_source_capabilities),
         )
         .route("/api/source/readback", get(routes::get_source_readback))
+        .route("/api/tune", post(routes::post_tune))
         .route("/api/pipeline", get(routes::pipeline_status))
         .route("/api/pipeline/start", post(routes::pipeline_start))
         .route("/api/pipeline/stop", post(routes::pipeline_stop))

@@ -9,7 +9,6 @@
 
 import { pipeline, currentAxes } from '$lib/pipeline.svelte';
 import { clientControls } from '$lib/control/clientStore.svelte';
-import { applyControl } from '$lib/control/dispatch';
 import { resolveTuning, snapHz, type Tuning } from '$lib/presets/tuningModel';
 
 /** Demods with no channel grid — continuous tuning, snap force-off. */
@@ -59,25 +58,19 @@ export function currentTuning(): Tuning {
   });
 }
 
-/** Move the VFO to `absHz` (snapped if a grid is resolved). When the
- *  preset has no channelizer VFO block, retunes the source centre
- *  instead. Clamps the channelizer shift to the captured span. */
+/** Move the VFO to `absHz` (snapped if a grid is resolved). Routes
+ *  through `pipeline.tune` → `POST /api/tune`, so the server makes the
+ *  single decision about whether to retune the source centre or just
+ *  shift the channelizer, applies the per-driver DC-spike dodge, and
+ *  reports a unified ReconfigureResponse. The old two-step
+ *  `applyControl(center_freq_hz)` / `applyControl(freq_shift_hz)`
+ *  split lived here before — server now owns the math. */
 export function tuneVfoTo(absHz: number): void {
-  const v = vfoState();
-  if (!v) return;
+  if (!vfoState()) return;
   const t = currentTuning();
   const target =
     t.snapGridHz !== null ? snapHz(absHz, t.snapGridHz, t.snapOffsetHz) : Math.round(absHz);
-
-  if (!v.vfoBlockId) {
-    if (target !== v.centerHz) void applyControl('flow.src.center_freq_hz', target);
-    return;
-  }
-  const shift = target - v.centerHz;
-  const clamped = Math.max(-v.halfSpanHz, Math.min(v.halfSpanHz, shift));
-  if (clamped !== v.shiftHz) {
-    void applyControl(`flow.${v.vfoBlockId}.freq_shift_hz`, clamped);
-  }
+  void pipeline.tune(target);
 }
 
 /** Step the VFO one increment up (`+1`) or down (`-1`). */

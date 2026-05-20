@@ -42,3 +42,31 @@ export async function fetchSourceReadback(): Promise<SoapyReadback | null> {
   if (!r.ok) return null;
   return (await r.json()) as SoapyReadback | null;
 }
+
+/** Body of `POST /api/tune` — see the server route for the dodge math.
+ *  `freq_hz` is the target listen frequency; `span_hz` is an optional
+ *  passband floor (band presets compute it from the band's range);
+ *  `offset_ratio` is the per-driver DC-spike dodge fraction. */
+export interface TuneRequest {
+  freq_hz: number;
+  span_hz?: number;
+  offset_ratio?: number;
+}
+
+/** `POST /api/tune` — single tuning intent (UI tuner-Enter, ▲▼,
+ *  spectrum click, band-preset rx/tune, ferrite-ctl tune, AI tune all
+ *  end up here). Server handles the DC-spike dodge + the keep-or-snap
+ *  decision against the live channelizer. Same response shape as
+ *  `PATCH /api/source`. */
+export async function tune(req: TuneRequest): Promise<ReconfigureResponse> {
+  const r = await fetch('/api/tune', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) {
+    const text = await r.text();
+    throw new ApiError(r.status, `tune failed (${r.status}): ${text}`);
+  }
+  return (await r.json()) as ReconfigureResponse;
+}

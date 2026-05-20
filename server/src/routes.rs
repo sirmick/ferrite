@@ -506,6 +506,47 @@ pub async fn get_source_readback(
     Json(state.cached_source_readback().await)
 }
 
+/// Body of `POST /api/tune`. `freq_hz` is the target listen frequency
+/// in Hz; `span_hz` (optional) is a desired sample-rate / passband
+/// floor the caller wants spanned (band presets compute this from the
+/// band's low/high). `offset_ratio` is the per-driver DC-spike dodge —
+/// fraction of the channelizer's output rate to keep between
+/// `src_center` and the target when a snap happens. Defaults to 0,
+/// meaning "don't dodge, just tune".
+#[derive(Deserialize)]
+pub struct TuneRequest {
+    pub freq_hz: f64,
+    #[serde(default)]
+    pub span_hz: Option<f64>,
+    #[serde(default)]
+    pub offset_ratio: f64,
+}
+
+/// `POST /api/tune` — single tuning intent. Every caller that "asks to
+/// listen at a frequency" (UI tuner-Enter, band-preset rx/tune,
+/// ferrite-ctl tune, AI tune via control plane) routes here so the
+/// DC-spike dodge and the "already in range" channelizer-shift fast
+/// path apply uniformly. Raw `PATCH /api/source { center_freq_hz }`
+/// stays as a low-level escape hatch (no dodge).
+pub async fn post_tune(
+    State(state): State<AppState>,
+    Json(req): Json<TuneRequest>,
+) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
+    tracing::info!(
+        freq_hz = req.freq_hz,
+        span_hz = ?req.span_hz,
+        offset_ratio = req.offset_ratio,
+        "POST /api/tune"
+    );
+    let plan = state
+        .tune(req.freq_hz, req.span_hz, req.offset_ratio)
+        .await
+        .map_err(|e| bad_request("TUNE_FAILED", format!("{e:#}")))?;
+    let mut resp = reconfigure_response(plan);
+    resp.source_readback = state.source_readback().await;
+    Ok(Json(resp))
+}
+
 /// `GET /api/pipeline/blocks` — every block in the currently-loaded
 /// composed preset, with its full spec and current param values.
 /// Source for the generic `<BlockParams>` UI component. See D24 in
