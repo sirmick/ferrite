@@ -248,6 +248,28 @@ impl AppState {
         }
     }
 
+    /// Compose `preset + source` into a runnable flowgraph with every
+    /// stage of the standard pipeline applied: source merge, narrow-FFT
+    /// tap injection, profile overlay, voice-transcribe overlay. Five
+    /// callers used to hand-roll this dance; skipping any one of the
+    /// injections silently diverged the running pipeline from what
+    /// /api/pipeline/blocks reports. Callers handle their own
+    /// preset/source acquisition (some need overrides) — this helper
+    /// owns the *order* and the lock on `profile`.
+    async fn compose_full(
+        &self,
+        preset: &FlowgraphDoc,
+        source: &SourceConfig,
+    ) -> Result<FlowgraphDoc> {
+        let mut composed =
+            compose_source(preset, source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
+        inject_narrow_fft_taps(&mut composed);
+        let profile = self.inner.profile.read().await;
+        apply_profile(&mut composed, &profile);
+        inject_voice_transcribe(&mut composed, &profile);
+        Ok(composed)
+    }
+
     pub async fn get_flowgraph(&self) -> FlowgraphDoc {
         // Drop the preset_doc read guard before touching the pipeline
         // lock — canonical order is pipeline → preset_doc, never the
@@ -284,13 +306,7 @@ impl AppState {
     pub async fn ui_sinks(&self) -> Result<Vec<UiSink>> {
         let preset = self.inner.preset_doc.read().await.clone();
         let source = self.inner.source_config.read().await.clone();
-        let mut composed =
-            compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
-        inject_narrow_fft_taps(&mut composed);
-        let profile = self.inner.profile.read().await;
-        apply_profile(&mut composed, &profile);
-        inject_voice_transcribe(&mut composed, &profile);
-        drop(profile);
+        let composed = self.compose_full(&preset, &source).await?;
         let node_half = split_for_environment(&composed, Environment::Node, &InventorySpecRegistry)
             .map_err(|e| anyhow!("env_split: {e}"))?;
         let mut out = Vec::new();
@@ -343,13 +359,7 @@ impl AppState {
     pub async fn list_blocks(&self) -> Result<Vec<PipelineBlock>> {
         let preset = self.inner.preset_doc.read().await.clone();
         let source = self.inner.source_config.read().await.clone();
-        let mut composed =
-            compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
-        inject_narrow_fft_taps(&mut composed);
-        let profile = self.inner.profile.read().await;
-        apply_profile(&mut composed, &profile);
-        inject_voice_transcribe(&mut composed, &profile);
-        drop(profile);
+        let mut composed = self.compose_full(&preset, &source).await?;
         // While the pipeline is live the runtime is the reader-of-
         // record: overlay its applied node-block params so an
         // interactive edit shows here without a preset_doc mirror-back.
@@ -546,13 +556,7 @@ impl AppState {
     /// plan; otherwise stores the doc and returns `None`.
     pub async fn patch_flowgraph(&self, new_doc: FlowgraphDoc) -> Result<Option<ReconfigurePlan>> {
         let source = self.inner.source_config.read().await.clone();
-        let mut composed =
-            compose_source(&new_doc, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
-        inject_narrow_fft_taps(&mut composed);
-        let profile = self.inner.profile.read().await;
-        apply_profile(&mut composed, &profile);
-        inject_voice_transcribe(&mut composed, &profile);
-        drop(profile);
+        let composed = self.compose_full(&new_doc, &source).await?;
         let mut pipeline = self.inner.pipeline.lock().await;
         let plan = if let Some(mount) = pipeline.as_mut() {
             Some(mount.reconfigure(&composed).await?)
@@ -595,13 +599,7 @@ impl AppState {
         }
 
         let preset = self.inner.preset_doc.read().await.clone();
-        let mut composed = compose_source(&preset, &new_source)
-            .map_err(|e| anyhow!("compose preset+source: {e}"))?;
-        inject_narrow_fft_taps(&mut composed);
-        let profile = self.inner.profile.read().await;
-        apply_profile(&mut composed, &profile);
-        inject_voice_transcribe(&mut composed, &profile);
-        drop(profile);
+        let composed = self.compose_full(&preset, &new_source).await?;
         let mut pipeline = self.inner.pipeline.lock().await;
         let plan = if let Some(mount) = pipeline.as_mut() {
             Some(mount.reconfigure(&composed).await?)
@@ -621,13 +619,7 @@ impl AppState {
         }
         let preset = self.inner.preset_doc.read().await.clone();
         let source = self.inner.source_config.read().await.clone();
-        let mut composed =
-            compose_source(&preset, &source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
-        inject_narrow_fft_taps(&mut composed);
-        let profile = self.inner.profile.read().await;
-        apply_profile(&mut composed, &profile);
-        inject_voice_transcribe(&mut composed, &profile);
-        drop(profile);
+        let composed = self.compose_full(&preset, &source).await?;
         let mount = spawn_preset(
             &composed,
             self.inner.frames.clone(),

@@ -69,7 +69,7 @@ pub enum ComposeError {
 /// 2. Live `source.params` — **user intent**. Overlays the hints.
 /// 3. Placeholder `force_params` — **preset-imposed overrides**. Wins
 ///    over both above so a preset can pin a setting it genuinely
-///    requires (e.g. `wbam` setting `agc_enable=false` to avoid the
+///    requires (e.g. `wbam` setting `agc=false` to avoid the
 ///    AM-AGC pumping pathology). Use sparingly.
 ///
 /// The placeholder's `placement` pins the composed block to the same

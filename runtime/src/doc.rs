@@ -48,7 +48,7 @@ pub struct BlockInstanceDecl {
     /// `SourceConfig` during `compose_source`), `force_params` *win*
     /// over the live state. Use sparingly — only when the preset
     /// genuinely demands a specific source setting (e.g. `wbam`
-    /// needs `agc_enable=false` to dodge the AGC-pumping pathology
+    /// needs `agc=false` to dodge the AGC-pumping pathology
     /// on AM envelopes regardless of what the operator had set
     /// before). Ignored on non-source blocks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
