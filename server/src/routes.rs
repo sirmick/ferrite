@@ -495,6 +495,17 @@ pub async fn get_flowdiag(
     Json(state.flowdiag().await)
 }
 
+/// `GET /api/source/readback` — the latest 1 Hz cached SoapySource
+/// driver readback (current gain, AGC state, etc.). `null` when the
+/// pipeline is stopped, the source is not a `SoapySource`, or the
+/// pipeline hasn't produced a tick yet. The UI polls this so AGC-driven
+/// gain motion shows up between explicit `PATCH /api/source` writes.
+pub async fn get_source_readback(
+    State(state): State<AppState>,
+) -> Json<Option<ferrite_blocks::SoapyReadback>> {
+    Json(state.cached_source_readback().await)
+}
+
 /// `GET /api/pipeline/blocks` — every block in the currently-loaded
 /// composed preset, with its full spec and current param values.
 /// Source for the generic `<BlockParams>` UI component. See D24 in

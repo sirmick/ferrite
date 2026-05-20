@@ -64,6 +64,12 @@ pub struct PresetMount {
     /// block regardless of port type; the sink discriminates by the
     /// `Frame` variant it receives on each push.
     bridge_sink: Arc<dyn BridgeSink>,
+    /// 1 Hz cache of the SoapySource driver readback (current gain,
+    /// AGC state, etc.). Populated by the [`drive`] task each diag tick
+    /// so HTTP handlers can serve a fresh snapshot without touching the
+    /// runtime mutex — and so AGC-driven gain moves reach the UI/AI
+    /// between explicit `PATCH /api/source` writes.
+    latest_source_readback: Arc<tokio::sync::RwLock<Option<SoapyReadback>>>,
 }
 
 impl PresetMount {
@@ -131,6 +137,14 @@ impl PresetMount {
         rt.block_typed::<SoapySource>(SOURCE_ID)
             .map(|b| b.readback())
     }
+
+    /// Latest cached SoapySource readback from the 1 Hz diag-tick poll.
+    /// Cheap (`Option::clone`) — does not touch the runtime mutex.
+    /// `None` until the first tick has populated it, the source is
+    /// not a `SoapySource`, or the pipeline has just been (re)started.
+    pub async fn cached_source_readback(&self) -> Option<SoapyReadback> {
+        self.latest_source_readback.read().await.clone()
+    }
 }
 
 impl PresetHandle {
@@ -181,12 +195,14 @@ pub fn spawn_preset(
     runtime.start().context("runtime start")?;
 
     let runtime = Arc::new(Mutex::new(runtime));
+    let latest_source_readback = Arc::new(tokio::sync::RwLock::new(None));
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join = tokio::spawn(drive(
         Arc::clone(&runtime),
         tick_period,
         shutdown_rx,
         latest_diag,
+        Arc::clone(&latest_source_readback),
     ));
     Ok(PresetMount {
         handle: PresetHandle {
@@ -195,6 +211,7 @@ pub fn spawn_preset(
         },
         runtime,
         bridge_sink,
+        latest_source_readback,
     })
 }
 
@@ -307,6 +324,7 @@ async fn drive(
     tick_period: Duration,
     shutdown: oneshot::Receiver<()>,
     latest_diag: Arc<tokio::sync::RwLock<Option<ferrite_runtime::DiagSnapshot>>>,
+    latest_source_readback: Arc<tokio::sync::RwLock<Option<SoapyReadback>>>,
 ) -> Result<()> {
     let mut interval = tokio::time::interval(tick_period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -365,6 +383,7 @@ async fn drive(
                     // HackRF resets). Log once per second we're over
                     // the threshold so operators see it immediately
                     // without rooting through flowdiag counters.
+                    let mut new_readback: Option<SoapyReadback> = None;
                     if let Some(src) =
                         rt.block_typed::<ferrite_blocks::SoapySource>(SOURCE_ID)
                     {
@@ -380,6 +399,14 @@ async fn drive(
                                 );
                             }
                         }
+                        // Driver readback (gain, agc, etc.) at 1 Hz so
+                        // AGC-driven gain moves reach the UI/AI between
+                        // explicit PATCH /api/source writes.
+                        new_readback = Some(src.readback());
+                    }
+                    drop(rt);
+                    if let Some(rb) = new_readback {
+                        *latest_source_readback.write().await = Some(rb);
                     }
                 }
                 let rt = runtime.lock().await;

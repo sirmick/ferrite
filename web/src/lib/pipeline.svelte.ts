@@ -19,7 +19,7 @@ import {
   type ReconfigureResponse,
   type SoapyReadback,
 } from '$lib/api/flowgraph';
-import { fetchSource, patchSource, type SourceConfig } from '$lib/api/source';
+import { fetchSource, fetchSourceReadback, patchSource, type SourceConfig } from '$lib/api/source';
 import {
   fetchPipelineStatus,
   startPipeline,
@@ -112,6 +112,12 @@ class PipelineStore {
    *  the store is alive — callers multiplex by stream id. */
   client = $state<FrameClient | undefined>(undefined);
 
+  /** Driver-readback poll handle; ticks 1 Hz while the store is alive.
+   *  Surfaces AGC-driven gain motion (and any other reactive driver
+   *  state) into `source.params` so the UI controls and the AI prompt
+   *  reflect what the radio is actually doing, not the last set-point. */
+  private readbackTimer: ReturnType<typeof setInterval> | undefined;
+
   /**
    * Load the initial state from the server and open the WS client.
    * Safe to call once on app mount. Idempotent — a second call is a
@@ -173,11 +179,55 @@ class PipelineStore {
         return center + (this.currentVfoOffset() ?? 0);
       };
       this.phase = 'ready';
+      this.startReadbackPoll();
       logs.push('client', 'info', `pipeline init: status=${st}, source=${src.type}`);
     } catch (err) {
       this.phase = 'error';
       this.errorMessage = err instanceof Error ? err.message : String(err);
       logs.push('client', 'error', `pipeline init failed: ${this.errorMessage}`);
+    }
+  }
+
+  /** Start the 1 Hz `/api/source/readback` poll. Idempotent — a second
+   *  call leaves the existing timer alone. Stopped via
+   *  `stopReadbackPoll`; in practice the singleton store never tears
+   *  down, but tests can opt out of the timer. */
+  private startReadbackPoll(): void {
+    if (this.readbackTimer !== undefined) return;
+    this.readbackTimer = setInterval(() => {
+      void this.pollReadback();
+    }, 1000);
+  }
+
+  /** Stop the readback poll. Used by tests to keep the global mock
+   *  fetch queue from receiving unexpected calls; production tears down
+   *  on tab close so the browser cancels timers itself. */
+  stopReadbackPoll(): void {
+    if (this.readbackTimer !== undefined) {
+      clearInterval(this.readbackTimer);
+      this.readbackTimer = undefined;
+    }
+  }
+
+  private async pollReadback(): Promise<void> {
+    // Don't ask while the pipeline isn't running — the endpoint would
+    // just return null and bursts of 4xx/5xx would noise up the network
+    // panel. The server's diag-tick stops populating the cache on stop
+    // too, so the stored value would be stale anyway.
+    if (this.status !== 'running' || !this.source) return;
+    try {
+      const rb = await fetchSourceReadback();
+      if (!rb || !this.source) return;
+      const next = applyReadback(this.source, rb);
+      // Only assign when something actually changed — keeps reactivity
+      // graphs (AI prompt rebuild, control rerender) from firing every
+      // tick on a stable signal.
+      if (!sourceEquals(this.source, next)) {
+        this.source = next;
+      }
+    } catch {
+      // Network blips happen; the next tick will retry. Silent on
+      // purpose — a 1 Hz error log would drown the LogPanel.
     }
   }
 
@@ -579,6 +629,20 @@ function applyReadback(next: SourceConfig, readback: SoapyReadback | undefined):
     if (v !== undefined) merged[k] = v;
   }
   return { type: next.type, params: merged };
+}
+
+/** Shallow equality on a SourceConfig — used by the readback poll to
+ *  skip reassignments when the driver state didn't move (so reactive
+ *  consumers like the AI prompt rebuild only when something changed). */
+function sourceEquals(a: SourceConfig, b: SourceConfig): boolean {
+  if (a.type !== b.type) return false;
+  const ka = Object.keys(a.params);
+  const kb = Object.keys(b.params);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (a.params[k] !== b.params[k]) return false;
+  }
+  return true;
 }
 
 function profileEquals(a: Profile, b: Profile): boolean {

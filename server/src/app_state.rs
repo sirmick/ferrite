@@ -349,6 +349,20 @@ impl AppState {
         }
     }
 
+    /// 1 Hz-polled snapshot of the source driver's state, populated by
+    /// the pipeline's diag tick. Cheap (no runtime mutex hit) and stays
+    /// fresh while the pipeline runs — surfaces AGC-driven gain motion
+    /// to the UI/AI between explicit `PATCH /api/source` writes.
+    /// `None` when the pipeline is stopped or hasn't ticked once yet.
+    pub async fn cached_source_readback(&self) -> Option<SoapyReadback> {
+        let pipeline = self.inner.pipeline.lock().await;
+        if let Some(mount) = pipeline.as_ref() {
+            mount.cached_source_readback().await
+        } else {
+            None
+        }
+    }
+
     /// Walk the current composed preset (preset + source merged) and
     /// surface every block with its full spec and current param values.
     /// The list is pre-split, so both node and browser blocks appear —
