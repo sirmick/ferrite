@@ -392,7 +392,7 @@ type CurrentSource = {
   bandwidth_hz?: number;
   antenna?: string;
   gain_db?: number;
-  agc_enable?: boolean;
+  agc?: boolean;
 };
 
 /** Render the per-block notes section. Blocks with both block-level
@@ -451,9 +451,9 @@ function renderCurrentSource(s: CurrentSource | undefined): string {
   }
   if (s.antenna) lines.push(`- Antenna: ${s.antenna}`);
   if (s.gain_db !== undefined) lines.push(`- Gain: ${s.gain_db.toFixed(1)} dB`);
-  if (s.agc_enable !== undefined) {
+  if (s.agc !== undefined) {
     lines.push(
-      `- AGC: ${s.agc_enable ? "enabled (driver manages gain)" : "disabled (manual gain in effect)"}`,
+      `- AGC: ${s.agc ? "enabled (driver manages gain)" : "disabled (manual gain in effect)"}`,
     );
   }
   return (

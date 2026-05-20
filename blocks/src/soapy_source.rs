@@ -605,7 +605,7 @@ impl Block for SoapySource {
                         unit: "dB",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "Overall SoapySDR gain element. Mutually exclusive with `agc_enable=true`; ferrite-ctl folds them atomically. Some drivers expose a separate LNA stage on top — see driver notes.",
+                    ai_notes: "Overall SoapySDR gain element. Mutually exclusive with `agc=true`; ferrite-ctl folds them atomically. Some drivers expose a separate LNA stage on top — see driver notes.",
                 },
                 ParamSpec {
                     key: "channel",

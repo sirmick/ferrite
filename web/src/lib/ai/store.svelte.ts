@@ -339,7 +339,7 @@ export class AiStore {
         'bandwidth_hz',
         'antenna',
         'gain_db',
-        'agc_enable',
+        'agc',
       ] as const) {
         if (p[k] !== undefined) curr[k] = p[k];
       }

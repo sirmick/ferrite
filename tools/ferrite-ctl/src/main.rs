@@ -650,12 +650,12 @@ impl Driver {
             // `--gain N` is a manual-gain intent; SDRplay (and a few
             // others) silently ignore manual IFGR while AGC is on and
             // log `Not updating IFGR gain because AGC is enabled`. Fold
-            // `agc_enable=false` into the same PATCH so the manual
-            // value actually lands — atomic from the API's POV, no
-            // operator dance to remember. If the caller really wants
-            // AGC on, they pass no `--gain` flag (and the rest of the
-            // tune still works fine).
-            params.insert("agc_enable".into(), json!(false));
+            // `agc=false` into the same PATCH so the manual value
+            // actually lands — atomic from the API's POV, no operator
+            // dance to remember. If the caller really wants AGC on,
+            // they pass no `--gain` flag (and the rest of the tune
+            // still works fine).
+            params.insert("agc".into(), json!(false));
         }
         let body = json!({ "type": type_name, "params": Value::Object(params) });
         let v = self.patch("/api/source", body).await?;
