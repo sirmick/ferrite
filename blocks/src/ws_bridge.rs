@@ -41,11 +41,11 @@ use serde::Deserialize;
 
 use crate::{
     block::{
-        Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, OutputPort, ParamKind, ParamSpec,
-        Placement, PortSpec, PortType, ReconfigureScope, Work,
+        Block, BlockFactory, BlockIo, BlockSpec, InBuf, InitCtx, InputPort, OutputPort, ParamKind,
+        ParamSpec, Placement, PortSpec, PortType, ReconfigureScope, Work,
     },
     frame::Frame,
-    spsc_ring::{AudioRing, IqRing},
+    spsc_ring::SpscRing,
 };
 
 /// One `Frame::JsonEvent` per complete line — see `WsBridgeTxEvents`.
@@ -134,9 +134,17 @@ const STREAM_ID_PARAM: ParamSpec = ParamSpec {
 /// Narrow the `u32` param back to the wire's `u16` stream id. `u16` is
 /// plenty (64k streams) and matches the `Frame` schema; the `u32` on
 /// the params struct just avoids a JSON-schema oddity around max.
+/// In practice `env_split` allocates from a small base (1000+), so the
+/// clamp branch is unreachable today — but warn loudly if it ever
+/// fires so the silent-collision failure mode never lands in prod.
 #[allow(clippy::cast_possible_truncation)]
-const fn stream_id_u16(stream_id: u32) -> u16 {
+fn stream_id_u16(stream_id: u32) -> u16 {
     if stream_id > u16::MAX as u32 {
+        tracing::warn!(
+            target: "ws_bridge",
+            stream_id,
+            "stream_id exceeds u16 wire range — clamping to u16::MAX, downstream subscribers will collide. The allocator should never produce this; investigate env_split."
+        );
         u16::MAX
     } else {
         stream_id as u16
@@ -144,28 +152,117 @@ const fn stream_id_u16(stream_id: u32) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
-// Tx (IqF32) — server-side egress for baseband IQ samples. Accepts
-// `Complex<f32>`, encodes as interleaved little-endian floats, pushes.
-// Native-only: a WASM block never sends over a WS to itself.
+// Sample-stream bridges (IqF32 + RealF32). Both directions of those two
+// payloads are pure twins — same params, batching, rate-stamp, ring —
+// so they ride a single generic body (`BridgeTxBody<T>` / `BridgeRxBody<T>`)
+// plus a small `BridgeSample` trait that captures the four per-type bits
+// (encode bytes, build the Frame variant, view an InputPort, view a
+// mut OutputPort). The concrete `WsBridgeTx{,F32}` / `WsBridgeRx{,F32}`
+// types are emitted by a macro so the registry/env_split type names
+// stay byte-identical to the previous hand-rolled blocks.
+//
+// `WsBridgeTxFftU8` and `WsBridgeTxEvents` stay separate further down:
+// their per-tick framing is fundamentally different (fixed-size FFT
+// windows, newline-delimited line reassembly) and forcing them through
+// the same trait shape would add abstraction without removing
+// duplication.
 // ---------------------------------------------------------------------------
 
-pub struct WsBridgeTx {
+/// Per-type plumbing for the IQ↔F32 bridge pair. Carries the four bits
+/// that vary by sample type; everything else (batching, sink dispatch,
+/// rate stamp, ring drain) lives in the generic body.
+trait BridgeSample: 'static + Copy + Default + Send + Sync {
+    /// `BlockSpec` port type announced by both sides.
+    const PORT_TYPE: PortType;
+
+    /// Encode a slice of samples as the bytes that ride on the wire.
+    fn encode(samples: &[Self]) -> Vec<u8>;
+
+    /// Wrap a payload in the right `Frame` variant. `sample_rate_hz` is
+    /// the producer's current input rate, stamped so the far-side Rx
+    /// can advertise it downstream without a preset reload.
+    fn make_frame(stream_id: u16, sample_rate_hz: u32, payload: Vec<u8>) -> Frame;
+
+    /// View the `in` input port as a slice of this sample type, or
+    /// `None` if the port carries a different payload (a wiring bug).
+    fn read_input<'a>(port: &'a InputPort<'_>) -> Option<&'a [Self]>;
+
+    /// View the `out` output port as a mut slice of this sample type.
+    fn write_output<'a>(port: &'a mut OutputPort<'_>) -> Option<&'a mut [Self]>;
+}
+
+impl BridgeSample for Complex<f32> {
+    const PORT_TYPE: PortType = PortType::IqF32;
+    fn encode(samples: &[Self]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(samples.len() * 8);
+        for c in samples {
+            out.extend_from_slice(&c.re.to_le_bytes());
+            out.extend_from_slice(&c.im.to_le_bytes());
+        }
+        out
+    }
+    fn make_frame(stream_id: u16, sample_rate_hz: u32, payload: Vec<u8>) -> Frame {
+        Frame::IqF32 {
+            stream_id,
+            seq: 0,
+            timestamp_ns: 0,
+            sample_rate_hz,
+            payload,
+        }
+    }
+    fn read_input<'a>(port: &'a InputPort<'_>) -> Option<&'a [Self]> {
+        port.as_iq_f32()
+    }
+    fn write_output<'a>(port: &'a mut OutputPort<'_>) -> Option<&'a mut [Self]> {
+        port.as_iq_f32_mut()
+    }
+}
+
+impl BridgeSample for f32 {
+    const PORT_TYPE: PortType = PortType::RealF32;
+    fn encode(samples: &[Self]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(samples.len() * 4);
+        for s in samples {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        out
+    }
+    fn make_frame(stream_id: u16, sample_rate_hz: u32, payload: Vec<u8>) -> Frame {
+        Frame::F32 {
+            stream_id,
+            seq: 0,
+            timestamp_ns: 0,
+            sample_rate_hz,
+            payload,
+        }
+    }
+    fn read_input<'a>(port: &'a InputPort<'_>) -> Option<&'a [Self]> {
+        port.as_real_f32()
+    }
+    fn write_output<'a>(port: &'a mut OutputPort<'_>) -> Option<&'a mut [Self]> {
+        port.as_real_f32_mut()
+    }
+}
+
+/// Generic Tx body: accumulator + sink + observed input rate. The
+/// concrete `WsBridgeTx{,F32}` types are thin wrappers that delegate
+/// `init`/`update_rates`/`process` straight here.
+struct BridgeTxBody<T: BridgeSample> {
     params: WsBridgeParams,
     sink: Option<Arc<dyn BridgeSink>>,
-    /// Accumulator for `min_samples_per_frame` batching. Filled on each
-    /// `process` call; flushed when it reaches the threshold. Empty when
-    /// batching is disabled (`min_samples_per_frame == 0`).
-    batch: Vec<Complex<f32>>,
+    /// Accumulator for `min_samples_per_frame` batching. Filled on
+    /// each `process` call; flushed when it reaches the threshold.
+    /// Empty when batching is disabled (`min_samples_per_frame == 0`).
+    batch: Vec<T>,
     /// Last input-port rate observed via `InitCtx.input_rate`. Stamped
-    /// onto every emitted `Frame::IqF32` so the receiving `WsBridgeRx`
-    /// on the other side of the WS boundary learns the actual runtime
-    /// rate rather than relying on a preset-time guess.
+    /// onto every emitted Frame so the Rx on the other side of the WS
+    /// boundary learns the actual runtime rate rather than relying on
+    /// a preset-time guess.
     input_rate_hz: f64,
 }
 
-impl WsBridgeTx {
-    #[must_use]
-    pub fn new(params: WsBridgeParams) -> Self {
+impl<T: BridgeSample> BridgeTxBody<T> {
+    fn new(params: WsBridgeParams) -> Self {
         Self {
             params,
             sink: None,
@@ -174,138 +271,74 @@ impl WsBridgeTx {
         }
     }
 
-    #[must_use]
-    pub const fn stream_id(&self) -> u32 {
-        self.params.stream_id
-    }
-
-    /// Wire a transport sink. The runtime calls this after constructing
-    /// the block but before `init`; `process` pushes every arriving IQ
-    /// block through the sink. Called once — later calls overwrite.
-    pub fn attach_sink(&mut self, sink: Arc<dyn BridgeSink>) {
+    fn attach_sink(&mut self, sink: Arc<dyn BridgeSink>) {
         self.sink = Some(sink);
     }
 
-    /// Encode a slice of complex samples as interleaved little-endian
-    /// `f32` bytes — the wire format for `IqF32`. Allocates fresh; the
-    /// hot path could reuse a scratch buffer if profiling shows it
-    /// matters.
-    fn encode_iq_f32(samples: &[Complex<f32>]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(samples.len() * 8);
-        for c in samples {
-            out.extend_from_slice(&c.re.to_le_bytes());
-            out.extend_from_slice(&c.im.to_le_bytes());
+    fn note_rate(&mut self, ctx: &InitCtx<'_>) {
+        if let Some(rate) = ctx.input_rate("in") {
+            if rate > 0.0 {
+                self.input_rate_hz = rate;
+            }
         }
-        out
     }
 
-    /// Emit the buffered samples as one frame. Clears the batch.
-    fn flush(&mut self, samples: &[Complex<f32>]) {
-        let Some(sink) = &self.sink else {
-            return;
-        };
+    fn flush(&mut self, samples: &[T]) {
+        let Some(sink) = &self.sink else { return };
         if samples.is_empty() {
             return;
         }
-        let payload = Self::encode_iq_f32(samples);
+        let payload = T::encode(samples);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let sample_rate_hz = self.input_rate_hz.round().max(0.0) as u32;
-        sink.push(Frame::IqF32 {
-            stream_id: stream_id_u16(self.params.stream_id),
-            seq: 0,
-            timestamp_ns: 0,
+        sink.push(T::make_frame(
+            stream_id_u16(self.params.stream_id),
             sample_rate_hz,
             payload,
-        });
-    }
-}
-
-#[ferrite_blocks_macros::ferrite_block]
-impl Block for WsBridgeTx {
-    fn spec() -> BlockSpec {
-        BlockSpec {
-            type_name: "WsBridgeTx",
-            placement: Placement::NativeOnly,
-            inputs: &[PortSpec {
-                name: "in",
-                port_type: PortType::IqF32,
-            }],
-            outputs: &[],
-            params: &[STREAM_ID_PARAM],
-            ai_notes: "Server-side end of the IQ WebSocket bridge. Auto-inserted by env_split at node→browser boundaries; not authored by hand in presets.",
-        }
+        ));
     }
 
-    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
-        if let Some(rate) = ctx.input_rate("in") {
-            if rate > 0.0 {
-                self.input_rate_hz = rate;
-            }
-        }
-        Ok(())
-    }
-
-    fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
-        // Source retuned — pick up the new rate so outgoing frames
-        // advertise the current runtime value to the far-side Rx.
-        if let Some(rate) = ctx.input_rate("in") {
-            if rate > 0.0 {
-                self.input_rate_hz = rate;
-            }
-        }
-        Ok(())
-    }
-
-    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+    fn process_io(&mut self, io: &mut BlockIo<'_>) -> Work {
         let mut w = Work::new();
-        if let Some(port) = io.inputs.iter().find(|p| p.name == "in") {
-            if let Some(slice) = port.as_iq_f32() {
-                if self.params.min_samples_per_frame == 0 {
-                    // No batching: emit every tick.
-                    self.flush(slice);
-                } else {
-                    self.batch.extend_from_slice(slice);
-                    if self.batch.len() >= self.params.min_samples_per_frame {
-                        // Take ownership of the batch buffer, emit, reset
-                        // with the same capacity. One allocation per
-                        // flush — negligible compared to the WS overhead
-                        // it saves.
-                        let drained = std::mem::replace(
-                            &mut self.batch,
-                            Vec::with_capacity(self.params.min_samples_per_frame),
-                        );
-                        self.flush(&drained);
-                    }
-                }
-                // Consume whatever arrived regardless of sink presence:
-                // an unwired bridge still needs to relieve upstream
-                // back-pressure, and tests without a sink must not
-                // deadlock the scheduler.
-                w.consumed[0] = slice.len();
+        let Some(port) = io.inputs.iter().find(|p| p.name == "in") else {
+            return w;
+        };
+        let Some(slice) = T::read_input(port) else {
+            return w;
+        };
+        if self.params.min_samples_per_frame == 0 {
+            self.flush(slice);
+        } else {
+            self.batch.extend_from_slice(slice);
+            if self.batch.len() >= self.params.min_samples_per_frame {
+                // One allocation per flush — negligible compared to
+                // the WS overhead it amortises.
+                let drained = std::mem::replace(
+                    &mut self.batch,
+                    Vec::with_capacity(self.params.min_samples_per_frame),
+                );
+                self.flush(&drained);
             }
         }
-        Ok(w)
-    }
-}
-
-impl BlockFactory for WsBridgeTx {
-    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
-        let p: WsBridgeParams = crate::block::deserialize_params(params)?;
-        Ok(Box::new(WsBridgeTx::new(p)))
+        // Consume whatever arrived regardless of sink presence: an
+        // unwired bridge still needs to relieve upstream back-pressure,
+        // and tests without a sink must not deadlock the scheduler.
+        w.consumed[0] = slice.len();
+        w
     }
 }
 
 // ---------------------------------------------------------------------------
-// Rx — browser-side ingress. Holds an internal [`IqRing`]; the browser
-// runner pushes decoded frames into it over the wasm-bindgen
-// `pushIq` method, and `process` drains the ring onto the typed
-// `IqF32` output at tick time. WASM-only. See module doc for the
+// Rx body — browser-side ingress. Holds an internal ring; the browser
+// runner pushes decoded frames into it over wasm-bindgen (`pushIq` for
+// IQ, `pushF32` for audio), and `process` drains the ring onto the
+// typed output at tick time. WASM-only blocks; see module doc for the
 // transport split.
 // ---------------------------------------------------------------------------
 
-/// Default ring capacity in **samples** (complex IQ pairs). 65 536
-/// samples ≈ 650 ms at 100 kS/s narrowband — plenty of headroom for
-/// scheduler jitter without adding meaningful latency.
+/// Default ring capacity in **samples**. 65 536 IQ samples ≈ 650 ms at
+/// 100 kS/s narrowband — plenty of headroom for scheduler jitter
+/// without adding meaningful latency.
 const DEFAULT_RX_BUFFER_SAMPLES: usize = 65_536;
 const DEFAULT_RX_BUFFER_SAMPLES_F64: f64 = 65_536.0;
 
@@ -313,15 +346,13 @@ const DEFAULT_RX_BUFFER_SAMPLES_F64: f64 = 65_536.0;
 #[serde(default)]
 pub struct WsBridgeRxParams {
     /// `stream_id` the browser-side transport demultiplexes for this
-    /// block. The runner registers a [`FrameClient`] subscription for
+    /// block. The runner registers a `FrameClient` subscription for
     /// this id on start and drops it on stop; the block itself just
-    /// consumes samples pushed in via [`WsBridgeRx::push_interleaved`].
-    ///
-    /// [`FrameClient`]: https://ferrite.example/frame-client
+    /// consumes samples pushed in via the wasm-bindgen `push*` shims.
     pub stream_id: u32,
-    /// Ring capacity in complex samples. Power of two recommended.
+    /// Ring capacity in samples. Power of two recommended.
     pub buffer_samples: usize,
-    /// Nominal sample rate of the IQ stream arriving on `stream_id`.
+    /// Nominal sample rate of the stream arriving on `stream_id`.
     /// Populated by `env_split` from the producing block's declared
     /// output rate when the bridge is inserted — lets downstream
     /// rate-aware blocks (e.g. `RealF32Resamp`) read this through
@@ -354,16 +385,17 @@ const RX_BUFFER_SAMPLES_PARAM: ParamSpec = ParamSpec {
     ai_notes: "Receive-side ring capacity in samples. Larger = more robust against bursty WS delivery; smaller = lower latency / memory.",
 };
 
-pub struct WsBridgeRx {
+/// Generic Rx body. Concrete `WsBridgeRx{,F32}` types delegate
+/// `push`/`set_advertised_rate`/init/process here.
+struct BridgeRxBody<T: BridgeSample> {
     params: WsBridgeRxParams,
-    ring: IqRing,
+    ring: SpscRing<T>,
     dropped_samples: u64,
 }
 
-impl WsBridgeRx {
-    #[must_use]
-    pub fn new(params: WsBridgeRxParams) -> Self {
-        let ring = IqRing::new(params.buffer_samples);
+impl<T: BridgeSample> BridgeRxBody<T> {
+    fn new(params: WsBridgeRxParams) -> Self {
+        let ring = SpscRing::new(params.buffer_samples);
         Self {
             params,
             ring,
@@ -371,39 +403,253 @@ impl WsBridgeRx {
         }
     }
 
-    #[must_use]
-    pub const fn stream_id(&self) -> u32 {
-        self.params.stream_id
-    }
-
-    #[must_use]
-    pub fn params(&self) -> &WsBridgeRxParams {
-        &self.params
-    }
-
-    /// Cumulative count of samples dropped because the ring was full.
-    /// The network clock wins over the flowgraph clock (losing IQ
-    /// samples beats stalling the WS reader).
-    #[must_use]
-    pub fn dropped_samples(&self) -> u64 {
-        self.dropped_samples
-    }
-
-    /// Samples currently buffered (written but not yet emitted).
-    #[must_use]
-    pub fn buffered_samples(&self) -> usize {
-        self.ring.available_read()
-    }
-
-    /// Push a batch of complex samples received from the transport.
-    /// Samples that don't fit are counted into `dropped_samples`.
-    pub fn push(&mut self, samples: &[Complex<f32>]) {
+    fn push(&mut self, samples: &[T]) {
         let written = self.ring.write(samples);
         if written < samples.len() {
             self.dropped_samples += (samples.len() - written) as u64;
         }
     }
 
+    fn set_advertised_rate(&mut self, rate_hz: f64) {
+        if rate_hz > 0.0 && rate_hz.is_finite() {
+            self.params.sample_rate_hz = rate_hz;
+        }
+    }
+
+    fn init_reset(&mut self) {
+        self.ring.reset();
+        self.dropped_samples = 0;
+    }
+
+    fn output_rate(&self) -> Option<f64> {
+        if self.params.sample_rate_hz > 0.0 {
+            Some(self.params.sample_rate_hz)
+        } else {
+            None
+        }
+    }
+
+    fn process_io(&mut self, io: &mut BlockIo<'_>) -> Work {
+        let Some(out) = io
+            .outputs
+            .iter_mut()
+            .find(|p| p.name == "out")
+            .and_then(T::write_output)
+        else {
+            return Work::new();
+        };
+        let got = self.ring.read(out);
+        let mut w = Work::new();
+        w.produced[0] = got;
+        w
+    }
+}
+
+/// Emit the concrete `WsBridgeTx*` block for one [`BridgeSample`]
+/// implementation. Keeps the type name byte-identical to the original
+/// hand-rolled blocks so the registry, `env_split`, and presets all
+/// keep working unchanged.
+macro_rules! ws_bridge_tx {
+    ($name:ident<$sample:ty>, type_name = $type_name:literal, ai = $ai:literal $(,)?) => {
+        pub struct $name {
+            body: BridgeTxBody<$sample>,
+        }
+
+        impl $name {
+            #[must_use]
+            pub fn new(params: WsBridgeParams) -> Self {
+                Self {
+                    body: BridgeTxBody::new(params),
+                }
+            }
+
+            #[must_use]
+            pub const fn stream_id(&self) -> u32 {
+                self.body.params.stream_id
+            }
+
+            /// Wire a transport sink. The runtime calls this after
+            /// constructing the block but before `init`; `process`
+            /// pushes every arriving sample block through the sink.
+            /// Called once — later calls overwrite.
+            pub fn attach_sink(&mut self, sink: Arc<dyn BridgeSink>) {
+                self.body.attach_sink(sink);
+            }
+        }
+
+        #[ferrite_blocks_macros::ferrite_block]
+        impl Block for $name {
+            fn spec() -> BlockSpec {
+                BlockSpec {
+                    type_name: $type_name,
+                    placement: Placement::NativeOnly,
+                    inputs: &[PortSpec {
+                        name: "in",
+                        port_type: <$sample as BridgeSample>::PORT_TYPE,
+                    }],
+                    outputs: &[],
+                    params: &[STREAM_ID_PARAM],
+                    ai_notes: $ai,
+                }
+            }
+
+            fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+                self.body.note_rate(ctx);
+                Ok(())
+            }
+
+            fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
+                // Source retuned — pick up the new rate so outgoing
+                // frames advertise the current runtime value to the
+                // far-side Rx.
+                self.body.note_rate(ctx);
+                Ok(())
+            }
+
+            fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+                Ok(self.body.process_io(io))
+            }
+        }
+
+        impl BlockFactory for $name {
+            fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+                let p: WsBridgeParams = crate::block::deserialize_params(params)?;
+                Ok(Box::new($name::new(p)))
+            }
+        }
+    };
+}
+
+/// Emit the concrete `WsBridgeRx*` block for one [`BridgeSample`]
+/// implementation. Mirrors [`ws_bridge_tx!`].
+macro_rules! ws_bridge_rx {
+    ($name:ident<$sample:ty>, type_name = $type_name:literal, ai = $ai:literal $(,)?) => {
+        pub struct $name {
+            body: BridgeRxBody<$sample>,
+        }
+
+        impl $name {
+            #[must_use]
+            pub fn new(params: WsBridgeRxParams) -> Self {
+                Self {
+                    body: BridgeRxBody::new(params),
+                }
+            }
+
+            #[must_use]
+            pub const fn stream_id(&self) -> u32 {
+                self.body.params.stream_id
+            }
+
+            #[must_use]
+            pub fn params(&self) -> &WsBridgeRxParams {
+                &self.body.params
+            }
+
+            /// Cumulative count of samples dropped because the ring
+            /// was full. The network clock wins over the flowgraph
+            /// clock (losing samples beats stalling the WS reader).
+            #[must_use]
+            pub fn dropped_samples(&self) -> u64 {
+                self.body.dropped_samples
+            }
+
+            /// Samples currently buffered (written but not yet emitted).
+            #[must_use]
+            pub fn buffered_samples(&self) -> usize {
+                self.body.ring.available_read()
+            }
+
+            /// Push a batch of samples received from the transport.
+            /// Samples that don't fit are counted into
+            /// `dropped_samples`.
+            pub fn push(&mut self, samples: &[$sample]) {
+                self.body.push(samples);
+            }
+
+            /// Record the sample rate advertised by the most recent
+            /// incoming frame. Runner glue (server transport decoder,
+            /// browser `FrameClient`) calls this on each frame that
+            /// carries a non-zero `sample_rate_hz`. The stored rate
+            /// feeds `output_rate_hz()`, which the runtime's
+            /// `refresh_rates()` sweep uses to re-advertise the live
+            /// rate to downstream blocks — so a runtime source-rate
+            /// change propagates across the WS boundary without a
+            /// full preset reconfigure.
+            pub fn set_advertised_rate(&mut self, rate_hz: f64) {
+                self.body.set_advertised_rate(rate_hz);
+            }
+        }
+
+        #[ferrite_blocks_macros::ferrite_block]
+        impl Block for $name {
+            fn spec() -> BlockSpec {
+                BlockSpec {
+                    type_name: $type_name,
+                    placement: Placement::WasmOnly,
+                    inputs: &[],
+                    outputs: &[PortSpec {
+                        name: "out",
+                        port_type: <$sample as BridgeSample>::PORT_TYPE,
+                    }],
+                    params: &[STREAM_ID_PARAM, RX_BUFFER_SAMPLES_PARAM],
+                    ai_notes: $ai,
+                }
+            }
+
+            fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
+                self.body.init_reset();
+                Ok(())
+            }
+
+            fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+                self.body.output_rate()
+            }
+
+            fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+                Ok(self.body.process_io(io))
+            }
+
+            fn stop(&mut self) -> Result<()> {
+                self.body.ring.reset();
+                Ok(())
+            }
+        }
+
+        impl BlockFactory for $name {
+            fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+                let p: WsBridgeRxParams = crate::block::deserialize_params(params)?;
+                Ok(Box::new($name::new(p)))
+            }
+        }
+    };
+}
+
+ws_bridge_tx!(
+    WsBridgeTx<Complex<f32>>,
+    type_name = "WsBridgeTx",
+    ai = "Server-side end of the IQ WebSocket bridge. Auto-inserted by env_split at node→browser boundaries; not authored by hand in presets.",
+);
+
+ws_bridge_rx!(
+    WsBridgeRx<Complex<f32>>,
+    type_name = "WsBridgeRx",
+    ai = "Browser-side end of the IQ WebSocket bridge. Auto-inserted by env_split at node→browser boundaries; paired with a WsBridgeTx by `stream_id`.",
+);
+
+ws_bridge_tx!(
+    WsBridgeTxF32<f32>,
+    type_name = "WsBridgeTxF32",
+    ai = "Server-side end of the real-audio WebSocket bridge. Auto-inserted by env_split at node→browser boundaries when the crossing port carries `RealF32` (audio after demod); not authored by hand in presets.",
+);
+
+ws_bridge_rx!(
+    WsBridgeRxF32<f32>,
+    type_name = "WsBridgeRxF32",
+    ai = "Browser-side end of the real-audio WebSocket bridge. Auto-inserted by env_split at node→browser boundaries on `RealF32` wires; paired with a `WsBridgeTxF32` by `stream_id`.",
+);
+
+impl WsBridgeRx {
     /// Push a batch from an interleaved `[i0, q0, i1, q1, …]` float
     /// slice. Convenience over [`push`] for callers that receive WS
     /// frames as raw `Float32Array` payloads. Odd-length inputs drop
@@ -415,327 +661,6 @@ impl WsBridgeRx {
             tmp.push(Complex::new(chunk[0], chunk[1]));
         }
         self.push(&tmp);
-    }
-
-    /// Record the sample rate advertised by the most recent incoming
-    /// `Frame::IqF32`. Runner glue (server transport decoder, browser
-    /// `FrameClient`) calls this on each frame that carries a non-zero
-    /// `sample_rate_hz`. The stored rate feeds `output_rate_hz()`, which
-    /// the runtime's `refresh_rates()` sweep uses to re-advertise the
-    /// live rate to downstream blocks (resamp, demod) — so a runtime
-    /// source-rate change propagates across the WS boundary without a
-    /// full preset reconfigure.
-    pub fn set_advertised_rate(&mut self, rate_hz: f64) {
-        if rate_hz > 0.0 && rate_hz.is_finite() {
-            self.params.sample_rate_hz = rate_hz;
-        }
-    }
-}
-
-#[ferrite_blocks_macros::ferrite_block]
-impl Block for WsBridgeRx {
-    fn spec() -> BlockSpec {
-        BlockSpec {
-            type_name: "WsBridgeRx",
-            placement: Placement::WasmOnly,
-            inputs: &[],
-            outputs: &[PortSpec {
-                name: "out",
-                port_type: PortType::IqF32,
-            }],
-            params: &[STREAM_ID_PARAM, RX_BUFFER_SAMPLES_PARAM],
-            ai_notes: "Browser-side end of the IQ WebSocket bridge. Auto-inserted by env_split at node→browser boundaries; paired with a WsBridgeTx by `stream_id`.",
-        }
-    }
-
-    fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
-        self.ring.reset();
-        self.dropped_samples = 0;
-        Ok(())
-    }
-
-    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
-        // Stamped by `env_split::producer_output_rate_hz` at split
-        // time — the rate the other half's producer declares. `None`
-        // when that walk couldn't resolve a rate from the doc.
-        if self.params.sample_rate_hz > 0.0 {
-            Some(self.params.sample_rate_hz)
-        } else {
-            None
-        }
-    }
-
-    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
-        let Some(out) = io
-            .outputs
-            .iter_mut()
-            .find(|p| p.name == "out")
-            .and_then(OutputPort::as_iq_f32_mut)
-        else {
-            return Ok(Work::new());
-        };
-        let got = self.ring.read(out);
-        let mut w = Work::new();
-        w.produced[0] = got;
-        Ok(w)
-    }
-
-    fn stop(&mut self) -> Result<()> {
-        self.ring.reset();
-        Ok(())
-    }
-}
-
-impl BlockFactory for WsBridgeRx {
-    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
-        let p: WsBridgeRxParams = crate::block::deserialize_params(params)?;
-        Ok(Box::new(WsBridgeRx::new(p)))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tx (F32) — server-side egress for real audio samples. Mirrors
-// [`WsBridgeTx`] but reads a `RealF32` input port and encodes as plain
-// little-endian `f32` (4 bytes per sample, not interleaved). Native-only;
-// pairs with [`WsBridgeRxF32`] on the browser side.
-// ---------------------------------------------------------------------------
-
-pub struct WsBridgeTxF32 {
-    params: WsBridgeParams,
-    sink: Option<Arc<dyn BridgeSink>>,
-    batch: Vec<f32>,
-    input_rate_hz: f64,
-}
-
-impl WsBridgeTxF32 {
-    #[must_use]
-    pub fn new(params: WsBridgeParams) -> Self {
-        Self {
-            params,
-            sink: None,
-            batch: Vec::with_capacity(params.min_samples_per_frame),
-            input_rate_hz: 0.0,
-        }
-    }
-
-    #[must_use]
-    pub const fn stream_id(&self) -> u32 {
-        self.params.stream_id
-    }
-
-    pub fn attach_sink(&mut self, sink: Arc<dyn BridgeSink>) {
-        self.sink = Some(sink);
-    }
-
-    fn encode_f32(samples: &[f32]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(samples.len() * 4);
-        for s in samples {
-            out.extend_from_slice(&s.to_le_bytes());
-        }
-        out
-    }
-
-    fn flush(&mut self, samples: &[f32]) {
-        let Some(sink) = &self.sink else {
-            return;
-        };
-        if samples.is_empty() {
-            return;
-        }
-        let payload = Self::encode_f32(samples);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let sample_rate_hz = self.input_rate_hz.round().max(0.0) as u32;
-        sink.push(Frame::F32 {
-            stream_id: stream_id_u16(self.params.stream_id),
-            seq: 0,
-            timestamp_ns: 0,
-            sample_rate_hz,
-            payload,
-        });
-    }
-}
-
-#[ferrite_blocks_macros::ferrite_block]
-impl Block for WsBridgeTxF32 {
-    fn spec() -> BlockSpec {
-        BlockSpec {
-            type_name: "WsBridgeTxF32",
-            placement: Placement::NativeOnly,
-            inputs: &[PortSpec {
-                name: "in",
-                port_type: PortType::RealF32,
-            }],
-            outputs: &[],
-            params: &[STREAM_ID_PARAM],
-            ai_notes: "Server-side end of the real-audio WebSocket bridge. Auto-inserted by env_split at node→browser boundaries when the crossing port carries `RealF32` (audio after demod); not authored by hand in presets.",
-        }
-    }
-
-    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
-        if let Some(rate) = ctx.input_rate("in") {
-            if rate > 0.0 {
-                self.input_rate_hz = rate;
-            }
-        }
-        Ok(())
-    }
-
-    fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
-        if let Some(rate) = ctx.input_rate("in") {
-            if rate > 0.0 {
-                self.input_rate_hz = rate;
-            }
-        }
-        Ok(())
-    }
-
-    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
-        let mut w = Work::new();
-        if let Some(port) = io.inputs.iter().find(|p| p.name == "in") {
-            if let Some(slice) = port.as_real_f32() {
-                if self.params.min_samples_per_frame == 0 {
-                    self.flush(slice);
-                } else {
-                    self.batch.extend_from_slice(slice);
-                    if self.batch.len() >= self.params.min_samples_per_frame {
-                        let drained = std::mem::replace(
-                            &mut self.batch,
-                            Vec::with_capacity(self.params.min_samples_per_frame),
-                        );
-                        self.flush(&drained);
-                    }
-                }
-                w.consumed[0] = slice.len();
-            }
-        }
-        Ok(w)
-    }
-}
-
-impl BlockFactory for WsBridgeTxF32 {
-    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
-        let p: WsBridgeParams = crate::block::deserialize_params(params)?;
-        Ok(Box::new(WsBridgeTxF32::new(p)))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Rx (F32) — browser-side ingress for real audio samples. Holds an
-// [`AudioRing`] (= `SpscRing<f32>`); the browser runner pushes decoded
-// `Frame::F32` payloads through `pushF32` and `process` drains onto the
-// typed `RealF32` output. WASM-only; pairs with [`WsBridgeTxF32`].
-// ---------------------------------------------------------------------------
-
-pub struct WsBridgeRxF32 {
-    params: WsBridgeRxParams,
-    ring: AudioRing,
-    dropped_samples: u64,
-}
-
-impl WsBridgeRxF32 {
-    #[must_use]
-    pub fn new(params: WsBridgeRxParams) -> Self {
-        let ring = AudioRing::new(params.buffer_samples);
-        Self {
-            params,
-            ring,
-            dropped_samples: 0,
-        }
-    }
-
-    #[must_use]
-    pub const fn stream_id(&self) -> u32 {
-        self.params.stream_id
-    }
-
-    #[must_use]
-    pub fn params(&self) -> &WsBridgeRxParams {
-        &self.params
-    }
-
-    #[must_use]
-    pub fn dropped_samples(&self) -> u64 {
-        self.dropped_samples
-    }
-
-    #[must_use]
-    pub fn buffered_samples(&self) -> usize {
-        self.ring.available_read()
-    }
-
-    /// Push a batch of real samples received from the transport. Samples
-    /// that don't fit are counted into `dropped_samples`.
-    pub fn push(&mut self, samples: &[f32]) {
-        let written = self.ring.write(samples);
-        if written < samples.len() {
-            self.dropped_samples += (samples.len() - written) as u64;
-        }
-    }
-
-    /// Record the sample rate advertised by the most recent incoming
-    /// `Frame::F32` — analog of [`WsBridgeRx::set_advertised_rate`].
-    pub fn set_advertised_rate(&mut self, rate_hz: f64) {
-        if rate_hz > 0.0 && rate_hz.is_finite() {
-            self.params.sample_rate_hz = rate_hz;
-        }
-    }
-}
-
-#[ferrite_blocks_macros::ferrite_block]
-impl Block for WsBridgeRxF32 {
-    fn spec() -> BlockSpec {
-        BlockSpec {
-            type_name: "WsBridgeRxF32",
-            placement: Placement::WasmOnly,
-            inputs: &[],
-            outputs: &[PortSpec {
-                name: "out",
-                port_type: PortType::RealF32,
-            }],
-            params: &[STREAM_ID_PARAM, RX_BUFFER_SAMPLES_PARAM],
-            ai_notes: "Browser-side end of the real-audio WebSocket bridge. Auto-inserted by env_split at node→browser boundaries on `RealF32` wires; paired with a `WsBridgeTxF32` by `stream_id`.",
-        }
-    }
-
-    fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
-        self.ring.reset();
-        self.dropped_samples = 0;
-        Ok(())
-    }
-
-    fn output_rate_hz(&self, _port: usize) -> Option<f64> {
-        if self.params.sample_rate_hz > 0.0 {
-            Some(self.params.sample_rate_hz)
-        } else {
-            None
-        }
-    }
-
-    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
-        let Some(out) = io
-            .outputs
-            .iter_mut()
-            .find(|p| p.name == "out")
-            .and_then(OutputPort::as_real_f32_mut)
-        else {
-            return Ok(Work::new());
-        };
-        let got = self.ring.read(out);
-        let mut w = Work::new();
-        w.produced[0] = got;
-        Ok(w)
-    }
-
-    fn stop(&mut self) -> Result<()> {
-        self.ring.reset();
-        Ok(())
-    }
-}
-
-impl BlockFactory for WsBridgeRxF32 {
-    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
-        let p: WsBridgeRxParams = crate::block::deserialize_params(params)?;
-        Ok(Box::new(WsBridgeRxF32::new(p)))
     }
 }
 
