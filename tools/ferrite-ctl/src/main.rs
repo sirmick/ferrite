@@ -176,6 +176,12 @@ enum Cmd {
         #[arg(long)]
         out: Option<String>,
     },
+    /// Print the browser's authored chrome state — which left tab is
+    /// active, channel-detail visibility, per-pane zoom + pause. Lets
+    /// the AI tailor responses to what the operator is looking at
+    /// ("you're on the AI tab, so I'll write here") without round-
+    /// tripping through a snapshot. 503 when no UI tab is connected.
+    ViewGet,
     /// Dev codegen: regenerate `web/src/lib/controls/
     /// if-filter-ladders.generated.json` from the Rust single source of
     /// truth in `sdr_tables`. Purely local — does not touch a running
@@ -433,6 +439,7 @@ fn command_summary(cmd: &Cmd) -> &'static str {
         Cmd::Tail { .. } => "tail",
         Cmd::Decoder(DecoderCmd::Recent { .. }) => "decoder-recent",
         Cmd::View { .. } => "view",
+        Cmd::ViewGet => "view-get",
         Cmd::GenTables => "gen-tables",
     }
 }
@@ -473,6 +480,7 @@ impl Driver {
                 limit,
             }) => self.decoder_recent(&category, lookback, limit).await,
             Cmd::View { pane, out } => self.view(&pane, out.as_deref()).await,
+            Cmd::ViewGet => self.view_get().await,
             // Local codegen — no network. The client is still built
             // above (harmless; no request is made).
             Cmd::GenTables => sdr_tables::write_web_ladders(),
@@ -1232,6 +1240,47 @@ impl Driver {
         std::fs::write(&out_path, &bytes)
             .with_context(|| format!("write {}", out_path.display()))?;
         println!("{}", out_path.display());
+        Ok(())
+    }
+
+    /// Print the cached chrome state ferrited holds on behalf of the
+    /// active browser. Same source the (forthcoming) view-set tools
+    /// will write into, and the same data MCP resources will surface.
+    async fn view_get(&self) -> Result<()> {
+        let v = self.get("/api/view").await?;
+        if self.json {
+            print_json(&v);
+            return Ok(());
+        }
+        // Human view: a few lines, formatted like `status`. Absent
+        // fields render as `—` so missing is visibly distinct from
+        // empty/false.
+        let left_tab = v.get("left_tab").and_then(Value::as_str).unwrap_or("—");
+        let channel_detail = match v.get("channel_detail_visible").and_then(Value::as_bool) {
+            Some(true) => "shown",
+            Some(false) => "hidden",
+            None => "—",
+        };
+        println!("left tab:        {left_tab}");
+        println!("channel detail:  {channel_detail}");
+        let zoom = v.get("pane_zoom").and_then(Value::as_object);
+        if let Some(z) = zoom {
+            if !z.is_empty() {
+                println!("zoom:");
+                for (k, val) in z {
+                    println!("  {k}: {val}");
+                }
+            }
+        }
+        let paused = v.get("pane_paused").and_then(Value::as_object);
+        if let Some(p) = paused {
+            if !p.is_empty() {
+                println!("paused:");
+                for (k, val) in p {
+                    println!("  {k}: {val}");
+                }
+            }
+        }
         Ok(())
     }
 

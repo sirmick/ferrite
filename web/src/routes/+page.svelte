@@ -16,10 +16,15 @@
   import { wsUrlFor } from '$lib/api/errors';
   import { composeSource, injectVoiceTranscribe } from '$lib/flowgraph';
   import { applyControl } from '$lib/control/dispatch';
+  import { viewState, type LeftTab } from '$lib/viz/viewState.svelte';
   import { onMount } from 'svelte';
 
-  type LeftTab = 'bands' | 'catalog' | 'settings' | 'logs' | 'flow' | 'ai';
-  let leftTab = $state<LeftTab>('bands');
+  // Default the tab on mount so ViewBridge ships a meaningful `left_tab`
+  // on the first `view_state` push. Module-level store ⇒ ferrited can
+  // read it via `GET /api/view`, and (next commit) write to it via the
+  // command channel so the AI can switch tabs.
+  if (viewState.leftTab === null) viewState.leftTab = 'bands';
+  let leftTab = $derived<LeftTab>(viewState.leftTab ?? 'bands');
 
   // Opening the Logs tab acks the error badge. While the tab is open,
   // unreadErrors changes also re-fire this effect (it reads both reactive
@@ -171,25 +176,25 @@
               type="button"
               class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
               class:tab-active={leftTab === 'bands'}
-              onclick={() => (leftTab = 'bands')}>Bands</button
+              onclick={() => (viewState.leftTab = 'bands')}>Bands</button
             >
             <button
               type="button"
               class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
               class:tab-active={leftTab === 'catalog'}
-              onclick={() => (leftTab = 'catalog')}>Catalog</button
+              onclick={() => (viewState.leftTab = 'catalog')}>Catalog</button
             >
             <button
               type="button"
               class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
               class:tab-active={leftTab === 'settings'}
-              onclick={() => (leftTab = 'settings')}>Settings</button
+              onclick={() => (viewState.leftTab = 'settings')}>Settings</button
             >
             <button
               type="button"
               class="relative flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
               class:tab-active={leftTab === 'logs'}
-              onclick={() => (leftTab = 'logs')}
+              onclick={() => (viewState.leftTab = 'logs')}
             >
               Logs
               {#if logs.unreadErrors > 0 && leftTab !== 'logs'}
@@ -204,13 +209,13 @@
               type="button"
               class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
               class:tab-active={leftTab === 'flow'}
-              onclick={() => (leftTab = 'flow')}>Flow</button
+              onclick={() => (viewState.leftTab = 'flow')}>Flow</button
             >
             <button
               type="button"
               class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
               class:tab-active={leftTab === 'ai'}
-              onclick={() => (leftTab = 'ai')}>AI</button
+              onclick={() => (viewState.leftTab = 'ai')}>AI</button
             >
           </div>
           <div class="min-h-0 flex-1">

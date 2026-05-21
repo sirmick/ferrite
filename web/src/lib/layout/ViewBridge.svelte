@@ -19,6 +19,7 @@
   // wherever they live in the tree.
   import { onMount, onDestroy } from 'svelte';
   import { snapshotView, type PaneName } from '$lib/viz/viewRegistry';
+  import { viewState } from '$lib/viz/viewState.svelte';
 
   // Same-origin WS — vite proxies `/ws` to ferrited (HTTP dev cert
   // also covers WSS), production mounts ferrited under the same host.
@@ -35,6 +36,10 @@
   let backoffMs = 500;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
+  // Track whether the socket is open so the `$effect` below can guard
+  // its sends. Plain WebSocket events fire imperatively; this `$state`
+  // surfaces "is the channel up" to the reactive graph.
+  let wsOpen = $state(false);
 
   function connect(): void {
     if (closed) return;
@@ -46,6 +51,7 @@
     }
     ws.addEventListener('open', () => {
       backoffMs = 500;
+      wsOpen = true;
     });
     ws.addEventListener('message', (ev) => {
       // Only text frames carry view_request; binaries are unexpected.
@@ -58,17 +64,37 @@
       }
       if (req.type !== 'view_request' || typeof req.req_id !== 'number') return;
       const { png_b64, error } = snapshotView(req.pane);
-      const resp = JSON.stringify({ req_id: req.req_id, png_b64, error });
+      // Tag the reply so the server-side `WireInbound` enum dispatches
+      // it as a `view_response` (vs. `view_state`, vs. future
+      // `view_command_result`).
+      const resp = JSON.stringify({
+        type: 'view_response',
+        req_id: req.req_id,
+        png_b64,
+        error,
+      });
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(resp);
     });
     ws.addEventListener('close', () => {
       ws = undefined;
+      wsOpen = false;
       schedule();
     });
     ws.addEventListener('error', () => {
       // close fires too; let that branch reconnect.
     });
   }
+
+  // Browser is the author for chrome state — push the cache to ferrited
+  // on every change. Reading `viewState.snapshot()` re-tracks every
+  // field; any flip (tab switch, zoom change, pause toggle…) re-fires
+  // this effect and ships a fresh state. The cheap stringify is
+  // ferrited's only window into "what is the operator looking at?"
+  $effect(() => {
+    const snapshot = viewState.snapshot();
+    if (!wsOpen || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'view_state', state: snapshot }));
+  });
 
   function schedule(): void {
     if (closed) return;

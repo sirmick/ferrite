@@ -1048,17 +1048,20 @@ async fn ws_ui_views_loop(mut socket: WebSocket, state: AppState) {
                     break;
                 }
             }
-            // browser → ferrited: a view_response landing the PNG for a
-            // prior request.
+            // browser → ferrited: a tagged inbound — either a
+            // view_response landing the PNG for a prior request, or a
+            // view_state push refreshing the chrome cache.
             msg = socket.recv() => {
                 let Some(msg) = msg else { break };
                 let Ok(msg) = msg else { break };
                 match msg {
                     Message::Text(t) => {
-                        if let Ok(resp) =
-                            serde_json::from_str::<crate::view_bridge::WireResponse>(&t)
-                        {
-                            bridge.complete(resp).await;
+                        match serde_json::from_str::<crate::view_bridge::WireInbound>(&t) {
+                            Ok(parsed) => bridge.ingest(parsed).await,
+                            Err(err) => {
+                                tracing::warn!(target: "view_bridge", %err,
+                                    "dropping malformed /ws/ui-views frame");
+                            }
                         }
                     }
                     Message::Close(_) => break,
@@ -1073,4 +1076,22 @@ async fn ws_ui_views_loop(mut socket: WebSocket, state: AppState) {
     }
 
     bridge.detach_viewer_if_current(&our_sender).await;
+}
+
+/// `GET /api/view` — the cached browser-authored chrome state.
+///
+/// Returns 200 with a [`UiViewState`] JSON when a viewer has pushed at
+/// least once; 503 with the same "open the UI first" message as the
+/// snapshot path when nothing has connected yet. The cache is overwritten
+/// in full on each browser push, so this is always the latest snapshot
+/// (no merge / staleness window beyond one WS hop).
+pub async fn get_view_state(State(state): State<AppState>) -> impl IntoResponse {
+    match state.view_bridge().state().await {
+        Some(s) => (StatusCode::OK, Json(s)).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            crate::view_bridge::ViewError::NoViewer.to_string(),
+        )
+            .into_response(),
+    }
 }

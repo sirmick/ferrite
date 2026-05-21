@@ -421,6 +421,7 @@ async fn main() -> Result<()> {
         .route("/ws/preset", get(routes::ws_preset))
         .route("/ws/chat", get(routes::ws_chat))
         .route("/api/ui-views/:pane", get(routes::get_ui_view))
+        .route("/api/view", get(routes::get_view_state))
         .route("/ws/ui-views", get(routes::ws_ui_views))
         .with_state(state);
 

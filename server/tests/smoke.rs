@@ -9,7 +9,7 @@ use axum::{
 };
 use ferrite_blocks::frame::Frame;
 use ferrite_runtime::{FlowgraphDoc, SourceConfig};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -109,7 +109,9 @@ async fn spawn_app(auto_start: bool) -> SocketAddr {
         .route("/api/pipeline/stop", post(routes::pipeline_stop))
         .route("/api/ui-sinks", get(routes::list_ui_sinks))
         .route("/api/blocks", get(routes::list_block_schemas))
+        .route("/api/view", get(routes::get_view_state))
         .route("/ws/preset", get(routes::ws_preset))
+        .route("/ws/ui-views", get(routes::ws_ui_views))
         .with_state(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -462,6 +464,59 @@ async fn devices_endpoint_shape_matches_build() {
         body.trim() == "[]" || body.contains("\"status\":"),
         "expected empty array or tagged DeviceEntry list, got: {body}"
     );
+}
+
+#[tokio::test]
+async fn view_state_starts_503_then_serves_cache_after_browser_push() {
+    let addr = spawn_app(false).await;
+
+    // No viewer yet — the route mirrors the snapshot path's NoViewer
+    // semantics with 503, so callers can treat both endpoints the
+    // same way.
+    let (status, body) =
+        raw_request_with_status(&format!("http://{addr}/api/view"), "GET", "").await;
+    assert_eq!(status, 503, "no viewer → 503; body: {body}");
+
+    // Simulate the browser connecting to /ws/ui-views and pushing a
+    // chrome state snapshot. After the push lands the route flips to
+    // 200 with the same payload.
+    use tokio_tungstenite::tungstenite::Message;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/ui-views"))
+        .await
+        .expect("connect /ws/ui-views");
+    let push = json!({
+        "type": "view_state",
+        "state": {
+            "left_tab": "ai",
+            "channel_detail_visible": true,
+            "pane_zoom": { "wide-spectrum": 2.5 },
+            "pane_paused": {}
+        }
+    });
+    ws.send(Message::Text(push.to_string()))
+        .await
+        .expect("ws send");
+
+    // Poll for up to 1 s — the push goes through an async task and
+    // the assertion races the message delivery. Two passes is plenty
+    // for the lock + cache write to complete on a loaded CI runner.
+    let mut got: Option<(u16, String)> = None;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let resp = raw_request_with_status(&format!("http://{addr}/api/view"), "GET", "").await;
+        if resp.0 == 200 {
+            got = Some(resp);
+            break;
+        }
+    }
+    let (status, body) = got.expect("/api/view should flip to 200 after view_state push");
+    assert_eq!(status, 200);
+    assert!(body.contains("\"left_tab\":\"ai\""), "body: {body}");
+    assert!(
+        body.contains("\"channel_detail_visible\":true"),
+        "body: {body}"
+    );
+    assert!(body.contains("\"wide-spectrum\":2.5"), "body: {body}");
 }
 
 /// Tiny HTTP GET helper — avoids pulling reqwest into dev-deps just for
