@@ -19,6 +19,7 @@ to `/ws/preset` to receive sample frames. There is no auth on any endpoint
 
 ```
 client ── GET   /api/devices                            ─► [DeviceEntry]
+client ── POST  /api/devices/reload                     ─► soapy module reload (in-proc recovery)
 client ── GET   /api/presets                            ─► [PresetEntry]
 client ── POST  /api/preset {name}                      ─► swaps active preset
 client ── GET   /api/flowgraph                          ─► FlowgraphDoc
@@ -28,6 +29,7 @@ client ── GET   /api/pipeline/blocks                    ─► [PipelineBloc
 client ── GET   /api/ui-sinks                           ─► [UiSink]
 client ── WS    /ws/preset                              ─► binary Frame stream
 client ── POST  /api/pipeline/start                     ─► {status:"running"}
+client ── POST  /api/tune  {freq_hz, span_hz?, offset_ratio} ─► ReconfigureResponse
 client ── PATCH /api/source       {SourceConfig}        ─► ReconfigureResponse
 client ── PATCH /api/flowgraph    {FlowgraphDoc}        ─► ReconfigureResponse
 client ── POST  /api/pipeline/blocks/{id}/params {...}  ─► ReconfigureResponse
@@ -86,6 +88,28 @@ Response: `Vec<DeviceEntry>`, where each is one of:
 The exact struct is `crate::device::DeviceCapabilities`
 ([`server/src/device.rs`](../server/src/device.rs)).
 
+### `POST /api/devices/reload`
+
+In-process recovery when a SoapySDR driver wedges inside `ferrited`
+itself — external `SoapySDRUtil --find` works, but our enumerate hangs
+or misses devices. The handler calls `SoapySDR_unloadModules` +
+`SoapySDR_loadModules` via raw FFI (the safe `soapysdr` crate doesn't
+expose it; we already pull `soapysdr-sys` for capability probing). The
+device-capability cache is cleared first so the next `/api/devices` re-
+probes fresh.
+
+`200 { "status": "ok" }` on success.
+
+`409 RELOAD_REFUSED_RUNNING` when the pipeline is up — a live
+`SoapySDRDevice` handle would dangle past `unloadModules`. Stop the
+pipeline (`POST /api/pipeline/stop`) and try again.
+
+Service-process drivers (notably SDRplay's `sdrplay_apiService`) don't
+benefit from this — the wedge is usually on the service side, not in
+the driver module. `sudo systemctl restart sdrplay` stays the right
+hammer there. Pure-library drivers (HackRF, RTL-SDR, Airspy, …) tear
+down + reload cleanly.
+
 ### `GET /api/source/capabilities`
 
 Probe the *currently-configured* source rather than enumerate everything.
@@ -129,8 +153,57 @@ Just the `src` placeholder's resolved config:
 ```
 
 PATCH body shape mirrors GET. Same `ReconfigureResponse` as above. This is
-the right surface for "swap to a different SDR" or "tune the centre"; it
-doesn't re-serialise the whole flowgraph.
+the right surface for "swap to a different SDR" or for a raw source-LO
+write that intentionally bypasses the DC-spike dodge (the "low-level
+escape hatch" half of D26 below). The high-level "listen at this
+frequency" call is `POST /api/tune`.
+
+### `POST /api/tune`
+
+Single tuning intent — "listen at `freq_hz`". Encapsulates the DC-spike
+dodge for zero-IF radios (HackRF leaks the LO straight into the ADC;
+the only fix is to park the source off-target and pull the listened
+freq back to baseband via the channelizer's `freq_shift_hz`).
+
+```json
+{ "freq_hz": 162400000.0, "span_hz": null, "offset_ratio": 0.7 }
+```
+
+- `freq_hz` (required) — target listen frequency in Hz.
+- `span_hz` (optional) — desired sample-rate / passband floor. When
+  given and larger than the current source rate, the source rate is
+  raised (and the driver's rate ladder clamps it).
+- `offset_ratio` (default 0) — per-driver DC-dodge ratio of the
+  channelizer's `output_rate_hz`. The server's snap math places the
+  source LO at `target − offset_ratio × output_rate_hz` and the
+  channelizer's `freq_shift_hz` at `+offset_ratio × output_rate_hz`,
+  so the DC spike lands outside the channel passband. **Must exceed
+  0.5** (the channelizer's complex-baseband LPF cutoff is at
+  `±0.5 × output_rate_hz`) or the spike sits inside the demodulated
+  channel; HackRF's preset uses `0.7`. SDRplay / RTL-SDR / Airspy
+  leave it unset → `0.0` → no dodge (their drivers track DC).
+
+Server behaviour:
+1. If `span_hz` raises the rate, the source-side delta carries
+   `sample_rate_hz`.
+2. Find the first `Channelizer` in the composed preset and read its
+   `output_rate_hz`. If absent, fall back to a direct
+   `src.center_freq_hz = freq_hz` write (no dodge to apply).
+3. Keepout = `0.4 × output_rate_hz`. Sticky path when the target is
+   within keepout of the current source centre — keep `src_center`
+   parked, only retune `chan.freq_shift_hz`. Snap path otherwise —
+   re-place the source LO + reset `chan.freq_shift_hz` per the dodge
+   math above.
+
+Response is a `ReconfigureResponse` (same shape as `PATCH /api/source`),
+plus the latest `source_readback`.
+
+The UI's `tuneVfoTo` (Nixie commit, double-click on a spectrum/waterfall
+pane, band-preset RX/Tune buttons, `ferrite-ctl tune`, AI tune) all
+route here. Single-click + drag bypass this — they only adjust the
+channelizer's `freq_shift_hz` (VFO-only), via
+`POST /api/pipeline/blocks/<chan>/params`. See D26 in
+[docs/09-decisions.md](09-decisions.md).
 
 ### `GET /api/pipeline` · `POST /api/pipeline/{start,stop}`
 

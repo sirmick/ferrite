@@ -80,9 +80,16 @@ One app, in the browser, out of the box:
   15 kHz WBFM mono / 3.4 kHz NBFM / 5 kHz AM), pilot-PLL stereo with
   blend, and a tunable 5-stage NR (deemph → blanker → notch → spectral
   MMSE-LSA → DFN3 neural), lean by default.
-- **Band-plan-aware tuning.** Step/snap derived from a US allocation
-  overlay + the active demod; ↑/↓ step, ←/→ pan, wheel zoom-at-cursor,
-  click-to-tune; phase-continuous VFO retune (no click).
+- **Band-plan-aware tuning, with a DC-dodge for zero-IF rigs.** The
+  active demod + a US allocation overlay derive step/snap; ↑/↓ step,
+  ←/→ pan, wheel zoom-at-cursor on the spectrum. Tuning gestures on
+  any FFT/waterfall pane: single-click = fine-tune the VFO (channel
+  shift only, source LO parked), double-click = re-acquire (full
+  `/api/tune` — the server may move the source LO and applies the
+  per-driver DC-spike dodge so HackRF-class zero-IF radios don't paint
+  the carrier on top of the signal), drag = live fine-tune. The wide
+  panes' axis is the source LO; the narrow panes follow the VFO. A
+  cross-pane hover line previews where the next click would tune.
 - **Auto-contrast waterfall.** P5/P98 of recent FFT rows tracked
   client-side and stretched to the palette; manual slider for
   pixel-peeping.
@@ -121,17 +128,36 @@ access is your tunnel problem (same posture as KiwiSDR / OpenWebRX). See
 `systemctl enable --now sdrplay` before the plugin is picked up.
 **RTL-SDR**: the package drops a udev rule + DVB-driver blacklist; if a
 fresh dongle isn't seen, replug or `sudo modprobe -r dvb_usb_rtl28xxu`.
+**In-process recovery**: if a driver wedges inside `ferrited` after it
+started (external `SoapySDRUtil --find` works, ours hangs / misses a
+device), the Source dialog's **Reload** button (or `POST
+/api/devices/reload`) calls `SoapySDR_unloadModules` +
+`SoapySDR_loadModules` and re-probes. Pipeline must be stopped first.
+For SDRplay specifically the wedge is usually in the daemon, not the
+in-process module — `sudo systemctl restart sdrplay` is the right
+hammer there.
 
 ## First five minutes
 
 1. Open `http://localhost:10001`.
-2. Click **SDR** in the top bar, pick your device, antenna, sample rate.
-   The dialog is auto-generated from the device's Soapy schema.
+2. Click **Source…** in the top bar, pick your device. The compact
+   dialog is the SDR-management surface — one-line-per-device list,
+   driver/rx chips; the rare alternatives (Tone, File, JSON) live
+   behind a collapsed **Other sources** disclosure. If a previously
+   working SDR has wedged in-process (external `SoapySDRUtil --find`
+   sees it but ours doesn't), **Reload** at the top of the device list
+   tears down + re-loads every driver module without restarting
+   `ferrited`. Driver-specific knobs live in the lower **Settings**
+   panel — auto-generated from the device's Soapy schema.
 3. Open the **catalog** (left sidebar). *NOAA Weather Radio* and *FM
    Broadcast* are the cheapest first listens; the thumbnail shows what the
    waterfall should look like on a real signal.
 4. **Listen** — audio routes through an AudioWorklet.
-5. Click the spectrum to retune; ↑/↓ to step, wheel to zoom at the cursor.
+5. **Tune.** On any FFT or waterfall pane: single-click = fine-tune
+   the VFO; double-click = re-acquire (moves the source LO with the
+   per-driver DC-spike dodge); drag = live fine-tune; wheel = zoom at
+   cursor; ↑/↓ = step. The orange Nixie also commits to whatever
+   frequency you type.
 6. Or open the **AI** tab and ask: *"find a strong FM station and identify
    it"*, *"scan 144–148 MHz for activity"*, *"capture 10 s of 162.475 MHz
    and render the FFT"*.

@@ -302,7 +302,11 @@ enforced invariant.
 
 ## D25 — Spectrum interaction: left-click = VFO; right-click = SDR centre
 
-**Supersedes D21** (which had it the other way around).
+**Supersedes D21** (which had it the other way around). **Itself
+superseded by [D30](#d30--pointer-gesture-grammar-on-spectrum--waterfall-panes)** —
+the right-click-for-SDR-centre never shipped; the modern mapping is
+single-click = VFO, double-click = full `/api/tune`, drag = live VFO,
+all driven through the shared `pointerTune` factory.
 
 **Context.** Field trial of D21's mapping (drag = SDR centre, right-click
 = VFO) found users overwhelmingly read "click on a peak" as "tune there",
@@ -401,6 +405,173 @@ node-vs-browser branch inside a block rather than removing it. The
 convergence-at-`FrameClient` design erases the only divergence that
 mattered (to the UI) at zero risk to the shipping node path; the two
 `env_split` block types never leak above the runner.
+
+## D29 — `POST /api/tune` as the single VFO entry point; DC-spike dodge lives server-side
+
+(Supersedes the relevant half of [D25](#d25--spectrum-interaction-left-click--vfo-right-click--sdr-centre).)
+
+**Context.** Every "tune to a frequency" gesture was scattered across
+two REST paths and re-implementing the same dodge math each time:
+the Nixie commit wrote `flow.src.center_freq_hz`; the spectrum click
+wrote `flow.<chan>.freq_shift_hz`; the band-preset RX did both in
+sequence; `ferrite-ctl tune` did its own thing. Worse, zero-IF radios
+(HackRF) leak the LO into the ADC as a bright vertical line at the
+tuned centre frequency — the only fix is the off-tune *dodge* (park
+the source LO off-target, pull the listened freq back through the
+channelizer's `freq_shift_hz`), which was either operator-managed or
+not done at all depending on the call site.
+
+**Decision.** One endpoint, `POST /api/tune { freq_hz, span_hz?,
+offset_ratio? }`, encodes the tuning intent. The server reads the
+composed flowgraph's first `Channelizer.output_rate_hz`, computes a
+keepout of `0.4 × output_rate_hz`, and either:
+
+- *(sticky)* keeps `src_center` parked and retunes `chan.freq_shift_hz`
+  when the target is within keepout of the current source centre, or
+- *(snap)* sets `src_center = target − offset_ratio × output_rate_hz`
+  and `chan.freq_shift_hz = +offset_ratio × output_rate_hz` so the
+  spike lands outside the demodulated channel.
+
+When `span_hz` exceeds the current source rate, the same call raises
+the rate (drivers clamp to their ladder via `apply_live_params`).
+Without a `Channelizer` block the dodge collapses to a direct
+`src.center_freq_hz` write.
+
+`offset_ratio` is supplied by the caller from the per-driver SDR-preset
+JSON (`web/src/lib/controls/sdr-presets/<driver>.json:tune_offset_ratio`).
+HackRF ships with `0.7`; drivers with a tuned RF stage + DC tracking
+(SDRplay, RTL-SDR, Airspy, …) leave it unset → `0.0` → identity.
+
+**The math constraint.** `offset_ratio` MUST exceed 0.5. The
+channelizer's complex-baseband LPF passes ±0.5 × `output_rate_hz`
+around the channel centre; a smaller ratio puts the DC spike inside
+that passband and the dodge is silently a no-op. The original HackRF
+setting was 0.4 — landed inside the passband, spike still on the
+signal. Bumped to 0.7 (≈0.2 × output_rate of margin past the LPF
+cutoff). Documented on the `tune_offset_ratio` field in
+`optionsModel.ts` so anyone tuning a future driver doesn't have to
+re-derive it.
+
+**Bypass paths.** Raw `PATCH /api/source { center_freq_hz }` and
+`POST /api/pipeline/blocks/<chan>/params { freq_shift_hz }` stay as
+deliberately unwrapped escape hatches: the source-centre Nixie writes
+the former (operator says "put the LO HERE"); single-click + drag on
+the spectrum/waterfall write the latter (VFO-only fine-tune, source
+LO parked). See D30 for the gesture grammar.
+
+**Migrated callers.** UI `tuneVfoTo` (orange Nixie, ▲▼/↑↓, double-
+click on any FFT or waterfall pane), band-preset RX/Tune (`BandsPanel`),
+`ferrite-ctl tune`, and the AI's tune-the-rig actions all route here.
+
+## D30 — Pointer gesture grammar on spectrum + waterfall panes
+
+(Supersedes the click/right-click half of [D25](#d25--spectrum-interaction-left-click--vfo-right-click--sdr-centre).)
+
+**Context.** Native `click` / `dblclick` fired in different orders on
+different browsers; the deferred-single-click pattern lagged by 250 ms;
+right-click conflicted with the native context menu; drag wasn't
+modelled at all (and a bare wheel-zoom-at-cursor was the only
+discoverable affordance). Worse, the four spectrum/waterfall panes
+(wide + narrow × FFT + waterfall) each had their own click handler
+with slightly different behaviour.
+
+**Decision.** A single shared factory in
+[`web/src/lib/control/pointerTune.ts`](../web/src/lib/control/pointerTune.ts)
+owns the click/drag/dblclick distinction for every FFT and waterfall
+pane. The grammar:
+
+- **single click** → VFO-only tune (`dragVfoExact` →
+  `chan.freq_shift_hz` patch, source LO parked, clamped to the
+  source's half-span).
+- **double click** → full re-acquire via `pipeline.tune` →
+  `POST /api/tune` with the per-driver `offset_ratio`. Source LO may
+  move; dodge applies.
+- **drag** → live VFO-only retune, in-flight-gated so one drag step
+  is in flight at a time (the next pointer-move coalesces with the
+  pending step; the rest are dropped). A naive 60 Hz rAF firing
+  `applyControl` overflowed the browser's 6-connection cap and the
+  spectrum scrolled in *after* mouse-up; the settled-gate keeps the
+  drag one round-trip deep against whatever the server can do.
+
+Snap-to-step is intentionally skipped on all three — the cursor is
+pointing at a precise pixel; honouring the active mode's grid would
+feel like the click landing somewhere other than where the user
+clicked.
+
+The factory snapshots the freq axis at pointer-down (the narrow panes
+re-centre on the VFO; without the snapshot, drag would chase itself).
+The wide panes use the source LO + sample rate as their axis; the
+narrow panes use the VFO + channelizer output rate. Spectrum panes
+declare `LEFT_MARGIN` / `RIGHT_MARGIN` (the axis-label gutters the
+renderer reserves) so pixel→Hz lands on the correct frequency — was
+off by ~5 % on the narrow FFT before the margin-aware path.
+
+**Hover preview.** A shared `hoverStore.freqHz` is written by whichever
+pane has the live pointer; every pane projects it back into its visible
+window and paints a sky-300 line at the matching freq. The operator
+sees, in real Hz, where the next click would tune — across wide and
+narrow panes simultaneously.
+
+## D31 — `POST /api/devices/reload`: in-process SoapySDR module recovery
+
+**Context.** A SoapySDR driver can wedge inside `ferrited` while
+external `SoapySDRUtil --find` still sees the device — the driver
+module's allocated state has gone bad in *this* process. Until now
+the only fix was a full `ferrited` restart (losing the preset,
+source config, and VFO position). The safe `soapysdr` 0.5 crate
+doesn't expose the SoapySDR registry's loader; the lower-level
+`soapysdr-sys` 0.8.1 *does* (`SoapySDR_unloadModules`,
+`SoapySDR_loadModules`), and we already pull `soapysdr-sys` for the
+capability-probe code in `server/src/device.rs`.
+
+**Decision.** `POST /api/devices/reload` calls
+`SoapySDR_unloadModules` + `SoapySDR_loadModules` via raw FFI
+(wrapper in `server/src/device.rs::reload_modules`), with the
+device-capability cache cleared first so the next `/api/devices`
+re-probes against the fresh driver state. The endpoint **refuses
+with 409 `RELOAD_REFUSED_RUNNING` while the pipeline is up**: a live
+`SoapySDRDevice` handle holds memory the driver allocated, which
+would dangle past `unloadModules`. The pipeline must be stopped
+first.
+
+The Source dialog's `Reload` button (next to `Refresh`) wires this
+up; the resulting status surfaces inline so a stopped-then-retry
+loop is one-click.
+
+**Caveat: service-process drivers.** SDRplay's `sdrplay_apiService`
+runs out-of-process; an SDRplay wedge is usually in the service, not
+the in-process module. `sudo systemctl restart sdrplay` stays the
+correct hammer there. Pure-library drivers (HackRF, RTL-SDR, Airspy,
+…) tear down + reload cleanly.
+
+**Caveat: thread leaks.** Some drivers spawn background threads in
+module init that aren't joined on unload. Acceptable for an
+occasional manual recovery; not for a hot loop.
+
+## D32 — Source dialog is "which SDR this app sees", not "all about the source"
+
+(Refines the source dialog's scope vs [D13](#d13--auto-generated-source-dialog-from-soapysdr-capability-schema).)
+
+**Context.** The original Source dialog was a four-tabbed surface
+(Device, Tone, File, JSON) with multi-line cards per device showing
+driver/hardware/rx-channels/args grids. On a typically-static rack
+("plug a HackRF in, leave it for a year") that's a lot of UI for
+something the operator interacts with rarely.
+
+**Decision.** One pane, no tabs. A terse `Selected` row at the top
+names the active source (driver + label, collapsed when both equal —
+RTL-SDR generic dongles read `rtlsdr` rather than `rtlsdr · rtlsdr`).
+The body is a dense one-line-per-device list — whole row selects,
+hover shows the full args. Header carries small `Refresh` / `Reload
+drivers` buttons. The non-hardware sources (Tone / File / JSON) tuck
+into a single `<details>` "Other sources" disclosure, collapsed by
+default; each is its own nested `<details>` inside. Dialog narrowed
+to 26 rem with no min-height.
+
+The live param surface (gain, antenna, AGC, DC-offset) deliberately
+*doesn't* live in this dialog — it's already in the bottom Settings
+panel via `InputControls`. Duplicating it here would add visual
+weight back without changing what the dialog is *for*.
 
 ## Revisiting decisions
 

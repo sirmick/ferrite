@@ -7,6 +7,10 @@ End-to-end, working today against live RF:
 ### Server / runtime
 - `ferrited` boots, enumerates SoapySDR devices, caches per-device
   probes ([`server/src/device_cache.rs`](../server/src/device_cache.rs)).
+  In-process recovery for a wedged driver: `POST /api/devices/reload`
+  drops + re-loads every Soapy module via `soapysdr-sys`, gated on a
+  stopped pipeline
+  ([D31](09-decisions.md#d31--post-apidevicesreload-in-process-soapysdr-module-recovery)).
 - Single-flowgraph, single-source on `AppState`; `--flowgraph PATH`
   required. Hot reconfig via `POST /api/preset`.
 - Rust runtime ([`runtime/`](../runtime/)) drives both ends — native
@@ -52,10 +56,17 @@ End-to-end, working today against live RF:
 - WebGL waterfall with **auto-contrast** (P5/P98 of recent rows,
   EMA-smoothed) plus a manual contrast slider for the colormap window.
 - **Auto-scale spectrum** trace separate from waterfall contrast.
-- Click-to-tune spectrum (left = retune source, double-click =
-  re-centre, right = cancel); orange VFO line + bandwidth band overlay
-  on the waterfall draggable for per-VFO offset inside the wideband
-  window.
+- Pointer-gesture grammar across every FFT and waterfall pane
+  (wide + narrow), driven by a shared `pointerTune` factory
+  ([D30](09-decisions.md#d30--pointer-gesture-grammar-on-spectrum--waterfall-panes)):
+  single-click = VFO-only fine-tune (`chan.freq_shift_hz` only,
+  source LO parked); double-click = full re-acquire via
+  `POST /api/tune` with the per-driver DC-spike dodge
+  ([D29](09-decisions.md#d29--post-apitune-as-the-single-vfo-entry-point-dc-spike-dodge-lives-server-side));
+  drag = live VFO-only retune, in-flight-gated against the browser's
+  6-conn cap. Cross-pane hover line previews where the next click
+  would tune. Orange VFO marker + channel-bandwidth band overlay on
+  both wide spectrum and waterfall.
 - Generic block-params pipe (D24): `GET /api/pipeline/blocks` +
   `POST /api/pipeline/blocks/:id/params`, mirrored on the WASM side by
   `RuntimeHandle::reconfigure_block`. One `<BlockParams>` Svelte
