@@ -2,7 +2,7 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "digital-hf-20m",
   "category": "FT8 / FT4 / WSPR",
-  "label": "Digital HF 20 m (FT8 + FT4 + WSPR at once)",
+  "label": "Digital HF 20 m",
   "description": "All three 20 m weak-signal modes at once \u2014 FT8, FT4 and WSPR decoded from one wideband 20 m capture.",
   "ai_notes": "Simultaneous 20 m FT8 + FT4 + WSPR off one wideband capture (centre 14.085 MHz). Each branch = Channelizer(freq_shift = dial \u2212 centre) \u2192 SsbDemod(usb) \u2192 decoder, identical to the standalone ft8/ft4/wspr presets. Decodes: `tail decoder --category ft8|ft4|wspr`. FT8/FT4 every 15/7.5 s, WSPR every 2 min \u2014 wait \u22654 min before declaring a dead band. Audio follows the FT8 branch. Per-band only (one SDR): for another band, load that band's variant.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/FT8",

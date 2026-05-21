@@ -2,7 +2,7 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "wspr",
   "category": "FT8 / FT4 / WSPR",
-  "label": "WSPR (HF propagation beacons)",
+  "label": "WSPR",
   "description": "WSPR \u2014 HF propagation beacons: 2-minute UTC-aligned slots, sub-watt signals heard worldwide.",
   "ai_notes": "WSPR (HF weak-signal propagation beacons, 2 min UTC-aligned slots). Standard dial frequencies (USB demod, listen ~1500 Hz audio): 0.4742 / 1.8366 / 3.5686 / 7.0386 / 10.1387 / 14.0956 / 18.1046 / 21.0946 / 28.1246 MHz. Decodes appear every 2 min \u2014 wait \u22654 min before declaring \"no traffic.\" Output: `tail decoder --category wspr`. Set the WsprDemod `dial_freq_hz` param to the RF dial so logged spots show the band.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/WSPR",

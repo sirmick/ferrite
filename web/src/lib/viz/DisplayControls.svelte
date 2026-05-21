@@ -269,9 +269,14 @@
 
   <div class="mx-1 h-4 border-l border-slate-800"></div>
 
+  <!-- Match the sibling <select> heights. Native selects min-out at
+       ~22 px on Chrome/Firefox regardless of padding; a bare <button>
+       with the same py-0.5 stops at ~16 px because it shrinks to text.
+       Explicit `h-[1.5rem]` + `inline-flex items-center` pins both
+       families to the same line. -->
   <button
     type="button"
-    class="rounded border border-slate-700 px-1.5 py-0 text-[10px] leading-none hover:border-slate-500"
+    class="inline-flex h-[1.5rem] items-center justify-center rounded border border-slate-700 px-2 leading-none hover:border-slate-500"
     class:bg-amber-900={waterfallStore.paused}
     onclick={() => (waterfallStore.paused = !waterfallStore.paused)}
     title={waterfallStore.paused ? 'resume waterfall' : 'freeze waterfall'}

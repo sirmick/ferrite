@@ -13,7 +13,7 @@
   import FlowgraphDialog from '$lib/controls/FlowgraphDialog.svelte';
   import { defaultsFor, toSourceConfig } from '$lib/controls/optionsModel';
   import type { SourceConfig } from '$lib/api/source';
-  import { pipeline, currentAxes } from '$lib/pipeline.svelte';
+  import { pipeline } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { applyControl } from '$lib/control/dispatch';
   import { activeAdvancedView } from '$lib/advanced/registry';
@@ -97,19 +97,19 @@
   // clear what's being decoded. Falls back to name, then nothing.
   let presetLabel = $derived(pipeline.flowgraph?.label ?? pipeline.flowgraph?.name ?? null);
 
+  // Source identity only — no centre freq. The RfQuickBar's nixies
+  // already show centre freq (SDR-centre + VFO), so duplicating it in
+  // the top status was just noise eating horizontal space.
   let sourceLabel = $derived.by(() => {
     const s = pipeline.source;
     if (!s) return '';
-    const axes = currentAxes(pipeline);
-    const freq = axes ? `${(axes.center_freq_hz / 1e6).toFixed(3)} MHz` : '';
     const caps = pipeline.sourceCaps;
     if (s.type === 'SoapySource') {
-      const dev = caps?.kind === 'hardware' ? caps.capabilities.info.label : 'soapy';
-      return `${dev} ${freq}`.trim();
+      return caps?.kind === 'hardware' ? caps.capabilities.info.label : 'soapy';
     }
     if (s.type === 'FileSource') return 'file';
-    if (s.type === 'SineSource') return `sine ${freq}`;
-    return `${s.type} ${freq}`;
+    if (s.type === 'SineSource') return 'sine';
+    return s.type;
   });
 
   let shotBusy = $state(false);
@@ -164,12 +164,15 @@
   class="flex w-full flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[color:var(--color-muted)]"
 >
   <HealthDots />
-  <span class="hidden md:inline">
-    ws: {pipeline.wsStatus}
-    {#if pipeline.wsStatus === 'open' && frameRate > 0}
-      ({frameRate.toFixed(1)} fps · {fmtBw(wsBwBps)})
-    {/if}
-  </span>
+  <!-- ws status / fps chip lived here. The HealthDots already convey
+       "are we connected and moving samples?" via the source / node /
+       browser dots; the literal "ws: open" line was redundant noise on
+       the always-visible top row. Removed 2026-05-21. -->
+  {#if pipeline.wsStatus === 'open' && frameRate > 0}
+    <span class="hidden font-mono text-[11px] text-[color:var(--color-muted)] md:inline">
+      {frameRate.toFixed(1)} fps · {fmtBw(wsBwBps)}
+    </span>
+  {/if}
   {#if sourceLabel}
     <span class="font-mono text-[11px]">{sourceLabel}</span>
   {/if}

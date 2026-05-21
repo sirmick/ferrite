@@ -192,22 +192,10 @@
         ></div>
       {/if}
     </div>
-    <!-- Axis label band underneath. Min/centre/max in absolute Hz so
-         the operator can read off the channel they're listening to
-         without doing mental arithmetic from the wide view. -->
-    {#if narrowCenterHz !== undefined && narrowRateHz !== undefined && narrowRateHz > 0}
-      {@const minHz = narrowCenterHz - narrowRateHz / 2}
-      {@const maxHz = narrowCenterHz + narrowRateHz / 2}
-      {@const fmt = (hz: number) => `${(hz / 1e6).toFixed(3)} MHz`}
-      <div
-        class="flex items-center justify-between border-t border-slate-800 px-2 py-0.5 font-mono text-[10px] text-slate-400"
-        style:padding-left="{LEFT_MARGIN + 4}px"
-        style:padding-right="{RIGHT_MARGIN + 4}px"
-      >
-        <span>{fmt(minHz)}</span>
-        <span class="text-slate-300">VFO {fmt(narrowCenterHz)}</span>
-        <span>{fmt(maxHz)}</span>
-      </div>
-    {/if}
+    <!-- Axis label band used to sit here (min / VFO / max in MHz) but
+         was redundant with the wide-waterfall axis labels and the
+         VFO Nixie in the top bar — operator already knows the abs
+         freq. Matching the wide waterfall's no-axis layout keeps the
+         vertical real estate for the channel image itself. -->
   </div>
 {/if}

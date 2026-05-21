@@ -80,14 +80,25 @@
       case 'SoapySource': {
         const args = (cfg.params.args as string | undefined) ?? '';
         // Parse `key=value,key=value` to pull out the human-friendly bits.
+        // RTL-SDR generic dongles expose no `label` key — just
+        // `driver=rtlsdr` — so falling back twice to driver gave us
+        // "rtlsdr · rtlsdr". Collapse the duplicate, and when parsing
+        // produces nothing usable (no driver key found, e.g. a
+        // hand-edited bare args string) show the raw args verbatim so
+        // the operator can see what they configured.
         const parts = new Map<string, string>();
         for (const seg of args.split(',')) {
           const eq = seg.indexOf('=');
           if (eq > 0) parts.set(seg.slice(0, eq).trim(), seg.slice(eq + 1).trim());
         }
-        const label = parts.get('label') ?? parts.get('driver') ?? args;
-        const driver = parts.get('driver') ?? '?';
-        return { kind: 'SDR', detail: `${label} · ${driver}` };
+        const driver = parts.get('driver');
+        const label = parts.get('label');
+        if (label && driver && label !== driver) {
+          return { kind: 'SDR', detail: `${label} · ${driver}` };
+        }
+        if (label) return { kind: 'SDR', detail: label };
+        if (driver) return { kind: 'SDR', detail: driver };
+        return { kind: 'SDR', detail: args || '—' };
       }
       case 'SineSource': {
         const cHz = (cfg.params.center_freq_hz as number | undefined) ?? 0;

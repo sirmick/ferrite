@@ -2,7 +2,7 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "adsb",
   "category": "Aviation",
-  "label": "ADS-B / Mode S (1090 MHz)",
+  "label": "ADS-B / Mode S",
   "description": "Aircraft Mode S / ADS-B transponder messages on 1090 MHz (dump1090 decoder).",
   "ai_notes": "ADS-B / Mode-S aircraft transponders on 1090 MHz. Vendored dump1090; locked at 2 MS/s. Best with a vertical antenna on a roof or window \u2014 line-of-sight to airliners is what matters, not antenna gain. Output: `tail decoder --category adsb`. Most decodes will be DF17 extended squitters with positions + IDs.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Automatic_Dependent_Surveillance-Broadcast_(ADS-B)",

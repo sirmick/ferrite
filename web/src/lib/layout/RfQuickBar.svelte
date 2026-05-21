@@ -57,20 +57,6 @@
   );
   let vfoAbsHz = $derived((axes?.center_freq_hz ?? 0) + vfoShiftHz);
 
-  // Zoom about the VFO: as the span shrinks/grows, recompute the pan so
-  // the tuned frequency stays centred in the view (clamped to the edge
-  // when the VFO sits near the captured-span boundary at high zoom).
-  function onZoomInput(z: number) {
-    void applyControl('client.spectrum.viewZoom', z);
-    if (!axes) return;
-    const rate = axes.sample_rate_hz;
-    const span = rate / Math.max(1, z);
-    const head = rate - span;
-    const fullMin = axes.center_freq_hz - rate / 2;
-    const pan = head > 0 ? Math.max(0, Math.min(1, (vfoAbsHz - span / 2 - fullMin) / head)) : 0.5;
-    void applyControl('client.spectrum.viewPan', pan);
-  }
-
   let rateChoices = $derived.by(() => {
     const caps = pipeline.sourceCaps;
     if (!caps || caps.kind !== 'hardware') return [] as number[];
@@ -82,8 +68,6 @@
     }
     return choices;
   });
-
-  let viewZoom = $derived(clientControls.get('client.spectrum.viewZoom'));
 
   function fmtRate(hz: number): string {
     if (hz >= 1e6) return `${(hz / 1e6).toFixed(3)} MS/s`;
@@ -119,7 +103,7 @@
 </script>
 
 <div
-  class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-800 bg-[color:var(--color-bg)] px-2 py-1 text-[11px] text-[color:var(--color-muted)]"
+  class="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-slate-800 bg-[color:var(--color-bg)] px-2 py-0.5 text-[11px] text-[color:var(--color-muted)]"
 >
   {#if axes}
     {#if vfoBlock}
@@ -133,12 +117,12 @@
       >
         <button
           type="button"
-          class="rounded border border-slate-700 px-1.5 py-0.5 hover:border-slate-600"
+          class="rounded border border-slate-700 px-1.5 py-1 leading-none hover:border-slate-600"
           aria-label="step down"
           onclick={() => stepVfo(-1)}>▼</button
         >
         <select
-          class="rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
+          class="rounded border border-slate-800 bg-slate-900 px-1.5 py-1 text-slate-200"
           value={stepMode}
           onchange={(e) =>
             void applyControl(
@@ -154,7 +138,7 @@
         </select>
         <button
           type="button"
-          class="rounded border border-slate-700 px-1.5 py-0.5 hover:border-slate-600"
+          class="rounded border border-slate-700 px-1.5 py-1 leading-none hover:border-slate-600"
           aria-label="step up"
           onclick={() => stepVfo(1)}>▲</button
         >
@@ -165,11 +149,13 @@
       <Nixie hz={axes.center_freq_hz} onCommit={commitCenter} tone="green" />
     </span>
 
-    <label class="flex items-center gap-1" title="sample rate / span">
-      <span>rate</span>
+    <!-- Sample rate / span. Unit suffix in the values (MS/s / kS/s) so
+         the leading "rate" label was redundant — dropped to claw back
+         horizontal space. -->
+    <label class="flex items-center" title="sample rate / span">
       {#if rateChoices.length > 1}
         <select
-          class="rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
+          class="rounded border border-slate-800 bg-slate-900 px-1.5 py-1 text-slate-200"
           value={axes.sample_rate_hz}
           onchange={onRateChange}
         >
@@ -184,36 +170,11 @@
 
     <LiveControls />
 
-    <!-- Display-zoom — right-aligned. Crops the FFT/waterfall view;
-         the SDR sample rate is unchanged. -->
-    <label
-      class="ml-auto flex items-center gap-1"
-      title="display zoom — crops the FFT view; SDR sample rate is unchanged"
-    >
-      <span>zoom</span>
-      <input
-        type="range"
-        class="w-20"
-        min={1}
-        max={16}
-        step={0.5}
-        value={viewZoom}
-        oninput={(e) => onZoomInput(Number((e.currentTarget as HTMLInputElement).value))}
-      />
-      <span class="w-7 text-right font-mono text-slate-300">{viewZoom.toFixed(1)}×</span>
-      {#if viewZoom > 1}
-        <button
-          type="button"
-          class="rounded border border-slate-700 px-1 py-0 text-[10px] leading-none hover:border-slate-500"
-          title="reset zoom + pan"
-          onclick={() => {
-            void applyControl('client.spectrum.viewZoom', 1);
-            void applyControl('client.spectrum.viewPan', 0.5);
-          }}
-        >
-          ⟲
-        </button>
-      {/if}
-    </label>
+    <!-- Display-zoom lived here until 2026-05-21 — a horizontal slider
+         claiming the right edge of the bar. The spectrum already has
+         wheel-zoom-at-cursor (the primary input), and dedicated +/−/⟲
+         buttons now sit inside the spectrum canvas's top-right corner,
+         in the eye-line of the FFT they affect. Frees the bar for
+         RF / source state. -->
   {/if}
 </div>

@@ -2,7 +2,7 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "nwr",
   "category": "Weather & alerts",
-  "label": "NOAA Weather Radio + EAS (162.55 MHz)",
+  "label": "NOAA Weather + EAS",
   "description": "NOAA Weather Radio with SAME/EAS alert decoding \u2014 seven 25 kHz NBFM channels, 162.400\u2013162.550 MHz.",
   "ai_notes": "NOAA Weather Radio + SAME / EAS header decode. 162.400\u2013162.550 MHz NBFM in 25 kHz steps (7 channels); default 162.550 MHz. Always-on EAS decoder so emergency alerts surface in `tail decoder --category eas`. US-only by frequency; equivalent services elsewhere may differ.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Emergency_Alert_System_(EAS)",

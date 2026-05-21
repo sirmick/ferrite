@@ -2,7 +2,7 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "rtl433-433",
   "category": "Paging & ISM",
-  "label": "ISM 433 MHz (rtl_433 \u2014 ~320 device decoders)",
+  "label": "ISM (rtl_433)",
   "description": "ISM 433.92 MHz device decoder (rtl_433, ~320 protocols): weather stations, TPMS, remotes, sensors.",
   "ai_notes": "rtl_433 ISM-band decoder at 433.92 MHz (also dial in 315 MHz for older NA TPMS / car fobs, or load `rtl433-915.json` once shipped for US smart meters / ERT). 250 kHz channelizer feeds the decoder; the audio tee runs an AM-demod chain (gated on the `audio` toggle) so the operator can hear bursts as click/chirp envelopes. Output: `tail decoder --category rtl_433` \u2014 each frame is one JSON record with at minimum a `model` field. Decoder set defaults to `default` (~220 stable protocols); flip to `extended` to also pick up experimental / niche / noisy devices.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/ISM_Band_device",

@@ -106,6 +106,33 @@
   const MAX_ZOOM = 64;
   const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
 
+  /** Zoom by `factor` around the current view's centre frequency.
+   *  Used by the overlay +/− buttons; the wheel handler anchors at
+   *  the cursor instead. Centring on the visible midpoint means a
+   *  button click changes the span around the part of the band the
+   *  operator is already looking at. */
+  function zoomBy(factor: number) {
+    if (!axes) return;
+    const rate = axes.sample_rate_hz;
+    const zOld = Math.max(1, viewZoom);
+    const zNew = Math.max(1, Math.min(MAX_ZOOM, zOld * factor));
+    if (zNew === zOld) return;
+    const fullMin = axes.center_freq_hz - rate / 2;
+    const spanOld = rate / zOld;
+    const headOld = rate - spanOld;
+    const viewCenterFreq = fullMin + clamp01(viewPan) * headOld + spanOld / 2;
+    const spanNew = rate / zNew;
+    const headNew = rate - spanNew;
+    const panNew = headNew > 0 ? clamp01((viewCenterFreq - spanNew / 2 - fullMin) / headNew) : 0.5;
+    if (zNew !== viewZoom) void applyControl('client.spectrum.viewZoom', zNew);
+    if (panNew !== viewPan) void applyControl('client.spectrum.viewPan', panNew);
+  }
+
+  function resetZoom() {
+    if (viewZoom !== 1) void applyControl('client.spectrum.viewZoom', 1);
+    if (viewPan !== 0.5) void applyControl('client.spectrum.viewPan', 0.5);
+  }
+
   // Wheel = zoom about the cursor: the frequency under the pointer
   // stays under the pointer as the span grows/shrinks (so it's a
   // combined zoom + view shift, not a separate pan gesture).
@@ -390,6 +417,54 @@
         style:box-shadow="0 0 3px rgba(125, 211, 252, 0.6)"
       ></div>
     {/if}
+    <!-- Zoom overlay — anchored top-right inside the spectrum canvas,
+         in the eye-line of the FFT it affects. Wheel-zoom-at-cursor is
+         still the primary control; these buttons are the discoverable
+         affordance. ⟲ only renders when zoom > 1. RIGHT_MARGIN-aware
+         so the cluster sits inside the plot area, not over the axis
+         label gutter. Each button is a fixed-size square with
+         `inline-flex items-center justify-center` so the glyphs (−, +,
+         ⟲ at different intrinsic heights) all paint at the same
+         vertical centre line. -->
+    <div
+      class="pointer-events-none absolute top-1 flex items-center"
+      style:right="{RIGHT_MARGIN + 6}px"
+    >
+      <div
+        class="pointer-events-auto inline-flex h-6 items-center gap-1 rounded border border-slate-700/70 bg-slate-900/70 px-1 text-xs text-slate-200 backdrop-blur-sm"
+      >
+        {#if viewZoom > 1}
+          <button
+            type="button"
+            class="inline-flex h-5 w-5 items-center justify-center rounded leading-none hover:bg-slate-700"
+            onclick={resetZoom}
+            title="reset zoom + pan"
+            aria-label="reset zoom"
+          >
+            ⟲
+          </button>
+          <span class="font-mono text-[10px] leading-none text-slate-400"
+            >{viewZoom.toFixed(1)}×</span
+          >
+        {/if}
+        <button
+          type="button"
+          class="inline-flex h-5 w-5 items-center justify-center rounded leading-none hover:bg-slate-700 disabled:opacity-40"
+          disabled={viewZoom <= 1}
+          onclick={() => zoomBy(1 / ZOOM_STEP)}
+          title="zoom out (wheel on FFT also works)"
+          aria-label="zoom out">−</button
+        >
+        <button
+          type="button"
+          class="inline-flex h-5 w-5 items-center justify-center rounded leading-none hover:bg-slate-700 disabled:opacity-40"
+          disabled={viewZoom >= MAX_ZOOM}
+          onclick={() => zoomBy(ZOOM_STEP)}
+          title="zoom in (wheel on FFT also works)"
+          aria-label="zoom in">+</button
+        >
+      </div>
+    </div>
   </div>
   {#if viewZoom > 1}
     <!-- Horizontal scrollbar for the zoomed FFT/waterfall view. Sized

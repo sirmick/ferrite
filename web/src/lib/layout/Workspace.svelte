@@ -35,7 +35,7 @@
   import AppToolbar from '$lib/layout/AppToolbar.svelte';
   import RfQuickBar from '$lib/layout/RfQuickBar.svelte';
   import ViewBridge from '$lib/layout/ViewBridge.svelte';
-  import { pipeline, currentAxes } from '$lib/pipeline.svelte';
+  import { pipeline } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { activeAdvancedView } from '$lib/advanced/registry';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
@@ -69,28 +69,12 @@
     advancedView !== null && clientControls.get('client.workspace.mainPane') === 'advanced',
   );
 
-  // Channel-detail header label: "Channel · 240 kHz @ 100.001 MHz" so
-  // the operator can read the channel width + absolute centre without
-  // mental arithmetic. Falls back to a bare "Channel" when axes
-  // haven't resolved yet.
-  let narrowHeaderLabel = $derived.by(() => {
-    const axes = currentAxes(pipeline);
-    const vfoBlock = Object.values(pipeline.blocks).find((b) =>
-      b.spec.params.some((p) => p.key === 'freq_shift_hz'),
-    );
-    const vfo = (vfoBlock?.values as Record<string, unknown> | null | undefined) ?? null;
-    if (!axes || !vfo) return 'Channel';
-    const shift = typeof vfo.freq_shift_hz === 'number' ? vfo.freq_shift_hz : 0;
-    const center = axes.center_freq_hz + shift;
-    let bw: number | undefined;
-    if (typeof vfo.output_rate_hz === 'number' && vfo.output_rate_hz > 0) {
-      bw = vfo.output_rate_hz;
-    } else if (typeof vfo.factor === 'number' && vfo.factor > 0) {
-      bw = axes.sample_rate_hz / vfo.factor;
-    }
-    const bwStr = bw === undefined ? '' : ` · ${(bw / 1e3).toFixed(0)} kHz`;
-    return `Channel${bwStr} @ ${(center / 1e6).toFixed(3)} MHz`;
-  });
+  // Channel-detail header used to read "Channel · 240 kHz @ 100.001 MHz"
+  // but the bandwidth + centre were redundant — the orange VFO Nixie
+  // in the top RfQuickBar already shows the centre, and the channel
+  // bandwidth is fixed per preset (operator picks it via the preset
+  // selector). Bare "Channel" keeps the panel-head terse.
+  const narrowHeaderLabel = 'Channel';
 </script>
 
 <div class="flex h-full w-full min-h-0 flex-col">
@@ -205,7 +189,14 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 4px 8px;
+    /* Vertical padding bumped from 4 → 7 so the row's intrinsic height
+       comfortably hosts the tallest control (Start button + dropdowns
+       sit ~24 px) and the smaller chips (HealthDots ~9 px) stay
+       optically centred. Previous 4 px left the dots reading low — the
+       flex `align-items: center` is correct geometrically, but with
+       the row barely taller than the buttons, the small dots looked
+       sunken. */
+    padding: 7px 8px;
     border-bottom: 1px solid rgb(30 41 59);
     background: var(--color-bg);
   }

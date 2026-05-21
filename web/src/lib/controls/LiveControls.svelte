@@ -108,8 +108,6 @@
 </script>
 
 {#if visible}
-  <div class="mx-1 h-4 border-l border-slate-800"></div>
-
   {#if overallRange}
     <label class="flex items-center gap-1" title={gainTooltip}>
       <span>{gainLabel}</span>
@@ -128,15 +126,20 @@
   {/if}
 
   {#if antennas.length > 1}
+    <!-- SDRplay and a few others stringify antennas as "Antenna A" /
+         "Antenna B"; on the quick-bar the "Antenna " prefix is just
+         noise (the `ant` label already says what the dropdown is for).
+         Driver-supplied values that don't share the prefix (HackRF
+         "TX/RX", RTL-SDR "RX", SDRplay "HiZ") fall through unchanged. -->
     <label class="flex items-center gap-1" title="RF antenna port">
       <span>ant</span>
       <select
-        class="rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
+        class="rounded border border-slate-800 bg-slate-900 px-1.5 py-1 text-slate-200"
         value={antenna}
         onchange={(e) => commitAntenna((e.currentTarget as HTMLSelectElement).value)}
       >
         {#each antennas as a (a)}
-          <option value={a}>{a}</option>
+          <option value={a}>{a.startsWith('Antenna ') ? a.slice(8) : a}</option>
         {/each}
       </select>
     </label>

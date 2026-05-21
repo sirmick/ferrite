@@ -2,7 +2,7 @@
   "$schema": "https://ferrite.example/flowgraph-v1.json",
   "name": "navtex",
   "category": "Maritime",
-  "label": "NAVTEX (518 kHz maritime safety)",
+  "label": "NAVTEX",
   "description": "NAVTEX \u2014 international maritime safety broadcast on 518 kHz (SITOR-B / CCIR-476, forward error corrected).",
   "ai_notes": "NAVTEX / SITOR-B (CCIR-476 FEC, 100 bd / 170 shift, vendored fldigi navtex core). 518 kHz international (also 490 kHz local, 4209.5 kHz). US Pacific = Point Reyes NMC, scheduled ~4-6 slots/day (not continuous \u2014 watch the waterfall for the burst). MF: source sample_rate 384 kHz, dial \u2248 516.5 kHz. mode=navtex; sitorb variant available. Strong groundwave \u2014 the realistic decodable signal on a long-wire. Output: `tail decoder --category fldigi`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/NAVTEX",
