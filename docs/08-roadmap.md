@@ -222,8 +222,16 @@ rather than an instance. Shipped as one conventional commit each:
 
 Captured in [`11-browsdr-inspired-plan.md`](11-browsdr-inspired-plan.md):
 
-- Audio transcription panel (Whisper-tiny WASM on the post-demod PCM
-  stream).
+- ~~Audio transcription panel (Whisper-tiny WASM on the post-demod PCM
+  stream).~~ **Shipped** — whisper.cpp compiled to WASM
+  ([`web/src/lib/wasm/whisper/`](../web/src/lib/wasm/whisper/),
+  pinned upstream `968eebe7`), runs in a Worker against the
+  post-demod PCM. Picks up tinydiarize via the `tdrz` model for
+  speaker turns. Ham-vocabulary prompt + tail-loop / call-sign
+  post-processing in
+  [`web/src/lib/transcribe/hamPostProcess.ts`](../web/src/lib/transcribe/hamPostProcess.ts).
+  Mounted as a `Main → Transcript` advanced view on every audio
+  preset; the AI sidecar reads the same store.
 - Frequency bookmarks with categories.
 - Multi-VFO (static N=2 first, then dynamic spawn).
 

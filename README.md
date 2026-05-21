@@ -7,7 +7,9 @@ LAN, and you get a fluent spectrum/waterfall UI, thirty-plus ready-to-go
 listening and decoder presets (analog, paging/packet/aviation, the full
 fldigi keyboard-mode family, FT8/FT4/WSPR weak-signal — many decoding
 right in the browser), mode-specific decoder panels (maps, tables, live
-text), and an optional Claude sidecar that finds signals, tunes the rig,
+text), **a live speech-to-text transcript of whatever voice mode you're
+listening to** (whisper.cpp running locally in the browser, no cloud),
+and an optional Claude sidecar that finds signals, tunes the rig,
 captures clips, and explains what it's hearing — all without leaving the
 page.
 
@@ -72,6 +74,17 @@ One app, in the browser, out of the box:
   FFT/waterfall column for a mode view: FT8/FT4/WSPR decode table +
   station map, ADS-B aircraft map, APRS station map + packet console,
   and a live fldigi text console (mode badge tracks RSID switches).
+- **In-browser voice transcription.** Tap *Main → Transcript* on any
+  analog-voice preset (WBFM / NBFM / AM / SSB) and the post-demod PCM
+  starts feeding [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
+  compiled to WASM — fully local, no network, no API key, no cloud.
+  Ham-vocabulary prompt + post-processing scrubs whisper's classic
+  short-clip tail-loop and call-sign mishearings;
+  [tinydiarize](https://github.com/akashmjn/tinydiarize) flags
+  speaker turns when you load the `tdrz` model so a two-station QSO
+  breaks into separate paragraphs. Live rolling transcript with
+  copy / save controls; the AI sidecar reads the same store so you
+  can ask it about what just got said.
 - **JSON-authored flowgraphs.** A mode is a flowgraph file in
   [`flowgraphs/`](flowgraphs/) plus optional blocks — no UI work, no
   server recompile. Thirty-plus ship in the box.
@@ -158,7 +171,12 @@ hammer there.
    per-driver DC-spike dodge); drag = live fine-tune; wheel = zoom at
    cursor; ↑/↓ = step. The orange Nixie also commits to whatever
    frequency you type.
-6. Or open the **AI** tab and ask: *"find a strong FM station and identify
+6. **Transcribe.** Flip the top-bar **Main → Transcript** on any voice
+   preset (WBFM / NBFM / AM / SSB) and a rolling, locally-run
+   whisper.cpp transcript starts populating in the main pane. Speaker
+   changes break into separate paragraphs (with the `tdrz` model);
+   ham-vocabulary post-processing keeps the call signs honest.
+7. Or open the **AI** tab and ask: *"find a strong FM station and identify
    it"*, *"scan 144–148 MHz for activity"*, *"capture 10 s of 162.475 MHz
    and render the FFT"*.
 
