@@ -1,7 +1,6 @@
 <script lang="ts">
   import { bands, type BandEntry } from './bands';
   import { pipeline } from '$lib/pipeline.svelte';
-  import { applyControl } from '$lib/control/dispatch';
   import { presetSlugForMode } from './receivers';
   import { presetDocBySlug } from './catalog';
 
@@ -43,10 +42,15 @@
   // so any pending tune/RX disables every action button until it lands.
   let busy = $state(false);
 
+  // Route through `pipeline.tune` so the per-driver DC-spike dodge
+  // (HackRF & friends) is applied uniformly with the VFO/Nixie/▲▼ paths
+  // — the server picks src_center vs chan.freq_shift_hz from
+  // `tune_offset_ratio`. The legacy `e.vfo_offset_hz` (a hand-tuned
+  // per-band BFO/dodge nudge from before the central dodge existed) is
+  // intentionally ignored; if a band entry needs a non-default shift,
+  // model it on the demod side, not as a tune offset.
   async function tuneFreq(e: BandEntry): Promise<void> {
-    const offset = e.vfo_offset_hz ?? 0;
-    await applyControl('flow.src.center_freq_hz', e.hz + offset);
-    await applyControl('flow.chan.freq_shift_hz', -offset);
+    await pipeline.tune(e.hz);
   }
 
   // Load the canonical receiver preset for this entry's mode — a

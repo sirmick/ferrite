@@ -644,6 +644,39 @@ impl AppState {
         Ok(())
     }
 
+    /// Tear down every loaded SoapySDR driver module and re-load them
+    /// from the search path. Recovery path for when a driver wedges
+    /// in-process (external `SoapySDRUtil --find` works but our
+    /// enumerate hangs) and a full ferrited restart would be too
+    /// disruptive.
+    ///
+    /// Refuses with an error if the pipeline is running, because a
+    /// live source-block holds a `SoapySDRDevice` whose backing
+    /// memory would dangle past `SoapySDR_unloadModules`. The
+    /// device-capability cache is cleared first so the next
+    /// enumerate re-probes against fresh driver state.
+    ///
+    /// Note: service-process drivers (SDRplay's `sdrplay_apiService`)
+    /// often wedge on the service side, not in the driver module —
+    /// `systemctl restart sdrplay` is the correct hammer there. This
+    /// path is most useful for pure-library drivers (HackRF, RTL-SDR,
+    /// etc.) whose state lives inside ferrited.
+    pub async fn reload_devices(&self) -> Result<()> {
+        if self.inner.pipeline.lock().await.is_some() {
+            return Err(anyhow!(
+                "cannot reload SoapySDR drivers while the pipeline is running — stop it first"
+            ));
+        }
+        self.inner.device_cache.clear().await;
+        // dlclose/dlopen are blocking and contend on the C runtime's
+        // mutex; off-runtime keeps the axum worker free.
+        tokio::task::spawn_blocking(crate::device::reload_modules)
+            .await
+            .map_err(|e| anyhow!("SoapySDR module reload task panicked: {e}"))?;
+        tracing::info!("SoapySDR modules reloaded");
+        Ok(())
+    }
+
     /// Stop the running pipeline. Returns `true` if it was running,
     /// `false` if it was already stopped. Waits for the runtime task
     /// to join before returning so the caller knows the source device

@@ -9,6 +9,7 @@
 
 import { pipeline, currentAxes } from '$lib/pipeline.svelte';
 import { clientControls } from '$lib/control/clientStore.svelte';
+import { applyControl } from '$lib/control/dispatch';
 import { resolveTuning, snapHz, type Tuning } from '$lib/presets/tuningModel';
 
 /** Demods with no channel grid — continuous tuning, snap force-off. */
@@ -79,4 +80,32 @@ export function stepVfo(dir: 1 | -1): void {
   if (!v) return;
   const { stepHz } = currentTuning();
   tuneVfoTo(v.absHz + dir * stepHz);
+}
+
+/** Pixel-pointing tune: jump the VFO to exactly `absHz`, ignoring the
+ *  active mode's step grid. Used by click-to-tune in the spectrum and
+ *  waterfall — the operator pointed at a precise pixel, so honouring
+ *  the step size would feel like "snap" the user can't see in the
+ *  cursor's actual freq. Routes through `pipeline.tune` so the server
+ *  still owns the per-driver DC dodge + sticky/snap decision. */
+export function tuneVfoExact(absHz: number): void {
+  if (!vfoState()) return;
+  void pipeline.tune(Math.round(absHz));
+}
+
+/** Drag-to-tune: live VFO retune that moves *only* `chan.freq_shift_hz`
+ *  (never the source LO). Clamped to the source's half-span so the
+ *  channel can't slide out of the captured passband mid-drag. Skips the
+ *  step grid (same reasoning as `tuneVfoExact`) and skips the server's
+ *  full-tune endpoint so the source LO stays parked — a drag is a
+ *  fine-tune gesture, not a re-acquisition. Returns the underlying
+ *  `applyControl` promise so callers (the pointer-tune factory) can
+ *  await it for in-flight gating. */
+export function dragVfoExact(absHz: number): Promise<void> {
+  const v = vfoState();
+  if (!v || !v.vfoBlockId) return Promise.resolve();
+  const shift = Math.round(absHz) - v.centerHz;
+  const clamped = Math.max(-v.halfSpanHz, Math.min(v.halfSpanHz, shift));
+  if (clamped === v.shiftHz) return Promise.resolve();
+  return applyControl(`flow.${v.vfoBlockId}.freq_shift_hz`, clamped);
 }

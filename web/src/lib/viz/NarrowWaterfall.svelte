@@ -7,8 +7,11 @@
   //
   // Differences from `Waterfall.svelte`:
   //
-  //   - No zoom/pan/click. The narrow view IS already zoomed; further
+  //   - No zoom/pan. The narrow view IS already zoomed; further
   //     window math doesn't apply.
+  //   - Click + drag fine-tune the VFO inside the channel window — same
+  //     `createPointerTune` factory the other panes use, so behaviour is
+  //     uniform.
   //   - No VFO marker (the VFO IS the centre).
   //   - Axes derive from the channelizer's `freq_shift_hz` +
   //     `output_rate_hz`, not from the source.
@@ -23,6 +26,9 @@
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
+  import { dragVfoExact, tuneVfoExact } from '$lib/control/tuning.svelte';
+  import { createPointerTune } from '$lib/control/pointerTune';
+  import { hoverStore, hoverPctInWindow } from './hoverStore.svelte';
   import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
 
   interface Props {
@@ -69,6 +75,30 @@
 
   let canvas: HTMLCanvasElement | undefined = $state();
   let renderer: WaterfallRenderer | undefined;
+
+  // Pointer-to-tune: same contract as the other panes — click → full
+  // VFO tune, drag → live channelizer freq_shift retune with the freq
+  // axis frozen at pointer-down so the view's VFO-following recentre
+  // doesn't chase the cursor.
+  let dragging = $state(false);
+  const ptr = createPointerTune({
+    getCanvas: () => canvas,
+    getAxis: () =>
+      narrowCenterHz !== undefined && narrowRateHz !== undefined && narrowRateHz > 0
+        ? { centerHz: narrowCenterHz, rateHz: narrowRateHz }
+        : undefined,
+    onClick: (hz) => {
+      void dragVfoExact(hz);
+    },
+    onDoubleClick: (hz) => tuneVfoExact(hz),
+    onDrag: ({ targetHz }) => dragVfoExact(targetHz),
+    onDragChange: (d) => (dragging = d),
+    onHover: (hz) => (hoverStore.freqHz = hz),
+  });
+
+  // Cross-pane hover preview — `null` when the hovered freq is outside
+  // this channel window.
+  let hoverPct = $derived(hoverPctInWindow(hoverStore.freqHz, narrowCenterHz, narrowRateHz));
 
   // Reuse the same contrast / auto-contrast state the wide waterfall
   // uses. Same dBFS-to-byte mapping (LogMagU8 quantises both wide and
@@ -140,7 +170,27 @@
       style:padding-left="{LEFT_MARGIN}px"
       style:padding-right="{RIGHT_MARGIN}px"
     >
-      <canvas bind:this={canvas} class="block h-full w-full"></canvas>
+      <canvas
+        bind:this={canvas}
+        onpointerdown={ptr.onpointerdown}
+        onpointermove={ptr.onpointermove}
+        onpointerup={ptr.onpointerup}
+        onpointercancel={ptr.onpointercancel}
+        onpointerleave={ptr.onpointerleave}
+        class="block h-full w-full touch-none"
+        class:cursor-grabbing={dragging}
+        class:cursor-crosshair={!dragging}
+        title="click: tune VFO · drag: fine-tune VFO · dbl-click: full tune"
+      ></canvas>
+      {#if hoverPct !== null}
+        <!-- Cross-pane VFO preview line. -->
+        <div
+          class="pointer-events-none absolute top-0 bottom-0 w-px bg-sky-300/70"
+          style:left="calc({LEFT_MARGIN}px + (100% - {LEFT_MARGIN + RIGHT_MARGIN}px) * {hoverPct}
+          / 100)"
+          style:box-shadow="0 0 3px rgba(125, 211, 252, 0.6)"
+        ></div>
+      {/if}
     </div>
     <!-- Axis label band underneath. Min/centre/max in absolute Hz so
          the operator can read off the channel they're listening to

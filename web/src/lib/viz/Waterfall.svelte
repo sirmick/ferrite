@@ -1,13 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { pixelToFreqLinear, WaterfallRenderer } from './waterfall';
+  import { WaterfallRenderer } from './waterfall';
   import { LEFT_MARGIN, RIGHT_MARGIN } from './spectrum';
   import { waterfallStore } from './waterfallStore.svelte';
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
-  import { applyControl } from '$lib/control/dispatch';
+  import { dragVfoExact, tuneVfoExact } from '$lib/control/tuning.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
+  import { createPointerTune } from '$lib/control/pointerTune';
+  import { hoverStore, hoverPctInWindow } from './hoverStore.svelte';
   import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
 
   interface Props {
@@ -88,53 +90,41 @@
     return { center, leftPct, widthPct };
   });
 
-  // Pointer drag state: `dragX` is the current pointer CSS-X relative to
-  // the canvas. While null the cursor sits at geometric centre — the VFO
-  // already lives at `center_freq_hz`, which the waterfall re-centres on.
+  // Gesture grammar (same across all four panes — see Spectrum.svelte
+  // for the full rationale):
+  //   - single click: VFO-only tune (source LO parked) → dragVfoExact
+  //   - double click: full tune via /api/tune → tuneVfoExact
+  //   - drag: live VFO retune, source LO untouched
   let dragging = $state(false);
-  let dragX = $state<number | null>(null);
 
-  function pointerFreq(clientX: number): number | null {
-    if (!canvas || !axes) return null;
-    const rect = canvas.getBoundingClientRect();
-    // When zoomed/panned the canvas paints only a sub-range of the full
-    // span; click-to-tune has to project against the *visible* window,
-    // not the full axes, or the cursor lands tens of MHz off.
-    const cHz = viewWindow?.centerHz ?? axes.center_freq_hz;
-    const rHz = viewWindow?.rateHz ?? axes.sample_rate_hz;
-    return pixelToFreqLinear(clientX - rect.left, rect.width, cHz, rHz);
-  }
+  const ptr = createPointerTune({
+    getCanvas: () => canvas,
+    getAxis: () =>
+      axes
+        ? {
+            centerHz: viewWindow?.centerHz ?? axes.center_freq_hz,
+            rateHz: viewWindow?.rateHz ?? axes.sample_rate_hz,
+          }
+        : undefined,
+    onClick: (hz) => {
+      void dragVfoExact(hz);
+    },
+    onDoubleClick: (hz) => tuneVfoExact(hz),
+    onDrag: ({ targetHz }) => dragVfoExact(targetHz),
+    onDragChange: (d) => (dragging = d),
+    onHover: (hz) => (hoverStore.freqHz = hz),
+  });
 
-  function onPointerDown(ev: PointerEvent) {
-    if (!axes || !canvas) return;
-    if (ev.button !== 0) return;
-    (ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId);
-    dragging = true;
-    const rect = canvas.getBoundingClientRect();
-    dragX = ev.clientX - rect.left;
-  }
-
-  function onPointerMove(ev: PointerEvent) {
-    if (!dragging || !canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    dragX = ev.clientX - rect.left;
-  }
-
-  function onPointerUp(ev: PointerEvent) {
-    if (!dragging) return;
-    (ev.currentTarget as HTMLElement).releasePointerCapture(ev.pointerId);
-    dragging = false;
-    const f = pointerFreq(ev.clientX);
-    dragX = null;
-    if (f !== null) void applyControl('flow.src.center_freq_hz', Math.round(f));
-  }
-
-  function onPointerCancel(ev: PointerEvent) {
-    if (!dragging) return;
-    (ev.currentTarget as HTMLElement).releasePointerCapture(ev.pointerId);
-    dragging = false;
-    dragX = null;
-  }
+  // Shared cross-pane hover preview line — projects whatever any pane's
+  // pointer is over into this pane's visible freq window. `null` when
+  // no pane has hover, or when the freq is off this pane's screen.
+  let hoverPct = $derived(
+    hoverPctInWindow(
+      hoverStore.freqHz,
+      viewWindow?.centerHz ?? axes?.center_freq_hz,
+      viewWindow?.rateHz ?? axes?.sample_rate_hz,
+    ),
+  );
 
   let renderer: WaterfallRenderer | undefined;
 
@@ -229,24 +219,23 @@
       bind:this={canvas}
       class="block h-full w-full touch-none select-none"
       class:cursor-grabbing={dragging}
-      class:cursor-grab={!dragging}
-      onpointerdown={onPointerDown}
-      onpointermove={onPointerMove}
-      onpointerup={onPointerUp}
-      onpointercancel={onPointerCancel}
-      title="drag to retune"
+      class:cursor-crosshair={!dragging}
+      onpointerdown={ptr.onpointerdown}
+      onpointermove={ptr.onpointermove}
+      onpointerup={ptr.onpointerup}
+      onpointercancel={ptr.onpointercancel}
+      onpointerleave={ptr.onpointerleave}
+      title="click: tune VFO · drag: fine-tune VFO · dbl-click: full tune"
     ></canvas>
-    {#if axes}
+    {#if hoverPct !== null}
+      <!-- Cross-pane VFO preview — vertical line at the freq under
+           whichever pane's cursor is live. `pointer-events-none` so
+           it can't capture clicks meant for the canvas underneath. -->
       <div
-        class="pointer-events-none absolute top-0 bottom-0 w-px"
-        class:bg-sky-400={!dragging}
-        class:bg-amber-400={dragging}
-        style:left={dragX != null
-          ? `${LEFT_MARGIN + dragX}px`
-          : `calc(${LEFT_MARGIN}px + (100% - ${LEFT_MARGIN + RIGHT_MARGIN}px) / 2)`}
-        style:box-shadow={dragging
-          ? '0 0 4px rgba(251, 191, 36, 0.8)'
-          : '0 0 3px rgba(56, 189, 248, 0.6)'}
+        class="pointer-events-none absolute top-0 bottom-0 w-px bg-sky-300/70"
+        style:left="calc({LEFT_MARGIN}px + (100% - {LEFT_MARGIN + RIGHT_MARGIN}px) * {hoverPct}
+        / 100)"
+        style:box-shadow="0 0 3px rgba(125, 211, 252, 0.6)"
       ></div>
     {/if}
     {#if vfoCssPct}

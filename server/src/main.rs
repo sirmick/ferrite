@@ -381,6 +381,7 @@ async fn main() -> Result<()> {
     let mut app = Router::new()
         .route("/api/hello", get(routes::hello))
         .route("/api/devices", get(routes::list_devices))
+        .route("/api/devices/reload", post(routes::reload_devices))
         .route(
             "/api/flowgraph",
             get(routes::get_flowgraph).patch(routes::patch_flowgraph),

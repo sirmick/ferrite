@@ -501,10 +501,13 @@ interface SdrPreset {
    * the current src centre, the server snaps `src_center = target -
    * ratio × chan.output_rate_hz` and sets `chan.freq_shift_hz = +ratio
    * × chan.output_rate_hz` so the LO leakage spike lands well outside
-   * the demodulated passband. Zero-IF radios with no built-in
-   * cancellation (notably HackRF) need ~0.4; drivers with a tuned RF
-   * stage and DC tracking (SDRplay, RTL-SDR) can leave it unset
-   * (default 0 → no dodge, target lands at `src_center`).
+   * the demodulated passband. The channelizer's lowpass passes ±0.5 ×
+   * output_rate around the channel centre, so the ratio MUST exceed 0.5
+   * or the spike sits inside the demodulated channel; ~0.7 leaves clean
+   * margin. Zero-IF radios with no built-in cancellation (notably
+   * HackRF) need this; drivers with a tuned RF stage and DC tracking
+   * (SDRplay, RTL-SDR) can leave it unset (default 0 → no dodge, target
+   * lands at `src_center`).
    */
   tune_offset_ratio?: number;
   /**

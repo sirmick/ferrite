@@ -7,12 +7,14 @@
   // marker (the narrow view IS centred on the VFO). Click inside the
   // pane fine-tunes the VFO to the clicked offset (snap-aware).
   import { onMount } from 'svelte';
-  import { SpectrumRenderer } from './spectrum';
+  import { LEFT_MARGIN, RIGHT_MARGIN, SpectrumRenderer } from './spectrum';
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
-  import { tuneVfoTo } from '$lib/control/tuning.svelte';
+  import { dragVfoExact, tuneVfoExact } from '$lib/control/tuning.svelte';
+  import { createPointerTune } from '$lib/control/pointerTune';
+  import { hoverStore, hoverPctInWindow } from './hoverStore.svelte';
   import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
 
   interface Props {
@@ -61,16 +63,36 @@
   const SERVER_FLOOR_DBFS = -160;
   const SERVER_CEIL_DBFS = 0;
 
-  // Click inside the channel view → fine-tune the VFO to that
-  // frequency. The narrow renderer's axes are the channel window, so
-  // `pixelToFreq` already returns an absolute Hz; the central path
-  // handles snap + the abs→freq_shift split.
-  function onClick(ev: MouseEvent) {
-    if (!renderer || !canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const f = renderer.pixelToFreq(ev.clientX - rect.left);
-    if (f !== undefined && Number.isFinite(f)) tuneVfoTo(f);
-  }
+  // Click / drag inside the channel view → fine-tune the VFO. Click is
+  // a one-shot tune (full /api/tune); drag is a live `freq_shift_hz`
+  // adjustment with the freq axis frozen at pointer-down so the view's
+  // VFO-following recentre doesn't make the cursor chase itself.
+  let dragging = $state(false);
+  const ptr = createPointerTune({
+    getCanvas: () => canvas,
+    getAxis: () =>
+      narrowCenterHz !== undefined && narrowRateHz !== undefined && narrowRateHz > 0
+        ? {
+            centerHz: narrowCenterHz,
+            rateHz: narrowRateHz,
+            // SpectrumRenderer reserves these for axis labels; click→Hz
+            // must subtract them or the channel-view tune lands wrong.
+            marginLeftPx: LEFT_MARGIN,
+            marginRightPx: RIGHT_MARGIN,
+          }
+        : undefined,
+    onClick: (hz) => {
+      void dragVfoExact(hz);
+    },
+    onDoubleClick: (hz) => tuneVfoExact(hz),
+    onDrag: ({ targetHz }) => dragVfoExact(targetHz),
+    onDragChange: (d) => (dragging = d),
+    onHover: (hz) => (hoverStore.freqHz = hz),
+  });
+
+  // Cross-pane hover preview — `null` when the hovered freq is outside
+  // this channel window.
+  let hoverPct = $derived(hoverPctInWindow(hoverStore.freqHz, narrowCenterHz, narrowRateHz));
 
   onMount(() => {
     if (!canvas) return;
@@ -127,12 +149,28 @@
 </script>
 
 {#if fftStreamId !== undefined}
-  <canvas
-    bind:this={canvas}
-    onclick={onClick}
-    class="block h-full w-full cursor-crosshair"
-    title="click to fine-tune the VFO within the channel"
-  ></canvas>
+  <div class="relative h-full w-full">
+    <canvas
+      bind:this={canvas}
+      onpointerdown={ptr.onpointerdown}
+      onpointermove={ptr.onpointermove}
+      onpointerup={ptr.onpointerup}
+      onpointercancel={ptr.onpointercancel}
+      onpointerleave={ptr.onpointerleave}
+      class="block h-full w-full touch-none"
+      class:cursor-grabbing={dragging}
+      class:cursor-crosshair={!dragging}
+      title="click: tune VFO · drag: fine-tune VFO · dbl-click: full tune"
+    ></canvas>
+    {#if hoverPct !== null}
+      <div
+        class="pointer-events-none absolute top-0 bottom-0 w-px bg-sky-300/70"
+        style:left="calc({LEFT_MARGIN}px + (100% - {LEFT_MARGIN + RIGHT_MARGIN}px) * {hoverPct}
+        / 100)"
+        style:box-shadow="0 0 3px rgba(125, 211, 252, 0.6)"
+      ></div>
+    {/if}
+  </div>
 {:else}
   <div
     class="flex h-full w-full items-center justify-center text-[11px] text-[color:var(--color-muted)]"

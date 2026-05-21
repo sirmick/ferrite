@@ -52,8 +52,16 @@ pub struct ApiErrorBody {
 }
 
 fn bad_request(code: &'static str, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    api_error(StatusCode::BAD_REQUEST, code, message)
+}
+
+fn api_error(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+) -> (StatusCode, Json<ApiError>) {
     (
-        StatusCode::BAD_REQUEST,
+        status,
         Json(ApiError {
             error: ApiErrorBody {
                 code,
@@ -308,6 +316,35 @@ pub async fn list_devices(
     }
     cache.prune(&present).await;
     Ok(Json(entries))
+}
+
+/// `POST /api/devices/reload` — tear down + re-load every SoapySDR
+/// driver module to recover from an in-process driver wedge. Returns
+/// `409 Conflict` when the pipeline is running (a live `SoapySDRDevice`
+/// would dangle past unload); stop the pipeline first.
+pub async fn reload_devices(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    tracing::info!("POST /api/devices/reload");
+    if let Err(err) = state.reload_devices().await {
+        let msg = format!("{err:#}");
+        // The only structural refusal is "pipeline is running" — surface
+        // it as 409 so the UI can distinguish "wrong state" from a true
+        // server fault. Anything else is a 500.
+        if msg.contains("pipeline is running") {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "RELOAD_REFUSED_RUNNING",
+                msg,
+            ));
+        }
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RELOAD_FAILED",
+            msg,
+        ));
+    }
+    Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
 fn internal(message: String) -> (StatusCode, Json<ApiError>) {
@@ -574,6 +611,7 @@ pub async fn patch_pipeline_block(
     Json(delta): Json<serde_json::Value>,
 ) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
     let is_src = id == ferrite_runtime::SOURCE_ID;
+    tracing::info!(block_id = %id, delta = ?delta, "POST /api/pipeline/blocks/.../params");
     let plan = state
         .apply_block_params(&id, delta)
         .await

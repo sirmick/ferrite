@@ -144,6 +144,14 @@ impl DeviceCache {
         guard.retain(|k, _| present.contains(k));
     }
 
+    /// Drop every cached capability snapshot. Used by the driver-
+    /// reload recovery path: after `SoapySDR_unloadModules` we can't
+    /// trust pre-reload probes, since the next probe goes through
+    /// freshly-loaded driver code with a fresh internal state.
+    pub async fn clear(&self) {
+        self.inner.write().await.clear();
+    }
+
     /// Enumerate every visible device and probe each one into the
     /// cache. Intended to be called once at daemon boot so the first
     /// `/api/devices` request and the first `SoapySource::new` don't

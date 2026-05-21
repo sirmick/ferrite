@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SpectrumRenderer } from './spectrum';
+  import { LEFT_MARGIN, RIGHT_MARGIN, SpectrumRenderer } from './spectrum';
   import type { FrameClient } from '$lib/ws/client';
   import { PayloadType } from '$lib/ws/frame';
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
   import { applyControl } from '$lib/control/dispatch';
-  import { tuneVfoTo, stepVfo } from '$lib/control/tuning.svelte';
+  import { dragVfoExact, stepVfo, tuneVfoExact } from '$lib/control/tuning.svelte';
+  import { createPointerTune } from '$lib/control/pointerTune';
+  import { hoverStore, hoverPctInWindow } from './hoverStore.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { bandplanUsa } from '$lib/presets/bandplan';
   import { waterfallStore } from './waterfallStore.svelte';
@@ -164,46 +166,45 @@
     }
   }
 
-  // Click = VFO; double-click = SDR centre. Native `click` fires twice
-  // before `dblclick`, so we hold the single-click action in a timer
-  // and cancel it if the second click lands within the OS double-click
-  // window.
-  const DBLCLICK_MS = 250;
-  let pendingSingle: ReturnType<typeof setTimeout> | undefined;
+  // Gesture grammar (same across wide + narrow panes):
+  //   - single click: VFO-only tune (source LO parked) → dragVfoExact
+  //   - double click: full tune via /api/tune (per-driver DC dodge can
+  //     move the source LO) → tuneVfoExact
+  //   - drag: live VFO-only retune, source LO untouched
+  // Snap is ignored on all three — the cursor pointed at a pixel.
+  let dragging = $state(false);
+  const ptr = createPointerTune({
+    getCanvas: () => canvas,
+    getAxis: () =>
+      axes
+        ? {
+            centerHz: viewWindow?.centerHz ?? axes.center_freq_hz,
+            rateHz: viewWindow?.rateHz ?? axes.sample_rate_hz,
+            // The SpectrumRenderer paints axis labels inside the canvas
+            // at the left/right edges; click → Hz must use only the
+            // plot's interior width or every tune lands ~5 % off.
+            marginLeftPx: LEFT_MARGIN,
+            marginRightPx: RIGHT_MARGIN,
+          }
+        : undefined,
+    onClick: (hz) => {
+      void dragVfoExact(hz);
+    },
+    onDoubleClick: (hz) => tuneVfoExact(hz),
+    onDrag: ({ targetHz }) => dragVfoExact(targetHz),
+    onDragChange: (d) => (dragging = d),
+    onHover: (hz) => (hoverStore.freqHz = hz),
+  });
 
-  function freqAtPointer(ev: MouseEvent): number | undefined {
-    if (!renderer || !canvas) return undefined;
-    const rect = canvas.getBoundingClientRect();
-    return renderer.pixelToFreq(ev.clientX - rect.left);
-  }
-
-  function onClick(ev: MouseEvent) {
-    const f = freqAtPointer(ev);
-    if (f === undefined) return;
-    // Defer so a following dblclick can cancel. If there's no VFO
-    // block there's nothing for the single-click to do that dblclick
-    // wouldn't also do — short-circuit and centre immediately.
-    if (!vfoBlock || !axes) {
-      void applyControl('flow.src.center_freq_hz', Math.round(f));
-      return;
-    }
-    if (pendingSingle !== undefined) clearTimeout(pendingSingle);
-    pendingSingle = setTimeout(() => {
-      pendingSingle = undefined;
-      tuneVfoTo(f); // snap-aware central path
-    }, DBLCLICK_MS);
-  }
-
-  function onDblClick(ev: MouseEvent) {
-    if (pendingSingle !== undefined) {
-      clearTimeout(pendingSingle);
-      pendingSingle = undefined;
-    }
-    const f = freqAtPointer(ev);
-    if (f === undefined) return;
-    // Centre freq is on the live-apply whitelist — hot retune, no rebuild.
-    void applyControl('flow.src.center_freq_hz', Math.round(f));
-  }
+  // Cross-pane hover preview. Pct is null when the hovered freq sits
+  // outside this pane's currently-visible window.
+  let hoverPct = $derived(
+    hoverPctInWindow(
+      hoverStore.freqHz,
+      viewWindow?.centerHz ?? axes?.center_freq_hz,
+      viewWindow?.rateHz ?? axes?.sample_rate_hz,
+    ),
+  );
 
   onMount(() => {
     if (!canvas) return;
@@ -360,17 +361,36 @@
 </script>
 
 <div class="flex h-full w-full flex-col">
-  <canvas
-    bind:this={canvas}
-    tabindex="0"
-    onclick={onClick}
-    ondblclick={onDblClick}
-    onwheel={onWheel}
-    onkeydown={onKeydown}
-    onpointerdown={() => canvas?.focus()}
-    class="block min-h-0 w-full flex-1 cursor-crosshair outline-none"
-    title="click: tune VFO · dbl-click: re-centre SDR · wheel: zoom at cursor · ↑↓: step · ←→: pan"
-  ></canvas>
+  <div class="relative min-h-0 w-full flex-1">
+    <canvas
+      bind:this={canvas}
+      tabindex="0"
+      onwheel={onWheel}
+      onkeydown={onKeydown}
+      onpointerdown={(ev) => {
+        canvas?.focus();
+        ptr.onpointerdown(ev);
+      }}
+      onpointermove={ptr.onpointermove}
+      onpointerup={ptr.onpointerup}
+      onpointercancel={ptr.onpointercancel}
+      onpointerleave={ptr.onpointerleave}
+      class="block h-full w-full touch-none outline-none"
+      class:cursor-grabbing={dragging}
+      class:cursor-crosshair={!dragging}
+      title="click: tune VFO · drag: fine-tune VFO · dbl-click: full tune · wheel: zoom · ↑↓: step · ←→: pan"
+    ></canvas>
+    {#if hoverPct !== null}
+      <!-- Cross-pane VFO preview line. `pointer-events-none` so it
+           doesn't intercept clicks meant for the canvas. -->
+      <div
+        class="pointer-events-none absolute top-0 bottom-0 w-px bg-sky-300/70"
+        style:left="calc({LEFT_MARGIN}px + (100% - {LEFT_MARGIN + RIGHT_MARGIN}px) * {hoverPct}
+        / 100)"
+        style:box-shadow="0 0 3px rgba(125, 211, 252, 0.6)"
+      ></div>
+    {/if}
+  </div>
   {#if viewZoom > 1}
     <!-- Horizontal scrollbar for the zoomed FFT/waterfall view. Sized
          to match the plot's interior so the slider extents map directly

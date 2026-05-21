@@ -23,6 +23,14 @@
   const LOGMAG_ID = 'logmag';
   let fftBlock = $derived(pipeline.blocks[FFT_ID]);
   let logmagBlock = $derived(pipeline.blocks[LOGMAG_ID]);
+  // Runtime-injected narrow-FFT chain has its own LogMagU8 named
+  // `__narrow_logmag_<chan_id>` (see `inject_narrow_fft.rs`). Fan the
+  // smooth-slider write across both so the channel FFT smooths in
+  // lockstep with the wide FFT instead of staying at its
+  // construction-time `NARROW_LOGMAG_ALPHA`.
+  let narrowLogmagIds = $derived(
+    Object.keys(pipeline.blocks).filter((id) => id.startsWith('__narrow_logmag_')),
+  );
   function numValue(block: typeof fftBlock | undefined, key: string, fallback: number): number {
     const v = (block?.values as Record<string, unknown> | null | undefined)?.[key];
     return typeof v === 'number' ? v : fallback;
@@ -123,11 +131,15 @@
           max={1}
           step={0.01}
           value={logmagAlpha}
-          oninput={(e) =>
-            void applyControl(
-              `flow.${LOGMAG_ID}.alpha`,
-              Number((e.target as HTMLInputElement).value),
-            )}
+          oninput={(e) => {
+            const alpha = Number((e.target as HTMLInputElement).value);
+            // Wide + every narrow chain's LogMag stay in sync — one
+            // slider, one user-visible smoothing factor.
+            void applyControl(`flow.${LOGMAG_ID}.alpha`, alpha);
+            for (const id of narrowLogmagIds) {
+              void applyControl(`flow.${id}.alpha`, alpha);
+            }
+          }}
         />
       </label>
     {/if}

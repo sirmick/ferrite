@@ -25,6 +25,34 @@ use soapysdr_sys::{SoapySDRDevice, SoapySDRKwargs, SoapySDRRange};
 /// hang forever. Server routes set their own.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Tear down every SoapySDR driver module currently loaded into this
+/// process and re-load them from `SoapySDR_listSearchPaths()`. The
+/// safe `soapysdr` 0.5 wrapper doesn't expose these — we go through
+/// `soapysdr-sys` directly, same as the capability-probe code in this
+/// file. Used by the `/api/devices/reload` recovery endpoint when a
+/// driver wedges in-process (e.g. external `SoapySDRUtil --find` works
+/// but our enumerate hangs) and a full ferrited restart would be too
+/// disruptive.
+///
+/// SAFETY: every `SoapySDRDevice` handle in the process MUST be
+/// dropped before calling. A driver's allocated memory survives
+/// `unloadModule`, so any live handle becomes a dangling C pointer.
+/// Callers gate on a stopped pipeline (the only known handle holder);
+/// `DeviceCache` stores descriptor data only, not handles, so it's
+/// safe to leave intact (we clear it for freshness anyway).
+///
+/// Also note: some drivers spawn background threads in module init
+/// that aren't joined on unload — those leak across reloads. Acceptable
+/// for an occasional manual recovery; not for a hot loop.
+pub fn reload_modules() {
+    // SAFETY: see fn-level contract; the recovery endpoint refuses to
+    // run while the pipeline is up. Both fns return void.
+    unsafe {
+        soapysdr_sys::SoapySDR_unloadModules();
+        soapysdr_sys::SoapySDR_loadModules();
+    }
+}
+
 /// Run a probe-style closure on a worker thread and bail with a helpful
 /// error if it doesn't return within `timeout`. SoapySDR drivers can
 /// wedge at the C/C++ layer (e.g. the SDRplay API service holding a

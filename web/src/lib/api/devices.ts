@@ -102,6 +102,26 @@ export async function fetchDevices(): Promise<DeviceEntry[]> {
   return (await r.json()) as DeviceEntry[];
 }
 
+/** Recovery for the case where a SoapySDR driver wedged in-process —
+ *  external `SoapySDRUtil --find` works but our enumerate hangs.
+ *  Server tears down every loaded driver module and re-loads from the
+ *  search path. Refuses with 409 if the pipeline is running (a live
+ *  source-block would dangle past unload). */
+export async function reloadDevices(): Promise<void> {
+  const r = await fetch('/api/devices/reload', { method: 'POST' });
+  if (!r.ok) {
+    const text = await r.text();
+    let msg = `${r.status} ${r.statusText}`;
+    try {
+      const body = JSON.parse(text) as { error?: { message?: string } };
+      if (body.error?.message) msg = body.error.message;
+    } catch {
+      if (text) msg = text;
+    }
+    throw new Error(msg);
+  }
+}
+
 /**
  * Decode the rust-side `serde(tag = "status")` representation into the
  * shape this module exports. Soapy entries marshal `Available(Box<Caps>)`
