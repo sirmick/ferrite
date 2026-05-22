@@ -14,6 +14,11 @@
 //! stderr (`tracing-subscriber` with `with_writer(stderr)` below). A
 //! stray `println!` here corrupts the JSON-RPC stream.
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use anyhow::Result;
 use reqwest::Client;
 use rmcp::{
@@ -25,8 +30,9 @@ use rmcp::{
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
 /// Thin HTTP shim around the running `ferrited`. Same shape the CLI
@@ -198,6 +204,35 @@ pub struct ViewSnapshotArgs {
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct StartCaptureArgs {
+    /// Capture duration in seconds. The block's wall-clock cap inside
+    /// ferrited stops the recording when this elapses; the job task
+    /// also belt-and-braces clears `record_path` 0.5 s past `duration`
+    /// to handle a missed tick.
+    pub duration_s: f64,
+    /// Optional retune target. When given, the task calls
+    /// `mcp__ferrite__tune` shape (POST /api/tune with offset_ratio=0)
+    /// first so the capture lands at the requested freq. Leave unset
+    /// to capture wherever the pipeline is already tuned.
+    #[serde(default)]
+    pub freq_hz: Option<f64>,
+    /// Output path. Defaults to
+    /// `/tmp/ferrite-captures/<kind>-<unix_ms>-<freq>.<ext>` matching
+    /// the CLI's convention (`cf32` for IQ, `bin` for FFT bytes).
+    #[serde(default)]
+    pub out: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CaptureStatusArgs {
+    /// Job id from a previous `start_capture_*` reply. Omit to get a
+    /// list of every job this MCP session knows about (most recent
+    /// first), capped to ~20 entries.
+    #[serde(default)]
+    pub job_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct SetViewStateArgs {
     /// Set the operator's Main pane: `"wide"` for the
     /// FFT/Waterfall column, `"advanced"` for the per-preset advanced
@@ -217,9 +252,70 @@ pub struct SetViewStateArgs {
 
 // ─── server ─────────────────────────────────────────────────────────────
 
+/// Which side-tee block this job is recording from. Maps 1:1 to the
+/// block id ferrited expects on the live-record patch (`chan` for the
+/// post-channelizer cf32 stream; `logmag` for the FFT u8 stream).
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum CaptureKind {
+    Iq,
+    Fft,
+}
+
+impl CaptureKind {
+    fn block_id(self) -> &'static str {
+        match self {
+            Self::Iq => "chan",
+            Self::Fft => "logmag",
+        }
+    }
+    fn ext(self) -> &'static str {
+        // chan tees cf32 (complex-baseband post-channelizer); logmag
+        // tees raw u8 spectrum bytes.
+        match self {
+            Self::Iq => "cf32",
+            Self::Fft => "bin",
+        }
+    }
+}
+
+/// State of one async capture. The MCP `start_capture_*` tools return
+/// immediately with a `Pending` entry; the spawned task updates to
+/// `Done` (path + sidecar bytes ready on disk) or `Failed` (error
+/// string) when the duration elapses.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+enum JobStatus {
+    Running,
+    Done,
+    Failed { error: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CaptureJob {
+    job_id: String,
+    kind: CaptureKind,
+    status: JobStatus,
+    output_path: String,
+    duration_s: f64,
+    /// Unix ms — set when the start tool returns.
+    started_at: u128,
+    /// Unix ms — set when the task transitions out of `Running`.
+    finished_at: Option<u128>,
+    /// Sidecar JSON the recording block wrote next to `output_path`
+    /// (`<path>.json`). Populated on success; useful for the AI's
+    /// `recent_decodes`-style follow-ups.
+    sidecar: Option<Value>,
+}
+
 #[derive(Clone)]
 pub struct FerriteServer {
     http: Http,
+    /// Async-capture registry. Indexed by job_id. Cap is ~20 entries
+    /// (LRU eviction on insert); each entry is ~1 KB.
+    jobs: Arc<RwLock<Vec<CaptureJob>>>,
+    /// Monotonic counter for job ids. Per MCP-server lifetime.
+    next_job: Arc<AtomicU64>,
     // `tool_router` is consumed by the `#[tool_handler]`-expanded
     // impl below; rustc's dead-code pass can't see through the macro
     // and warns spuriously.
@@ -227,13 +323,194 @@ pub struct FerriteServer {
     tool_router: ToolRouter<FerriteServer>,
 }
 
+const JOBS_CAP: usize = 20;
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn default_capture_path(kind: CaptureKind, freq_hz: f64) -> PathBuf {
+    let mhz = (freq_hz / 1e6).round();
+    // Mirror the CLI's `/tmp/ferrite-captures/<kind>-<unix_ms>-<freq>.<ext>`.
+    let stem = format!("{:?}-{}-{:.0}mhz", kind, now_ms(), mhz).to_lowercase();
+    PathBuf::from("/tmp/ferrite-captures").join(format!("{stem}.{}", kind.ext()))
+}
+
+async fn upsert_job(jobs: &Arc<RwLock<Vec<CaptureJob>>>, job: CaptureJob) {
+    let mut guard = jobs.write().await;
+    // Newest first; truncate so the registry doesn't grow unbounded
+    // across a long session.
+    if let Some(pos) = guard.iter().position(|j| j.job_id == job.job_id) {
+        guard[pos] = job;
+    } else {
+        guard.insert(0, job);
+        guard.truncate(JOBS_CAP);
+    }
+}
+
+/// Live-record orchestration — patches the block's `record_path` +
+/// `record_max_seconds`, sleeps, then clears `record_path`. Same shape
+/// the CLI's `live_record` uses. The block's wall-clock cap inside
+/// ferrited usually fires first; the empty-path patch is the
+/// belt-and-braces stop.
+async fn run_capture_task(
+    http: Http,
+    jobs: Arc<RwLock<Vec<CaptureJob>>>,
+    job_id: String,
+    kind: CaptureKind,
+    duration_s: f64,
+    freq_hz: Option<f64>,
+    out_path: PathBuf,
+) {
+    let block = kind.block_id();
+    let path_str = out_path.display().to_string();
+    let result: Result<(), String> = async {
+        // Optional retune via the dodge-aware tune endpoint.
+        if let Some(f) = freq_hz {
+            http.post("/api/tune", json!({ "freq_hz": f, "offset_ratio": 0.0 }))
+                .await
+                .map_err(|e| format!("retune: {}", display_mcp_err(&e)))?;
+        }
+        // Patch the block's record_path + max_seconds to start the tee.
+        // record_max_seconds is the block's internal wall-clock cap;
+        // the empty-path patch on the way out is the belt-and-braces.
+        http.post(
+            &format!("/api/pipeline/blocks/{block}/params"),
+            json!({ "record_path": path_str, "record_max_seconds": duration_s }),
+        )
+        .await
+        .map_err(|e| format!("start recording on `{block}`: {}", display_mcp_err(&e)))?;
+        // Wait. 0.5 s past the requested duration so the block's own
+        // cap finalises first; clearing record_path on a block that
+        // already finalised is a no-op.
+        tokio::time::sleep(Duration::from_secs_f64(duration_s + 0.5)).await;
+        // Stop. Best-effort — the daemon may have cleared already.
+        let _ = http
+            .post(
+                &format!("/api/pipeline/blocks/{block}/params"),
+                json!({ "record_path": "" }),
+            )
+            .await;
+        Ok(())
+    }
+    .await;
+    let sidecar = if result.is_ok() {
+        let side_path = out_path.with_extension(format!("{}.json", kind.ext()));
+        match tokio::fs::read(&side_path).await {
+            Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let status = match &result {
+        Ok(()) => JobStatus::Done,
+        Err(e) => JobStatus::Failed { error: e.clone() },
+    };
+    let job = {
+        let g = jobs.read().await;
+        g.iter().find(|j| j.job_id == job_id).cloned()
+    };
+    if let Some(mut j) = job {
+        j.status = status;
+        j.finished_at = Some(now_ms());
+        j.sidecar = sidecar;
+        upsert_job(&jobs, j).await;
+    }
+}
+
+/// Best-effort error-string extraction from an `McpError` (the type's
+/// fields aren't `pub` in the rmcp version we pin, so we go through
+/// the Display impl).
+fn display_mcp_err(e: &McpError) -> String {
+    format!("{e}")
+}
+
 #[tool_router]
 impl FerriteServer {
     fn new(http: Http) -> Self {
         Self {
             http,
+            jobs: Arc::new(RwLock::new(Vec::new())),
+            next_job: Arc::new(AtomicU64::new(1)),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Spawn one async capture task. Returns the registry entry so the
+    /// caller can serialise it into the tool reply. Shared by the IQ
+    /// and FFT start-capture tools.
+    async fn spawn_capture(
+        &self,
+        kind: CaptureKind,
+        args: StartCaptureArgs,
+    ) -> Result<CaptureJob, McpError> {
+        if !(args.duration_s.is_finite() && args.duration_s > 0.0) {
+            return Err(McpError::invalid_params(
+                format!(
+                    "duration_s must be a finite positive number, got {}",
+                    args.duration_s
+                ),
+                None,
+            ));
+        }
+        // Resolve output path. Default uses the source's current freq
+        // when none was provided so the file name still has a useful
+        // hint about where the recording came from.
+        let freq_for_name = if let Some(f) = args.freq_hz {
+            f
+        } else {
+            // Cheap read so the default path picks up the live freq.
+            self.http
+                .get("/api/source")
+                .await
+                .ok()
+                .and_then(|src| src.get("params")?.get("center_freq_hz")?.as_f64())
+                .unwrap_or(0.0)
+        };
+        let out_path = match args.out {
+            Some(s) => PathBuf::from(s),
+            None => default_capture_path(kind, freq_for_name),
+        };
+        if let Some(parent) = out_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| http_err(&format!("mkdir {}", parent.display()), e.to_string()))?;
+        }
+        let job_id = format!("cap-{}", self.next_job.fetch_add(1, Ordering::SeqCst));
+        let job = CaptureJob {
+            job_id: job_id.clone(),
+            kind,
+            status: JobStatus::Running,
+            output_path: out_path.display().to_string(),
+            duration_s: args.duration_s,
+            started_at: now_ms(),
+            finished_at: None,
+            sidecar: None,
+        };
+        upsert_job(&self.jobs, job.clone()).await;
+        // Spawn the worker. Each task carries its own `Http` clone (a
+        // cheap `reqwest::Client` ref) so the MCP tool returns
+        // immediately while the orchestration runs in background.
+        let http = self.http.clone();
+        let jobs = self.jobs.clone();
+        let task_path = out_path.clone();
+        tokio::spawn(async move {
+            run_capture_task(
+                http,
+                jobs,
+                job_id,
+                kind,
+                args.duration_s,
+                args.freq_hz,
+                task_path,
+            )
+            .await;
+        });
+        Ok(job)
     }
 
     #[tool(
@@ -512,6 +789,67 @@ impl FerriteServer {
     )]
     async fn view_state(&self) -> Result<CallToolResult, McpError> {
         ok_json(&self.http.get("/api/view").await?)
+    }
+
+    #[tool(
+        description = "Start an async IQ capture against the post-channelizer cf32 stream (block `chan`). Non-disruptive — the user's UI session keeps running while the recording side-tees to `output_path`. **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar JSON. `duration_s` is the recording wall-clock cap (block enforces it server-side). Optional `freq_hz` retunes through `/api/tune` first; omit to capture wherever the pipeline is already pointed. Defaults `out` to `/tmp/ferrite-captures/iq-<unix_ms>-<freq>mhz.cf32`."
+    )]
+    async fn start_capture_iq(
+        &self,
+        Parameters(args): Parameters<StartCaptureArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let job = self.spawn_capture(CaptureKind::Iq, args).await?;
+        ok_json(
+            &serde_json::to_value(&job).map_err(|e| {
+                McpError::internal_error(format!("serialize capture job: {e}"), None)
+            })?,
+        )
+    }
+
+    #[tool(
+        description = "Start an async FFT-byte-stream capture against the post-`logmag` u8 spectrum (block `logmag`). Non-disruptive — the UI's waterfall keeps painting while the byte stream side-tees to `output_path`. **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for completion + sidecar. Same args / defaults as `start_capture_iq` but writes raw `u8` frame bytes (`bin`) plus a sidecar JSON the AI's `find_fft_peaks` / `fft_to_png` python wrappers consume."
+    )]
+    async fn start_capture_fft(
+        &self,
+        Parameters(args): Parameters<StartCaptureArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let job = self.spawn_capture(CaptureKind::Fft, args).await?;
+        ok_json(
+            &serde_json::to_value(&job).map_err(|e| {
+                McpError::internal_error(format!("serialize capture job: {e}"), None)
+            })?,
+        )
+    }
+
+    #[tool(
+        description = "Poll one async capture job by `job_id`, or list every job this MCP session has tracked (most recent first, capped to ~20 entries) when `job_id` is omitted. The reply's `status` is `running` (still recording), `done` (file + sidecar ready on disk; `sidecar` field carries the JSON), or `failed` (with an `error` string). Cheap; safe to poll once a second while a capture is in flight."
+    )]
+    async fn capture_status(
+        &self,
+        Parameters(args): Parameters<CaptureStatusArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let guard = self.jobs.read().await;
+        match args.job_id {
+            Some(id) => {
+                let Some(job) = guard.iter().find(|j| j.job_id == id) else {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "no capture job with id {id:?}; this session has {} known",
+                            guard.len()
+                        ),
+                        None,
+                    ));
+                };
+                ok_json(
+                    &serde_json::to_value(job)
+                        .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?,
+                )
+            }
+            None => ok_json(
+                &serde_json::to_value(&*guard)
+                    .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?,
+            ),
+        }
     }
 
     #[tool(
