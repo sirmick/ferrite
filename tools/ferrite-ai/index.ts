@@ -299,10 +299,75 @@ function loadPrompt(name: string): string {
 }
 
 // "chat" mode is tools-free: the AI is Q&A only, no Bash, no Read.
-// Other modes get the full toolkit ferrite-ctl exploration needs.
+// Other modes get the full toolkit ferrite-ctl exploration needs —
+// plus every tool the local `ferrite` MCP server exposes (wildcarded
+// via `mcp__ferrite`, matched by the Agent SDK's prefix rule).
+// `Bash` stays available for the script wrappers
+// (`fft_to_png.py`, `fft_peaks.py`, `ft8_worldmap.py`) that aren't
+// surfaced through MCP yet, and as an exploratory escape hatch.
 function allowedToolsFor(mode: Mode): string[] {
   if (mode === "chat") return [];
-  return ["Bash", "Read", "Glob", "Grep"];
+  return ["Bash", "Read", "Glob", "Grep", "mcp__ferrite"];
+}
+
+// `ferrite-ctl mcp` config the Agent SDK spawns on session start. The
+// subprocess hosts the same control surface the human-facing CLI does,
+// over MCP JSON-RPC — so Claude calls `mcp__ferrite__status`,
+// `mcp__ferrite__tune`, etc. directly instead of shell-execing
+// `ferrite-ctl status --json` through `Bash`. Tool source:
+// `tools/ferrite-ctl/src/mcp.rs`. The MCP subprocess proxies to the
+// same daemon the human CLI talks to (default 127.0.0.1:10001),
+// overridable via `FERRITE_CTL_CONNECT`.
+const FERRITE_MCP_ARGS = ["mcp"];
+const FERRITE_CTL_CONNECT =
+  process.env.FERRITE_CTL_CONNECT ?? "http://127.0.0.1:10001";
+
+// Appended to every non-chat mode's system prompt. The prompts still
+// reference `ferrite-ctl …` extensively (history: shell-exec via Bash
+// was the only path) — this block reframes those as MCP tools and
+// gives the AI a name-mapping so it doesn't try to grep the prompt for
+// the Bash equivalent on every turn. Phase 2 will rewrite the prompts
+// directly; for now both paths work and the AI picks the cheaper one.
+const MCP_TOOL_PREFERENCE = `## Tool preference — local \`ferrite\` MCP server
+
+A local Model Context Protocol server, \`ferrite\`, is attached this
+session. Every common control surface this sidecar used to shell-exec
+through Bash (\`ferrite-ctl status\`, \`ferrite-ctl tune …\`, etc.) is
+available as a discrete MCP tool. **Prefer the MCP tool over the
+Bash equivalent** — one round-trip, structured JSON in / out, no shell
+quoting, no \`--json\` flag wrangling, no \`X-Ferrite-Note\` plumbing
+(the sidecar tags those server-side).
+
+Name mapping (each MCP name → equivalent \`ferrite-ctl …\` invocation):
+
+- \`mcp__ferrite__status\` → \`ferrite-ctl --json status\`
+- \`mcp__ferrite__list_devices\` → \`ferrite-ctl --json device list\`
+- \`mcp__ferrite__select_device\` → \`ferrite-ctl device select <args>\`
+- \`mcp__ferrite__reload_drivers\` → in-process Soapy module reload (recovery)
+- \`mcp__ferrite__list_presets\` → \`ferrite-ctl --json preset list\`
+- \`mcp__ferrite__load_preset\` → \`ferrite-ctl preset load <name>\`
+- \`mcp__ferrite__tune\` → \`ferrite-ctl tune <freq_hz>\` **with the
+  per-driver DC-spike dodge applied** — pass \`offset_ratio\` from the
+  driver notes when given (HackRF: 0.7; SDRplay / RTL-SDR / Airspy: 0).
+- \`mcp__ferrite__set_block_param\` → \`ferrite-ctl param <block> k=v\`
+- \`mcp__ferrite__start\` / \`mcp__ferrite__stop\` → pipeline lifecycle
+- \`mcp__ferrite__transcribe\` → \`ferrite-ctl transcribe on|off\`
+- \`mcp__ferrite__recent_decodes\` → \`ferrite-ctl --json decoder recent\`
+- \`mcp__ferrite__view_snapshot\` → \`ferrite-ctl view <pane>\`
+- \`mcp__ferrite__view_state\` → \`ferrite-ctl --json view-get\`
+
+Bash + Read + Glob + Grep stay available for the script wrappers
+(\`fft_to_png.py\`, \`fft_peaks.py\`, \`ft8_worldmap.py\`) and for
+exploratory file / log reads that aren't in the MCP surface. The
+streaming \`ferrite-ctl tail\` command is not exposed as an MCP tool —
+poll \`mcp__ferrite__recent_decodes\` instead.
+`;
+function ferriteMcpServer(): { command: string; args: string[]; env: Record<string, string> } {
+  return {
+    command: FERRITE_CTL,
+    args: [...FERRITE_MCP_ARGS, "--connect", FERRITE_CTL_CONNECT],
+    env: { RUST_LOG: process.env.FERRITE_AI_MCP_LOG ?? "info" },
+  };
 }
 
 type IncomingMessage = {
@@ -485,7 +550,7 @@ function appendPromptExtras(
   localTimeIso: string | undefined,
   timeZone: string | undefined,
 ): string {
-  let out = systemPrompt;
+  let out = `${systemPrompt}\n\n${MCP_TOOL_PREFERENCE}`;
   const driver = (driverNotes ?? "").trim();
   if (driver) {
     out = `${out}\n\n## Active SDR — driver-specific operator notes\n\n${driver}\n`;
@@ -661,6 +726,13 @@ wss.on("connection", (ws) => {
         parsed.time_zone,
       ),
       allowedTools: allowedToolsFor(mode),
+      // Local `ferrite` MCP server. Spawned per session by the SDK;
+      // talks to the same running ferrited the human CLI does (env
+      // var `FERRITE_CTL_CONNECT` overrides the daemon URL). Skipped
+      // for chat mode (tools-free).
+      ...(mode === "chat"
+        ? {}
+        : { mcpServers: { ferrite: ferriteMcpServer() } }),
       // User opted into autonomy; bypassPermissions skips the SDK's
       // confirmation prompts entirely. The activity-log middleware on
       // ferrited still surfaces every API call to the UI panel.
