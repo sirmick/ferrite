@@ -9,7 +9,6 @@
 // sure `claude` is logged in before starting the sidecar.
 
 import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
-import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,24 +31,6 @@ const FERRITE_CTL =
 const FFT_TO_PNG = resolve(FERRITE_HOME, "tools/fft_to_png.py");
 const FFT_PEAKS = resolve(FERRITE_HOME, "tools/fft_peaks.py");
 const FT8_WORLDMAP = resolve(FERRITE_HOME, "tools/ft8_worldmap.py");
-
-// Capture `ferrite-ctl --help` once at startup so the AI sees the full
-// CLI surface in its system prompt — saves a tool call per turn and
-// avoids the AI having to guess at flag names. If the binary is
-// missing (clean checkout, not built yet) we fall back to a hint
-// pointing at the build command rather than crashing the sidecar.
-function captureCtlHelp(): string {
-  try {
-    return execFileSync(FERRITE_CTL, ["--help"], {
-      encoding: "utf-8",
-      timeout: 5000,
-    }).trim();
-  } catch (e) {
-    console.warn(`[ferrite-ai] \`${FERRITE_CTL} --help\` failed:`, e);
-    return `(ferrite-ctl unavailable at ${FERRITE_CTL} — run \`cargo build --release -p ferrite-ctl\` from ${FERRITE_HOME})`;
-  }
-}
-const CTL_HELP = captureCtlHelp();
 
 console.log(`[ferrite-ai] FERRITE_HOME=${FERRITE_HOME}`);
 console.log(`[ferrite-ai] FERRITE_CTL=${FERRITE_CTL}`);
@@ -286,16 +267,17 @@ function loadPrompt(name: string): string {
   if (!existsSync(path)) {
     throw new Error(`prompt missing: ${path}`);
   }
-  // Substitute environment-derived paths + the captured CLI help into
-  // the prompt template. Doing it at load-time keeps the per-turn
-  // hot path string-free.
+  // Substitute environment-derived paths into the prompt template.
+  // Doing it at load-time keeps the per-turn hot path string-free.
+  // The historical `{{FERRITE_CTL}}` + `{{CTL_HELP}}` placeholders are
+  // gone — prompts now drive the radio through the `mcp__ferrite__*`
+  // tools surfaced by the local MCP server; the Python script
+  // wrappers (FFT_TO_PNG / FFT_PEAKS / FT8_WORLDMAP) still ride Bash.
   return readFileSync(path, "utf-8")
     .replaceAll("{{FERRITE_HOME}}", FERRITE_HOME)
-    .replaceAll("{{FERRITE_CTL}}", FERRITE_CTL)
     .replaceAll("{{FFT_TO_PNG}}", FFT_TO_PNG)
     .replaceAll("{{FFT_PEAKS}}", FFT_PEAKS)
-    .replaceAll("{{FT8_WORLDMAP}}", FT8_WORLDMAP)
-    .replaceAll("{{CTL_HELP}}", CTL_HELP);
+    .replaceAll("{{FT8_WORLDMAP}}", FT8_WORLDMAP);
 }
 
 // "chat" mode is tools-free: the AI is Q&A only, no Bash, no Read.
@@ -322,46 +304,6 @@ const FERRITE_MCP_ARGS = ["mcp"];
 const FERRITE_CTL_CONNECT =
   process.env.FERRITE_CTL_CONNECT ?? "http://127.0.0.1:10001";
 
-// Appended to every non-chat mode's system prompt. The prompts still
-// reference `ferrite-ctl …` extensively (history: shell-exec via Bash
-// was the only path) — this block reframes those as MCP tools and
-// gives the AI a name-mapping so it doesn't try to grep the prompt for
-// the Bash equivalent on every turn. Phase 2 will rewrite the prompts
-// directly; for now both paths work and the AI picks the cheaper one.
-const MCP_TOOL_PREFERENCE = `## Tool preference — local \`ferrite\` MCP server
-
-A local Model Context Protocol server, \`ferrite\`, is attached this
-session. Every common control surface this sidecar used to shell-exec
-through Bash (\`ferrite-ctl status\`, \`ferrite-ctl tune …\`, etc.) is
-available as a discrete MCP tool. **Prefer the MCP tool over the
-Bash equivalent** — one round-trip, structured JSON in / out, no shell
-quoting, no \`--json\` flag wrangling, no \`X-Ferrite-Note\` plumbing
-(the sidecar tags those server-side).
-
-Name mapping (each MCP name → equivalent \`ferrite-ctl …\` invocation):
-
-- \`mcp__ferrite__status\` → \`ferrite-ctl --json status\`
-- \`mcp__ferrite__list_devices\` → \`ferrite-ctl --json device list\`
-- \`mcp__ferrite__select_device\` → \`ferrite-ctl device select <args>\`
-- \`mcp__ferrite__reload_drivers\` → in-process Soapy module reload (recovery)
-- \`mcp__ferrite__list_presets\` → \`ferrite-ctl --json preset list\`
-- \`mcp__ferrite__load_preset\` → \`ferrite-ctl preset load <name>\`
-- \`mcp__ferrite__tune\` → \`ferrite-ctl tune <freq_hz>\` **with the
-  per-driver DC-spike dodge applied** — pass \`offset_ratio\` from the
-  driver notes when given (HackRF: 0.7; SDRplay / RTL-SDR / Airspy: 0).
-- \`mcp__ferrite__set_block_param\` → \`ferrite-ctl param <block> k=v\`
-- \`mcp__ferrite__start\` / \`mcp__ferrite__stop\` → pipeline lifecycle
-- \`mcp__ferrite__transcribe\` → \`ferrite-ctl transcribe on|off\`
-- \`mcp__ferrite__recent_decodes\` → \`ferrite-ctl --json decoder recent\`
-- \`mcp__ferrite__view_snapshot\` → \`ferrite-ctl view <pane>\`
-- \`mcp__ferrite__view_state\` → \`ferrite-ctl --json view-get\`
-
-Bash + Read + Glob + Grep stay available for the script wrappers
-(\`fft_to_png.py\`, \`fft_peaks.py\`, \`ft8_worldmap.py\`) and for
-exploratory file / log reads that aren't in the MCP surface. The
-streaming \`ferrite-ctl tail\` command is not exposed as an MCP tool —
-poll \`mcp__ferrite__recent_decodes\` instead.
-`;
 function ferriteMcpServer(): { command: string; args: string[]; env: Record<string, string> } {
   return {
     command: FERRITE_CTL,
@@ -550,7 +492,7 @@ function appendPromptExtras(
   localTimeIso: string | undefined,
   timeZone: string | undefined,
 ): string {
-  let out = `${systemPrompt}\n\n${MCP_TOOL_PREFERENCE}`;
+  let out = systemPrompt;
   const driver = (driverNotes ?? "").trim();
   if (driver) {
     out = `${out}\n\n## Active SDR — driver-specific operator notes\n\n${driver}\n`;

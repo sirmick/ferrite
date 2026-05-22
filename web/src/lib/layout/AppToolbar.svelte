@@ -18,7 +18,7 @@
   import { applyControl } from '$lib/control/dispatch';
   import { activeAdvancedView } from '$lib/advanced/registry';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
-  import { snapshotView } from '$lib/viz/viewRegistry';
+  import { snapshotView, dataUrlToBase64 } from '$lib/viz/viewRegistry';
   import { logs } from '$lib/logs/store.svelte';
 
   // Channel-detail pane toggle. Disabled when the active preset has no
@@ -113,24 +113,34 @@
   });
 
   let shotBusy = $state(false);
-  // Grab the main canvas the operator is looking at and persist it
-  // server-side via POST /api/screenshot. Whichever wide pane is
-  // mounted wins (waterfall when an advanced view hasn't replaced it,
-  // else the spectrum); the registry returns '' for an unmounted pane.
+  /** Capture the entire browser tab (or whatever the user picks) via
+   *  `getDisplayMedia`, grab one frame, POST to `/api/screenshot`.
+   *  Used to be a single-canvas grab through `snapshotView` — that
+   *  only ever caught the wide waterfall / spectrum and missed the
+   *  toolbar, side panel, AI chat, dialogs, etc. The displayCapture
+   *  route is pixel-perfect (WebGL waterfalls included, live) at the
+   *  cost of one per-click browser permission prompt where the
+   *  operator picks which surface to share. `preferCurrentTab` hints
+   *  Chrome's picker to default to *this* tab so it's usually a
+   *  single-click confirm.
+   *
+   *  Falls back to the canvas-only path on browsers that don't ship
+   *  `getDisplayMedia` (Safari < 13, some embedded webviews) so the
+   *  button isn't dead-on-arrival there. */
   async function takeScreenshot() {
     if (shotBusy) return;
     shotBusy = true;
+    let stream: MediaStream | undefined;
     try {
-      let shot = snapshotView('wide-waterfall');
-      if (shot.error || !shot.png_b64) shot = snapshotView('wide-spectrum');
-      if (shot.error || !shot.png_b64) {
-        logs.push('client', 'warn', `screenshot: no canvas to capture (${shot.error || 'empty'})`);
+      const png_b64 = (await captureViaDisplayMedia()) ?? captureCanvasFallback();
+      if (!png_b64) {
+        logs.push('client', 'warn', 'screenshot: no capture path succeeded');
         return;
       }
       const res = await fetch('/api/screenshot', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ png_b64: shot.png_b64, label: sourceLabel }),
+        body: JSON.stringify({ png_b64, label: sourceLabel }),
       });
       if (!res.ok) {
         logs.push('client', 'warn', `screenshot: server ${res.status} ${await res.text()}`);
@@ -141,8 +151,61 @@
     } catch (e) {
       logs.push('client', 'warn', `screenshot failed: ${e instanceof Error ? e.message : e}`);
     } finally {
+      stream?.getTracks().forEach((t) => t.stop());
       shotBusy = false;
     }
+  }
+
+  /** displayCapture-path. Returns base64 PNG (no `data:` prefix) on
+   *  success, `null` when the API is unavailable. Rejects on every
+   *  other failure (user-cancelled, no track, drawImage error) so the
+   *  caller surfaces it through the logs path. */
+  async function captureViaDisplayMedia(): Promise<string | null> {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getDisplayMedia) {
+      return null;
+    }
+    // `preferCurrentTab` is Chrome-only and makes the picker default
+    // to this tab — single-click confirm in the happy path. Other
+    // browsers ignore it and show the standard surface picker. Cast
+    // because the lib.dom typings haven't caught up.
+    const constraints = {
+      video: true,
+      audio: false,
+      preferCurrentTab: true,
+    } as unknown as MediaStreamConstraints;
+    const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
+    try {
+      const track = stream.getVideoTracks()[0];
+      if (!track) throw new Error('no video track in displayCapture stream');
+      const video = document.createElement('video');
+      video.muted = true;
+      video.srcObject = stream;
+      await video.play();
+      // First decoded frame can be a tick after `play()` resolves;
+      // wait one rAF so the canvas grabs an actual picture, not a
+      // black hole.
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      const w = video.videoWidth || track.getSettings().width || 1;
+      const h = video.videoHeight || track.getSettings().height || 1;
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('2D canvas context unavailable');
+      ctx.drawImage(video, 0, 0, w, h);
+      const dataUrl = canvas.toDataURL('image/png');
+      return dataUrlToBase64(dataUrl);
+    } finally {
+      stream.getTracks().forEach((t) => t.stop());
+    }
+  }
+
+  /** Pre-displayMedia fallback: same single-canvas path the button
+   *  used to take. Returns base64 PNG or '' on miss. */
+  function captureCanvasFallback(): string {
+    let shot = snapshotView('wide-waterfall');
+    if (shot.error || !shot.png_b64) shot = snapshotView('wide-spectrum');
+    return shot.png_b64 ?? '';
   }
 
   async function togglePipeline() {

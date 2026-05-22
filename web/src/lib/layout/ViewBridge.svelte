@@ -20,6 +20,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { snapshotView, type PaneName } from '$lib/viz/viewRegistry';
   import { viewState } from '$lib/viz/viewState.svelte';
+  import { applyControl } from '$lib/control/dispatch';
+  import { logs } from '$lib/logs/store.svelte';
 
   // Same-origin WS — vite proxies `/ws` to ferrited (HTTP dev cert
   // also covers WSS), production mounts ferrited under the same host.
@@ -29,6 +31,40 @@
   }
 
   type WireRequest = { type: 'view_request'; req_id: number; pane: PaneName };
+  /** Server → browser chrome-state push (`POST /api/ui-view/set`). The
+   *  fields are optional; the browser writes only the ones supplied.
+   *  Source: `server/src/view_bridge.rs:UiViewStatePatch`. */
+  type WireSetViewState = {
+    type: 'set_view_state';
+    state: {
+      main_pane?: 'wide' | 'advanced' | string;
+      channel_detail_visible?: boolean;
+      left_tab?: string;
+    };
+  };
+  type WireInbound = WireRequest | WireSetViewState;
+
+  /** Apply a server-requested chrome-state patch. Each field maps to
+   *  the matching `client.workspace.*` control store key; we route
+   *  through `applyControl` so the same dispatcher path the UI uses
+   *  validates + persists the value. Unknown fields are logged + dropped
+   *  instead of silently swallowed — surfaces server-side bugs. */
+  function applyViewStatePatch(state: WireSetViewState['state']): void {
+    if (state.main_pane !== undefined) {
+      if (state.main_pane === 'wide' || state.main_pane === 'advanced') {
+        void applyControl('client.workspace.mainPane', state.main_pane);
+      } else {
+        logs.push('client', 'warn', `view-bridge: unknown main_pane=${state.main_pane}`);
+      }
+    }
+    if (state.channel_detail_visible !== undefined) {
+      void applyControl('client.workspace.narrowVisible', state.channel_detail_visible);
+    }
+    // `left_tab` arrives over the wire (server side carries it in
+    // UiViewStatePatch) but isn't applied yet — the left-side tab
+    // selector doesn't live in a single client-store key the way
+    // mainPane / narrowVisible do. Drop silently rather than warn.
+  }
 
   let ws: WebSocket | undefined;
   // Reconnect with exponential backoff so a transient ferrited
@@ -54,26 +90,30 @@
       wsOpen = true;
     });
     ws.addEventListener('message', (ev) => {
-      // Only text frames carry view_request; binaries are unexpected.
+      // Only text frames carry outbound messages; binaries are unexpected.
       if (typeof ev.data !== 'string') return;
-      let req: WireRequest;
+      let msg: WireInbound;
       try {
-        req = JSON.parse(ev.data);
+        msg = JSON.parse(ev.data);
       } catch {
         return;
       }
-      if (req.type !== 'view_request' || typeof req.req_id !== 'number') return;
-      const { png_b64, error } = snapshotView(req.pane);
-      // Tag the reply so the server-side `WireInbound` enum dispatches
-      // it as a `view_response` (vs. `view_state`, vs. future
-      // `view_command_result`).
-      const resp = JSON.stringify({
-        type: 'view_response',
-        req_id: req.req_id,
-        png_b64,
-        error,
-      });
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(resp);
+      if (msg.type === 'view_request' && typeof msg.req_id === 'number') {
+        const { png_b64, error } = snapshotView(msg.pane);
+        // Tag the reply so the server-side `WireInbound` enum dispatches
+        // it as a `view_response` (vs. `view_state`).
+        const resp = JSON.stringify({
+          type: 'view_response',
+          req_id: msg.req_id,
+          png_b64,
+          error,
+        });
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(resp);
+        return;
+      }
+      if (msg.type === 'set_view_state') {
+        applyViewStatePatch(msg.state);
+      }
     });
     ws.addEventListener('close', () => {
       ws = undefined;

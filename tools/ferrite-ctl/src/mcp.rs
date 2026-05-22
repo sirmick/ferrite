@@ -184,6 +184,24 @@ pub struct ViewSnapshotArgs {
     pub pane: String,
 }
 
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SetViewStateArgs {
+    /// Set the operator's Main pane: `"wide"` for the
+    /// FFT/Waterfall column, `"advanced"` for the per-preset advanced
+    /// view (FT8 / ADS-B / APRS map, Transcript, …). Unset = leave alone.
+    #[serde(default)]
+    pub main_pane: Option<String>,
+    /// Show/hide the channel-detail pane (the narrow FFT + waterfall
+    /// column alongside whatever Main pane is up). Unset = leave alone.
+    #[serde(default)]
+    pub channel_detail_visible: Option<bool>,
+    /// Reserved for future use (selecting the left-panel tab). Server
+    /// currently routes this through to the browser but the browser
+    /// hasn't been wired to act on it yet.
+    #[serde(default)]
+    pub left_tab: Option<String>,
+}
+
 // ─── server ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -237,27 +255,25 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Switch the active source to the SDR identified by the supplied Soapy args string. Preserves existing source params (centre freq, rate, gain) where applicable. Triggers a source restart."
+        description = "Switch the active source to the SDR identified by the supplied Soapy args string (e.g. `driver=hackrf,serial=…`). Source params reset to the driver's defaults — the previous source's centre freq / rate / gain do NOT carry over (a SineSource centre of 100 MHz would have been meaningless on the SDR anyway). Always follow up with `tune` to set the listen frequency and `set_block_param` for gain / antenna / AGC. Triggers a source restart."
     )]
     async fn select_device(
         &self,
         Parameters(args): Parameters<SelectDeviceArgs>,
     ) -> Result<CallToolResult, McpError> {
-        // Merge `args` into the current source's params so we don't
-        // drop centre freq / rate / gain — same shape the CLI does.
-        let current = self.http.get("/api/source").await.unwrap_or(Value::Null);
-        let mut params = current
-            .get("params")
-            .cloned()
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
-        params.insert("args".into(), Value::String(args.args));
+        // Cross-source-type param carryover is a footgun: a previous
+        // SineSource's `tone_freq_abs_hz` makes no sense on a real
+        // SDR, and its default `center_freq_hz=100_000_000` Hz would
+        // land the new SDR at 100 MHz regardless of band. Send only
+        // the args; the server fills the driver-appropriate defaults
+        // (sample rate, bandwidth, gain) from the device's
+        // capability schema.
         ok_json(
             &self
                 .http
                 .patch(
                     "/api/source",
-                    json!({ "type": "SoapySource", "params": params }),
+                    json!({ "type": "SoapySource", "params": { "args": args.args } }),
                 )
                 .await?,
         )
@@ -387,6 +403,31 @@ impl FerriteServer {
     )]
     async fn view_state(&self) -> Result<CallToolResult, McpError> {
         ok_json(&self.http.get("/api/view").await?)
+    }
+
+    #[tool(
+        description = "Push a chrome-state patch to the operator's browser. Use this to put them on the right pane for what's happening: `main_pane='advanced'` switches the main column to the per-preset view (FT8 map / ADS-B map / APRS map / Transcript / fldigi console, depending on the active preset); `main_pane='wide'` switches back to the FFT/Waterfall. `channel_detail_visible` flips the narrow channel-detail column on/off. Unset fields are left alone. 503 when no UI tab is connected — the patch needs a viewer to land on."
+    )]
+    async fn set_view_state(
+        &self,
+        Parameters(args): Parameters<SetViewStateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut body = serde_json::Map::new();
+        if let Some(p) = args.main_pane {
+            body.insert("main_pane".into(), Value::String(p));
+        }
+        if let Some(b) = args.channel_detail_visible {
+            body.insert("channel_detail_visible".into(), Value::Bool(b));
+        }
+        if let Some(t) = args.left_tab {
+            body.insert("left_tab".into(), Value::String(t));
+        }
+        ok_json(
+            &self
+                .http
+                .post("/api/ui-view/set", Value::Object(body))
+                .await?,
+        )
     }
 }
 

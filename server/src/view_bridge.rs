@@ -42,23 +42,52 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 /// One pending HTTP request waiting on a browser snapshot.
 type Pending = HashMap<u64, oneshot::Sender<Vec<u8>>>;
 
-/// Pump command sent from the broker to the active WS task: "ask the
-/// browser for `pane`, tag it with `req_id`". The WS task serialises
-/// to JSON and sends; the response comes back through `complete()`.
-pub struct ViewRequest {
-    pub req_id: u64,
-    pub pane: String,
+/// Pump command sent from the broker to the active WS task. The WS
+/// task serialises to JSON and sends. `RequestSnapshot` is the
+/// request-response shape (response comes back via `ingest`);
+/// `SetViewState` is fire-and-forget (the browser applies the patch
+/// to its client controls).
+pub enum Outbound {
+    /// Ask the browser for a PNG of `pane`; reply tagged with `req_id`.
+    RequestSnapshot { req_id: u64, pane: String },
+    /// Push a chrome-state patch to the browser. Fields are optional;
+    /// the browser applies only the ones provided (so callers can
+    /// flip `main_pane` without disturbing zoom / paused / etc.).
+    SetViewState(UiViewStatePatch),
 }
 
-/// JSON wire shape — ferrited → browser, on `/ws/ui-views`. The
-/// browser-side `ViewBridge.svelte` decodes this, dispatches to the
-/// pane's registered snapshot fn, and replies with a [`WireInbound::ViewResponse`].
+/// JSON wire shape — ferrited → browser, on `/ws/ui-views`. Tagged on
+/// `type`. `view_request` matches [`Outbound::RequestSnapshot`];
+/// `set_view_state` matches [`Outbound::SetViewState`].
 #[derive(Serialize)]
-pub struct WireRequest<'a> {
-    #[serde(rename = "type")]
-    pub kind: &'static str, // "view_request"
-    pub req_id: u64,
-    pub pane: &'a str,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireOutbound<'a> {
+    ViewRequest { req_id: u64, pane: &'a str },
+    SetViewState { state: &'a UiViewStatePatch },
+}
+
+/// Partial overlay of [`UiViewState`] used by the server→browser push
+/// path. Same fields as the cache, but every entry is optional and
+/// `None` means "don't touch this field"; the browser merges the
+/// patch into its live state. Kept as a sibling type rather than
+/// re-using `UiViewState` directly so the cache (browser is
+/// authoritative; an absent field means "browser declines to expose
+/// it") and the patch (server is authoritative; an absent field
+/// means "leave alone") don't drift in interpretation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UiViewStatePatch {
+    /// Set the operator's main-pane selector — `"wide"` for the
+    /// FFT/Waterfall column, `"advanced"` for the per-preset mode
+    /// view (FT8 / ADS-B / APRS map, Transcript, …).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub main_pane: Option<String>,
+    /// Show/hide the channel-detail pane (channel-spectrum +
+    /// channel-waterfall) alongside whatever Main pane is up.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub channel_detail_visible: Option<bool>,
+    /// Switch the active left-panel tab.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub left_tab: Option<String>,
 }
 
 /// Cached snapshot of the browser's purely-visual chrome state.
@@ -102,7 +131,7 @@ pub struct UiViewState {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireInbound {
-    /// Reply to a [`WireRequest`] snapshot request. `png_b64` is the
+    /// Reply to a [`WireOutbound::ViewRequest`] snapshot. `png_b64` is the
     /// raw base64 payload (no `data:image/png,` prefix). `error` is
     /// non-empty when the browser couldn't render (no canvas
     /// registered for that pane, paused, etc.); in that case `png_b64`
@@ -134,7 +163,7 @@ pub enum ViewError {
 pub struct ViewBridge {
     /// Active browser's sink. `None` when no tab is subscribed; replaced
     /// on each new subscriber (last-connect-wins).
-    sender: Arc<Mutex<Option<mpsc::Sender<ViewRequest>>>>,
+    sender: Arc<Mutex<Option<mpsc::Sender<Outbound>>>>,
     /// In-flight HTTP requests, keyed by `req_id`. The WS handler
     /// completes them by looking up the id from the browser's response.
     pending: Arc<Mutex<Pending>>,
@@ -165,7 +194,7 @@ impl ViewBridge {
         self.pending.lock().await.insert(req_id, resp_tx);
 
         if tx
-            .send(ViewRequest {
+            .send(Outbound::RequestSnapshot {
                 req_id,
                 pane: pane.to_string(),
             })
@@ -194,7 +223,7 @@ impl ViewBridge {
     /// caller hangs onto as an identity token for
     /// [`Self::detach_viewer_if_current`] on disconnect. Replaces any
     /// previous subscriber (last-connect-wins, per D06).
-    pub async fn install_viewer(&self) -> (mpsc::Sender<ViewRequest>, mpsc::Receiver<ViewRequest>) {
+    pub async fn install_viewer(&self) -> (mpsc::Sender<Outbound>, mpsc::Receiver<Outbound>) {
         let (tx, rx) = mpsc::channel(16);
         *self.sender.lock().await = Some(tx.clone());
         (tx, rx)
@@ -207,7 +236,7 @@ impl ViewBridge {
     /// Clears the cached [`UiViewState`] in the same step, so the next
     /// `GET /api/view` reports `NoViewer` instead of returning a stale
     /// snapshot from the now-gone browser.
-    pub async fn detach_viewer_if_current(&self, expected: &mpsc::Sender<ViewRequest>) {
+    pub async fn detach_viewer_if_current(&self, expected: &mpsc::Sender<Outbound>) {
         let mut slot = self.sender.lock().await;
         if let Some(s) = slot.as_ref() {
             if s.same_channel(expected) {
@@ -231,6 +260,21 @@ impl ViewBridge {
                 *self.state.write().await = Some(state);
             }
         }
+    }
+
+    /// HTTP-side: ask the browser to apply a chrome-state patch.
+    /// Fire-and-forget — the browser applies the supplied fields to
+    /// its client controls. Returns [`ViewError::NoViewer`] when no
+    /// tab is subscribed (operator must open the UI for the patch to
+    /// land somewhere).
+    pub async fn push_state(&self, patch: UiViewStatePatch) -> Result<(), ViewError> {
+        let Some(tx) = self.sender.lock().await.clone() else {
+            return Err(ViewError::NoViewer);
+        };
+        if tx.send(Outbound::SetViewState(patch)).await.is_err() {
+            return Err(ViewError::NoViewer);
+        }
+        Ok(())
     }
 
     /// HTTP-side: read the last-known browser-authored chrome state.

@@ -1034,14 +1034,22 @@ async fn ws_ui_views_loop(mut socket: WebSocket, state: AppState) {
 
     loop {
         tokio::select! {
-            // ferrited → browser: a new snapshot request from the HTTP
-            // side. Serialise as JSON and send over the WS.
-            req = req_rx.recv() => {
-                let Some(req) = req else { break };
-                let wire = crate::view_bridge::WireRequest {
-                    kind: "view_request",
-                    req_id: req.req_id,
-                    pane: &req.pane,
+            // ferrited → browser: an outbound command — either a
+            // snapshot request (response comes back via /ws/ui-views)
+            // or a chrome-state push. Serialise tagged-enum-style and
+            // send over the WS.
+            out = req_rx.recv() => {
+                let Some(out) = out else { break };
+                let wire = match &out {
+                    crate::view_bridge::Outbound::RequestSnapshot { req_id, pane } => {
+                        crate::view_bridge::WireOutbound::ViewRequest {
+                            req_id: *req_id,
+                            pane: pane.as_str(),
+                        }
+                    }
+                    crate::view_bridge::Outbound::SetViewState(patch) => {
+                        crate::view_bridge::WireOutbound::SetViewState { state: patch }
+                    }
                 };
                 let Ok(json) = serde_json::to_string(&wire) else { continue };
                 if socket.send(Message::Text(json)).await.is_err() {
@@ -1076,6 +1084,22 @@ async fn ws_ui_views_loop(mut socket: WebSocket, state: AppState) {
     }
 
     bridge.detach_viewer_if_current(&our_sender).await;
+}
+
+/// `POST /api/ui-view/set` — push a chrome-state patch to the active
+/// browser tab. The browser applies the supplied fields to its
+/// client controls (`main_pane` → `client.workspace.mainPane`;
+/// `channel_detail_visible` → `client.workspace.narrowVisible`).
+/// Returns 503 when no tab is connected.
+pub async fn set_view_state(
+    State(state): State<AppState>,
+    Json(patch): Json<crate::view_bridge::UiViewStatePatch>,
+) -> impl IntoResponse {
+    tracing::info!(?patch, "POST /api/ui-view/set");
+    match state.view_bridge().push_state(patch).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
 }
 
 /// `GET /api/view` — the cached browser-authored chrome state.

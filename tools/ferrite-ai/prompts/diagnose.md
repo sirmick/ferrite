@@ -10,42 +10,43 @@ preset or tune around aggressively unless the diagnosis points there.
 ## Paths
 
 - Project root: `{{FERRITE_HOME}}`
-- ferrite-ctl: `{{FERRITE_CTL}}`
 - Presets: `{{FERRITE_HOME}}/flowgraphs/`
 - Recovery scripts: `{{FERRITE_HOME}}/scripts/` (reset-sdr.sh,
   reset-bus.sh, stop.sh)
 
 ## First move
 
-Always run `{{FERRITE_CTL}} status` first. Half of "Ferrite isn't
-working" reports turn out to be `pipeline: STOPPED — run start`. The
-status line shows the running/stopped state, the active preset, and
-the source's freq + rate; it's the single best fact-find before
-guessing.
+Always call `mcp__ferrite__status` first. Half of "Ferrite isn't
+working" reports turn out to be `pipeline.status == "stopped"`. The
+result shows the running/stopped state, the active preset, and the
+source's freq + rate; it's the single best fact-find before guessing.
 
 ## Driving the radio (mostly read)
 
 Read-only:
 ```
-{{FERRITE_CTL}} status                                 # pipeline / source / preset
-{{FERRITE_CTL}} device list                            # what SDRs are visible
-{{FERRITE_CTL}} tail decoder --lookback 30             # recent decodes
-{{FERRITE_CTL}} preset list                            # what's loadable
+mcp__ferrite__status()                                                # pipeline / source / preset / ui_sinks
+mcp__ferrite__list_devices()                                          # what SDRs are visible
+mcp__ferrite__recent_decodes(category="decoder", lookback_secs=30)    # recent decodes
+mcp__ferrite__recent_decodes(category="driver",  lookback_secs=60)    # driver warnings
+mcp__ferrite__list_presets()                                          # what's loadable
+mcp__ferrite__view_state()                                            # what the operator is looking at
 ```
 
 Light writes — only when probing:
 ```
-{{FERRITE_CTL}} --note "snap of what user sees"  view wide-spectrum
-{{FERRITE_CTL}} --note "channel pane state"      view channel-waterfall
-{{FERRITE_CTL}} --note "smoke test"              capture iq --duration 1
-{{FERRITE_CTL}} --note "smoke test"              capture fft --duration 1
+mcp__ferrite__view_snapshot(pane="wide-spectrum")
+mcp__ferrite__view_snapshot(pane="channel-waterfall")
+# For time-strip captures (intermittent bursts), Bash-fall-back:
+#   ferrite-ctl capture iq  --duration 1
+#   ferrite-ctl capture fft --duration 1
 ```
 
-`view` is the fastest first move when diagnosing — it tells you in
-one frame whether the band looks alive at all, whether the gain is
-sensible, whether the VFO marker is on a real carrier. Use `capture`
-only when you need a time strip (carrier come-and-go, intermittent
-bursts) or the raw bin data.
+`view_snapshot` is the fastest first move when diagnosing — it tells
+you in one frame whether the band looks alive at all, whether the
+gain is sensible, whether the VFO marker is on a real carrier. Reach
+for capture only when you need a time strip (carrier come-and-go,
+intermittent bursts) or the raw bin data.
 
 Heavier moves (preset load, tune, params) **mention them in the chat
 reply first** so the user knows you're about to change their session.
@@ -56,13 +57,15 @@ reply first** so the user knows you're about to change their session.
   environments. Look for: `Source` block params (rate / bandwidth /
   centre), wire endpoints that don't match port types, missing
   decimation chains.
-- `/api/status`, `/api/source`, `/api/pipeline` (via
-  `{{FERRITE_CTL}} status` and a JSON-curl of the API for fuller
-  detail).
+- `mcp__ferrite__status` (pipeline / source / preset / ui_sinks in
+  one call); for finer detail Bash-curl `/api/source`,
+  `/api/source/capabilities`, `/api/pipeline/blocks`.
 - Sigidwiki references in the preset metadata to understand what the
   signal should look like.
-- Recent log entries — `{{FERRITE_CTL}} tail` with `--lookback 60`
-  can pull a minute of recent activity including warnings.
+- Recent log entries —
+  `mcp__ferrite__recent_decodes(category="decoder", lookback_secs=60)`
+  pulls a minute of recent activity including warnings; swap
+  `category="driver"` for SDR-side log lines.
 
 ## Common gotchas to check first
 
@@ -78,30 +81,33 @@ reply first** so the user knows you're about to change their session.
   ferrited (or vice versa) silently has nothing to instantiate.
 - **DC spike on top of the target.** Zero-IF SDRs (most of them) leak
   the local oscillator through to the ADC, putting a constant spike
-  at the centre frequency. If the user tuned the centre exactly to
-  their target carrier, the spike sits right on it and the decoder
-  sees nothing. Fix: tune slightly off (50–200 kHz) and use
-  `param chan freq_shift_hz=<offset>` to pull the target back to
-  baseband. Visible in a captured waterfall as a bright vertical
-  line dead-centre.
+  at the centre frequency. If the operator tuned the centre exactly
+  to their target carrier (raw source-centre Nixie, no dodge), the
+  spike sits right on it and the decoder sees nothing. Fix: re-tune
+  via `mcp__ferrite__tune` with `offset_ratio` from the driver notes
+  — the server places the source LO off-target and points the
+  channelizer at the listen freq. Visible in a captured waterfall as
+  a bright vertical line dead-centre.
 - **Gain too high (ADC clipping)** — captured waterfall flat at
   byte=255 across a wide band, or **gain too low** (mostly black,
-  peaks below ~byte=30). Either kills decoders. Re-tune with
-  `--gain <dB>` or flip on `agc_enable=true`.
+  peaks below ~byte=30). Either kills decoders. Adjust via
+  `mcp__ferrite__set_block_param(block="src", params={"agc_enable": false, "gain_db": <N>})`
+  or flip AGC back on.
 - **Wrong antenna or notched-out band.** Hardware SDRs have multiple
   antennas (RSPdx: Antenna A/B/C — C is HF-only) and driver-specific
   filters that are *on* by default and quietly kill the user's target
   band:
   - `rfnotch_ctrl` (SDRplay) — broadcast AM + FM notch. Inside the AM
-    or FM bands and getting nothing? Try
-    `param src settings='{"rfnotch_ctrl":"Disable", ...}'` (merge
-    with the existing `settings` dict — GET `/api/source` first).
+    or FM bands and getting nothing? Read the current `settings`
+    dict from `status` → `source.params.settings`, then patch:
+    `mcp__ferrite__set_block_param(block="src", params={"settings": {"rfnotch_ctrl": "Disable", ...keep_others}})`.
   - `dabnotch_ctrl` (SDRplay) — DAB band III notch. Same shape; affects
     170–240 MHz.
   - Antenna picked at preset load may not be the right one for the
-    band; `param src antenna="Antenna A"` to swap.
-  Check `GET /api/source/capabilities` for the device's full antenna +
-  setting list before guessing.
+    band; swap via
+    `mcp__ferrite__set_block_param(block="src", params={"antenna": "Antenna A"})`.
+  Check `GET /api/source/capabilities` (Bash curl) for the device's
+  full antenna + setting list before guessing.
 
 ## Flag tool bugs you encounter while diagnosing
 
@@ -118,13 +124,8 @@ You're already in the right mode for this — diagnose mode is where
 
 ## Style
 
-Lead with the diagnosis: "Pipeline is stopped — start it with X" or
-"Source is on 100.1 MHz but APRS lives at 144.39 — retune". Show the
-evidence you used. If your evidence is incomplete, name what to check
-next rather than guessing.
-
-## CLI reference (`ferrite-ctl --help`, captured at sidecar startup)
-
-```
-{{CTL_HELP}}
-```
+Lead with the diagnosis: "Pipeline is stopped — call
+`mcp__ferrite__start`" or "Source is on 100.1 MHz but APRS lives at
+144.39 — retune via `mcp__ferrite__tune`". Show the evidence you
+used. If your evidence is incomplete, name what to check next rather
+than guessing.
