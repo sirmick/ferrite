@@ -248,6 +248,27 @@ impl FerriteServer {
     }
 
     #[tool(
+        description = "Capability schema of the currently-bound source — antennas (port names), Soapy settings (filters, bias-T, AGC tuners — every key the driver lets you patch via `set_block_param(block='src', params={settings: {...}})`), gain ladder, sample-rate / bandwidth / frequency ranges. Use this before swapping antennas or flipping driver-specific knobs so you know what's actually settable on the bound SDR. Tagged response: `kind='hardware'|'software'|'unavailable'`."
+    )]
+    async fn source_capabilities(&self) -> Result<CallToolResult, McpError> {
+        ok_json(&self.http.get("/api/source/capabilities").await?)
+    }
+
+    #[tool(
+        description = "Every block in the currently-composed preset, including the resolved source and any auto-inserted bridges. Each entry has the block's id, type_name, full BlockSpec, current values, and (when published) ai_notes. Use to introspect the active pipeline's topology before guessing block ids — `chan` exists in some presets, `audio_nr` in voice-mode presets, `rds` in WBFM, etc. Pairs with `set_block_param(block=<id>, params={...})`."
+    )]
+    async fn list_blocks(&self) -> Result<CallToolResult, McpError> {
+        ok_json(&self.http.get("/api/pipeline/blocks").await?)
+    }
+
+    #[tool(
+        description = "Every registered block type's schema (sorted by `type_name`). Static — doesn't depend on the active preset. Each entry has the type_name, the BlockSpec (param keys, kinds, defaults, ranges, ai_notes), and the reconfig_scope (`self` / `downstream` / `sourceRestart`) so you know whether a param hot-applies or rebuilds. Use to look up the exact param key for a block before patching it (saves a guess-then-retry round)."
+    )]
+    async fn list_block_types(&self) -> Result<CallToolResult, McpError> {
+        ok_json(&self.http.get("/api/blocks").await?)
+    }
+
+    #[tool(
         description = "Recover from an in-process SoapySDR driver wedge (external `SoapySDRUtil --find` works but our enumerate hangs / misses devices). Tears down + re-loads every Soapy driver module via the soapysdr-sys C ABI. Refuses with 409 when the pipeline is running — call `stop` first. Service-process drivers (notably SDRplay) usually wedge on the service side, not in the module; `systemctl restart sdrplay` is the right hammer there."
     )]
     async fn reload_drivers(&self) -> Result<CallToolResult, McpError> {
@@ -388,14 +409,67 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Snapshot one of the four spectrum/waterfall canvases the browser is currently rendering. Returns the PNG as a base64 data URL the caller can save or render — band-plan overlay, VFO marker, contrast, pause state, and zoom are all baked in (no re-render from raw FFT). Requires a UI tab connected to /ws/ui-views; 503 when none."
+        description = "Snapshot one of the four spectrum/waterfall canvases the browser is currently rendering. Writes the PNG to `/tmp/ferrite-views/<pane>-<unix_ms>.png` and returns the path + byte count — band-plan overlay, VFO marker, contrast, pause state, and zoom are all baked in (no re-render from raw FFT). Read the returned path with the `Read` tool to see the image. Requires a UI tab connected to /ws/ui-views; 503 when none. Note: `wide-*` panes are only rendered while `main_pane=wide`; `channel-*` panes only when the active preset has a Channelizer AND `channel_detail_visible=true`. Check via `view_state` if a snapshot returns 404 (canvas not mounted)."
     )]
     async fn view_snapshot(
         &self,
         Parameters(args): Parameters<ViewSnapshotArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let path = format!("/api/ui-view/snapshot/{}", args.pane);
-        ok_json(&self.http.get(&path).await?)
+        const KNOWN_PANES: &[&str] = &[
+            "wide-spectrum",
+            "wide-waterfall",
+            "channel-spectrum",
+            "channel-waterfall",
+        ];
+        if !KNOWN_PANES.contains(&args.pane.as_str()) {
+            return Err(McpError::invalid_params(
+                format!(
+                    "unknown pane {:?}; expected one of {KNOWN_PANES:?}",
+                    args.pane
+                ),
+                None,
+            ));
+        }
+        // The server returns raw image/png bytes (not JSON), so the
+        // generic `Http::get` text-then-parse path doesn't fit — go
+        // through the bare reqwest client. Path is `/api/ui-views/:pane`
+        // (plural, no `snapshot/` prefix); the earlier wrong path
+        // `/api/ui-view/snapshot/<pane>` 404'd every call.
+        let url = format!("{}/api/ui-views/{}", self.http.base, args.pane);
+        let resp = self
+            .http
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| http_err(&format!("GET {url}"), e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(http_err(&format!("GET {url}"), format!("{status}: {body}")));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| http_err(&format!("GET {url}"), format!("read body: {e}")))?;
+        // Mirror the CLI: write to `/tmp/ferrite-views/<pane>-<ms>.png`
+        // and return the path. AI clients can `Read` the file as an
+        // image content block.
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let dir = std::path::PathBuf::from("/tmp/ferrite-views");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| http_err("mkdir /tmp/ferrite-views", e.to_string()))?;
+        let out_path = dir.join(format!("{}-{ms}.png", args.pane));
+        std::fs::write(&out_path, &bytes)
+            .map_err(|e| http_err(&format!("write {}", out_path.display()), e.to_string()))?;
+        ok_json(&json!({
+            "path": out_path.display().to_string(),
+            "bytes": bytes.len(),
+            "pane": args.pane,
+        }))
     }
 
     #[tool(
