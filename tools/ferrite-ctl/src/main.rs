@@ -22,6 +22,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
+mod mcp;
 mod sdr_tables;
 use sdr_tables::recommended_bandwidth_for;
 
@@ -189,6 +190,15 @@ enum Cmd {
     /// committed artifact is stale.
     #[command(hide = true)]
     GenTables,
+    /// Run as an MCP (Model Context Protocol) server over stdio.
+    /// Exposes the ferrite-ctl verbs that make sense as discrete tools
+    /// (`status`, `tune`, `load_preset`, `recent_decodes`, …) to any
+    /// MCP-enabled client — Claude Desktop, Claude Code CLI, the
+    /// bundled ferrite-ai sidecar via the Agent SDK's `mcpServers`
+    /// config. Drives the same running ferrited (`--connect`) the CLI
+    /// uses; stdio is reserved for the JSON-RPC stream so logs go to
+    /// stderr. See docs/02-protocol.md and tools/ferrite-ctl/src/mcp.rs.
+    Mcp,
 }
 
 #[derive(Subcommand, Debug)]
@@ -441,6 +451,7 @@ fn command_summary(cmd: &Cmd) -> &'static str {
         Cmd::View { .. } => "view",
         Cmd::ViewGet => "view-get",
         Cmd::GenTables => "gen-tables",
+        Cmd::Mcp => "mcp",
     }
 }
 
@@ -484,6 +495,9 @@ impl Driver {
             // Local codegen — no network. The client is still built
             // above (harmless; no request is made).
             Cmd::GenTables => sdr_tables::write_web_ladders(),
+            // MCP server: hand off the configured client + base to
+            // the rmcp tool-router. Runs until the stdio peer closes.
+            Cmd::Mcp => mcp::serve(self.client.clone(), self.base.clone()).await,
         }
     }
 

@@ -57,6 +57,15 @@ One app, in the browser, out of the box:
   read PNG renders of what it just heard. Auth is your local Claude Code
   subscription — no API key in a file. Every command it runs surfaces in
   the activity panel.
+- **MCP server.** `ferrite-ctl mcp` exposes the rig as a Model Context
+  Protocol server over stdio — any MCP-enabled client (Claude Desktop,
+  Claude Code CLI, the bundled sidecar) can drive a running `ferrited`
+  with no shell-exec, no glue. Tools: `status`, `list_devices` /
+  `list_presets`, `select_device` / `load_preset`, `tune` (dodge-aware),
+  `start` / `stop`, `set_block_param`, `recent_decodes`, `view_snapshot`
+  / `view_state`, `transcribe`, `reload_drivers`. See
+  [docs/02-protocol.md](docs/02-protocol.md) for the wire surface +
+  example Claude Desktop config.
 - **One block crate, two compile targets.** Every DSP unit (channelizer,
   FM/AM/SSB demod, audio shaper, EAS/POCSAG/RDS/ADS-B/AIS/FT8/WSPR/fldigi
   decoders, …) is one Rust source file that builds native into `ferrited`

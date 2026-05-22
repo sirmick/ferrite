@@ -373,6 +373,86 @@ Set in `server/src/main.rs:313-314`. The dev-server equivalent is in
 [`web/src/lib/vite/coop-coep.ts`](../web/src/lib/vite/coop-coep.ts).
 `SharedArrayBuffer` (the audio ring) silently degrades without these.
 
+## MCP server (`ferrite-ctl mcp`)
+
+A parallel control surface for AI clients. The same REST API documented
+above is wrapped as [Model Context Protocol](https://modelcontextprotocol.io)
+tools, dispatched over **stdio JSON-RPC**. Any MCP-enabled client —
+Claude Desktop, Claude Code CLI, the bundled `ferrite-ai` sidecar via
+the Agent SDK's `mcpServers` config — can drive a running `ferrited`
+with no shell-exec and no per-tool prompt engineering. Source:
+[`tools/ferrite-ctl/src/mcp.rs`](../tools/ferrite-ctl/src/mcp.rs);
+underlying SDK is the canonical
+[`rmcp`](https://crates.io/crates/rmcp).
+
+### Wire transport
+
+`stdio`. Each line on stdin is a JSON-RPC 2.0 request; replies land on
+stdout. Logs (including any error context) are routed to **stderr** —
+a stray `println!` from a tool handler would corrupt the protocol
+stream, so handlers return text content blocks instead. Set
+`RUST_LOG=rmcp=debug` for per-frame protocol detail.
+
+### Tools
+
+Each tool corresponds to one or more REST endpoints from this document.
+Argument schemas are emitted automatically from `#[derive(JsonSchema)]`
+request structs; the descriptions below are what `tools/list` returns.
+
+| Tool | Wraps | Purpose |
+|---|---|---|
+| `status` | `GET /api/pipeline` + `/source` + `/flowgraph` + `/ui-sinks` | Cheap "what's the world look like" snapshot. Call first. |
+| `list_devices` | `GET /api/devices` | Enumerate Soapy devices + capability schemas. |
+| `select_device` | `PATCH /api/source` | Bind the source to a different SDR (Soapy args string). |
+| `reload_drivers` | `POST /api/devices/reload` | In-process Soapy module unload + reload. Pipeline must be stopped. |
+| `list_presets` | `GET /api/presets` | Available flowgraph presets. |
+| `load_preset` | `POST /api/preset` | Swap to a different preset (preserves centre freq). |
+| `tune` | `POST /api/tune` | Listen-frequency change with the per-driver DC-spike dodge. |
+| `set_block_param` | `POST /api/pipeline/blocks/{id}/params` | Patch one block's params (incl. `src`). |
+| `start` | `POST /api/pipeline/start` | Start the pipeline. |
+| `stop` | `POST /api/pipeline/stop` | Stop the pipeline. |
+| `transcribe` | `PATCH /api/profile` | Toggle the in-browser whisper.cpp tap. |
+| `recent_decodes` | `GET /api/decoder/recent` | Recent decoder-log entries; filterable by category. |
+| `view_snapshot` | `GET /api/ui-view/snapshot/{pane}` | PNG of a live FFT/waterfall canvas. |
+| `view_state` | `GET /api/view` | Browser-authored UI chrome state. |
+
+The streaming `tail` verb from the CLI is *not* exposed — MCP tools are
+request/response. Poll `recent_decodes` instead.
+
+### Claude Desktop / Claude Code config
+
+Drop this into `~/.config/Claude/claude_desktop_config.json` (Linux) or
+the Claude Code MCP config (`~/.config/claude/mcp.json` or per-project
+`.mcp.json`) and the tools surface automatically:
+
+```jsonc
+{
+  "mcpServers": {
+    "ferrite": {
+      "command": "/usr/bin/ferrite-ctl",
+      "args": ["mcp"],
+      "env": { "FERRITE_CTL_CONNECT": "http://127.0.0.1:10001" }
+    }
+  }
+}
+```
+
+Override the target daemon with `--connect <BASE>` (CLI flag, surfaces
+in MCP mode too) when driving a remote rig over an SSH tunnel.
+
+### Smoke test by hand
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"status","arguments":{}}}' \
+  | ferrite-ctl mcp
+```
+
+Each `tools/call` reply's `result.content[0].text` is the wrapped REST
+response body as a JSON-encoded string.
+
 ## Security
 
 LAN-trust, no auth on any endpoint. Anything beyond the LAN is the user's
