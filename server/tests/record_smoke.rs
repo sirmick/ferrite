@@ -36,6 +36,10 @@ mod preset_pipeline;
 #[allow(dead_code)]
 mod view_bridge;
 
+#[path = "../src/band_plan.rs"]
+#[allow(dead_code)]
+mod band_plan;
+
 #[path = "../src/app_state.rs"]
 #[allow(dead_code)]
 mod app_state;

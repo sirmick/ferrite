@@ -527,6 +527,34 @@ impl AppState {
         Ok(entries)
     }
 
+    /// Read the named preset's full JSON from [`Self::presets_dir`].
+    /// `name` must match `[A-Za-z0-9_-]+` (same rule as
+    /// [`Self::load_preset_by_name`]) — anything with path separators
+    /// or `..` is rejected without touching disk. Returns the raw
+    /// `serde_json::Value` so callers can surface every field the
+    /// preset declares (label, description, ai_notes, blocks, wires,
+    /// signal_wiki_url, …) without re-typing the schema.
+    pub async fn read_preset_doc(&self, name: &str) -> Result<serde_json::Value> {
+        let dir = self
+            .presets_dir
+            .as_ref()
+            .ok_or_else(|| anyhow!("presets browser not configured"))?
+            .as_ref()
+            .clone();
+        if !is_valid_preset_name(name) {
+            return Err(anyhow!(
+                "invalid preset name {name:?}: must match [A-Za-z0-9_-]+"
+            ));
+        }
+        let path = dir.join(format!("{name}.json"));
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| anyhow!("read {}: {e}", path.display()))?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| anyhow!("parse {}: {e}", path.display()))?;
+        Ok(value)
+    }
+
     /// Enumerate replayable captures under [`Self::captures_dir`].
     /// Empty when no captures dir is configured.
     pub async fn list_captures(&self) -> Result<Vec<CaptureEntry>> {

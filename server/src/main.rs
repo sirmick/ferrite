@@ -32,6 +32,7 @@ use tower_http::{
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod app_state;
+mod band_plan;
 mod block_schema;
 mod bridge_sink;
 mod device;
@@ -408,6 +409,8 @@ async fn main() -> Result<()> {
         .route("/api/ui-sinks", get(routes::list_ui_sinks))
         .route("/api/blocks", get(routes::list_block_schemas))
         .route("/api/presets", get(routes::list_presets))
+        .route("/api/presets/:name", get(routes::get_preset))
+        .route("/api/band-plan/at", get(routes::band_at))
         .route("/api/captures", get(routes::list_captures))
         .route("/api/preset", post(routes::load_preset))
         .route(

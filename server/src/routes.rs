@@ -691,6 +691,49 @@ pub async fn list_presets(
         .map_err(|e| bad_request("LIST_PRESETS_FAILED", format!("{e:#}")))
 }
 
+/// Query for `GET /api/band-plan/at?hz=NNN` — single Hz value the
+/// caller wants resolved.
+#[derive(Deserialize)]
+pub struct BandAtQuery {
+    pub hz: f64,
+}
+
+/// `GET /api/band-plan/at?hz=NNN` — every US-allocation band whose
+/// `[start, end)` window contains the supplied frequency. Multiple
+/// matches are common (a primary allocation plus a sub-band carving
+/// inside it); the AI sorts to pick the narrowest for naming. Source
+/// is Arrin Clark [KN1E]'s `bandplan-usa.json`, embedded into
+/// `ferrited` at compile time.
+pub async fn band_at(
+    Query(q): Query<BandAtQuery>,
+) -> Result<Json<Vec<crate::band_plan::BandEntry>>, (StatusCode, Json<ApiError>)> {
+    if !q.hz.is_finite() || q.hz < 0.0 {
+        return Err(bad_request(
+            "BAND_AT_BAD_FREQ",
+            format!("hz must be a finite non-negative number, got {}", q.hz),
+        ));
+    }
+    Ok(Json(crate::band_plan::at(q.hz)))
+}
+
+/// `GET /api/presets/:name` — return one preset's full JSON. Used by
+/// the AI's `preset_detail` MCP tool when picking which preset to
+/// load: enumerating via `list_presets` gives label + description
+/// but not the full `ai_notes` / block graph / `signal_wiki_url`
+/// fields. Name is the on-disk basename (e.g. `wbfm`, `nwr`,
+/// `digital-hf-20m`). 404 when the file isn't there or the name has
+/// path separators.
+pub async fn get_preset(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    state
+        .read_preset_doc(&name)
+        .await
+        .map(Json)
+        .map_err(|e| api_error(StatusCode::NOT_FOUND, "PRESET_NOT_FOUND", format!("{e:#}")))
+}
+
 /// `GET /api/captures` — enumerate replayable IQ/audio fixtures under
 /// the `samples/` tree (with `*.json` sidecar metadata) so the File
 /// source tab can list them instead of asking for a server path.

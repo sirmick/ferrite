@@ -176,6 +176,19 @@ pub struct RecentDecodesArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PresetDetailArgs {
+    /// Preset basename — matches `flowgraphs/<name>.json` on the
+    /// daemon. Use `list_presets` to see what's loadable.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BandAtArgs {
+    /// Frequency in Hz to look up in the US allocation chart.
+    pub freq_hz: f64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ViewSnapshotArgs {
     /// Which canvas to snapshot: `wide-spectrum`, `wide-waterfall`,
     /// `channel-spectrum`, or `channel-waterfall`. The `channel-*`
@@ -305,6 +318,28 @@ impl FerriteServer {
     )]
     async fn list_presets(&self) -> Result<CallToolResult, McpError> {
         ok_json(&self.http.get("/api/presets").await?)
+    }
+
+    #[tool(
+        description = "Full JSON of one preset by name: `label`, `description`, `ai_notes` (the operator notes the prompt-builder embeds for the *active* preset; this gets them for any other), the block graph (which decoders, channelizer width, audio chain), `signal_wiki_url`, `signal_wiki_image`, `sample_path`. Use this when picking between candidate presets — `list_presets` gives a one-liner each, this gives the gotchas + canonical frequencies."
+    )]
+    async fn preset_detail(
+        &self,
+        Parameters(args): Parameters<PresetDetailArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = format!("/api/presets/{}", args.name);
+        ok_json(&self.http.get(&path).await?)
+    }
+
+    #[tool(
+        description = "What US frequency-allocation band(s) contain `freq_hz`. Returns every matching band in the embedded `bandplan-usa.json` (Arrin Clark KN1E's CC0 plan, same chart the spectrum's ribbon overlay uses). Multiple matches are common (a primary allocation + a sub-band carving inside it); the narrowest is usually the most informative name. Returns an empty list when `freq_hz` falls outside any allocation. Use to answer 'what band am I tuned to?' without hard-coding the boundaries in prompts (e.g. 144.39 → 'Amateur 2 m', 162.55 → 'NOAA Weather Radio', 433.92 → 'ISM Region 1')."
+    )]
+    async fn band_at(
+        &self,
+        Parameters(args): Parameters<BandAtArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = format!("/api/band-plan/at?hz={}", args.freq_hz);
+        ok_json(&self.http.get(&path).await?)
     }
 
     #[tool(

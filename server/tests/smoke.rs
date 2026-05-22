@@ -54,6 +54,12 @@ mod block_schema;
 #[allow(dead_code)]
 mod view_bridge;
 
+// `routes.rs` references `crate::band_plan::…` for the band-allocation
+// lookup; mirror the shim so the test binary resolves it.
+#[path = "../src/band_plan.rs"]
+#[allow(dead_code)]
+mod band_plan;
+
 #[path = "../src/routes.rs"]
 #[allow(dead_code, clippy::unused_async)]
 mod routes;
