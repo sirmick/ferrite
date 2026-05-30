@@ -24,8 +24,8 @@ mod sdr_tables;
 
 use mcp::{
     BandAtArgs, BlockParamsArgs, CaptureStatusArgs, FerriteServer, Http, LoadPresetArgs,
-    PresetDetailArgs, RecentDecodesArgs, SelectDeviceArgs, SetViewStateArgs, StartCaptureArgs,
-    StartCaptureAudioArgs, TranscribeArgs, TuneArgs, ViewSnapshotArgs,
+    PresetDetailArgs, RecentDecodesArgs, ReplayCaptureArgs, SelectDeviceArgs, SetViewStateArgs,
+    StartCaptureArgs, StartCaptureAudioArgs, TranscribeArgs, TuneArgs, ViewSnapshotArgs,
 };
 
 const DEFAULT_CONNECT: &str = "http://127.0.0.1:10001";
@@ -130,10 +130,37 @@ enum Cmd {
     /// Capability schema of the currently-bound source (antennas, gain
     /// ladder, rate/bw/freq ranges, driver settings).
     Caps,
+    /// Per-block flow diagnostics (throughput / process-time / ring fill)
+    /// — the "are samples actually moving?" health check. `null` stopped.
+    Flowdiag,
+    /// Latest driver readback (actual gain / AGC / antenna / bandwidth as
+    /// the hardware reports them). `null` when stopped or non-Soapy.
+    Readback,
     /// Every block in the active preset with its full spec + values.
     Blocks,
     /// Every registered block type's schema (static).
     BlockTypes,
+    /// List the curated `samples/` tree of replayable IQ/audio fixtures.
+    Captures,
+    /// Replay a recorded sample as the source (full RX chain via
+    /// ModulatedFileSource) — deterministic testing with no SDR.
+    Replay {
+        /// Sample path (absolute server `path` or `samples/`-relative
+        /// `rel` from `captures`), or any server file path.
+        path: String,
+        /// `iq` or `audio`. Defaults from the capture entry, else audio.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Audio replay carrier: `fm` / `am` / `usb` / `lsb` / `ssb`.
+        #[arg(long)]
+        modulation: Option<String>,
+        /// Sample-rate hint (Hz, SI shorthand). Defaults from the entry.
+        #[arg(long)]
+        rate: Option<String>,
+        /// Centre frequency to claim (Hz, SI shorthand). Defaults entry.
+        #[arg(long)]
+        center: Option<String>,
+    },
     /// What US allocation band(s) contain a frequency.
     BandAt {
         /// Frequency in Hz (SI shorthand OK).
@@ -486,8 +513,32 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             &server.source_capabilities_op().await.map_err(op_err)?,
             json,
         ),
+        Cmd::Flowdiag => emit(&server.flowdiag_op().await.map_err(op_err)?, json),
+        Cmd::Readback => emit(&server.source_readback_op().await.map_err(op_err)?, json),
         Cmd::Blocks => emit(&server.list_blocks_op().await.map_err(op_err)?, json),
         Cmd::BlockTypes => emit(&server.list_block_types_op().await.map_err(op_err)?, json),
+        Cmd::Captures => emit(&server.list_captures_op().await.map_err(op_err)?, json),
+        Cmd::Replay {
+            path,
+            kind,
+            modulation,
+            rate,
+            center,
+        } => {
+            let v = server
+                .replay_capture_op(ReplayCaptureArgs {
+                    path,
+                    kind,
+                    modulation,
+                    rate_hz_hint: parse_si_opt(rate.as_deref())?,
+                    center_freq_hz: parse_si_opt(center.as_deref())?,
+                    loop_playback: None,
+                    note: None,
+                })
+                .await
+                .map_err(op_err)?;
+            emit(&v, json)
+        }
         Cmd::BandAt { freq } => {
             let v = server
                 .band_at_op(BandAtArgs {

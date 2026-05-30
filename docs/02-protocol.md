@@ -411,6 +411,10 @@ request structs; the descriptions below are what `tools/list` returns.
 | `status` | `GET /api/pipeline` + `/source` + `/flowgraph` + `/ui-sinks` | Cheap "what's the world look like" snapshot (incl. a `ready` boolean + the full flowgraph). Call first. |
 | `list_devices` | `GET /api/devices` | Enumerate Soapy devices + capability schemas. |
 | `source_capabilities` | `GET /api/source/capabilities` | Antennas, gain ladder, rate/bw/freq ranges, and the driver `settings` map for the *bound* source. |
+| `source_readback` | `GET /api/source/readback` | Live 1 Hz driver readback (actual gain/AGC/antenna/bw) — confirms a gain/AGC change landed. |
+| `flowdiag` | `GET /api/flowdiag` | Per-block throughput / process-time / ring fill — "are samples actually moving?". |
+| `list_captures` | `GET /api/captures` | The curated `samples/` fixtures (path, kind, rate, centre, modulation). |
+| `replay_capture` | `PATCH /api/source` (`ModulatedFileSource`) | Replay a fixture through the full RX chain — deterministic decode/transcribe tests, no SDR. |
 | `list_blocks` | `GET /api/pipeline/blocks` | Every block in the active preset with its full spec (param keys, kinds, ai_notes) + current values. |
 | `list_block_types` | `GET /api/blocks` | Static schema of every registered block type, with `reconfig_scope`. |
 | `reload_drivers` | `POST /api/devices/reload` | In-process Soapy module unload + reload. Pipeline must be stopped. |

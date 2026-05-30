@@ -375,6 +375,39 @@ pub struct StartCaptureAudioArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReplayCaptureArgs {
+    /// Path of the sample to replay — the absolute server `path` (or the
+    /// `samples/`-relative `rel`) from a `list_captures` entry. Arbitrary
+    /// server paths work too; supply `kind` / `rate_hz_hint` for raw
+    /// clips with no sidecar.
+    pub path: String,
+    /// `iq` (upmixed verbatim) or `audio` (re-modulated onto a carrier).
+    /// Defaults to the capture entry's kind, else `audio`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// For `audio` replay: how to modulate the clip onto RF (`fm`, `am`,
+    /// `usb`, `lsb`, `ssb`). Defaults to the entry's recorded modulation,
+    /// else `fm`. Ignored for `iq`.
+    #[serde(default)]
+    pub modulation: Option<String>,
+    /// Source sample-rate hint, Hz. Defaults to the entry's
+    /// `sample_rate_hz`. 0 = let the block read it from the sidecar.
+    #[serde(default)]
+    pub rate_hz_hint: Option<f64>,
+    /// Centre frequency the replay should claim, Hz (drives the band
+    /// label + waterfall axis). Defaults to the entry's `center_freq_hz`.
+    #[serde(default)]
+    pub center_freq_hz: Option<f64>,
+    /// Loop the clip when it reaches the end (default `true`) so a short
+    /// sample keeps feeding the chain for the length of a test.
+    #[serde(default)]
+    pub loop_playback: Option<bool>,
+    /// Optional "why" note surfaced in the UI's activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CaptureStatusArgs {
     /// Job id from a previous `start_capture_*` reply. Omit to get a
     /// list of every job this MCP session knows about (most recent
@@ -792,6 +825,92 @@ impl FerriteServer {
 
     pub(crate) async fn source_capabilities_op(&self) -> Result<Value, McpError> {
         self.http.get("/api/source/capabilities").await
+    }
+
+    /// Per-block flow diagnostics (sample throughput / process-time /
+    /// ring fill) for the running pipeline, or `null` when stopped. The
+    /// "are samples actually moving?" health check beyond `status.ready`.
+    pub(crate) async fn flowdiag_op(&self) -> Result<Value, McpError> {
+        self.http.get("/api/flowdiag").await
+    }
+
+    /// Latest 1 Hz driver readback (actual gain, AGC state, antenna,
+    /// bandwidth as the hardware reports them) — confirms a `set_block_param`
+    /// gain/AGC change really landed. `null` when stopped or non-Soapy.
+    pub(crate) async fn source_readback_op(&self) -> Result<Value, McpError> {
+        self.http.get("/api/source/readback").await
+    }
+
+    /// The curated `samples/` tree of replayable IQ/audio fixtures —
+    /// path, kind, rate, centre freq, modulation. Feed a path to
+    /// `replay_capture` to run a deterministic decode test without RF.
+    pub(crate) async fn list_captures_op(&self) -> Result<Value, McpError> {
+        self.http.get("/api/captures").await
+    }
+
+    /// Point the source at a recorded sample via `ModulatedFileSource`
+    /// (audio fixtures get re-modulated, IQ upmixed — so the full RX
+    /// chain runs). Resolves kind/rate/centre/modulation from the
+    /// matching `list_captures` entry; explicit args override. Triggers a
+    /// source restart, same as `select_device`.
+    pub(crate) async fn replay_capture_op(
+        &self,
+        args: ReplayCaptureArgs,
+    ) -> Result<Value, McpError> {
+        // Look up the fixture so we can default the metadata from its
+        // sidecar (matches the web SamplePicker). Match on absolute path
+        // or the samples-relative `rel` for convenience.
+        let captures = self.http.get("/api/captures").await.unwrap_or(Value::Null);
+        let entry = captures.as_array().and_then(|arr| {
+            arr.iter().find(|e| {
+                let p = e.get("path").and_then(Value::as_str);
+                let rel = e.get("rel").and_then(Value::as_str);
+                p == Some(args.path.as_str()) || rel == Some(args.path.as_str())
+            })
+        });
+        let field = |k: &str| entry.and_then(|e| e.get(k)).cloned();
+        let entry_str = |k: &str| field(k).and_then(|v| v.as_str().map(str::to_owned));
+        let entry_f64 = |k: &str| field(k).and_then(|v| v.as_f64());
+
+        // Prefer the entry's absolute path when matched by `rel`.
+        let path = entry_str("path").unwrap_or_else(|| args.path.clone());
+        let kind = args
+            .kind
+            .or_else(|| entry_str("kind"))
+            .unwrap_or_else(|| "audio".into());
+        let modulation = args
+            .modulation
+            .or_else(|| entry_str("modulation"))
+            .unwrap_or_else(|| "fm".into());
+        let rate = args
+            .rate_hz_hint
+            .or_else(|| entry_f64("sample_rate_hz"))
+            .unwrap_or(0.0);
+        let center = args
+            .center_freq_hz
+            .or_else(|| entry_f64("center_freq_hz"))
+            .unwrap_or(0.0);
+        let loop_playback = args.loop_playback.unwrap_or(true);
+
+        // Only the keys we resolve; the rest (sideband, offset_hz,
+        // deviation_hz, mod_depth, output_rate_hz) fall back to the
+        // block's `#[serde(default)]`.
+        let params = json!({
+            "path": path,
+            "kind": kind,
+            "modulation": modulation,
+            "rate_hz_hint": rate,
+            "center_freq_hz": center,
+            "loop_playback": loop_playback,
+        });
+        self.http
+            .patch(
+                "/api/source",
+                json!({ "type": "ModulatedFileSource", "params": params }),
+                "replay-capture",
+                args.note.as_deref(),
+            )
+            .await
     }
 
     pub(crate) async fn list_blocks_op(&self) -> Result<Value, McpError> {
@@ -1336,6 +1455,37 @@ impl FerriteServer {
     }
 
     #[tool(
+        description = "Per-block flow diagnostics for the running pipeline — sample throughput, process-time, and ring-buffer fill for every block, or `null` when stopped. The 'are samples actually moving?' health check that `status.ready` (just 'the pipeline is up') can't answer: after `start`, poll this to confirm the source is delivering frames downstream before you wait on a decode."
+    )]
+    async fn flowdiag(&self) -> Result<CallToolResult, McpError> {
+        ok_json(&self.flowdiag_op().await?)
+    }
+
+    #[tool(
+        description = "Latest 1 Hz driver readback — the actual gain, AGC state, antenna, and bandwidth as the *hardware* reports them (not the values you asked for). Use to confirm a `set_block_param`/`tune` gain or AGC change really landed (SDRplay silently ignores manual IFGR while AGC is on, so the readback is how you catch it). `null` when the pipeline is stopped or the source isn't a SoapySource."
+    )]
+    async fn source_readback(&self) -> Result<CallToolResult, McpError> {
+        ok_json(&self.source_readback_op().await?)
+    }
+
+    #[tool(
+        description = "List the curated `samples/` tree of replayable IQ/audio fixtures — each entry has the server `path`, `rel`, `kind` (iq/audio), `sample_rate_hz`, `center_freq_hz`, and `modulation`. Feed a `path` to `replay_capture` to run a deterministic decode/transcribe test against a known signal with no SDR attached."
+    )]
+    async fn list_captures(&self) -> Result<CallToolResult, McpError> {
+        ok_json(&self.list_captures_op().await?)
+    }
+
+    #[tool(
+        description = "Point the source at a recorded sample (from `list_captures`) so the full RX chain runs against a known signal — no SDR needed. Routes through `ModulatedFileSource`: `audio` fixtures are re-modulated onto a carrier (`modulation` fm/am/usb/lsb), `iq` captures are upmixed verbatim. kind/rate/centre/modulation default from the matching capture entry's sidecar; pass them explicitly for a raw clip. Loops by default. Triggers a source restart — follow with `start` (and `load_preset` for the matching demod), then poll `recent_decodes` / `flowdiag`. The deterministic counterpart to `select_device` + `tune` for testing decoders."
+    )]
+    async fn replay_capture(
+        &self,
+        Parameters(args): Parameters<ReplayCaptureArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.replay_capture_op(args).await?)
+    }
+
+    #[tool(
         description = "Every block in the currently-composed preset, including the resolved source and any auto-inserted bridges. Each entry has the block's id, type_name, full BlockSpec (param keys, kinds, defaults, ranges, ai_notes), current values, and placement. Use to introspect the active pipeline's topology before guessing block ids — `chan` exists in some presets, `audio_nr` in voice-mode presets, `rds` in WBFM, etc. The `src` block now surfaces the full SDR knob set (gain, agc, antenna, bandwidth_hz, dc_offset_correction). Pairs with `set_block_param(block=<id>, params={...})`."
     )]
     async fn list_blocks(&self) -> Result<CallToolResult, McpError> {
@@ -1537,8 +1687,11 @@ impl ServerHandler for FerriteServer {
              inventory, `source_capabilities` / `list_blocks` to introspect the bound SDR + \
              active pipeline, `select_device` + `load_preset` to set up, `start`/`stop` for \
              lifecycle, `tune` for the dodge-aware listen-frequency change (now also folds in \
-             gain/bw/rate), `set_block_param` for everything else, `recent_decodes` to read \
-             decoder output, `start_capture_{iq,fft,audio}` + `capture_status` for recordings, \
+             gain/bw/rate), `set_block_param` for everything else, `flowdiag` + \
+             `source_readback` to confirm samples are flowing and a gain/AGC change landed, \
+             `recent_decodes` to read decoder output, `start_capture_{iq,fft,audio}` + \
+             `capture_status` for recordings, `list_captures` + `replay_capture` to drive the \
+             full RX chain from a recorded fixture (deterministic testing, no SDR), \
              `view_snapshot` / `view_state` / `set_view_state` to see and steer what the \
              operator is looking at. Source: tools/ferrite-ctl/src/mcp.rs; behaviour matches \
              the REST endpoints in docs/02-protocol.md."
