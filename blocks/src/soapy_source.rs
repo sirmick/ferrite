@@ -595,6 +595,19 @@ impl Block for SoapySource {
                     ai_notes: "RF tuning. Park 50–100 kHz off your target on zero-IF drivers to dodge the DC spike; use the channelizer's `freq_shift_hz` to recover the carrier.",
                 },
                 ParamSpec {
+                    key: "bandwidth_hz",
+                    label: "Bandwidth",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 20_000_000.0,
+                        step: 1.0,
+                        default: 0.0,
+                        unit: "Hz",
+                    },
+                    reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "Analog IF/filter bandwidth, Hz. 0 = auto-derive from the sample rate. Set below the sample rate to brick-wall out-of-channel energy at the hardware; the valid span is in `source_capabilities` → `rx_channels[].bandwidth_ranges_hz`.",
+                },
+                ParamSpec {
                     key: "gain_db",
                     label: "Gain",
                     kind: ParamKind::Range {
@@ -606,6 +619,27 @@ impl Block for SoapySource {
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
                     ai_notes: "Overall SoapySDR gain element. Mutually exclusive with `agc=true`; ferrite-ctl folds them atomically. Some drivers expose a separate LNA stage on top — see driver notes.",
+                },
+                ParamSpec {
+                    key: "agc",
+                    label: "AGC",
+                    kind: ParamKind::Toggle { default: false },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Hardware automatic gain control. `true` lets the driver ride gain on its own; `false` (default) holds the manual `gain_db`. Mutually exclusive with manual gain — setting `gain_db` folds `agc=false` in atomically. Drivers without AGC silently ignore it.",
+                },
+                ParamSpec {
+                    key: "antenna",
+                    label: "Antenna",
+                    kind: ParamKind::Text { default: "" },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "RF antenna port name (driver-specific, e.g. `LNA-H`, `Tuner 1 50ohm`, `RX`). Discover the valid set for the bound SDR via `source_capabilities` → `rx_channels[].antennas`; leave empty to keep the driver default.",
+                },
+                ParamSpec {
+                    key: "dc_offset_correction",
+                    label: "DC tracking",
+                    kind: ParamKind::Toggle { default: true },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Driver automatic DC-offset tracking. Suppresses the LO-leakage spike at the tuned centre on zero-IF SDRs (SDRplay honours it; HackRF's driver is a no-op). Default `true`; turn off only when A/B-testing or a signal sits exactly at carrier and the tracker fights it.",
                 },
                 ParamSpec {
                     key: "channel",
@@ -621,7 +655,7 @@ impl Block for SoapySource {
                     ai_notes: "Receive channel index. 0 for single-tuner SDRs (most common case).",
                 },
             ],
-            ai_notes: "Hardware IQ source via SoapySDR. The actual radio. Live-tunable params: centre, gain, antenna, AGC, dc_offset_correction. `dc_offset_correction` (bool, default true) drives the driver's automatic DC-offset tracking — suppresses the LO-leakage spike at the tuned centre on zero-IF SDRs (SDRplay honours it; HackRF's driver doesn't expose DC-offset mode, so there it's a no-op — use the off-tune-and-VFO-shift dance). Leave on unless A/B-testing or working around a buggy tracker. Driver-specific gain stages, antenna ports, and notches are documented in the driver-specific operator notes appended to the system prompt.",
+            ai_notes: "Hardware IQ source via SoapySDR. The actual radio. Live-tunable params: centre, gain, antenna, AGC, dc_offset_correction. `dc_offset_correction` (bool, default true) drives the driver's automatic DC-offset tracking — suppresses the LO-leakage spike at the tuned centre on zero-IF SDRs (SDRplay honours it; HackRF's driver doesn't expose DC-offset mode, so there it's a no-op — use the off-tune-and-VFO-shift dance). Leave on unless A/B-testing or working around a buggy tracker. Driver-specific gain stages, antenna ports, and notches are documented in the driver-specific operator notes appended to the system prompt. Driver-specific knobs that don't fit a standard param (bias-T, notch filters, decimation, AGC setpoint, …) live in the dynamic `settings` map — patch them with `set_block_param(block='src', params={ settings: { <key>: <value> } })`, discovering the available keys, value types, and options via `source_capabilities` → `settings[]`.",
         }
     }
 

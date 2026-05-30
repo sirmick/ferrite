@@ -375,12 +375,19 @@ Set in `server/src/main.rs:313-314`. The dev-server equivalent is in
 
 ## MCP server (`ferrite-ctl mcp`)
 
-A parallel control surface for AI clients. The same REST API documented
-above is wrapped as [Model Context Protocol](https://modelcontextprotocol.io)
+The control surface for AI clients — and the single operations layer the
+human `ferrite-ctl` CLI drives too. The REST API documented above is
+wrapped as [Model Context Protocol](https://modelcontextprotocol.io)
 tools, dispatched over **stdio JSON-RPC**. Any MCP-enabled client —
 Claude Desktop, Claude Code CLI, the bundled `ferrite-ai` sidecar via
 the Agent SDK's `mcpServers` config — can drive a running `ferrited`
-with no shell-exec and no per-tool prompt engineering. Source:
+with no shell-exec and no per-tool prompt engineering.
+
+Each verb is implemented exactly once, as a `FerriteServer::*_op` method
+that hits the REST API. The MCP `#[tool]` handlers are thin wrappers
+over those ops, and every human CLI subcommand calls the same `*_op`
+method — so the two front-ends **cannot drift** (a CLI verb *is* its MCP
+tool). Source:
 [`tools/ferrite-ctl/src/mcp.rs`](../tools/ferrite-ctl/src/mcp.rs);
 underlying SDK is the canonical
 [`rmcp`](https://crates.io/crates/rmcp).
@@ -401,23 +408,37 @@ request structs; the descriptions below are what `tools/list` returns.
 
 | Tool | Wraps | Purpose |
 |---|---|---|
-| `status` | `GET /api/pipeline` + `/source` + `/flowgraph` + `/ui-sinks` | Cheap "what's the world look like" snapshot. Call first. |
+| `status` | `GET /api/pipeline` + `/source` + `/flowgraph` + `/ui-sinks` | Cheap "what's the world look like" snapshot (incl. a `ready` boolean + the full flowgraph). Call first. |
 | `list_devices` | `GET /api/devices` | Enumerate Soapy devices + capability schemas. |
-| `select_device` | `PATCH /api/source` | Bind the source to a different SDR (Soapy args string). |
+| `source_capabilities` | `GET /api/source/capabilities` | Antennas, gain ladder, rate/bw/freq ranges, and the driver `settings` map for the *bound* source. |
+| `list_blocks` | `GET /api/pipeline/blocks` | Every block in the active preset with its full spec (param keys, kinds, ai_notes) + current values. |
+| `list_block_types` | `GET /api/blocks` | Static schema of every registered block type, with `reconfig_scope`. |
 | `reload_drivers` | `POST /api/devices/reload` | In-process Soapy module unload + reload. Pipeline must be stopped. |
-| `list_presets` | `GET /api/presets` | Available flowgraph presets. |
+| `select_device` | `PATCH /api/source` | Bind the source to a different SDR (Soapy args string). Resets params to driver defaults. |
+| `list_presets` | `GET /api/presets` | Available flowgraph presets (name + label + description). |
+| `preset_detail` | `GET /api/presets/{name}` | Full JSON of one preset (ai_notes, block graph, sigwiki refs, sample path). |
+| `band_at` | `GET /api/band-plan/at?hz=` | US allocation band(s) containing a frequency. |
 | `load_preset` | `POST /api/preset` | Swap to a different preset (preserves centre freq). |
-| `tune` | `POST /api/tune` | Listen-frequency change with the per-driver DC-spike dodge. |
-| `set_block_param` | `POST /api/pipeline/blocks/{id}/params` | Patch one block's params (incl. `src`). |
+| `tune` | `POST /api/tune` (+ `PATCH /api/source`) | Listen-frequency change with the per-driver DC-spike dodge; optionally folds in `gain_db` (+`agc=false`), `bandwidth_hz`, `sample_rate_hz`. |
+| `set_block_param` | `POST /api/pipeline/blocks/{id}/params` | Patch one block's params. `src` accepts gain/agc/antenna/bandwidth_hz/dc_offset_correction/`settings`. |
 | `start` | `POST /api/pipeline/start` | Start the pipeline. |
 | `stop` | `POST /api/pipeline/stop` | Stop the pipeline. |
 | `transcribe` | `PATCH /api/profile` | Toggle the in-browser whisper.cpp tap. |
 | `recent_decodes` | `GET /api/decoder/recent` | Recent decoder-log entries; filterable by category. |
-| `view_snapshot` | `GET /api/ui-view/snapshot/{pane}` | PNG of a live FFT/waterfall canvas. |
+| `start_capture_iq` | `chan` tee / `capture_fm` preset | Async IQ capture — live narrowband tee (default) or `wideband` full-rate slice. Returns a `job_id`. |
+| `start_capture_fft` | `logmag` tee | Async FFT-byte-stream capture (live tee). Returns a `job_id`. |
+| `start_capture_audio` | `*-audio-record` preset | Async demodulated-audio capture to WAV (preset-swap). Returns a `job_id`. |
+| `capture_status` | (in-memory job registry) | Poll one capture job by id, or list all. `running` / `done` (+ sidecar) / `failed`. |
+| `view_snapshot` | `GET /api/ui-views/{pane}` | PNG of a live FFT/waterfall canvas. |
 | `view_state` | `GET /api/view` | Browser-authored UI chrome state. |
+| `set_view_state` | `POST /api/ui-view/set` | Push a chrome-state patch (Main pane, channel-detail visibility) to the browser. |
 
-The streaming `tail` verb from the CLI is *not* exposed — MCP tools are
-request/response. Poll `recent_decodes` instead.
+Mutating tools accept an optional `note` (the "why") that the daemon
+surfaces under `ai::activity` for the UI's transcript panel.
+
+The streaming `tail` verb from the CLI is *not* an MCP tool — captures
+are async (`start_capture_*` + poll `capture_status`); for a live decoder
+follow, poll `recent_decodes`.
 
 ### Claude Desktop / Claude Code config
 
