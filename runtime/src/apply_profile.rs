@@ -54,6 +54,23 @@ pub struct Profile {
     /// flip, the bridge crossing relocates automatically because the
     /// post-split env_split pass dispatches on the source port's type.
     pub demod_placement: Option<Environment>,
+    /// Override placement for blocks tagged `"placement_role": "nr"`
+    /// (the audio noise-reduction chain). Same mechanism as
+    /// `demod_placement`: `None` leaves the authored side in effect.
+    /// `AudioNrMono`/`AudioNrStereo` are `Placement::Either` and pure
+    /// Rust (wasm-clean), so they run on either half; flipping this
+    /// relocates the F32 audio bridge automatically at split time.
+    /// Pushing NR node-side lets the headless daemon clean audio for
+    /// node-side consumers (e.g. a future node-side transcribe) without
+    /// a browser; leaving it browser-side keeps the server lighter.
+    pub nr_placement: Option<Environment>,
+
+    /// Transcription side: which side runs `VoiceTranscribe` (the STT
+    /// tap). `placement_role: "transcribe"`-tagged blocks adopt this.
+    /// `Some(Node)` is the headless path — whisper runs in `ferrited`,
+    /// no browser required. `None` leaves the authored side in effect.
+    #[serde(default)]
+    pub transcribe_placement: Option<Environment>,
 }
 
 impl Default for Profile {
@@ -62,6 +79,8 @@ impl Default for Profile {
             audio: true,
             transcribe: false,
             demod_placement: None,
+            nr_placement: None,
+            transcribe_placement: None,
         }
     }
 }
@@ -108,11 +127,20 @@ pub fn apply_profile(doc: &mut FlowgraphDoc, profile: &Profile) {
         });
     }
 
-    if let Some(env) = profile.demod_placement {
-        for b in doc.blocks.values_mut() {
-            if b.placement_role.as_deref() == Some("demod") {
-                b.placement = Some(env);
-            }
+    // Placement-role overrides: a `placement_role`-tagged block adopts
+    // the matching profile field when set. Same mechanism for every
+    // role; `env_split` relocates the inserted bridge by port type, so
+    // adding a role is just a tag + a `Profile` field + one arm here.
+    for b in doc.blocks.values_mut() {
+        let role = b.placement_role.as_deref();
+        let override_env = match role {
+            Some("demod") => profile.demod_placement,
+            Some("nr") => profile.nr_placement,
+            Some("transcribe") => profile.transcribe_placement,
+            _ => None,
+        };
+        if let Some(env) = override_env {
+            b.placement = Some(env);
         }
     }
 }
@@ -161,6 +189,8 @@ mod tests {
                 audio: false,
                 transcribe: false,
                 demod_placement: None,
+                nr_placement: None,
+                transcribe_placement: None,
             },
         );
         assert!(doc.blocks.contains_key("src"));
@@ -207,6 +237,8 @@ mod tests {
                 audio: false,
                 transcribe: false,
                 demod_placement: None,
+                nr_placement: None,
+                transcribe_placement: None,
             },
         );
         // The "freshness_v9" key isn't on Profile, so the block is kept.
@@ -233,6 +265,8 @@ mod tests {
                 audio: true,
                 transcribe: false,
                 demod_placement: Some(Environment::Browser),
+                nr_placement: None,
+                transcribe_placement: None,
             },
         );
         assert_eq!(
@@ -244,6 +278,85 @@ mod tests {
             doc.blocks["other"].placement,
             Some(Environment::Node),
             "untagged block untouched"
+        );
+    }
+
+    #[test]
+    fn nr_placement_rewrites_nr_role_only_and_is_independent_of_demod() {
+        // `nr_placement` moves the NR-tagged block; demod stays where
+        // authored (its own override is None). Proves the two roles are
+        // dispatched independently by the generalized rewrite loop.
+        let mut doc = doc_from(
+            r#"{
+                "name": "t",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "demod":   {"type": "FmDemod", "placement": "node",
+                                "placement_role": "demod"},
+                    "audio_nr":{"type": "AudioNrMono", "placement": "browser",
+                                "placement_role": "nr"}
+                },
+                "wires": []
+            }"#,
+        );
+        apply_profile(
+            &mut doc,
+            &Profile {
+                audio: true,
+                transcribe: false,
+                demod_placement: None,
+                nr_placement: Some(Environment::Node),
+                transcribe_placement: None,
+            },
+        );
+        assert_eq!(
+            doc.blocks["audio_nr"].placement,
+            Some(Environment::Node),
+            "nr-tagged block moved node-side"
+        );
+        assert_eq!(
+            doc.blocks["demod"].placement,
+            Some(Environment::Node),
+            "demod left at its authored placement (no demod override)"
+        );
+    }
+
+    #[test]
+    fn transcribe_placement_rewrites_transcribe_role_only() {
+        // `transcribe_placement` moves the STT-tagged block node-side
+        // (the headless path) and leaves other roles where authored.
+        let mut doc = doc_from(
+            r#"{
+                "name": "t",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "vt":  {"type": "VoiceTranscribe", "placement": "browser",
+                            "placement_role": "transcribe"},
+                    "nr":  {"type": "AudioNrMono", "placement": "browser",
+                            "placement_role": "nr"}
+                },
+                "wires": []
+            }"#,
+        );
+        apply_profile(
+            &mut doc,
+            &Profile {
+                audio: true,
+                transcribe: false,
+                demod_placement: None,
+                nr_placement: None,
+                transcribe_placement: Some(Environment::Node),
+            },
+        );
+        assert_eq!(
+            doc.blocks["vt"].placement,
+            Some(Environment::Node),
+            "transcribe-tagged block moved node-side"
+        );
+        assert_eq!(
+            doc.blocks["nr"].placement,
+            Some(Environment::Browser),
+            "nr left at authored placement (no nr override)"
         );
     }
 
@@ -284,6 +397,8 @@ mod tests {
                 audio: false,
                 transcribe: false,
                 demod_placement: None,
+                nr_placement: None,
+                transcribe_placement: None,
             },
         );
         assert!(doc.blocks.is_empty());
@@ -321,6 +436,8 @@ mod tests {
             audio: false,
             transcribe: false,
             demod_placement: Some(Environment::Browser),
+            nr_placement: None,
+            transcribe_placement: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: Profile = serde_json::from_str(&s).unwrap();
@@ -371,6 +488,8 @@ mod tests {
             audio: false,
             transcribe: false,
             demod_placement: None,
+            nr_placement: None,
+            transcribe_placement: None,
         };
         apply_profile(&mut doc, &profile);
         let snapshot = serde_json::to_value(&doc).unwrap();

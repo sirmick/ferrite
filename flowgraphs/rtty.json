@@ -142,6 +142,7 @@
     },
     "audio_nr": {
       "type": "AudioNrMono",
+      "placement_role": "nr",
       "placement": "browser",
       "when": {
         "audio": true

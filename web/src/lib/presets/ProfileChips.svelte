@@ -30,7 +30,20 @@
     return false;
   });
 
-  let visible = $derived(hasAudioToggle || hasDemodToggle);
+  let hasNrToggle = $derived.by(() => {
+    const blocks = pipeline.flowgraph?.blocks ?? {};
+    for (const b of Object.values(blocks)) {
+      if (b.placement_role === 'nr') return true;
+    }
+    return false;
+  });
+
+  // The VoiceTranscribe tap is injected server-side only when
+  // transcription is engaged, so its placement chip rides the
+  // `transcribe` profile bit rather than a preset block tag.
+  let hasTranscribeToggle = $derived(pipeline.profile.transcribe);
+
+  let visible = $derived(hasAudioToggle || hasDemodToggle || hasNrToggle || hasTranscribeToggle);
 
   // Off | On | Transcribe — one tri-state over two profile bits.
   // `transcribe` implies `audio` (the tap sits on the audio chain), so
@@ -58,11 +71,21 @@
     void pipeline.setProfile({ ...pipeline.profile, demod_placement: side });
   }
 
-  // Reads `pipeline.profile.demod_placement` (`'node' | 'browser' | null`)
-  // and translates to the UI's tri-state. `null` = "auto" (preset
-  // author's authored placement wins). The API-side `node` is shown
-  // as "server" in the UI — same value, less jargon.
+  function pickNrPlacement(side: 'node' | 'browser' | null): void {
+    void pipeline.setProfile({ ...pipeline.profile, nr_placement: side });
+  }
+
+  function pickTranscribePlacement(side: 'node' | 'browser' | null): void {
+    void pipeline.setProfile({ ...pipeline.profile, transcribe_placement: side });
+  }
+
+  // Reads each placement override (`'node' | 'browser' | null`) and
+  // translates to the UI's tri-state. `null` = "auto" (preset author's
+  // authored placement wins). The API-side `node` is shown as "server"
+  // in the UI — same value, less jargon.
   let demodValue = $derived(pipeline.profile.demod_placement ?? 'auto');
+  let nrValue = $derived(pipeline.profile.nr_placement ?? 'auto');
+  let transcribeValue = $derived(pipeline.profile.transcribe_placement ?? 'auto');
 </script>
 
 {#if visible}
@@ -144,6 +167,72 @@
           class:chip-segment-active={demodValue === 'browser'}
           onclick={() => pickDemod('browser')}
           title="Stream IQ across the WS and demod in the browser."
+        >
+          browser
+        </button>
+      </div>
+    {/if}
+
+    {#if hasNrToggle}
+      <div class="chip-group" role="group" aria-label="Noise-reduction placement">
+        <span class="chip-label">NR run</span>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={nrValue === 'auto'}
+          onclick={() => pickNrPlacement(null)}
+          title="Follow the preset author's placement (default)."
+        >
+          auto
+        </button>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={nrValue === 'node'}
+          onclick={() => pickNrPlacement('node')}
+          title="Run noise reduction on the server (cleans audio for node-side consumers, e.g. headless transcribe)."
+        >
+          server
+        </button>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={nrValue === 'browser'}
+          onclick={() => pickNrPlacement('browser')}
+          title="Run noise reduction in the browser (keeps the server lighter)."
+        >
+          browser
+        </button>
+      </div>
+    {/if}
+
+    {#if hasTranscribeToggle}
+      <div class="chip-group" role="group" aria-label="Transcription placement">
+        <span class="chip-label">STT run</span>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={transcribeValue === 'auto'}
+          onclick={() => pickTranscribePlacement(null)}
+          title="Default placement (in-browser whisper)."
+        >
+          auto
+        </button>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={transcribeValue === 'node'}
+          onclick={() => pickTranscribePlacement('node')}
+          title="Headless: whisper runs on the server (ferrited), no browser needed. Transcript on the decoder feed."
+        >
+          server
+        </button>
+        <button
+          type="button"
+          class="chip-segment"
+          class:chip-segment-active={transcribeValue === 'browser'}
+          onclick={() => pickTranscribePlacement('browser')}
+          title="Run whisper in the browser (the Transcript advanced view)."
         >
           browser
         </button>

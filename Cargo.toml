@@ -13,6 +13,7 @@ members = [
     "blocks/native/ft8",
     "blocks/native/wsprd",
     "blocks/native/fldigi",
+    "blocks/native/whisper",
     "runtime",
     "tools/ferrite-ctl",
 ]

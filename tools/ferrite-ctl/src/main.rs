@@ -23,9 +23,10 @@ mod mcp;
 mod sdr_tables;
 
 use mcp::{
-    BandAtArgs, BlockParamsArgs, CaptureStatusArgs, FerriteServer, Http, LoadPresetArgs,
-    PresetDetailArgs, RecentDecodesArgs, ReplayCaptureArgs, SelectDeviceArgs, SetViewStateArgs,
-    StartCaptureArgs, StartCaptureAudioArgs, TranscribeArgs, TuneArgs, ViewSnapshotArgs,
+    BandAtArgs, BlockParamsArgs, CaptureStatusArgs, ChatPostArgs, FerriteServer, Http,
+    LoadPresetArgs, PresetDetailArgs, RecentDecodesArgs, ReplayCaptureArgs, SelectDeviceArgs,
+    SetViewStateArgs, StartCaptureArgs, StartCaptureAudioArgs, TranscribeArgs, TuneArgs,
+    ViewSnapshotArgs,
 };
 
 const DEFAULT_CONNECT: &str = "http://127.0.0.1:10001";
@@ -116,13 +117,17 @@ enum Cmd {
     Start,
     /// Stop the pipeline.
     Stop,
-    /// Toggle in-browser speech-to-text. Whisper runs in the browser,
-    /// so a UI tab must be connected; read results with
+    /// Toggle speech-to-text (VoiceTranscribe tap). Read results with
     /// `decoder recent --category decoder::transcribe`.
     Transcribe {
         /// `on` to enable transcription, `off` to disable.
         #[arg(value_parser = ["on", "off"])]
         state: String,
+        /// Where it runs: `node` is headless (whisper in `ferrited`, no
+        /// browser); `browser` uses the in-browser worker. Omit to leave
+        /// the current placement unchanged.
+        #[arg(long, value_parser = ["node", "browser"])]
+        placement: Option<String>,
     },
     /// One-shot world snapshot: pipeline status (+ `ready`), source
     /// config, active flowgraph, UI sinks.
@@ -205,6 +210,27 @@ enum Cmd {
         /// Show/hide the channel-detail pane.
         #[arg(long)]
         channel_detail: Option<bool>,
+    },
+    /// Mirror a conversation turn into the operator's browser AI panel
+    /// (so a headless driver's prompts / replies / tool calls show in
+    /// the UI alongside the in-browser assistant). Needs a UI tab open.
+    ChatPost {
+        /// `user` (a prompt), `assistant` (a reply, auto-closed), or
+        /// `tool` (a tool-call card in the open assistant turn).
+        #[arg(value_parser = ["user", "assistant", "tool"])]
+        role: String,
+        /// Message text (user / assistant). Optional for `tool`.
+        #[arg(default_value = "")]
+        text: String,
+        /// `tool` role: the tool name shown on the card.
+        #[arg(long)]
+        tool_name: Option<String>,
+        /// `tool` role: the tool input rendered under the card.
+        #[arg(long)]
+        tool_input: Option<String>,
+        /// `tool` role: the tool result text, if any.
+        #[arg(long)]
+        tool_result: Option<String>,
     },
     /// Dev codegen: regenerate the if-filter-ladders artifact from the
     /// Rust source of truth. Purely local — no running ferrited.
@@ -498,10 +524,11 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
         }
         Cmd::Start => emit(&server.start_op().await.map_err(op_err)?, json),
         Cmd::Stop => emit(&server.stop_op().await.map_err(op_err)?, json),
-        Cmd::Transcribe { state } => {
+        Cmd::Transcribe { state, placement } => {
             let v = server
                 .transcribe_op(TranscribeArgs {
                     enabled: state == "on",
+                    placement,
                     note: None,
                 })
                 .await
@@ -587,6 +614,25 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                     channel_detail_visible: channel_detail,
                     left_tab: None,
                     note: None,
+                })
+                .await
+                .map_err(op_err)?;
+            emit(&v, json)
+        }
+        Cmd::ChatPost {
+            role,
+            text,
+            tool_name,
+            tool_input,
+            tool_result,
+        } => {
+            let v = server
+                .chat_post_op(ChatPostArgs {
+                    role,
+                    text: if text.is_empty() { None } else { Some(text) },
+                    tool_name,
+                    tool_input,
+                    tool_result,
                 })
                 .await
                 .map_err(op_err)?;

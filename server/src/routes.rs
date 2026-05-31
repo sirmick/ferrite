@@ -130,6 +130,18 @@ async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroa
 /// machine on a trusted LAN).
 const DEFAULT_FERRITE_AI_URL: &str = "ws://127.0.0.1:10002/ws/chat";
 
+/// Process-wide fan-out for externally-injected chat events. The
+/// headless ops layer (`ferrite-ctl chat-post` / the `chat_post` MCP
+/// tool) POSTs to `/api/ai/chat-inject`; every live `/ws/chat` browser
+/// proxy subscribes here and forwards the frames to its socket. That
+/// lets an agent driving ferrited from *outside* the browser mirror its
+/// conversation into the UI's AI panel. One ferrited process → a single
+/// global channel is the whole story; nothing per-connection lives here.
+fn chat_inject_hub() -> &'static broadcast::Sender<String> {
+    static HUB: std::sync::OnceLock<broadcast::Sender<String>> = std::sync::OnceLock::new();
+    HUB.get_or_init(|| broadcast::channel::<String>(256).0)
+}
+
 /// `GET /ws/chat` — reverse-proxy to the ferrite-ai sidecar. The
 /// browser opens this WS to ferrited; we open a second WS upstream to
 /// the sidecar and pump frames bidirectionally until either side
@@ -183,18 +195,42 @@ async fn ws_chat_proxy(mut client_ws: WebSocket, upstream_url: String) {
         let _ = up_tx.close().await;
     };
 
-    // Sidecar → browser: same shape in reverse.
+    // Sidecar → browser, plus externally-injected chat frames
+    // (`POST /api/ai/chat-inject`). Both write to the same client
+    // socket, so we select over them: a headless driver's mirrored
+    // turns interleave with the (usually idle) sidecar stream.
+    let mut inject_rx = chat_inject_hub().subscribe();
     let u2c = async move {
-        while let Some(msg) = up_rx.next().await {
-            let Ok(msg) = msg else { break };
-            let client_msg = match msg {
-                TungMessage::Text(t) => Message::Text(t),
-                TungMessage::Binary(b) => Message::Binary(b),
-                TungMessage::Close(_) => break,
-                TungMessage::Ping(_) | TungMessage::Pong(_) | TungMessage::Frame(_) => continue,
-            };
-            if cli_tx.send(client_msg).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                up = up_rx.next() => {
+                    let Some(Ok(msg)) = up else { break };
+                    let client_msg = match msg {
+                        TungMessage::Text(t) => Message::Text(t),
+                        TungMessage::Binary(b) => Message::Binary(b),
+                        TungMessage::Close(_) => break,
+                        TungMessage::Ping(_) | TungMessage::Pong(_) | TungMessage::Frame(_) => {
+                            continue
+                        }
+                    };
+                    if cli_tx.send(client_msg).await.is_err() {
+                        break;
+                    }
+                }
+                inj = inject_rx.recv() => {
+                    match inj {
+                        Ok(text) => {
+                            if cli_tx.send(Message::Text(text)).await.is_err() {
+                                break;
+                            }
+                        }
+                        // A slow tab missed some injects — keep serving.
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        // The sender is a 'static OnceLock, so Closed
+                        // shouldn't happen; ignore defensively.
+                        Err(broadcast::error::RecvError::Closed) => continue,
+                    }
+                }
             }
         }
         let _ = cli_tx.close().await;
@@ -207,6 +243,36 @@ async fn ws_chat_proxy(mut client_ws: WebSocket, upstream_url: String) {
         _ = c2u => {},
         _ = u2c => {},
     }
+}
+
+/// `POST /api/ai/chat-inject` — fan an externally-authored chat event
+/// (or a batch) out to every connected `/ws/chat` browser. Body is a
+/// single event object, an array of events, or `{ "events": [ … ] }`;
+/// each is broadcast verbatim, so the event vocabulary
+/// (`ferrite_ai_user_turn`, `stream_event`, `ferrite_ai_done`, …) lives
+/// in the ops layer that builds them, not here. Returns how many live
+/// browser subscribers the frames reached. Deliberately *not* tagged
+/// for `ai_activity_layer` (the ops layer omits the command header) so
+/// mirroring a conversation doesn't also flood the activity transcript.
+pub async fn post_chat_inject(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let events: Vec<serde_json::Value> = match body {
+        serde_json::Value::Array(a) => a,
+        serde_json::Value::Object(o) if o.contains_key("events") => o
+            .get("events")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        other => vec![other],
+    };
+    let hub = chat_inject_hub();
+    let subscribers = hub.receiver_count();
+    let mut sent = 0usize;
+    for ev in &events {
+        if hub.send(ev.to_string()).is_ok() {
+            sent += 1;
+        }
+    }
+    Json(serde_json::json!({ "subscribers": subscribers, "events": sent }))
 }
 
 /// `GET /api/decoder/recent?since=<unix_ms>&category=<prefix>` — pull

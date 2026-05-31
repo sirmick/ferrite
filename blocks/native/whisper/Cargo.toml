@@ -1,0 +1,29 @@
+[package]
+name        = "ferrite-whisper"
+version     = "0.9.0"
+edition.workspace      = true
+rust-version.workspace = true
+# whisper.cpp + ggml are MIT; our glue + wrapper are GPL-3.0 like the
+# rest of the workspace. Same posture as the other vendored cores.
+license     = "GPL-3.0-or-later"
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+description = "Native whisper.cpp speech-to-text behind the wsp_* C ABI + a safe Rust wrapper. Native: cmake-built libwhisper/libggml statically linked (the wsprd/fldigi pattern). wasm32: compiles to a stub — the browser uses the sibling Emscripten whisper.mjs directly, not this crate."
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+# Native only: drives whisper.cpp's own CMake (the same build the
+# emscripten script uses, minus emcc) and compiles the C glue. Skipped
+# entirely on wasm32.
+cc    = "1"
+cmake = "0.1"

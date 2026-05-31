@@ -423,6 +423,7 @@ async fn main() -> Result<()> {
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
         .route("/ws/chat", get(routes::ws_chat))
+        .route("/api/ai/chat-inject", post(routes::post_chat_inject))
         .route("/api/ui-views/:pane", get(routes::get_ui_view))
         .route("/api/view", get(routes::get_view_state))
         .route("/api/ui-view/set", post(routes::set_view_state))

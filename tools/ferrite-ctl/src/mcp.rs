@@ -105,6 +105,21 @@ impl Http {
         api_response(resp, &format!("POST {path}")).await
     }
 
+    /// Mutating POST that is deliberately *not* tagged for the activity
+    /// transcript (no `x-ferrite-command` / `x-ferrite-note`). Used by
+    /// `chat_post`: mirroring the headless conversation into the UI's AI
+    /// panel shouldn't also spam the `ai::activity` command log.
+    async fn post_raw(&self, path: &str, body: Value) -> Result<Value, McpError> {
+        let resp = self
+            .client
+            .post(format!("{}{}", self.base, path))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| http_err(&format!("POST {path}"), e.to_string()))?;
+        api_response(resp, &format!("POST {path}")).await
+    }
+
     /// Mutating PATCH, tagged like [`Self::post`].
     async fn patch(
         &self,
@@ -252,12 +267,17 @@ pub struct BlockParamsArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TranscribeArgs {
-    /// `true` enables the in-browser VoiceTranscribe tap; `false`
-    /// disables it. The pipeline rebuilds to splice the tap in/out.
-    /// Needs a UI tab connected for the whisper.cpp worker to
-    /// actually run; check decodes with `recent_decodes` filtered
-    /// to `decoder::transcribe`.
+    /// `true` enables the VoiceTranscribe tap; `false` disables it.
+    /// The pipeline rebuilds to splice the tap in/out.
     pub enabled: bool,
+    /// Where transcription runs. `"node"` is **headless**: whisper.cpp
+    /// runs in `ferrited` and needs no browser — read results with
+    /// `recent_decodes` filtered to `decoder::transcribe`. `"browser"`
+    /// (the default when omitted) runs the in-browser whisper worker and
+    /// needs a UI tab connected. Sets `transcribe_placement` on the
+    /// profile.
+    #[serde(default)]
+    pub placement: Option<String>,
     /// Optional "why" note surfaced in the UI's activity transcript.
     #[serde(default)]
     pub note: Option<String>,
@@ -435,6 +455,28 @@ pub struct SetViewStateArgs {
     /// Optional "why" note surfaced in the UI's activity transcript.
     #[serde(default)]
     pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ChatPostArgs {
+    /// Which side of the conversation this turn is: `user` (mirror an
+    /// operator/agent prompt), `assistant` (a reply — auto-closed so the
+    /// streaming spinner resolves), or `tool` (a tool-call card inside
+    /// the currently-open assistant turn).
+    pub role: String,
+    /// Message text. Required for `user` / `assistant`; ignored for
+    /// `tool` (use the `tool_*` fields).
+    #[serde(default)]
+    pub text: Option<String>,
+    /// `tool` role only: the tool name shown on the card (e.g. `tune`).
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    /// `tool` role only: the tool input, rendered under the card.
+    #[serde(default)]
+    pub tool_input: Option<String>,
+    /// `tool` role only: the tool result text, if any.
+    #[serde(default)]
+    pub tool_result: Option<String>,
 }
 
 // ─── async-capture registry ─────────────────────────────────────────────
@@ -1051,12 +1093,28 @@ impl FerriteServer {
 
     pub(crate) async fn transcribe_op(&self, args: TranscribeArgs) -> Result<Value, McpError> {
         // GET /api/profile, merge the transcribe flag (forcing audio on
-        // when enabling — the tap rides the audio chain), PATCH back.
+        // when enabling — the tap rides the audio chain), set the
+        // placement when asked, PATCH back.
         let current = self.http.get("/api/profile").await.unwrap_or(Value::Null);
         let mut profile = current.as_object().cloned().unwrap_or_default();
         profile.insert("transcribe".into(), Value::Bool(args.enabled));
         if args.enabled {
             profile.insert("audio".into(), Value::Bool(true));
+        }
+        // `transcribe_placement` chooses headless (node) vs in-browser.
+        // Only touch it when a placement is given so we don't clobber a
+        // side the operator already picked.
+        if let Some(p) = args.placement.as_deref() {
+            let v = match p {
+                "node" | "browser" => Value::String(p.to_string()),
+                other => {
+                    return Err(McpError::invalid_params(
+                        format!("placement must be \"node\" or \"browser\", got {other:?}"),
+                        None,
+                    ))
+                }
+            };
+            profile.insert("transcribe_placement".into(), v);
         }
         self.http
             .patch(
@@ -1164,6 +1222,76 @@ impl FerriteServer {
                 "set-view-state",
                 args.note.as_deref(),
             )
+            .await
+    }
+
+    /// Mirror a headless conversation turn into the operator's browser
+    /// AI panel. Builds the exact event frames the chat store already
+    /// renders (`ferrite_ai_user_turn` / `stream_event` text-delta +
+    /// `ferrite_ai_done` / tool cards) and fans them out via
+    /// `POST /api/ai/chat-inject`; ferrited's `/ws/chat` proxy relays
+    /// them to every live tab. Lets an agent driving ferrited from
+    /// outside the browser show its prompts, tool calls, and replies in
+    /// the UI. Needs a UI tab open; returns the daemon's delivery counts.
+    pub(crate) async fn chat_post_op(&self, args: ChatPostArgs) -> Result<Value, McpError> {
+        let t = now_ms();
+        let events: Vec<Value> = match args.role.as_str() {
+            "user" => {
+                let text = args.text.unwrap_or_default();
+                vec![json!({ "type": "ferrite_ai_user_turn", "text": text, "t": t })]
+            }
+            "assistant" => {
+                let text = args.text.unwrap_or_default();
+                vec![
+                    json!({
+                        "type": "stream_event",
+                        "event": {
+                            "type": "content_block_delta",
+                            "delta": { "type": "text_delta", "text": text }
+                        }
+                    }),
+                    json!({ "type": "ferrite_ai_done" }),
+                ]
+            }
+            "tool" => {
+                let id = format!("inj-{t}");
+                let name = args.tool_name.unwrap_or_else(|| "tool".into());
+                let input = args.tool_input.unwrap_or_default();
+                let mut evs = vec![
+                    json!({
+                        "type": "stream_event",
+                        "event": {
+                            "type": "content_block_start",
+                            "content_block": { "type": "tool_use", "id": id, "name": name }
+                        }
+                    }),
+                    json!({
+                        "type": "stream_event",
+                        "event": {
+                            "type": "content_block_delta",
+                            "delta": { "type": "input_json_delta", "partial_json": input }
+                        }
+                    }),
+                ];
+                if let Some(result) = args.tool_result {
+                    evs.push(json!({
+                        "type": "user",
+                        "message": { "content": [
+                            { "type": "tool_result", "tool_use_id": id, "content": result }
+                        ]}
+                    }));
+                }
+                evs
+            }
+            other => {
+                return Err(McpError::invalid_params(
+                    format!("unknown chat role {other:?}; expected user|assistant|tool"),
+                    None,
+                ));
+            }
+        };
+        self.http
+            .post_raw("/api/ai/chat-inject", json!({ "events": events }))
             .await
     }
 
@@ -1433,6 +1561,24 @@ async fn ensure_parent(out: &std::path::Path) -> Result<(), McpError> {
 
 #[tool_router]
 impl FerriteServer {
+    #[tool(
+        description = "Mirror a conversation turn into the operator's browser AI \
+                       panel so an agent driving ferrited headlessly (CLI / MCP) \
+                       shows its prompts, tool calls, and replies in the UI alongside \
+                       the in-browser assistant. `role`: `user` (a prompt), \
+                       `assistant` (a reply — auto-closed so the spinner resolves), or \
+                       `tool` (a tool-call card in the open assistant turn; use \
+                       `tool_name` / `tool_input` / `tool_result`). Needs a UI tab \
+                       connected to /ws/chat; frames with no viewer are dropped. Not \
+                       logged to the `ai::activity` transcript."
+    )]
+    async fn chat_post(
+        &self,
+        Parameters(args): Parameters<ChatPostArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.chat_post_op(args).await?)
+    }
+
     #[tool(
         description = "One-shot snapshot of the running ferrited: pipeline status (running/stopped) with a hoisted `ready` boolean, the active source config (driver/freq/rate/gain), the full active flowgraph + its `preset` name, and the set of UI sinks. Cheap; the AI calls this first to learn what the world looks like."
     )]

@@ -105,6 +105,7 @@
     },
     "audio_nr": {
       "type": "AudioNrStereo",
+      "placement_role": "nr",
       "placement": "browser",
       "params": {
         "sample_rate_hz": 48000.0,
