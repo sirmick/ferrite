@@ -110,6 +110,14 @@ impl Orchestrator {
         self.pending.len()
     }
 
+    /// Total 16 kHz samples sitting in the pending queue — audio that's
+    /// closed but not yet transcribed. The UI turns this into a "seconds
+    /// behind" lag readout alongside the still-in-ring backlog.
+    #[must_use]
+    pub fn queued_samples(&self) -> usize {
+        self.pending.iter().map(|p| p.pcm.len()).sum()
+    }
+
     /// Total clips shed to backlog pressure since construction / reset.
     #[must_use]
     pub fn dropped_total(&self) -> u64 {

@@ -598,7 +598,7 @@ class BrowserRuntime {
       logs.push(
         'client',
         'warn',
-        `[transcribe] DROP ${(msg.shedS as number).toFixed(1)}s utterance — ` +
+        `[transcribe] DROP ${msg.shed as number} utterance(s) — ` +
           `whisper behind, queue full; total_shed=${msg.total as number}`,
       );
     } else if (msg.type === 'stat') {

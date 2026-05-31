@@ -76,6 +76,10 @@ pub mod tee_iq_f32;
 pub mod tee_real_f32;
 #[cfg(test)]
 pub(crate) mod test_support;
+/// Browser worker's handle to the shared Rust transcription core
+/// (wasm-bindgen). Only built for the wasm surface.
+#[cfg(feature = "wasm")]
+pub mod transcribe_wasm;
 pub mod voice_transcribe;
 pub mod wav;
 pub mod ws_bridge;

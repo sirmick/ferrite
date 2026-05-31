@@ -13,7 +13,10 @@
 // "leave it running" session pays the download (small.en-q5 ≈ 180 MB)
 // exactly once across reloads.
 
-import { WHISPER_RATE } from './resample';
+/** Whisper's required input sample rate. The shared Rust core
+ *  (`WasmTranscriber`) resamples to this before inference; re-exported
+ *  here for any consumer that needs the constant. */
+export const WHISPER_RATE = 16_000;
 
 export class EngineUnavailableError extends Error {
   constructor(detail: string) {
@@ -205,5 +208,3 @@ export class WhisperEngine {
     }
   }
 }
-
-export { WHISPER_RATE };

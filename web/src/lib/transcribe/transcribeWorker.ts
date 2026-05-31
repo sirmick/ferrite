@@ -1,21 +1,26 @@
 // Transcription Worker — one per VoiceTranscribe block.
 //
-// Drains the block's tap SAB on its own coarse cadence (never the
-// audio clock), resamples to 16 kHz, VAD-gates into utterances, and
-// runs each through whisper.cpp. Inference is heavy and fully
-// off-thread here, so it can never stall audio or the UI. Posts
-// results back to the main thread, where browserRuntime forwards them
-// to the transcript store.
+// Drains the block's tap SAB on its own coarse cadence (never the audio
+// clock) and runs closed utterances through whisper.cpp. Inference is
+// heavy and fully off-thread here, so it can never stall audio or the
+// UI. Posts results back to the main thread, where browserRuntime
+// forwards them to the transcript store.
 //
-// Graceful degradation: if the whisper.cpp WASM artifact isn't built
-// the Worker still runs (draining the ring so the glitch counter is
-// honest) but reports `unavailable` and emits no segments — the
-// VoiceTranscribe block is pure passthrough so audio is unaffected.
+// The VAD, ham cleanup, resampling, and queue/backlog bookkeeping all
+// live in the shared Rust core (`ferrite-whisper`, compiled to wasm via
+// `WasmTranscriber`) — the *same* code the node-side block runs, so both
+// sides segment and clean identically. The only step that stays
+// JavaScript is the whisper.cpp inference call itself (`whisperEngine`,
+// an Emscripten module): the core hands out a 16 kHz clip, JS runs
+// whisper on it, and hands the segments back for cleanup + recording.
+//
+// Graceful degradation: if the whisper.cpp WASM artifact isn't built the
+// Worker still runs (draining the ring so the glitch counter is honest)
+// but reports `unavailable` and emits no segments — the VoiceTranscribe
+// block is pure passthrough so audio is unaffected.
 
+import initBlocksWasm, { WasmTranscriber } from '../wasm/blocks/ferrite_blocks';
 import { AudioRingReader } from '../audio/ringBuffer';
-import { applyHamPostProcess, extractCallsigns } from './hamPostProcess';
-import { LinearResampler } from './resample';
-import { EnergyVadSegmenter } from './vad';
 import { DEFAULT_HAM_PROMPT } from './hamPrompt';
 import {
   EngineUnavailableError,
@@ -33,11 +38,11 @@ type InMsg =
 
 type OutMsg =
   | { type: 'status'; status: string; detail: string; model: string; vad: 'silero' | 'energy' }
-  | { type: 'dropped'; total: number; shedS: number }
+  | { type: 'dropped'; total: number; shed: number }
   | {
       // Per-utterance instrumentation → backend log (one line per
-      // segment, not the 150 ms telemetry). Lets us spot whisper
-      // falling behind / shedding from `/tmp/ferrite-run.log`.
+      // segment, not the 150 ms telemetry). Lets us spot whisper falling
+      // behind / shedding from `/tmp/ferrite-run.log`.
       type: 'stat';
       segS: number;
       inferMs: number;
@@ -59,59 +64,48 @@ type OutMsg =
       t0: number;
       t1: number;
       text: string;
+      /** Raw whisper output before ham post-processing — the store keeps
+       *  it so the panel can toggle raw/clean. */
+      rawText: string;
       tokens: { text: string; p: number }[];
       confidence: number;
       noSpeechProb: number;
-      /** This segment continues the previous one with no speaker pause
-       *  between (mid-utterance: a max-cut split, or a later sub-
-       *  segment of the same clip). */
       cont: boolean;
-      /** Silence (ms) before this utterance — only the first chunk of
-       *  an utterance carries it; 0 otherwise. The rolling transcript
-       *  starts a new paragraph when it exceeds the threshold. */
       gapMs: number;
-      /** tinydiarize speaker-turn flag (only meaningful on tdrz
-       *  models; always false otherwise). True ⇒ the model thinks the
-       *  talker changed at this segment. */
       speakerTurn?: boolean;
     };
 
-const POLL_MS = 150;
-/** Ham-vocabulary `initial_prompt` base. Defaults to the dense corpus
- *  in hamPrompt.ts; overridden live by the Transcript tab's editable
- *  field (browserRuntime forwards a `prompt` message). The rolling
- *  recently-heard callsigns are appended after it so the bias self-
- *  reinforces within a QSO. */
-let promptBase = DEFAULT_HAM_PROMPT;
-const MAX_PROMPT_CALLS = 16;
+/** The camelCase `TranscriptEntry` shape `WasmTranscriber.drainNew()`
+ *  returns — mirrors the Rust `transcript::TranscriptEntry` serialize. */
+interface CoreEntry {
+  id: number;
+  atMs: number;
+  vfoHz: number | null;
+  t0: number;
+  t1: number;
+  rawText: string;
+  text: string;
+  confidence: number;
+  noSpeechProb: number;
+  cont: boolean;
+  gapMs: number;
+  speakerTurn: boolean;
+}
 
+const POLL_MS = 150;
+
+let wasmReady = false;
 let reader: AudioRingReader | undefined;
-let resampler: LinearResampler | undefined;
-let segmenter: EnergyVadSegmenter | undefined;
+let core: WasmTranscriber | undefined;
 let engine: WhisperEngine | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
-let droppedTotal = 0;
 let srcRateHz = 0;
-const recentCalls: string[] = [];
 let curModel: WhisperModelDef = MODELS[0];
-
-// Closed utterances waiting for whisper. `whisper_full` is a blocking
-// WASM call (seconds for a multi-second clip) and this Worker is
-// single-threaded, so segments that close while one is running are
-// QUEUED, not dropped — continuous speech closes a fresh segment every
-// `maxSegmentMs`, and the old "drop if busy" lost whole sentences.
-// Bounded: a speaker faster than whisper sheds the OLDEST backlog so
-// latency can't balloon, counted as a glitch.
-interface PendingSeg {
-  pcm: Float32Array;
-  /** ms at the start of `pcm` carried from the previous max-cut —
-   *  whisper segments fully inside this were already emitted. */
-  leadMs: number;
-  /** Silence (ms) before this utterance — for the paragraph break. */
-  gapMs: number;
-}
-const pendingSegs: PendingSeg[] = [];
-const MAX_PENDING = 6;
+/** Operator prompt base, stashed until the core exists (the `prompt`
+ *  message can arrive before `rate`). Empty = built-in ham corpus. */
+let promptBase = DEFAULT_HAM_PROMPT;
+/** Re-entrancy guard: `drainPending` calls `poll` between inferences to
+ *  keep the SAB from overflowing, and the timer fires both. */
 let draining = false;
 
 const scratch = new Float32Array(65536);
@@ -126,112 +120,100 @@ function status(s: string, detail = ''): void {
     status: s,
     detail,
     model: curModel.label,
-    vad: engine?.vadAvailable ? 'silero' : 'energy',
+    // VAD is always the Rust energy gate now (we segment before the
+    // whisper call); whisper.cpp's bundled Silero is never the gate.
+    vad: 'energy',
   });
 }
 
-function rollingPrompt(): string {
-  return promptBase + recentCalls.slice(-MAX_PROMPT_CALLS).join(' ');
+/** Build the core once we know both the wasm module is ready and the
+ *  negotiated source rate. Idempotent. Applies any stashed prompt base. */
+function maybeCreateCore(): void {
+  if (core || !wasmReady || srcRateHz <= 0) return;
+  core = new WasmTranscriber(srcRateHz);
+  core.setPromptBase(promptBase === DEFAULT_HAM_PROMPT ? '' : promptBase);
 }
 
-function transcribeOne(pcm16k: Float32Array, leadMs: number, gapMs: number): void {
-  if (!engine?.loaded) return;
-  status('transcribing');
-  const _t0 = performance.now();
-  const res = engine.transcribe(pcm16k, rollingPrompt());
-  // Instrument: real wasm inference time vs the clip's own duration.
-  // realtime-factor = inferMs / (segS*1000); >1 ⇒ whisper can't keep
-  // up ⇒ the bounded queue will shed = "missing sections".
-  post({
-    type: 'stat',
-    segS: pcm16k.length / 16_000,
-    inferMs: Math.round(performance.now() - _t0),
-    queued: pendingSegs.length,
-  });
-  // The clip just ended (~now). Whisper segment times (`t1`, seconds
-  // into the clip) place each segment in real wall-clock relative to
-  // that end — otherwise every segment of a 10 s utterance shares one
-  // timestamp and the band log loses intra-utterance ordering.
-  const endMs = Date.now();
-  const lastT1 = res.segments.length ? (res.segments[res.segments.length - 1].t1 ?? 0) : 0;
-  // Carried-over max-cut lead: whisper segments that end inside it were
-  // already emitted by the previous chunk — drop them. A segment that
-  // straddles the boundary (t1 past the lead) is kept: that's the word
-  // we re-decoded *with* its lead-in context, the whole point.
-  const leadSec = leadMs / 1000;
-  let kept = 0;
-  for (const seg of res.segments) {
-    if (leadSec > 0 && (seg.t1 ?? 0) <= leadSec) continue;
-    const cleaned = applyHamPostProcess(seg.text);
-    if (!cleaned) continue;
-    // The first kept segment continues the prior chunk iff this clip
-    // carried a max-cut lead (mid-utterance). Later sub-segments of the
-    // same clip are always continuous. `cont=false` ⇒ fresh utterance
-    // after a silence ⇒ paragraph break in the rolling transcript.
-    const cont = kept > 0 || leadMs > 0;
-    // Only the very first kept chunk of an utterance carries the
-    // preceding pause; later sub-segments are mid-utterance.
-    const segGapMs = kept === 0 && leadMs === 0 ? gapMs : 0;
-    kept += 1;
-    const atMs = Math.round(endMs - Math.max(0, lastT1 - (seg.t1 ?? lastT1)) * 1000);
-    for (const c of extractCallsigns(cleaned)) {
-      if (!recentCalls.includes(c)) {
-        recentCalls.push(c);
-        // Bound it: only the last MAX_PROMPT_CALLS feed the prompt, and
-        // an ever-growing array is both a leak and (via the prompt) a
-        // whisper repetition trigger. Keep a little history headroom.
-        if (recentCalls.length > MAX_PROMPT_CALLS * 3) recentCalls.shift();
-      }
+/** Drain the SAB into the core (resample + VAD + enqueue) and post the
+ *  live meter/backlog telemetry. Never blocks on inference. */
+function poll(): void {
+  // Don't touch the ring until the core exists. The `rate` message
+  // arrives a few runner ticks after `init`, so draining pre-rate would
+  // consume and discard the first ~hundreds of ms of speech. The SAB
+  // ring is large (≈ seconds), so buffering until then loses nothing.
+  if (!reader || !core) return;
+  let n = reader.read(scratch);
+  while (n > 0) {
+    const shed = core.feed(scratch.subarray(0, n));
+    if (shed > 0) {
+      // Whisper is behind the speaker — the core shed the oldest
+      // utterance(s) so latency stays bounded. Loud, greppable line.
+      post({ type: 'dropped', total: Number(core.droppedTotal()), shed });
     }
-    post({
-      type: 'segment',
-      atMs,
-      t0: seg.t0,
-      t1: seg.t1,
-      text: cleaned,
-      tokens: seg.tokens ?? [],
-      // avg log-prob → rough 0..1 confidence for the panel's dimming.
-      confidence: Math.max(0, Math.min(1, Math.exp(seg.avgLogprob))),
-      noSpeechProb: seg.noSpeechProb ?? 0,
-      cont,
-      gapMs: segGapMs,
-      speakerTurn: seg.speakerTurn === true,
-    });
+    if (n < scratch.length) break;
+    n = reader.read(scratch);
   }
+
+  const m = core.meter() as { level: number; threshold: number; speaking: boolean };
+  const ringMs = srcRateHz > 0 ? (reader.availableRead() / srcRateHz) * 1000 : 0;
+  post({
+    type: 'telemetry',
+    gateOpen: m.speaking,
+    level: m.level,
+    threshold: m.threshold,
+    queued: core.pendingLen(),
+    lagMs: Math.round(ringMs + core.queuedMs()),
+  });
 }
 
-function enqueueSegment(pcm16k: Float32Array, leadMs: number, gapMs: number): void {
-  if (!engine?.loaded) return;
-  if (pendingSegs.length >= MAX_PENDING) {
-    // Whisper is behind the speaker — shed the oldest utterance so
-    // latency stays bounded; surfaced as a glitch (and a loud backend
-    // log line — this is the "missing section" smoking gun).
-    const shed = pendingSegs.shift();
-    droppedTotal += 1;
-    post({ type: 'dropped', total: droppedTotal, shedS: (shed?.pcm.length ?? 0) / 16_000 });
-  }
-  pendingSegs.push({ pcm: pcm16k, leadMs, gapMs });
-  void drainSegments();
-}
-
-// Synchronous in practice (no awaits — `engine.transcribe` is a
-// blocking WASM call). The `draining` guard makes the re-entrant
-// poll()→segmenter→enqueueSegment path safe: a segment closed *during*
-// drain just lands on the queue and the loop picks it up.
-async function drainSegments(): Promise<void> {
+/** Run whisper on every closed utterance the core has queued, recording
+ *  each result back into the core and posting the cleaned entries. The
+ *  whisper call is the one blocking step; everything around it is the
+ *  shared Rust core. */
+function drainPending(): void {
   if (draining) return;
   draining = true;
   try {
-    while (pendingSegs.length > 0 && engine?.loaded) {
-      const item = pendingSegs.shift() as PendingSeg;
+    if (!core || !engine?.loaded) return;
+    let pcm = core.takePending();
+    while (pcm) {
+      status('transcribing');
+      const t0 = performance.now();
       try {
-        transcribeOne(item.pcm, item.leadMs, item.gapMs);
-      } catch (e) {
-        status('error', String(e));
+        const res = engine.transcribe(pcm, core.rollingPrompt());
+        post({
+          type: 'stat',
+          segS: pcm.length / 16_000,
+          inferMs: Math.round(performance.now() - t0),
+          queued: core.pendingLen(),
+        });
+        // Hand the segments back: the core applies the max-cut lead
+        // drop, ham cleanup, cont/gap, wall-clock stamping, and callsign
+        // bias — identically to the node side.
+        core.ingestInflight(JSON.stringify(res.segments), Date.now());
+        for (const e of core.drainNew() as CoreEntry[]) {
+          post({
+            type: 'segment',
+            atMs: e.atMs,
+            t0: e.t0,
+            t1: e.t1,
+            text: e.text,
+            rawText: e.rawText,
+            tokens: [], // per-token probabilities aren't carried by the core
+            confidence: e.confidence,
+            noSpeechProb: e.noSpeechProb,
+            cont: e.cont,
+            gapMs: e.gapMs,
+            speakerTurn: e.speakerTurn,
+          });
+        }
+      } catch (err) {
+        status('error', String(err));
       }
       // Drain the SAB between queued inferences so a backlog doesn't
       // overflow the ring while we catch up.
       poll();
+      pcm = core.takePending();
     }
     status('listening');
   } finally {
@@ -239,47 +221,21 @@ async function drainSegments(): Promise<void> {
   }
 }
 
-function poll(): void {
-  // Don't touch the ring until the resampler exists. The `rate`
-  // message arrives a few runner ticks after `init` (the runner only
-  // knows the negotiated input rate once the block has run), so
-  // draining here pre-rate would *consume and discard* the first
-  // ~hundreds of ms of speech. The SAB ring is large (≈ seconds), so
-  // leaving the audio buffered until `rate` lands loses nothing.
-  if (!reader || !resampler || !segmenter) return;
-  let n = reader.read(scratch);
-  while (n > 0) {
-    const r = resampler.feed(scratch.subarray(0, n));
-    if (r.length > 0) segmenter.feed(r);
-    if (n < scratch.length) break;
-    n = reader.read(scratch);
-  }
-  // `dropped` is posted on the actual shed event (with the shed
-  // duration) — no need to re-post the counter every poll.
-
-  // Live behaviour for the panel. `lagMs` = audio captured but not yet
-  // transcribed: still-in-ring backlog + queued utterances' duration.
-  const m = segmenter.meterState();
-  const ringMs = srcRateHz > 0 ? (reader.availableRead() / srcRateHz) * 1000 : 0;
-  let queuedMs = 0;
-  for (const s of pendingSegs) queuedMs += (s.pcm.length / 16_000) * 1000;
-  post({
-    type: 'telemetry',
-    gateOpen: m.speaking,
-    level: m.level,
-    threshold: m.threshold,
-    queued: pendingSegs.length,
-    lagMs: Math.round(ringMs + queuedMs),
-  });
+function tick(): void {
+  poll();
+  drainPending();
 }
 
 async function init(sab: SharedArrayBuffer): Promise<void> {
   reader = AudioRingReader.fromSab(sab);
-  segmenter = new EnergyVadSegmenter({}, (pcm, leadMs, gapMs) =>
-    enqueueSegment(pcm, leadMs, gapMs),
-  );
-  timer = setInterval(poll, POLL_MS);
+  timer = setInterval(tick, POLL_MS);
 
+  // The shared Rust core (VAD/cleanup/queue). Cheap; always available.
+  await initBlocksWasm();
+  wasmReady = true;
+  maybeCreateCore();
+
+  // The whisper.cpp inference engine (Emscripten). Heavy; may be absent.
   status('loading-model', `${curModel.label} (~${curModel.approxMB} MB, one-time)`);
   engine = new WhisperEngine();
   try {
@@ -307,7 +263,7 @@ self.onmessage = (ev: MessageEvent<InMsg>) => {
       break;
     case 'rate':
       srcRateHz = msg.rateHz;
-      resampler = new LinearResampler(msg.rateHz);
+      maybeCreateCore();
       break;
     case 'model': {
       const m = MODELS.find((x) => x.id === msg.modelId);
@@ -326,12 +282,13 @@ self.onmessage = (ev: MessageEvent<InMsg>) => {
     case 'prompt':
       // Empty → fall back to the built-in ham corpus.
       promptBase = msg.text.trim() ? msg.text : DEFAULT_HAM_PROMPT;
+      core?.setPromptBase(promptBase === DEFAULT_HAM_PROMPT ? '' : promptBase);
       break;
     case 'stop':
       if (timer) clearInterval(timer);
       timer = undefined;
       reader = undefined;
-      segmenter = undefined;
+      core = undefined;
       break;
   }
 };
