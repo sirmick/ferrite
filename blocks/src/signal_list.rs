@@ -94,6 +94,12 @@ pub struct SignalListParams {
     /// Emission throttle (ms). Detection runs every frame; the ranked list
     /// is published at most this often. 250 ms = 4 Hz.
     pub emit_interval_ms: f32,
+    /// Mask bins within this many Hz of the tuned centre (DC). Most SDRs
+    /// leave a DC-offset spike at the LO that would otherwise always rank
+    /// as the strongest "signal" — a useless artifact. The default ±25 kHz
+    /// notch kills it; signals genuinely at the LO are unusual (you'd
+    /// retune to one anyway). `0` disables the notch.
+    pub dc_notch_hz: f32,
 }
 
 impl Default for SignalListParams {
@@ -107,6 +113,7 @@ impl Default for SignalListParams {
             persist_hits: 3,
             track_bucket_hz: 2_500.0,
             emit_interval_ms: 250.0,
+            dc_notch_hz: 25_000.0,
         }
     }
 }
@@ -206,18 +213,35 @@ impl SignalList {
             .clamp(0.0, 255.0) as u8;
         let bin_hz = self.sample_rate_hz / self.params.size as f64;
 
+        // DC-spike notch: bins within `dc_notch_hz` of the centre (bin
+        // N/2) are skipped so the SDR's LO offset spike never groups into
+        // a candidate. Width in bins from the Hz setting; 0 disables.
+        let notch_half = if self.params.dc_notch_hz > 0.0 && bin_hz > 0.0 {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let h = (f64::from(self.params.dc_notch_hz) / bin_hz).round() as usize;
+            h
+        } else {
+            0
+        };
+        let center_bin = n / 2;
+        let notch_lo = center_bin.saturating_sub(notch_half);
+        let notch_hi = (center_bin + notch_half).min(n.saturating_sub(1));
+        let in_notch = |idx: usize| notch_half > 0 && idx >= notch_lo && idx <= notch_hi;
+
         let mut out = Vec::new();
         let mut i = 0;
         while i < n {
-            if row[i] < thresh_byte {
+            if row[i] < thresh_byte || in_notch(i) {
                 i += 1;
                 continue;
             }
             // Walk the contiguous above-threshold run; remember its peak.
+            // The notch also breaks a run, so a wide carrier straddling DC
+            // splits into two candidates rather than swallowing the spike.
             let start = i;
             let mut peak = row[i];
             let mut peak_idx = i;
-            while i < n && row[i] >= thresh_byte {
+            while i < n && row[i] >= thresh_byte && !in_notch(i) {
                 if row[i] > peak {
                     peak = row[i];
                     peak_idx = i;
@@ -497,6 +521,19 @@ impl Block for SignalList {
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
                     ai_notes: "How often to publish the ranked list. 250 ms = 4 Hz. Detection still runs every frame.",
+                },
+                ParamSpec {
+                    key: "dc_notch_hz",
+                    label: "DC notch",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 200_000.0,
+                        step: 1_000.0,
+                        default: 25_000.0,
+                        unit: "Hz",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Mask ±this around the tuned centre so the SDR's DC/LO spike isn't reported as the strongest signal. 0 disables; raise if a wider spike leaks through.",
                 },
             ],
             ai_notes: "Strongest-signal detector on the wideband FFT byte stream (taps LogMagU8.out). Emits a ranked watchlist of {id, freq_hz, power_db, bw_hz, snr_db} as JSON events, driving the UI's 'Strongest Signals' panel and the `signals` MCP verb; click/tune a row to retune there.",
@@ -828,6 +865,35 @@ mod tests {
             v["signals"].as_array().unwrap().len(),
             0,
             "signal gone after > persist_window misses"
+        );
+    }
+
+    #[test]
+    fn dc_spike_at_centre_is_masked_but_real_signal_survives() {
+        // A strong spike exactly at the centre bin (the SDR DC/LO
+        // artifact) plus a real carrier off-centre. Only the real one
+        // should be reported.
+        let n = 4096;
+        let mut b = block(
+            n,
+            SignalListParams {
+                persist_hits: 1,
+                emit_interval_ms: 0.0,
+                threshold_db: 8.0,
+                dc_notch_hz: 25_000.0,
+                ..Default::default()
+            },
+        );
+        // bin n/2 = 2048 is DC; bin 3200 is a genuine off-centre signal.
+        let row = make_row(n, -120.0, &[(2048, 30, -40.0), (3200, 15, -80.0)]);
+        let v = push(&mut b, &row).unwrap();
+        let sigs = v["signals"].as_array().unwrap();
+        assert_eq!(sigs.len(), 1, "DC spike masked, only the real signal");
+        // The survivor is the off-centre one, not the DC bin.
+        let f = sigs[0]["freq_hz"].as_f64().unwrap();
+        assert!(
+            (f - b.center_freq_hz).abs() > 50_000.0,
+            "reported signal {f} must not be the masked DC bin"
         );
     }
 
