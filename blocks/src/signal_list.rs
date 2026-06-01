@@ -152,6 +152,11 @@ pub struct SignalList {
     tracks: Vec<Track>,
     next_id: u64,
     frame: u64,
+    /// Latest estimated noise floor + effective detection threshold (dBFS),
+    /// stashed each frame so `build_payload` can report them — disambiguates
+    /// an empty watchlist ("quiet" vs "threshold too high").
+    last_noise_floor_db: f32,
+    last_threshold_db: f32,
     /// JSON bytes waiting to drain to the `events` output.
     pending: Vec<u8>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -183,6 +188,8 @@ impl SignalList {
             tracks: Vec::new(),
             next_id: 1,
             frame: 0,
+            last_noise_floor_db: SERVER_FLOOR_DBFS,
+            last_threshold_db: SERVER_FLOOR_DBFS,
             pending: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             last_emit: None,
@@ -200,17 +207,23 @@ impl SignalList {
         self.center_freq_hz + offset
     }
 
-    /// Scan one frame into raw candidate groups.
-    fn detect(&self, row: &[u8]) -> Vec<Candidate> {
+    /// Scan one frame into raw candidate groups, returning them alongside
+    /// the estimated noise floor and the effective detection threshold (both
+    /// dBFS). Reporting the floor + threshold lets a caller tell an empty
+    /// list apart from "threshold too high for this band" — `0 signals` with
+    /// `noise_floor_dbfs` well below `threshold_dbfs` means "quiet"; close
+    /// together means "lower the threshold".
+    fn detect(&self, row: &[u8]) -> (Vec<Candidate>, f32, f32) {
         let n = self.params.size.min(row.len());
         if n == 0 {
-            return Vec::new();
+            return (Vec::new(), SERVER_FLOOR_DBFS, SERVER_FLOOR_DBFS);
         }
         let floor_byte = compute_spectrum_stats(&row[..n]).p10;
         let floor_db = byte_to_dbfs(floor_byte);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let thresh_byte = (f32::from(floor_byte) + self.params.threshold_db / DB_PER_BYTE)
             .clamp(0.0, 255.0) as u8;
+        let threshold_db = byte_to_dbfs(thresh_byte);
         let bin_hz = self.sample_rate_hz / self.params.size as f64;
 
         // DC-spike notch: bins within `dc_notch_hz` of the centre (bin
@@ -260,7 +273,7 @@ impl SignalList {
                 snr_db: byte_to_dbfs(peak) - floor_db,
             });
         }
-        out
+        (out, floor_db, threshold_db)
     }
 
     /// Fold this frame's candidates into the persistent track set.
@@ -359,6 +372,10 @@ impl SignalList {
             "center_freq_hz": self.center_freq_hz,
             "span_hz": self.sample_rate_hz,
             "frame": self.frame,
+            // Floor + effective threshold so an empty list is unambiguous:
+            // floor well below threshold = quiet band; close = raise sensitivity.
+            "noise_floor_dbfs": round2(self.last_noise_floor_db),
+            "threshold_dbfs": round2(self.last_threshold_db),
         })
     }
 
@@ -610,7 +627,9 @@ impl Block for SignalList {
         }
 
         self.frame += 1;
-        let cands = self.detect(&row[..n]);
+        let (cands, floor_db, threshold_db) = self.detect(&row[..n]);
+        self.last_noise_floor_db = floor_db;
+        self.last_threshold_db = threshold_db;
         self.update_tracks(&cands);
 
         // Throttled emission: detection ran above on this frame, but the
@@ -824,6 +843,16 @@ mod tests {
                 v["signals"].as_array().unwrap().len(),
                 0,
                 "flat floor must yield no signals"
+            );
+            // The empty list is *explained*: floor ≈ -118 dBFS, threshold a
+            // clear `threshold_db` above it — so a caller sees "quiet band",
+            // not an ambiguous zero.
+            let floor = v["noise_floor_dbfs"].as_f64().unwrap();
+            let thresh = v["threshold_dbfs"].as_f64().unwrap();
+            assert!((floor - -118.0).abs() < 3.0, "floor {floor} ≈ -118 dBFS");
+            assert!(
+                thresh > floor + 5.0,
+                "threshold {thresh} should sit ~10 dB above floor {floor}"
             );
         }
     }

@@ -402,12 +402,32 @@ pub async fn get_signals(
             "frame": serde_json::Value::Null,
         })
     });
+    // Surface whether we're on real hardware vs a software/test source, so a
+    // blind caller can't mistake a SineSource tone (or a restart's fallback)
+    // for a dead band. `source_kind: "software"` + a note means "you're not
+    // tuned to RF — `device select` first."
+    let source = state.get_source().await;
+    let is_hw = source.type_name == "SoapySource";
     if let Some(obj) = out.as_object_mut() {
         obj.insert(
             "at_ms".into(),
             at_ms.map_or(serde_json::Value::Null, Into::into),
         );
         obj.insert("now".into(), now.into());
+        obj.insert(
+            "source_kind".into(),
+            serde_json::json!(if is_hw { "hardware" } else { "software" }),
+        );
+        if !is_hw {
+            obj.insert(
+                "note".into(),
+                serde_json::json!(format!(
+                    "source is '{}' — a software/test source, not real RF. \
+                     Run `device select <args>` before surveying.",
+                    source.type_name
+                )),
+            );
+        }
     }
     Ok(Json(out))
 }

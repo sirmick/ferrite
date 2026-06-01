@@ -881,9 +881,19 @@ impl FerriteServer {
         let ui_sinks = self.http.get("/api/ui-sinks").await.unwrap_or(Value::Null);
         let preset = flowgraph.get("name").cloned().unwrap_or(Value::Null);
         let ready = pipeline.get("status").and_then(Value::as_str) == Some("running");
+        // Explicit hardware-vs-software flag so a blind caller can't mistake
+        // a SineSource/File (a restart's fallback, or a `param src args=` that
+        // never changed the type) for real RF. Authority is the server's
+        // source.type; this just surfaces it at the top level.
+        let source_kind = match source.get("type").and_then(Value::as_str) {
+            Some("SoapySource") => "hardware",
+            Some(_) => "software",
+            None => "unknown",
+        };
         Ok(json!({
             "pipeline": pipeline,
             "source": source,
+            "source_kind": source_kind,
             "flowgraph": flowgraph,
             "preset": preset,
             "ui_sinks": ui_sinks,
