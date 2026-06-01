@@ -353,6 +353,14 @@ impl InputPort<'_> {
             None
         }
     }
+    #[must_use]
+    pub fn as_fft_u8(&self) -> Option<&[u8]> {
+        if let InBuf::FftU8(s) = &self.buf {
+            Some(s)
+        } else {
+            None
+        }
+    }
 }
 
 /// One output port's buffer slice plus its metadata for the duration of a

@@ -62,6 +62,7 @@ pub mod render;
 pub mod rssi_probe;
 #[cfg(feature = "rtl_433")]
 pub mod rtl_433;
+pub mod signal_list;
 pub mod sine;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_retry;
