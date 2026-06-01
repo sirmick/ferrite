@@ -2,10 +2,16 @@
 //!
 //! Taps the same `FftU8` bytes the waterfall renders (the output of
 //! [`LogMagU8`](crate::log_mag_u8)) and continuously reports the strongest
-//! signals across the whole span as a ranked watchlist. One `FftU8` input,
-//! one `Events` output. Node-side only — it's a cheap per-frame scan that
-//! feeds the browser's "Strongest Signals" panel and the `signals` MCP
-//! verb, neither of which needs the byte stream itself.
+//! signals across the whole span as a ranked watchlist.
+//!
+//! Like [`RssiProbe`](crate::rssi_probe) it's an **inline pass-through**:
+//! `FftU8` in → `FftU8` out (the bytes copied through unchanged) plus an
+//! `Events` out carrying the ranked list. The runtime is one-wire-per-port
+//! (fan-out needs a `Tee`), so rather than tee the waterfall stream the
+//! block sits *on* it — splice it between `LogMagU8` and the `ui:fft` sink
+//! and the waterfall is unaffected while the detector taps every frame.
+//! Node-side only — the per-frame scan feeds the browser's "Strongest
+//! Signals" panel and the `signals` MCP verb, not the byte stream itself.
 //!
 //! ### Algorithm (per emitted frame)
 //!
@@ -42,8 +48,8 @@ use anyhow::{bail, Result};
 use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutBuf, ParamKind, ParamSpec,
-    Placement, PortSpec, PortType, ReconfigureScope, Work, MAX_PORTS,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutBuf, OutputPort, ParamKind,
+    ParamSpec, Placement, PortSpec, PortType, ReconfigureScope, Work, MAX_PORTS,
 };
 use crate::log_mag_u8::{SERVER_CEIL_DBFS, SERVER_FLOOR_DBFS};
 use crate::render::compute_spectrum_stats;
@@ -374,10 +380,19 @@ impl Block for SignalList {
                 name: "in",
                 port_type: PortType::FftU8,
             }],
-            outputs: &[PortSpec {
-                name: "events",
-                port_type: PortType::Events,
-            }],
+            outputs: &[
+                // Pass-through of the input FftU8 frame, unchanged — lets
+                // the block splice inline ahead of the `ui:fft` waterfall
+                // sink without a Tee.
+                PortSpec {
+                    name: "out",
+                    port_type: PortType::FftU8,
+                },
+                PortSpec {
+                    name: "events",
+                    port_type: PortType::Events,
+                },
+            ],
             params: &[
                 ParamSpec {
                     key: "size",
@@ -514,6 +529,13 @@ impl Block for SignalList {
         Ok(())
     }
 
+    fn output_capacity_hints(&self) -> [usize; MAX_PORTS] {
+        // The pass-through `out` carries one `size`-byte FftU8 frame.
+        let mut h = [0; MAX_PORTS];
+        h[0] = self.params.size;
+        h
+    }
+
     fn forecast(&self, _noutput_items: usize) -> Option<[usize; MAX_PORTS]> {
         // Operate on whole FFT frames: don't run until a full `size`-byte
         // frame is available (upstream LogMagU8 emits exactly `size` at a
@@ -555,24 +577,38 @@ impl Block for SignalList {
             self.pending.push(b'\n');
         }
 
-        // Drain pending JSON to the events output.
+        // Copy the input frame to the pass-through `out` (waterfall) and
+        // drain pending JSON to `events`. Ports are matched by name — the
+        // scheduler's `outputs` order isn't guaranteed.
+        let mut produced_iq = 0;
         let mut produced_events = 0;
         for port in io.outputs.iter_mut() {
-            if port.name == "events" {
-                if let OutBuf::Events(dst) = &mut port.buf {
-                    let take = self.pending.len().min(dst.len());
-                    if take > 0 {
-                        dst[..take].copy_from_slice(&self.pending[..take]);
-                        self.pending.drain(..take);
-                        produced_events = take;
+            match port.name {
+                "out" => {
+                    if let Some(dst) = OutputPort::as_fft_u8_mut(port) {
+                        let k = dst.len().min(n);
+                        dst[..k].copy_from_slice(&row[..k]);
+                        produced_iq = k;
                     }
                 }
+                "events" => {
+                    if let OutBuf::Events(dst) = &mut port.buf {
+                        let take = self.pending.len().min(dst.len());
+                        if take > 0 {
+                            dst[..take].copy_from_slice(&self.pending[..take]);
+                            self.pending.drain(..take);
+                            produced_events = take;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
         let mut w = Work::new();
         w.consumed[0] = n;
-        w.produced[0] = produced_events;
+        w.produced[0] = produced_iq;
+        w.produced[1] = produced_events;
         Ok(w)
     }
 }
@@ -630,23 +666,34 @@ mod tests {
     /// Push one frame; return the parsed emission JSON (or None if throttled
     /// — but with emit_interval_ms=0 every frame emits).
     fn push(b: &mut SignalList, row: &[u8]) -> Option<serde_json::Value> {
+        let mut passthrough = vec![0u8; row.len()];
         let mut events = vec![0u8; 64 * 1024];
         let mut inputs = [InputPort {
             name: "in",
             meta: PortMeta::default(),
             buf: InBuf::FftU8(row),
         }];
-        let mut outputs = [OutputPort {
-            name: "events",
-            meta: PortMeta::default(),
-            buf: OutBuf::Events(&mut events),
-        }];
+        let mut outputs = [
+            OutputPort {
+                name: "out",
+                meta: PortMeta::default(),
+                buf: OutBuf::FftU8(&mut passthrough),
+            },
+            OutputPort {
+                name: "events",
+                meta: PortMeta::default(),
+                buf: OutBuf::Events(&mut events),
+            },
+        ];
         let mut io = BlockIo {
             inputs: &mut inputs,
             outputs: &mut outputs,
         };
         let w = b.process(&mut io).unwrap();
-        let len = w.produced[0];
+        // Pass-through must copy the input frame verbatim.
+        assert_eq!(w.produced[0], row.len(), "passthrough produced full frame");
+        assert_eq!(&passthrough, row, "passthrough bytes match input");
+        let len = w.produced[1];
         if len == 0 {
             return None;
         }

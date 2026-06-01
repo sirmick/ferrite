@@ -301,6 +301,7 @@ mod tests {
                 "rds",
                 "rssi",
                 "shaper",
+                "signals",
                 "src",
                 "tee"
             ],
@@ -311,7 +312,10 @@ mod tests {
         // pair. Removes `chan_tee` and `demod_rds`; adds `audio_tee`.
         // +1 wire vs. B2: the `AudioShaper` (15 kHz LPF + DC block) now
         // sits on the audio branch — `audio_tee.out1 → shaper → decim`.
-        assert_eq!(doc.wires.len(), 15);
+        // +2 more: the `SignalList` tap splices inline ahead of `ui:fft`
+        // (logmag.out → signals.in → ui:fft) and adds `signals.events
+        // → ui:signals`.
+        assert_eq!(doc.wires.len(), 17);
         // Spot-check one block's params survived the round-trip. Demod
         // now runs at the 240 kHz channel rate, not the 48 kHz audio
         // rate — the RealF32Decimator handles the final drop.
@@ -332,11 +336,21 @@ mod tests {
             doc.blocks.get("audio").unwrap().placement,
             Some(Environment::Browser)
         );
-        // UI-terminal FFT wire is the sentinel form.
+        // UI-terminal FFT wire is the sentinel form — now fed through the
+        // inline `SignalList` tap (logmag.out → signals.in → ui:fft), with
+        // the ranked watchlist on signals.events → ui:signals.
         assert!(doc
             .wires
             .iter()
-            .any(|w| w.src == "logmag.out" && w.dst == "ui:fft"));
+            .any(|w| w.src == "logmag.out" && w.dst == "signals.in"));
+        assert!(doc
+            .wires
+            .iter()
+            .any(|w| w.src == "signals.out" && w.dst == "ui:fft"));
+        assert!(doc
+            .wires
+            .iter()
+            .any(|w| w.src == "signals.events" && w.dst == "ui:signals"));
     }
 
     #[test]
@@ -353,8 +367,8 @@ mod tests {
         assert_eq!(
             doc.blocks.keys().cloned().collect::<Vec<_>>(),
             vec![
-                "audio", "audio_nr", "chan", "demod", "fft", "logmag", "resamp", "shaper", "src",
-                "tee",
+                "audio", "audio_nr", "chan", "demod", "fft", "logmag", "resamp", "shaper",
+                "signals", "src", "tee",
             ],
         );
         let demod = doc.blocks.get("demod").expect("demod block present");

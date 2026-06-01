@@ -183,7 +183,13 @@ mod tests {
                 "shaper",
                 "decim",
                 "audio_nr",
-                "audio"
+                "audio",
+                // `SignalList` taps logmag.out inline (→ ui:fft) but its
+                // only producer dependency is `logmag`; the topo-sort's
+                // alphabetical tie-break defers this terminal tap to the
+                // end of the tick. Functionally a leaf — its order vs. the
+                // audio chain doesn't matter.
+                "signals"
             ]
         );
     }

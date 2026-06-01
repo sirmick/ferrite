@@ -55,6 +55,15 @@
         "alpha": 0.3
       }
     },
+    "signals": {
+      "type": "SignalList",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "threshold_db": 10.0,
+        "top_k": 16
+      }
+    },
     "demod": {
       "type": "AmDemod",
       "placement": "browser",
@@ -141,7 +150,15 @@
     ],
     [
       "logmag.out",
+      "signals.in"
+    ],
+    [
+      "signals.out",
       "ui:fft"
+    ],
+    [
+      "signals.events",
+      "ui:signals"
     ],
     [
       "demod.out",
