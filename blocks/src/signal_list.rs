@@ -545,17 +545,14 @@ impl Block for SignalList {
         // ranked list is only published every `emit_interval_ms`.
         if self.emit_due() {
             let payload = self.build_payload();
-            // Compact single-line JSON object on the events port.
-            let mut line = serde_json::to_string(&payload).unwrap_or_default();
-            line.push('\n');
-            self.pending.extend_from_slice(line.as_bytes());
-            // Decoder trace so `recent_decodes`/log readers can see the
-            // watchlist without a WS subscription.
-            let count = payload
-                .get("signals")
-                .and_then(|s| s.as_array())
-                .map_or(0, Vec::len);
-            tracing::info!(target: "decoder::signals", "{count} signals: {payload}");
+            // Compact single-line JSON object — same bytes go to the
+            // events port (for the browser WS) and the decoder trace. The
+            // trace message is the raw JSON so `/api/signals` can parse it
+            // directly into the current watchlist without a WS subscription.
+            let json = serde_json::to_string(&payload).unwrap_or_default();
+            tracing::info!(target: "decoder::signals", "{json}");
+            self.pending.extend_from_slice(json.as_bytes());
+            self.pending.push(b'\n');
         }
 
         // Drain pending JSON to the events output.

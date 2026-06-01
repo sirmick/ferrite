@@ -343,6 +343,75 @@ pub async fn recent_decoder(
     Ok(Json(RecentResponse { entries, now }))
 }
 
+/// `GET /api/signals?max_age_ms=<ms>` — the current strongest-signal
+/// watchlist as detected by the `SignalList` block at the wideband FFT.
+///
+/// This is a **snapshot, not history**: it returns the single most-recent
+/// `decoder::signals` emission, which already carries the full ranked list
+/// for that frame (`{signals:[…], center_freq_hz, span_hz, frame}`). The
+/// block re-emits the whole watchlist every ~250 ms, so the latest entry
+/// *is* the live list. If nothing was emitted within `max_age_ms` (default
+/// 2000 — i.e. the preset has no `SignalList`, or detection stalled), the
+/// watchlist is reported empty rather than stale. `max_age_ms=0` disables
+/// the freshness gate and returns the last retained emission at any age.
+///
+/// Pairs with `POST /api/tune`: read a row's `freq_hz`, tune there.
+#[derive(Deserialize)]
+pub struct SignalsQuery {
+    pub max_age_ms: Option<u64>,
+}
+
+pub async fn get_signals(
+    State(state): State<AppState>,
+    Query(q): Query<SignalsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let logs = state.logs().ok_or_else(|| {
+        bad_request(
+            "LOGS_DISABLED",
+            "log broadcast not configured on this server",
+        )
+    })?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let max_age = q.max_age_ms.unwrap_or(2000);
+    let since = if max_age == 0 {
+        0
+    } else {
+        now.saturating_sub(max_age)
+    };
+
+    // Newest `decoder::signals` line within the freshness window. `recent`
+    // returns oldest→newest, so the tail is the current watchlist.
+    let entries = logs.recent(since, Some("decoder::signals"));
+    let latest = entries.last();
+    let at_ms = latest.map(|e| e.at_ms);
+    let payload = latest
+        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.message).ok())
+        .filter(serde_json::Value::is_object);
+
+    // Either the parsed emission or a typed-empty watchlist; then stamp
+    // `at_ms` (when it was emitted) and `now` (server clock) so a poller
+    // can tell live from stale.
+    let mut out = payload.unwrap_or_else(|| {
+        serde_json::json!({
+            "signals": [],
+            "center_freq_hz": serde_json::Value::Null,
+            "span_hz": serde_json::Value::Null,
+            "frame": serde_json::Value::Null,
+        })
+    });
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert(
+            "at_ms".into(),
+            at_ms.map_or(serde_json::Value::Null, Into::into),
+        );
+        obj.insert("now".into(), now.into());
+    }
+    Ok(Json(out))
+}
+
 // Make `LogEntry` serialize-friendly. Defined here rather than in
 // log_stream.rs so log_stream stays serde-free; the API layer is the
 // right place to gate JSON shape.

@@ -25,8 +25,8 @@ mod sdr_tables;
 use mcp::{
     BandAtArgs, BlockParamsArgs, CaptureStatusArgs, ChatPostArgs, FerriteServer, Http,
     LoadPresetArgs, PresetDetailArgs, RecentDecodesArgs, ReplayCaptureArgs, SelectDeviceArgs,
-    SetViewStateArgs, StartCaptureArgs, StartCaptureAudioArgs, TranscribeArgs, TuneArgs,
-    ViewSnapshotArgs,
+    SetViewStateArgs, SignalsArgs, StartCaptureArgs, StartCaptureAudioArgs, TranscribeArgs,
+    TuneArgs, ViewSnapshotArgs,
 };
 
 const DEFAULT_CONNECT: &str = "http://127.0.0.1:10001";
@@ -170,6 +170,14 @@ enum Cmd {
     BandAt {
         /// Frequency in Hz (SI shorthand OK).
         freq: String,
+    },
+    /// Current strongest-signal watchlist (snapshot, ranked by power).
+    /// Each row's `freq_hz` feeds straight into `tune`.
+    Signals {
+        /// Report the list empty if nothing was detected within this many
+        /// ms (0 = no freshness gate). Default 2000.
+        #[arg(long)]
+        max_age_ms: Option<u64>,
     },
     /// Capture a slice of signal to disk (IQ / audio / FFT). Blocks
     /// until the async job finishes, then prints the job record.
@@ -582,6 +590,13 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 .band_at_op(BandAtArgs {
                     freq_hz: parse_si(&freq)?,
                 })
+                .await
+                .map_err(op_err)?;
+            emit(&v, json)
+        }
+        Cmd::Signals { max_age_ms } => {
+            let v = server
+                .signals_op(SignalsArgs { max_age_ms })
                 .await
                 .map_err(op_err)?;
             emit(&v, json)

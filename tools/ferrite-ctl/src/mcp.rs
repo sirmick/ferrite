@@ -309,6 +309,17 @@ pub struct RecentDecodesArgs {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SignalsArgs {
+    /// Freshness gate (ms). The watchlist is reported empty if the
+    /// `SignalList` block hasn't emitted within this window — i.e. the
+    /// preset has no detector or detection stalled. Default 2000. Set `0`
+    /// to disable the gate and return the last retained emission at any
+    /// age (useful right after stopping the pipeline).
+    #[serde(default)]
+    pub max_age_ms: Option<u64>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PresetDetailArgs {
     /// Preset basename — matches `flowgraphs/<name>.json` on the
@@ -1015,6 +1026,17 @@ impl FerriteServer {
         self.http
             .get(&format!("/api/band-plan/at?hz={}", args.freq_hz))
             .await
+    }
+
+    /// Current strongest-signal watchlist (GET /api/signals) — the live
+    /// ranked list from the `SignalList` block at the wideband FFT, not a
+    /// history. Each row's `freq_hz` feeds straight into `tune`.
+    pub(crate) async fn signals_op(&self, args: SignalsArgs) -> Result<Value, McpError> {
+        let path = match args.max_age_ms {
+            Some(ms) => format!("/api/signals?max_age_ms={ms}"),
+            None => "/api/signals".to_string(),
+        };
+        self.http.get(&path).await
     }
 
     pub(crate) async fn load_preset_op(&self, args: LoadPresetArgs) -> Result<Value, McpError> {
@@ -1744,6 +1766,16 @@ impl FerriteServer {
         Parameters(args): Parameters<BandAtArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_json(&self.band_at_op(args).await?)
+    }
+
+    #[tool(
+        description = "The current strongest-signal watchlist, auto-detected at the wideband FFT by the `SignalList` block. Returns a *snapshot* (not history): `{signals:[{id, freq_hz, power_db, bw_hz, snr_db, first_seen_frame, last_seen_frame}], center_freq_hz, span_hz, frame, at_ms, now}`, ranked strongest-first. The two-step survey workflow is `signals` → pick a row → `tune` its `freq_hz`. Empty `signals` means either no signal clears the detector or the active preset has no `SignalList` (only the wideband presets wire it — e.g. `wbfm`). `at_ms` is when the list was emitted; if `now - at_ms` is large the list is stale (detection stalled). `max_age_ms` gates that staleness (default 2000)."
+    )]
+    async fn signals(
+        &self,
+        Parameters(args): Parameters<SignalsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.signals_op(args).await?)
     }
 
     #[tool(

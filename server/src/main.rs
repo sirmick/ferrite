@@ -418,6 +418,7 @@ async fn main() -> Result<()> {
             get(routes::get_profile).patch(routes::patch_profile),
         )
         .route("/api/decoder/recent", get(routes::recent_decoder))
+        .route("/api/signals", get(routes::get_signals))
         .route("/api/debug/log", post(routes::browser_log))
         .route("/api/screenshot", post(routes::save_screenshot))
         .route("/ws/logs", get(routes::ws_logs))
