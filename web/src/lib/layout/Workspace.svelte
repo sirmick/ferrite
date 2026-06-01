@@ -25,7 +25,9 @@
   // The narrow column is gated on (a) the runtime having injected a
   // `ui:fft_narrow` sink (only true when the active preset has a
   // Channelizer — `inject_narrow_fft.rs`) AND (b) the operator's
-  // `client.workspace.narrowVisible` toggle.
+  // `client.workspace.rightPane` selection being `channel` (the toolbar's
+  // Display → Right dropdown; `signals` swaps in the strongest-signal
+  // list, `off` collapses the column).
   import Spectrum from '$lib/viz/Spectrum.svelte';
   import Waterfall from '$lib/viz/Waterfall.svelte';
   import NarrowSpectrum from '$lib/viz/NarrowSpectrum.svelte';
@@ -47,9 +49,16 @@
 
   let { client }: Props = $props();
 
+  // Right (channel-detail) column. Driven by the toolbar's Display →
+  // Right dropdown (`client.workspace.rightPane`): `channel` shows the
+  // narrow FFT/waterfall, `off` collapses it. (`signals` — the
+  // strongest-signal list — lands with the SignalList block; until then
+  // its option is hidden because no preset advertises a `ui:signals`
+  // sink.) The whole column only exists when the preset has a
+  // Channelizer (`ui:fft_narrow`).
   let hasNarrowSink = $derived(pipeline.uiSinks.fft_narrow !== undefined);
-  let narrowVisible = $derived(clientControls.get('client.workspace.narrowVisible'));
-  let showNarrow = $derived(hasNarrowSink && narrowVisible);
+  let rightPane = $derived(clientControls.get('client.workspace.rightPane'));
+  let showNarrow = $derived(hasNarrowSink && rightPane === 'channel');
 
   // Advanced view replaces *only* the wide FFT/waterfall column when
   // toggled on (and the preset registers one). The Channel column is

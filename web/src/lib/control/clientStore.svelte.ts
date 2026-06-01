@@ -15,9 +15,16 @@
 const STORAGE_KEY = 'ferrite.clientControls';
 
 /** Which view occupies the workspace's main column (the toolbar's
- *  Main: dropdown). Exported so the dispatcher / consumers can refer
- *  to the union by name. */
+ *  Display → Main dropdown). Exported so the dispatcher / consumers can
+ *  refer to the union by name. */
 export type WorkspaceMainPane = 'wide' | 'advanced';
+
+/** Which view occupies the workspace's right (channel-detail) column
+ *  (the toolbar's Display → Right dropdown). `off` collapses it,
+ *  `channel` is the narrow FFT/waterfall, `signals` is the strongest-
+ *  signal list (only selectable when the preset advertises `ui:signals`).
+ *  Replaces the old boolean `narrowVisible` checkbox with a 3-state pick. */
+export type WorkspaceRightPane = 'off' | 'channel' | 'signals';
 
 /** Full list of known client paths and their defaults. The defaults
  *  object also declares the *type* of each knob (by its JavaScript
@@ -77,13 +84,17 @@ export const CLIENT_DEFAULTS = {
   'client.audio.nrPreset': 'auto',
 
   // Workspace layout — when the active preset has a Channelizer the
+  // What occupies the right (channel-detail) workspace column. The
   // runtime auto-injects a `ui:fft_narrow` tap (see
-  // `inject_narrow_fft.rs`), which the workspace renders as a second
-  // Spectrum+Waterfall column to the right of the wide view. The user
-  // can collapse that column to reclaim the screen real estate; the
-  // setting persists. Has no effect on bareband presets — the column
-  // is hidden automatically when no `fft_narrow` sink is present.
-  'client.workspace.narrowVisible': true,
+  // `inject_narrow_fft.rs`) rendered as a second Spectrum+Waterfall
+  // column right of the wide view; `signals` swaps it for the
+  // strongest-signal list (gated on a `ui:signals` sink); `off`
+  // collapses the column to reclaim screen space. Persists. Has no
+  // effect on bareband presets — the column is hidden automatically
+  // when no `fft_narrow` sink is present regardless of this setting.
+  // The toolbar exposes this as the Display → Right dropdown. (Replaced
+  // the old boolean `client.workspace.narrowVisible` checkbox.)
+  'client.workspace.rightPane': 'channel' as WorkspaceRightPane,
 
   // What occupies the main (wide) workspace column: `"wide"` shows the
   // wide Spectrum+Waterfall; `"advanced"` shows the active preset's
