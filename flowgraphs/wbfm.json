@@ -4,7 +4,7 @@
   "category": "FM/AM broadcast",
   "label": "FM broadcast (mono)",
   "description": "Wideband FM broadcast \u2014 commercial radio, 87.9\u2013107.9 MHz, mono playback.",
-  "ai_notes": "Wideband FM broadcast, mono. Pick for commercial radio (87.9\u2013107.9 MHz). Includes RdsDemod \u2014 RDS station name + program type show in the UI RdsReadout. Audio chain: 15 kHz LPF, 75 \u00b5s de-emphasis. `wbfm_stereo` for pilot-locked stereo.",
+  "ai_notes": "Wideband FM broadcast, mono. Pick for commercial radio (87.9\u2013107.9 MHz). Includes RdsDemod \u2014 RDS station name + program type show in the UI RdsReadout. Audio chain: 15 kHz LPF, 75 \u00b5s de-emphasis. `wbfm_stereo` for pilot-locked stereo. Wideband FFT carries a SignalList tap: call the `signals` verb for the strongest carriers across the ~2.4 MHz span (ranked by power, on the 'Strongest Signals' panel), then `tune` a row's freq_hz to listen. The tuned centre itself is DC-notched out of that list.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/FM_Broadcast_Radio",
   "sample_path": "samples/sigidwiki/WFM.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Broadcast_FM.jpg",

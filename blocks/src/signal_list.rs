@@ -536,7 +536,7 @@ impl Block for SignalList {
                     ai_notes: "Mask ±this around the tuned centre so the SDR's DC/LO spike isn't reported as the strongest signal. 0 disables; raise if a wider spike leaks through.",
                 },
             ],
-            ai_notes: "Strongest-signal detector on the wideband FFT byte stream (taps LogMagU8.out). Emits a ranked watchlist of {id, freq_hz, power_db, bw_hz, snr_db} as JSON events, driving the UI's 'Strongest Signals' panel and the `signals` MCP verb; click/tune a row to retune there.",
+            ai_notes: "Strongest-signal detector on the wideband FFT byte stream. Inline pass-through (FftU8 in → FftU8 out, like RssiProbe): splice it between LogMagU8 and the ui:fft sink — logmag.out → signals.in → ui:fft, with the watchlist on signals.events → ui:signals. NativeOnly (node-side). Emits a ranked list of {id, freq_hz, power_db, bw_hz, snr_db} JSON events ~4 Hz, driving the UI's 'Strongest Signals' panel and the `signals` MCP verb; click/tune a row to retune there. The `dc_notch_hz` param masks the SDR's LO spike at the tuned centre so it isn't reported as the top signal.",
         }
     }
 

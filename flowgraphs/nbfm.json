@@ -4,7 +4,7 @@
   "category": "Voice (SSB/NBFM)",
   "label": "Narrowband FM (voice)",
   "description": "Narrowband FM voice \u2014 25 kHz channels: marine VHF, public-safety, FRS/GMRS, 2 m / 70 cm amateur.",
-  "ai_notes": "Narrowband FM voice, 25 kHz channels: 2 m / 70 cm repeaters, marine VHF (156-162 MHz), public-safety, FRS/GMRS (462-467 MHz). +-5 kHz deviation. Squelch, 3.4 kHz voice LPF, 75 us de-emphasis, impulse blanker. `neural`/`spectral` selectable in the UI for weak/hissy channels.",
+  "ai_notes": "Narrowband FM voice, 25 kHz channels: 2 m / 70 cm repeaters, marine VHF (156-162 MHz), public-safety, FRS/GMRS (462-467 MHz). +-5 kHz deviation. Squelch, 3.4 kHz voice LPF, 75 us de-emphasis, impulse blanker. `neural`/`spectral` selectable in the UI for weak/hissy channels. Wideband FFT carries a SignalList tap: call the `signals` verb for the strongest carriers across the ~2.4 MHz span (ranked by power, on the 'Strongest Signals' panel), then `tune` a row's freq_hz to listen. The tuned centre itself is DC-notched out of that list.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/NFM_Voice",
   "sample_path": "samples/sigidwiki/Nfm_voice.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Sintitulo.png",
