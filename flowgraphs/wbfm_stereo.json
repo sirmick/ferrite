@@ -89,6 +89,7 @@
     },
     "decim_l": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "browser",
       "params": {
         "output_rate_hz": 48000.0,
@@ -97,6 +98,7 @@
     },
     "decim_r": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "browser",
       "params": {
         "output_rate_hz": 48000.0,

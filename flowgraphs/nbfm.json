@@ -81,6 +81,7 @@
     },
     "shaper": {
       "type": "AudioShaper",
+      "placement_role": "audio",
       "placement": "browser",
       "when": {
         "audio": true
@@ -93,6 +94,7 @@
     },
     "resamp": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "browser",
       "when": {
         "audio": true
