@@ -568,8 +568,21 @@ impl Block for SignalList {
 
     fn output_capacity_hints(&self) -> [usize; MAX_PORTS] {
         // The pass-through `out` carries one `size`-byte FftU8 frame.
+        //
+        // The runtime's per-tick output budget is the *minimum* writable
+        // length across all of a block's output ports (see
+        // `try_run_block`: `output_budget = min(per_port_cap…)`, and each
+        // port is then handed `write_peek(output_budget)`). A port whose
+        // hint is 0 caps at `frames_hint` (~1024), which would drag the
+        // shared budget far below the 16384-byte frame the `out`
+        // pass-through must emit — so `out` would only ever get a partial
+        // slice and the waterfall would starve to ~1 fps. Give `events`
+        // the same `size` hint so it never throttles the frame-sized
+        // pass-through (it also sizes the events ring to comfortably hold
+        // a JSON emission).
         let mut h = [0; MAX_PORTS];
         h[0] = self.params.size;
+        h[1] = self.params.size;
         h
     }
 
