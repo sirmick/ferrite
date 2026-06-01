@@ -32,6 +32,7 @@
   import Waterfall from '$lib/viz/Waterfall.svelte';
   import NarrowSpectrum from '$lib/viz/NarrowSpectrum.svelte';
   import NarrowWaterfall from '$lib/viz/NarrowWaterfall.svelte';
+  import SignalListView from '$lib/signals/SignalListView.svelte';
   import DisplayControls from '$lib/viz/DisplayControls.svelte';
   import Split from '$lib/layout/Split.svelte';
   import AppToolbar from '$lib/layout/AppToolbar.svelte';
@@ -51,14 +52,16 @@
 
   // Right (channel-detail) column. Driven by the toolbar's Display →
   // Right dropdown (`client.workspace.rightPane`): `channel` shows the
-  // narrow FFT/waterfall, `off` collapses it. (`signals` — the
-  // strongest-signal list — lands with the SignalList block; until then
-  // its option is hidden because no preset advertises a `ui:signals`
-  // sink.) The whole column only exists when the preset has a
-  // Channelizer (`ui:fft_narrow`).
+  // narrow FFT/waterfall (needs a Channelizer's `ui:fft_narrow`),
+  // `signals` shows the strongest-signal list (needs the SignalList
+  // block's `ui:signals`), `off` collapses the column. The column shows
+  // whenever the selected pane has its backing sink.
   let hasNarrowSink = $derived(pipeline.uiSinks.fft_narrow !== undefined);
+  let hasSignalsSink = $derived(pipeline.uiSinks.signals !== undefined);
   let rightPane = $derived(clientControls.get('client.workspace.rightPane'));
   let showNarrow = $derived(hasNarrowSink && rightPane === 'channel');
+  let showSignals = $derived(hasSignalsSink && rightPane === 'signals');
+  let showRight = $derived(showNarrow || showSignals);
 
   // Advanced view replaces *only* the wide FFT/waterfall column when
   // toggled on (and the preset registers one). The Channel column is
@@ -115,13 +118,13 @@
   <RfQuickBar />
 
   <div class="flex min-h-0 flex-1">
-    {#if showNarrow}
+    {#if showRight}
       <Split direction="row" defaultFraction={0.65} storageKey="ferrite.split.workspace-columns">
         {#snippet a()}
           {@render (showAdvanced ? advancedColumn : wideColumn)()}
         {/snippet}
         {#snippet b()}
-          {@render narrowColumn()}
+          {@render (showSignals ? signalsColumn : narrowColumn)()}
         {/snippet}
       </Split>
     {:else}
@@ -164,6 +167,10 @@
     {@const Advanced = advancedView.component}
     <Advanced />
   {/if}
+{/snippet}
+
+{#snippet signalsColumn()}
+  <SignalListView />
 {/snippet}
 
 {#snippet narrowColumn()}
