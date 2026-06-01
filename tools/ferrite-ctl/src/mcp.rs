@@ -1052,9 +1052,15 @@ impl FerriteServer {
 
     /// Dodge-aware tune (POST /api/tune) plus, when supplied, a source
     /// PATCH folding in `gain_db` (+ `agc=false`), `bandwidth_hz`, and
-    /// `sample_rate_hz` (auto-deriving bandwidth from the driver ladder
-    /// when a rate change leaves BW unpinned). The freq itself rides the
-    /// dodge path, so the source PATCH never touches `center_freq_hz`.
+    /// `sample_rate_hz`. The freq itself rides the dodge path, so the
+    /// source PATCH never touches `center_freq_hz`.
+    ///
+    /// Bandwidth + SDRplay broadcast notches are now derived **server-side**
+    /// at the `patch_source` choke point (see ferrited's `source_policy`),
+    /// so every path — including a bare `--span` rate bump that never sets
+    /// `sample_rate_hz` here — gets the right anti-alias BW and notch state.
+    /// The client-side BW derive below is kept as harmless, idempotent
+    /// belt-and-suspenders for the explicit `--sample-rate` path.
     pub(crate) async fn tune_op(&self, args: TuneArgs) -> Result<Value, McpError> {
         let note = args.note.as_deref();
         let tune = self

@@ -56,6 +56,10 @@ mod view_bridge;
 #[allow(dead_code)]
 mod band_plan;
 
+#[path = "../src/source_policy.rs"]
+#[allow(dead_code)]
+mod source_policy;
+
 #[path = "../src/app_state.rs"]
 #[allow(dead_code)]
 mod app_state;

@@ -605,7 +605,7 @@ impl Block for SoapySource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "Analog IF/filter bandwidth, Hz. 0 = auto-derive from the sample rate. Set below the sample rate to brick-wall out-of-channel energy at the hardware; the valid span is in `source_capabilities` → `rx_channels[].bandwidth_ranges_hz`.",
+                    ai_notes: "Analog IF/filter bandwidth, Hz. Leave unset / 0 to let the daemon auto-derive it from the sample rate (largest advertised filter ≤ rate — the anti-alias choice); it also re-derives whenever you change the rate, so you normally never set this. Pin an explicit value below the rate to brick-wall out-of-channel energy at the hardware; the valid filters are in `source_capabilities` → `rx_channels[].bandwidth_ranges_hz`.",
                 },
                 ParamSpec {
                     key: "gain_db",

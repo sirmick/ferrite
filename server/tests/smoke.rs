@@ -30,6 +30,10 @@ mod bridge_sink;
 #[allow(dead_code)]
 mod preset_pipeline;
 
+#[path = "../src/source_policy.rs"]
+#[allow(dead_code)]
+mod source_policy;
+
 #[path = "../src/app_state.rs"]
 #[allow(dead_code)]
 mod app_state;

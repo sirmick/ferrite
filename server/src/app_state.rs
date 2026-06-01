@@ -619,13 +619,23 @@ impl AppState {
     /// a full rebuild. This keeps the `PATCH /api/source` entry point
     /// behaviourally identical to `apply_block_params("src", delta)` —
     /// the frontend can send partial source-param edits through either.
-    pub async fn patch_source(&self, new_source: SourceConfig) -> Result<Option<ReconfigurePlan>> {
+    pub async fn patch_source(
+        &self,
+        mut new_source: SourceConfig,
+    ) -> Result<Option<ReconfigurePlan>> {
         // Compute the delta in its own scope so the read guard drops
         // before we try to take the pipeline mutex or the source_config
         // write — Rust extends temporary lifetimes across an `if let`
         // body, which would otherwise deadlock with the write below.
         let maybe_delta = {
-            let current = self.inner.source_config.read().await;
+            // Clone + drop the guard so the (async, cached) caps probe in
+            // apply_source_policy never holds the source_config read lock.
+            let current = self.inner.source_config.read().await.clone();
+            // Fill the daemon-owned derived settings — anti-alias bandwidth
+            // from the sample rate, SDRplay broadcast notches from the tuned
+            // span — BEFORE the delta is computed, so every path (UI mouse,
+            // /api/tune span-raise, ferrite-ctl, headless AI) gets them.
+            self.apply_source_policy(&current, &mut new_source).await;
             shallow_source_delta(&current, &new_source)
         };
         if let Some(delta) = maybe_delta {
@@ -650,6 +660,50 @@ impl AppState {
         };
         *self.inner.source_config.write().await = new_source;
         Ok(plan)
+    }
+
+    /// Fill the derived source settings the daemon owns: anti-alias
+    /// `bandwidth_hz` (largest device-advertised filter ≤ the sample rate)
+    /// and the SDRplay broadcast-notch `settings` (off inside the band
+    /// you're receiving, on outside). Applied at the [`patch_source`]
+    /// choke point so the UI, ferrite-ctl, and a headless AI all behave
+    /// identically — none of them has to set BW or notches by hand.
+    ///
+    /// Only fills what the caller left implicit: a value the caller
+    /// explicitly changed in *this* reconfigure (differs from `current`)
+    /// wins. Writing an unchanged value is a no-op that `shallow_source_delta`
+    /// suppresses, so a center-only retune stays a hot apply and the notch
+    /// only forces a rebuild when the tune crosses a broadcast-band edge.
+    ///
+    /// [`patch_source`]: AppState::patch_source
+    async fn apply_source_policy(&self, current: &SourceConfig, next: &mut SourceConfig) {
+        if next.type_name != "SoapySource" {
+            return; // software sources (Sine/File) have no caps to key off
+        }
+        let args = next
+            .params
+            .as_object()
+            .and_then(|p| p.get("args"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if args.is_empty() {
+            return;
+        }
+        // Cached after warm-up; a probe error/timeout must NOT block a
+        // tune — skip the policy and keep the caller's params.
+        let caps = match self.inner.device_cache.ensure_args(&args).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    "apply_source_policy: caps probe failed; skipping derived BW/notch"
+                );
+                return;
+            }
+        };
+        // Pure decision logic (exhaustively unit-tested in `source_policy`).
+        crate::source_policy::apply(current, next, &caps);
     }
 
     /// Start the pipeline if it isn't already running. Idempotent:

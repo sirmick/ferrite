@@ -42,6 +42,7 @@ mod log_stream;
 mod preset_pipeline;
 mod routes;
 mod soapy_log;
+mod source_policy;
 mod view_bridge;
 
 /// Ferrite SDR daemon.
