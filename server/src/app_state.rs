@@ -855,11 +855,16 @@ impl AppState {
                 Some((id.clone(), rate))
             });
 
+        // The source's *known* current centre. `None` means it's never been
+        // written (fresh device-select / preset default) — crucially NOT the
+        // same as "happens to equal the target": defaulting an unknown centre
+        // to `freq_hz` made the dodge below think the source was already on
+        // target, go sticky, and skip the write — leaving the device parked
+        // at its block default (100 MHz) while the operator thinks it tuned.
         let cur_src_center = source
             .params
             .get("center_freq_hz")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(freq_hz);
+            .and_then(serde_json::Value::as_f64);
         let cur_rate = source
             .params
             .get("sample_rate_hz")
@@ -871,21 +876,26 @@ impl AppState {
             Some((_, chan_rate)) => {
                 let keepout = 0.4 * chan_rate;
                 let dodge = offset_ratio * chan_rate;
-                if (freq_hz - cur_src_center).abs() <= keepout {
-                    // Sticky: keep source parked, just retune chan.
-                    (cur_src_center, freq_hz - cur_src_center)
-                } else {
-                    // Snap: source low of target by dodge_offset.
-                    (freq_hz - dodge, dodge)
+                match cur_src_center {
+                    // Sticky: source already parked within keepout of target.
+                    Some(cur) if (freq_hz - cur).abs() <= keepout => (cur, freq_hz - cur),
+                    // Snap (also the first-tune / unknown-centre case): park
+                    // the source low of target by the dodge offset and let the
+                    // channelizer recover the carrier.
+                    _ => (freq_hz - dodge, dodge),
                 }
             }
             None => (freq_hz, 0.0),
         };
 
         // Build source-side delta. 0.5 Hz floor on the centre delta so a
-        // round-trip readback noise doesn't trigger a reconfigure.
+        // round-trip readback noise doesn't trigger a reconfigure — but
+        // always write on the first tune (unknown centre), so an unset
+        // source centre actually gets established instead of silently
+        // staying at the block default.
         let mut src_delta = serde_json::Map::new();
-        if (new_src_center - cur_src_center).abs() > 0.5 {
+        let center_changed = cur_src_center.is_none_or(|cur| (new_src_center - cur).abs() > 0.5);
+        if center_changed {
             src_delta.insert("center_freq_hz".into(), serde_json::json!(new_src_center));
         }
         if let Some(span) = span_hz {
