@@ -10,12 +10,14 @@
 //!    profile field doesn't strip blocks tagged for it on an older
 //!    runtime.
 //!
-//! 2. **Placement rewrite.** Blocks carrying a
-//!    `"placement_role": "demod"` tag adopt the profile's
-//!    `demod_placement` (when set) regardless of the authored
-//!    placement. Lets a user flip the demod between node and browser
-//!    without editing the preset JSON; the auto-inserted F32 bridge
-//!    appears or disappears at split time.
+//! 2. **Audio-spine cut.** Blocks on the audio path carry a
+//!    `"placement_role"` (`demod` / `audio` / `nr` / `transcribe`). The
+//!    profile's [`AudioSplit`] slides a single node↔browser cut along
+//!    that chain: `Server` pulls the whole spine node-side (headless
+//!    transcription), `Browser` pushes it browser-side, `Balanced`
+//!    leaves the authored placement. One ordered knob instead of three
+//!    independent per-block overrides — which keeps the boundary a
+//!    single monotonic node→browser crossing `env_split` can realise.
 //!
 //! The pass runs after [`compose_source`](crate::compose) and
 //! [`inject_narrow_fft_taps`](crate::inject_narrow_fft) and before
@@ -31,9 +33,70 @@ use serde_json::Value;
 use crate::doc::{BlockInstanceDecl, Environment, FlowgraphDoc};
 use crate::validate::split_endpoint;
 
+/// Where the audio-processing spine is cut between the node daemon and
+/// the browser. The post-source audio path is a linear chain —
+/// `demod → audio-resample → noise-reduce → AudioSink` — and `env_split`
+/// only supports a single **node→browser** crossing along it. So rather
+/// than three independent per-block placement knobs (which can encode an
+/// illegal browser→node crossing — e.g. "NR browser, transcribe node"),
+/// one ordered setting slides that single cut down the chain. Every
+/// spine block before the cut runs node; everything at or after it runs
+/// browser. Because the chain is topologically ordered, every crossing
+/// is node→browser by construction — illegal states are unrepresentable.
+///
+/// `AudioSink` is `Placement::WasmOnly`, so the cut can never pass it:
+/// the final WebAudio sink always runs browser-side. "Server" therefore
+/// means "everything up to (and feeding) the sink runs node".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioSplit {
+    /// Thin server: push the whole spine (demod onward) browser-side.
+    /// IQ is streamed across and demodulated in the browser. Heaviest on
+    /// the client, lightest on the daemon.
+    Browser,
+    /// Leave each spine block at its preset-authored placement (the
+    /// default). Demod typically node, audio-render + NR browser — the
+    /// historical behaviour, preserved exactly so this is a no-op.
+    Balanced,
+    /// Headless: pull the whole spine node-side. Demod, resample, and NR
+    /// run in `ferrited`; a node-placed `VoiceTranscribe` tap therefore
+    /// has node-side audio to read, so whisper runs with no browser. The
+    /// (forced-browser) `AudioSink` still receives finished audio over
+    /// the one remaining node→browser crossing.
+    Server,
+}
+
+impl AudioSplit {
+    /// The placement a spine block should adopt under this split, or
+    /// `None` to leave its authored placement (Balanced). Applied
+    /// uniformly to every spine role, which is what keeps the cut a
+    /// single monotonic boundary.
+    fn override_env(self) -> Option<Environment> {
+        match self {
+            Self::Browser => Some(Environment::Browser),
+            Self::Server => Some(Environment::Node),
+            Self::Balanced => None,
+        }
+    }
+
+    /// Placement for a *newly injected* spine block (the `VoiceTranscribe`
+    /// tap) that has no authored placement to fall back on. `Server` →
+    /// node (headless); everything else → browser (the default audio
+    /// side). Distinct from [`override_env`] only in that `Balanced`
+    /// resolves to a concrete side rather than "leave as authored",
+    /// because there's nothing authored to leave.
+    #[must_use]
+    pub fn tap_placement(self) -> Environment {
+        match self {
+            Self::Server => Environment::Node,
+            Self::Browser | Self::Balanced => Environment::Browser,
+        }
+    }
+}
+
 /// User-facing runtime knobs that affect doc shape independently of
-/// preset authoring. `Default` keeps the audio chain enabled and
-/// leaves placement decisions to the preset author.
+/// preset authoring. `Default` keeps the audio chain enabled and leaves
+/// placement at the preset author's choice (`AudioSplit::Balanced`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
@@ -44,33 +107,16 @@ pub struct Profile {
     /// from being fed silence.
     pub audio: bool,
     /// When true, a `VoiceTranscribe` tap is spliced before every
-    /// `AudioSink` (browser-side speech-to-text). Default false —
-    /// transcription is opt-in via the receiver's Audio control, the
-    /// same build-time mechanism as `audio`. Implies `audio` (the tap
-    /// sits on the audio chain); the UI never sets it without `audio`.
+    /// `AudioSink` (speech-to-text). Default false — transcription is
+    /// opt-in via the receiver's Audio control, the same build-time
+    /// mechanism as `audio`. Implies `audio` (the tap sits on the audio
+    /// chain); the UI never sets it without `audio`. The tap follows
+    /// `audio_split`: node-side (headless) under `Server`, else browser.
     pub transcribe: bool,
-    /// Override placement for blocks tagged `"placement_role": "demod"`.
-    /// `None` leaves the preset's authored placement in effect; on
-    /// flip, the bridge crossing relocates automatically because the
-    /// post-split env_split pass dispatches on the source port's type.
-    pub demod_placement: Option<Environment>,
-    /// Override placement for blocks tagged `"placement_role": "nr"`
-    /// (the audio noise-reduction chain). Same mechanism as
-    /// `demod_placement`: `None` leaves the authored side in effect.
-    /// `AudioNrMono`/`AudioNrStereo` are `Placement::Either` and pure
-    /// Rust (wasm-clean), so they run on either half; flipping this
-    /// relocates the F32 audio bridge automatically at split time.
-    /// Pushing NR node-side lets the headless daemon clean audio for
-    /// node-side consumers (e.g. a future node-side transcribe) without
-    /// a browser; leaving it browser-side keeps the server lighter.
-    pub nr_placement: Option<Environment>,
-
-    /// Transcription side: which side runs `VoiceTranscribe` (the STT
-    /// tap). `placement_role: "transcribe"`-tagged blocks adopt this.
-    /// `Some(Node)` is the headless path — whisper runs in `ferrited`,
-    /// no browser required. `None` leaves the authored side in effect.
-    #[serde(default)]
-    pub transcribe_placement: Option<Environment>,
+    /// Where the audio spine is cut between daemon and browser — one
+    /// ordered setting over what used to be three independent per-block
+    /// placement overrides. See [`AudioSplit`].
+    pub audio_split: AudioSplit,
 }
 
 impl Default for Profile {
@@ -78,9 +124,7 @@ impl Default for Profile {
         Self {
             audio: true,
             transcribe: false,
-            demod_placement: None,
-            nr_placement: None,
-            transcribe_placement: None,
+            audio_split: AudioSplit::Balanced,
         }
     }
 }
@@ -127,22 +171,28 @@ pub fn apply_profile(doc: &mut FlowgraphDoc, profile: &Profile) {
         });
     }
 
-    // Placement-role overrides: a `placement_role`-tagged block adopts
-    // the matching profile field when set. Same mechanism for every
-    // role; `env_split` relocates the inserted bridge by port type, so
-    // adding a role is just a tag + a `Profile` field + one arm here.
-    for b in doc.blocks.values_mut() {
-        let role = b.placement_role.as_deref();
-        let override_env = match role {
-            Some("demod") => profile.demod_placement,
-            Some("nr") => profile.nr_placement,
-            Some("transcribe") => profile.transcribe_placement,
-            _ => None,
-        };
-        if let Some(env) = override_env {
-            b.placement = Some(env);
+    // Audio-spine cut: every block on the audio path carries a
+    // `placement_role` (`demod` / `audio` / `nr` / `transcribe`), and
+    // `audio_split` moves them all to the same side — node before the
+    // cut, browser after. Applying one override uniformly to every spine
+    // role is what keeps the boundary a single monotonic node→browser
+    // crossing: there's no way to express a browser-upstream/node-
+    // downstream pair, so `env_split` can't be handed an illegal
+    // crossing. `Balanced` is `None` → authored placement preserved.
+    if let Some(env) = profile.audio_split.override_env() {
+        for b in doc.blocks.values_mut() {
+            if is_spine_role(b.placement_role.as_deref()) {
+                b.placement = Some(env);
+            }
         }
     }
+}
+
+/// Whether a `placement_role` tag names a block on the audio spine —
+/// the linear chain the `audio_split` cut slides along. New audio-path
+/// blocks join the cut just by carrying one of these roles.
+fn is_spine_role(role: Option<&str>) -> bool {
+    matches!(role, Some("demod" | "audio" | "nr" | "transcribe"))
 }
 
 fn block_passes(b: &BlockInstanceDecl, p: &Profile) -> bool {
@@ -188,9 +238,7 @@ mod tests {
             &Profile {
                 audio: false,
                 transcribe: false,
-                demod_placement: None,
-                nr_placement: None,
-                transcribe_placement: None,
+                audio_split: AudioSplit::Balanced,
             },
         );
         assert!(doc.blocks.contains_key("src"));
@@ -236,128 +284,128 @@ mod tests {
             &Profile {
                 audio: false,
                 transcribe: false,
-                demod_placement: None,
-                nr_placement: None,
-                transcribe_placement: None,
+                audio_split: AudioSplit::Balanced,
             },
         );
         // The "freshness_v9" key isn't on Profile, so the block is kept.
         assert!(doc.blocks.contains_key("future"));
     }
 
-    #[test]
-    fn demod_placement_rewrites_role_tagged_blocks_only() {
-        let mut doc = doc_from(
+    /// A representative audio spine: demod (node) → audio-resample
+    /// (browser) → NR (browser) → transcribe tap (browser) → AudioSink
+    /// (browser, the fixed `WasmOnly` floor — untagged, never moves),
+    /// plus an unrelated untagged block. Used by the `audio_split` cut
+    /// tests. The movable spine = the four role-tagged blocks.
+    fn spine_doc() -> FlowgraphDoc {
+        doc_from(
             r#"{
                 "name": "t",
                 "environments": ["node", "browser"],
                 "blocks": {
-                    "demod": {"type": "FmDemod", "placement": "node",
-                              "placement_role": "demod"},
-                    "other": {"type": "X", "placement": "node"}
+                    "demod":  {"type": "FmDemod", "placement": "node",
+                               "placement_role": "demod"},
+                    "resamp": {"type": "RealF32Resamp", "placement": "browser",
+                               "placement_role": "audio"},
+                    "nr":     {"type": "AudioNrMono", "placement": "browser",
+                               "placement_role": "nr"},
+                    "vt":     {"type": "VoiceTranscribe", "placement": "browser",
+                               "placement_role": "transcribe"},
+                    "audio":  {"type": "AudioSink", "placement": "browser"},
+                    "other":  {"type": "X", "placement": "node"}
                 },
                 "wires": []
             }"#,
-        );
-        apply_profile(
-            &mut doc,
-            &Profile {
-                audio: true,
-                transcribe: false,
-                demod_placement: Some(Environment::Browser),
-                nr_placement: None,
-                transcribe_placement: None,
-            },
-        );
+        )
+    }
+
+    /// The movable spine, in flow order. The AudioSink is the fixed
+    /// browser floor and is deliberately not in this list.
+    const SPINE: [&str; 4] = ["demod", "resamp", "nr", "vt"];
+
+    fn split_profile(split: AudioSplit) -> Profile {
+        Profile {
+            audio: true,
+            transcribe: false,
+            audio_split: split,
+        }
+    }
+
+    #[test]
+    fn server_split_pulls_whole_spine_node_side() {
+        // The headless cut: every movable spine block → node, so a
+        // node-placed transcribe tap has node-side audio to read. The
+        // WasmOnly sink stays browser; untagged blocks aren't touched.
+        let mut doc = spine_doc();
+        apply_profile(&mut doc, &split_profile(AudioSplit::Server));
+        for id in SPINE {
+            assert_eq!(
+                doc.blocks[id].placement,
+                Some(Environment::Node),
+                "{id} pulled node-side"
+            );
+        }
         assert_eq!(
-            doc.blocks["demod"].placement,
+            doc.blocks["audio"].placement,
             Some(Environment::Browser),
-            "demod-tagged block moved"
-        );
-        assert_eq!(
-            doc.blocks["other"].placement,
-            Some(Environment::Node),
-            "untagged block untouched"
+            "AudioSink stays browser (WasmOnly floor)"
         );
     }
 
     #[test]
-    fn nr_placement_rewrites_nr_role_only_and_is_independent_of_demod() {
-        // `nr_placement` moves the NR-tagged block; demod stays where
-        // authored (its own override is None). Proves the two roles are
-        // dispatched independently by the generalized rewrite loop.
-        let mut doc = doc_from(
-            r#"{
-                "name": "t",
-                "environments": ["node", "browser"],
-                "blocks": {
-                    "demod":   {"type": "FmDemod", "placement": "node",
-                                "placement_role": "demod"},
-                    "audio_nr":{"type": "AudioNrMono", "placement": "browser",
-                                "placement_role": "nr"}
-                },
-                "wires": []
-            }"#,
-        );
-        apply_profile(
-            &mut doc,
-            &Profile {
-                audio: true,
-                transcribe: false,
-                demod_placement: None,
-                nr_placement: Some(Environment::Node),
-                transcribe_placement: None,
-            },
-        );
-        assert_eq!(
-            doc.blocks["audio_nr"].placement,
-            Some(Environment::Node),
-            "nr-tagged block moved node-side"
-        );
-        assert_eq!(
-            doc.blocks["demod"].placement,
-            Some(Environment::Node),
-            "demod left at its authored placement (no demod override)"
-        );
+    fn browser_split_pushes_whole_spine_browser_side() {
+        let mut doc = spine_doc();
+        apply_profile(&mut doc, &split_profile(AudioSplit::Browser));
+        for id in SPINE {
+            assert_eq!(
+                doc.blocks[id].placement,
+                Some(Environment::Browser),
+                "{id} pushed browser-side"
+            );
+        }
+        // Untagged block keeps its authored side — the cut only moves
+        // the spine.
+        assert_eq!(doc.blocks["other"].placement, Some(Environment::Node));
     }
 
     #[test]
-    fn transcribe_placement_rewrites_transcribe_role_only() {
-        // `transcribe_placement` moves the STT-tagged block node-side
-        // (the headless path) and leaves other roles where authored.
-        let mut doc = doc_from(
-            r#"{
-                "name": "t",
-                "environments": ["node", "browser"],
-                "blocks": {
-                    "vt":  {"type": "VoiceTranscribe", "placement": "browser",
-                            "placement_role": "transcribe"},
-                    "nr":  {"type": "AudioNrMono", "placement": "browser",
-                            "placement_role": "nr"}
-                },
-                "wires": []
-            }"#,
-        );
-        apply_profile(
-            &mut doc,
-            &Profile {
-                audio: true,
-                transcribe: false,
-                demod_placement: None,
-                nr_placement: None,
-                transcribe_placement: Some(Environment::Node),
-            },
-        );
-        assert_eq!(
-            doc.blocks["vt"].placement,
-            Some(Environment::Node),
-            "transcribe-tagged block moved node-side"
-        );
-        assert_eq!(
-            doc.blocks["nr"].placement,
-            Some(Environment::Browser),
-            "nr left at authored placement (no nr override)"
-        );
+    fn balanced_split_leaves_authored_placement() {
+        // The default: no spine block moves — every placement is exactly
+        // what the preset authored. This is the property that makes the
+        // collapse a no-op for existing presets.
+        let mut doc = spine_doc();
+        apply_profile(&mut doc, &split_profile(AudioSplit::Balanced));
+        assert_eq!(doc.blocks["demod"].placement, Some(Environment::Node));
+        assert_eq!(doc.blocks["resamp"].placement, Some(Environment::Browser));
+        assert_eq!(doc.blocks["nr"].placement, Some(Environment::Browser));
+        assert_eq!(doc.blocks["vt"].placement, Some(Environment::Browser));
+        assert_eq!(doc.blocks["audio"].placement, Some(Environment::Browser));
+    }
+
+    #[test]
+    fn split_never_creates_a_browser_to_node_crossing() {
+        // The core safety property: whatever the split, the chain stays
+        // monotonic node→…→browser, so no upstream block is browser
+        // while a downstream one is node — `env_split` is never handed
+        // an illegal crossing. Check the full flow order incl. the sink.
+        for split in [
+            AudioSplit::Browser,
+            AudioSplit::Balanced,
+            AudioSplit::Server,
+        ] {
+            let mut doc = spine_doc();
+            apply_profile(&mut doc, &split_profile(split));
+            let mut seen_browser = false;
+            for id in ["demod", "resamp", "nr", "vt", "audio"] {
+                if doc.blocks[id].placement == Some(Environment::Browser) {
+                    seen_browser = true;
+                } else {
+                    assert!(
+                        !seen_browser,
+                        "{split:?}: node block {id} downstream of a browser block — illegal crossing"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -396,9 +444,7 @@ mod tests {
             &Profile {
                 audio: false,
                 transcribe: false,
-                demod_placement: None,
-                nr_placement: None,
-                transcribe_placement: None,
+                audio_split: AudioSplit::Balanced,
             },
         );
         assert!(doc.blocks.is_empty());
@@ -426,7 +472,7 @@ mod tests {
         apply_profile(&mut doc, &Profile::default());
         assert_eq!(doc.blocks.len(), original.blocks.len());
         assert_eq!(doc.wires, original.wires);
-        // Authored placement preserved (no demod_placement override).
+        // Authored placement preserved (Balanced split = no override).
         assert_eq!(doc.blocks["src"].placement, Some(Environment::Node));
     }
 
@@ -434,14 +480,14 @@ mod tests {
     fn profile_round_trips_through_json() {
         let p = Profile {
             audio: false,
-            transcribe: false,
-            demod_placement: Some(Environment::Browser),
-            nr_placement: None,
-            transcribe_placement: None,
+            transcribe: true,
+            audio_split: AudioSplit::Server,
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: Profile = serde_json::from_str(&s).unwrap();
         assert_eq!(back, p);
+        // `audio_split` serializes as a lowercase string tag.
+        assert!(s.contains("\"audio_split\":\"server\""), "got {s}");
         // Default-on-deserialize: an empty `{}` gives the defaults so
         // the API surface can ship an optional `profile` field without
         // breaking older clients.
@@ -487,9 +533,7 @@ mod tests {
         let profile = Profile {
             audio: false,
             transcribe: false,
-            demod_placement: None,
-            nr_placement: None,
-            transcribe_placement: None,
+            audio_split: AudioSplit::Balanced,
         };
         apply_profile(&mut doc, &profile);
         let snapshot = serde_json::to_value(&doc).unwrap();

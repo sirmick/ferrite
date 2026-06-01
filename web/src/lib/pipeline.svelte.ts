@@ -103,11 +103,11 @@ class PipelineStore {
    *  stable for the session (the presets dir isn't watched). */
   presets = $state<PresetEntry[]>([]);
 
-  /** Runtime profile applied before the env-split pass. Today: `audio`
-   *  gates the audio chain, `demod_placement` overrides where the
-   *  `placement_role: "demod"` block lives. Hydrated from server state
-   *  on `init()` (so a reload preserves the user's choice — server is
-   *  the source of truth, not localStorage). */
+  /** Runtime profile applied before the env-split pass: `audio` gates
+   *  the audio chain, `audio_split` slides the node↔browser cut along
+   *  the audio spine (browser | balanced | server). Hydrated from server
+   *  state on `init()` (so a reload preserves the user's choice — server
+   *  is the source of truth, not localStorage). */
   profile = $state<Profile>({ ...DEFAULT_PROFILE });
 
   /** Hardware/software capabilities of the currently-active source.
@@ -155,9 +155,9 @@ class PipelineStore {
       this.sourceCaps = caps;
       this.profile = profile;
       // Hydrate from URL params if present (`?audio=off` /
-      // `?demod=node|browser`); a one-shot apply on first load so a
-      // shared link lands the user in the right state without an
-      // extra round trip.
+      // `?split=browser|balanced|server`); a one-shot apply on first
+      // load so a shared link lands the user in the right state without
+      // an extra round trip.
       await this.applyProfileFromUrl();
       this.client = new FrameClient({
         url: wsUrlFor('/ws/preset'),
@@ -474,8 +474,8 @@ class PipelineStore {
     }, 'set profile');
   }
 
-  /** One-shot: read `?audio=off` / `?demod=node|browser` from the
-   *  current URL on first load and call [`setProfile`] when they
+  /** One-shot: read `?audio=off` / `?split=browser|balanced|server` from
+   *  the current URL on first load and call [`setProfile`] when they
    *  differ from the server's idea. Lets a shared link land the user
    *  in the right state without a manual second click. */
   private async applyProfileFromUrl(): Promise<void> {
@@ -487,10 +487,10 @@ class PipelineStore {
       next.audio = params.get('audio') !== 'off';
       touched = true;
     }
-    if (params.has('demod')) {
-      const v = params.get('demod');
-      if (v === 'node' || v === 'browser') {
-        next.demod_placement = v;
+    if (params.has('split')) {
+      const v = params.get('split');
+      if (v === 'browser' || v === 'balanced' || v === 'server') {
+        next.audio_split = v;
         touched = true;
       }
     }
@@ -507,10 +507,11 @@ class PipelineStore {
     } else {
       url.searchParams.set('audio', 'off');
     }
-    if (this.profile.demod_placement) {
-      url.searchParams.set('demod', this.profile.demod_placement);
+    // Only the non-default split rides the URL (keeps shared links clean).
+    if (this.profile.audio_split !== 'balanced') {
+      url.searchParams.set('split', this.profile.audio_split);
     } else {
-      url.searchParams.delete('demod');
+      url.searchParams.delete('split');
     }
     // SvelteKit owns the navigation history; its `replaceState`
     // wrapper updates the URL without invoking a route load. Calling
@@ -678,7 +679,7 @@ function sourceEquals(a: SourceConfig, b: SourceConfig): boolean {
 }
 
 function profileEquals(a: Profile, b: Profile): boolean {
-  return a.audio === b.audio && a.demod_placement === b.demod_placement;
+  return a.audio === b.audio && a.transcribe === b.transcribe && a.audio_split === b.audio_split;
 }
 
 function indexByName(sinks: UiSink[]): Record<string, UiSink> {

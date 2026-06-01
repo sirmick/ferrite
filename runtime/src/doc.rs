@@ -72,11 +72,13 @@ pub struct BlockInstanceDecl {
     /// strips them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<std::collections::BTreeMap<String, serde_json::Value>>,
-    /// Optional semantic tag for [`apply_profile`](crate::apply_profile)
-    /// placement overrides. Today the only well-known role is
-    /// `"demod"` — tagging a block lets a profile's `demod_placement`
-    /// flip it between "node" and "browser" without rewriting the
-    /// preset JSON.
+    /// Optional semantic tag marking a block on the audio spine for
+    /// [`apply_profile`](crate::apply_profile)'s `audio_split` cut.
+    /// Well-known roles: `"demod"`, `"audio"` (audio-rate resample),
+    /// `"nr"` (noise reduction), `"transcribe"` (the STT tap). The split
+    /// moves every tagged block to the same side, keeping the
+    /// node↔browser boundary a single monotonic crossing — no preset
+    /// JSON edit needed to run the chain headless or fully in-browser.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_role: Option<String>,
 }

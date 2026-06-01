@@ -33,7 +33,7 @@
 use serde_json::json;
 
 use crate::apply_profile::Profile;
-use crate::doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
+use crate::doc::{BlockInstanceDecl, FlowgraphDoc, Wire};
 
 /// Synthetic-block id prefix. `__` matches the convention `env_split`
 /// and `inject_narrow_fft` already use; no registry block starts `__`.
@@ -116,16 +116,16 @@ pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc, profile: &Profile) {
             "ui:transcribe".to_string(),
         ));
 
-        // Placement: `transcribe_placement` chooses the side (default
-        // Browser — the legacy in-browser STT). `Some(Node)` is the
-        // headless path: whisper runs in `ferrited`, no browser needed.
-        // We also tag `placement_role: "transcribe"` for introspection
-        // and so a later re-`apply_profile` would flip it consistently
-        // (this pass runs *after* apply_profile, so we set placement
-        // directly here rather than relying on that rewrite).
-        // `mode: "on"` — the tap only exists when transcription is
-        // engaged, so it's active on injection (audio plays + STT).
-        let placement = profile.transcribe_placement.unwrap_or(Environment::Browser);
+        // Placement follows the audio-spine cut: `Server` → node (the
+        // headless path, whisper in `ferrited`); `Browser`/`Balanced` →
+        // browser (the legacy in-browser STT). The tap is newly injected
+        // with no authored placement, so `Balanced` defaults to browser.
+        // Under `Server` the whole upstream audio chain is already node
+        // (apply_profile ran first), so a node tap reads node-side audio
+        // with no illegal crossing. We still tag `placement_role:
+        // "transcribe"` for introspection / a later re-apply. `mode:
+        // "on"` — the tap only exists when transcription is engaged.
+        let placement = profile.audio_split.tap_placement();
         doc.blocks.insert(
             vt_id,
             BlockInstanceDecl {
@@ -143,21 +143,21 @@ pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc, profile: &Profile) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::FlowgraphDoc;
+    use crate::apply_profile::AudioSplit;
+    use crate::doc::{Environment, FlowgraphDoc};
 
     fn parse(json: &[u8]) -> FlowgraphDoc {
         FlowgraphDoc::from_json(json).expect("doc parses")
     }
 
     /// Profile with transcription engaged (the receiver's "Transcribe"
-    /// state — implies `audio`).
+    /// state — implies `audio`). `Balanced` split = browser tap, the
+    /// default in-browser path.
     fn engaged() -> Profile {
         Profile {
             audio: true,
             transcribe: true,
-            demod_placement: None,
-            nr_placement: None,
-            transcribe_placement: None,
+            audio_split: AudioSplit::Balanced,
         }
     }
 
@@ -259,10 +259,10 @@ mod tests {
 
     #[test]
     fn transcribe_placement_node_runs_the_tap_server_side() {
-        // The headless path: `transcribe_placement: Node` puts the
-        // injected VoiceTranscribe on the node side so whisper runs in
-        // `ferrited` with no browser. The events wire is unchanged —
-        // env_split turns it into a node→browser bridge.
+        // The headless path: `AudioSplit::Server` puts the injected
+        // VoiceTranscribe on the node side so whisper runs in `ferrited`
+        // with no browser. The events wire is unchanged — env_split turns
+        // it into a node→browser bridge.
         let mut doc = parse(
             br#"{
                 "name": "audio",
@@ -281,9 +281,7 @@ mod tests {
         let profile = Profile {
             audio: true,
             transcribe: true,
-            demod_placement: None,
-            nr_placement: None,
-            transcribe_placement: Some(Environment::Node),
+            audio_split: AudioSplit::Server,
         };
         inject_voice_transcribe(&mut doc, &profile);
 

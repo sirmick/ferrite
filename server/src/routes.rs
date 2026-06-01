@@ -888,10 +888,11 @@ pub async fn patch_profile(
     Json(profile): Json<Profile>,
 ) -> Result<Json<Profile>, (StatusCode, Json<ApiError>)> {
     // Transactional swap: stash the previous profile, apply the new
-    // one, then re-compose. If the compose fails (e.g. flipping
-    // `demod_placement` produces an unsupported browser→node wire),
-    // roll the profile back so subsequent preset loads don't carry
-    // forward the bad state.
+    // one, then re-compose. If the compose fails (a malformed preset
+    // could still yield an unsupported browser→node wire), roll the
+    // profile back so subsequent preset loads don't carry forward the
+    // bad state. (The `audio_split` cut is monotonic by construction and
+    // can't itself create one, but the rollback stays as a guard.)
     let prev = state.get_profile().await;
     state.set_profile(profile.clone()).await;
     let current = state.get_flowgraph().await;

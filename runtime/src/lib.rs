@@ -29,7 +29,7 @@ pub mod validate;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-pub use apply_profile::{apply_profile, Profile};
+pub use apply_profile::{apply_profile, AudioSplit, Profile};
 pub use block_registry::{instantiate_blocks, BlockMap, InventorySpecRegistry};
 pub use compose::{compose_source, ComposeError, SourceConfig, SOURCE_ID, SOURCE_SENTINEL_TYPE};
 pub use corpus::{validate_corpus, CorpusFinding};

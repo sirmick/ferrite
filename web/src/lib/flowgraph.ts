@@ -16,9 +16,10 @@ export interface BlockInstanceDecl {
    *  the active runtime profile. Unknown keys don't gate
    *  (forward-compat). Today the only recognized key is `"audio"`. */
   readonly when?: Readonly<Record<string, unknown>>;
-  /** Pre-split tag the profile rewrites against. Today `"demod"`
-   *  lets `Profile.demod_placement` flip this block's `placement`
-   *  field. */
+  /** Pre-split tag marking this block as part of the audio spine
+   *  (`"demod"` / `"audio"` / `"nr"` / `"transcribe"`). The profile's
+   *  `audio_split` moves every tagged block to the same side of the
+   *  node↔browser cut. */
   readonly placement_role?: string;
 }
 

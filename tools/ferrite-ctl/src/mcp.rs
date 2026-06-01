@@ -270,12 +270,13 @@ pub struct TranscribeArgs {
     /// `true` enables the VoiceTranscribe tap; `false` disables it.
     /// The pipeline rebuilds to splice the tap in/out.
     pub enabled: bool,
-    /// Where transcription runs. `"node"` is **headless**: whisper.cpp
-    /// runs in `ferrited` and needs no browser — read results with
-    /// `recent_decodes` filtered to `decoder::transcribe`. `"browser"`
-    /// (the default when omitted) runs the in-browser whisper worker and
-    /// needs a UI tab connected. Sets `transcribe_placement` on the
-    /// profile.
+    /// Where transcription runs. `"node"` is **headless**: it sets the
+    /// profile's audio split to `server`, pulling the whole audio chain
+    /// (demod → resample → NR → transcribe) into `ferrited` so whisper.cpp
+    /// runs with no browser — read results with `recent_decodes` filtered
+    /// to `decoder::transcribe`. `"browser"` sets the split to `browser`
+    /// (in-browser whisper, needs a UI tab). Omit to leave the current
+    /// split unchanged.
     #[serde(default)]
     pub placement: Option<String>,
     /// Optional "why" note surfaced in the UI's activity transcript.
@@ -1101,12 +1102,14 @@ impl FerriteServer {
         if args.enabled {
             profile.insert("audio".into(), Value::Bool(true));
         }
-        // `transcribe_placement` chooses headless (node) vs in-browser.
-        // Only touch it when a placement is given so we don't clobber a
-        // side the operator already picked.
+        // The audio split chooses headless (server) vs in-browser. Map
+        // the verb's node/browser to the split's server/browser. Only
+        // touch it when given, so we don't clobber a split the operator
+        // already picked.
         if let Some(p) = args.placement.as_deref() {
-            let v = match p {
-                "node" | "browser" => Value::String(p.to_string()),
+            let split = match p {
+                "node" => "server",
+                "browser" => "browser",
                 other => {
                     return Err(McpError::invalid_params(
                         format!("placement must be \"node\" or \"browser\", got {other:?}"),
@@ -1114,7 +1117,7 @@ impl FerriteServer {
                     ))
                 }
             };
-            profile.insert("transcribe_placement".into(), v);
+            profile.insert("audio_split".into(), Value::String(split.to_string()));
         }
         self.http
             .patch(
