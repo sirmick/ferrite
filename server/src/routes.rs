@@ -287,8 +287,19 @@ pub async fn post_chat_inject(Json(body): Json<serde_json::Value>) -> impl IntoR
 /// faster than the carrier emits is the right shape (1–2 s).
 #[derive(Deserialize)]
 pub struct RecentQuery {
+    /// Return only entries strictly after this unix-ms watermark. The
+    /// precise "what's new since I last polled" cursor — pass back the
+    /// previous response's `now` (or the largest `at_ms` seen).
     pub since: Option<u64>,
+    /// Convenience relative window: only entries from the last N seconds.
+    /// Resolved against the server clock into a `since` watermark, so it
+    /// composes with (and is overridden by an explicit) `since`. Default
+    /// behaviour with neither set is "all retained" (since = 0).
+    pub lookback: Option<f64>,
     pub category: Option<String>,
+    /// Keep only the newest `limit` entries (0 / unset = no cap). Applied
+    /// after filtering, so `tail`-style "just the last few" is cheap.
+    pub limit: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -311,12 +322,24 @@ pub async fn recent_decoder(
             "log broadcast not configured on this server",
         )
     })?;
-    let since = q.since.unwrap_or(0);
-    let entries = logs.recent(since, q.category.as_deref());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0);
+    // Resolve the watermark: explicit `since` wins; else `lookback`
+    // seconds back from now; else everything retained.
+    let since = q.since.unwrap_or_else(|| match q.lookback {
+        Some(secs) if secs > 0.0 => now.saturating_sub((secs * 1000.0) as u64),
+        _ => 0,
+    });
+    let mut entries = logs.recent(since, q.category.as_deref());
+    // `tail`: keep the newest `limit`. `recent` returns oldest→newest,
+    // so trim from the front.
+    if let Some(limit) = q.limit {
+        if limit > 0 && entries.len() > limit {
+            entries.drain(..entries.len() - limit);
+        }
+    }
     Ok(Json(RecentResponse { entries, now }))
 }
 

@@ -272,6 +272,9 @@ enum CaptureCmd {
         /// Opt into the preset-swap wideband capture.
         #[arg(long)]
         wideband: bool,
+        /// Proceed even if it would tear down an active transcription.
+        #[arg(long)]
+        force: bool,
     },
     /// Capture demodulated audio to disk (preset-swap; disruptive).
     Audio {
@@ -295,6 +298,9 @@ enum CaptureCmd {
         /// Output path. Defaults under `/tmp/ferrite-captures/`.
         #[arg(long)]
         out: Option<String>,
+        /// Proceed even if it would tear down an active transcription.
+        #[arg(long)]
+        force: bool,
     },
     /// Capture the byte-quantised FFT waterfall (live tee on `logmag`).
     Fft {
@@ -347,7 +353,12 @@ enum DecoderCmd {
         /// Pull entries emitted in the last N seconds.
         #[arg(long, default_value_t = 30.0)]
         lookback: f64,
-        /// Cap the number of entries printed (newest kept). 0 = no cap.
+        /// Incremental cursor: only entries strictly after this unix-ms
+        /// watermark. Pass the previous call's `now` to get just what's
+        /// new. Overrides `--lookback` when set.
+        #[arg(long)]
+        since: Option<u64>,
+        /// `tail` — print only the newest N entries (0 = no cap).
         #[arg(long, default_value_t = 0_usize)]
         limit: usize,
     },
@@ -584,12 +595,19 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
         Cmd::Decoder(DecoderCmd::Recent {
             category,
             lookback,
+            since,
             limit,
         }) => {
             let v = server
                 .recent_decodes_op(RecentDecodesArgs {
                     category: Some(category),
-                    lookback_secs: Some(lookback),
+                    since_ms: since,
+                    // An explicit --since supersedes the relative window.
+                    lookback_secs: if since.is_some() {
+                        None
+                    } else {
+                        Some(lookback)
+                    },
                     limit: if limit == 0 { None } else { Some(limit) },
                 })
                 .await
@@ -656,6 +674,7 @@ async fn capture(cmd: CaptureCmd, server: &FerriteServer, json: bool) -> Result<
             out,
             format,
             wideband,
+            force,
         } => {
             let args = StartCaptureArgs {
                 duration_s: duration,
@@ -666,6 +685,7 @@ async fn capture(cmd: CaptureCmd, server: &FerriteServer, json: bool) -> Result<
                 bandwidth_hz: parse_si_opt(bw.as_deref())?,
                 gain_db: gain,
                 format: Some(format),
+                force,
                 note: None,
             };
             (
@@ -681,6 +701,7 @@ async fn capture(cmd: CaptureCmd, server: &FerriteServer, json: bool) -> Result<
             gain,
             preset,
             out,
+            force,
         } => {
             let args = StartCaptureAudioArgs {
                 freq_hz: parse_si(&freq)?,
@@ -690,6 +711,7 @@ async fn capture(cmd: CaptureCmd, server: &FerriteServer, json: bool) -> Result<
                 gain_db: gain,
                 preset: Some(preset),
                 out,
+                force,
                 note: None,
             };
             (
@@ -767,6 +789,7 @@ async fn tail(
         let v = server
             .recent_decodes_op(RecentDecodesArgs {
                 category: Some(category.to_string()),
+                since_ms: None,
                 lookback_secs: Some(lb),
                 limit: None,
             })

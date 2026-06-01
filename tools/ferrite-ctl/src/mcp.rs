@@ -291,12 +291,20 @@ pub struct RecentDecodesArgs {
     /// `decoder::pocsag`, `decoder::transcribe`, `decoder::ft8`.
     #[serde(default)]
     pub category: Option<String>,
-    /// How far back to pull entries (seconds). Default 30. Buffer
-    /// caps at ~4096 entries, so very long lookbacks are bounded.
+    /// **Incremental polling cursor.** Return only entries strictly after
+    /// this unix-ms watermark. Pass back the previous response's `now`
+    /// field (which advances even through quiet stretches) to get exactly
+    /// "what's new since I last looked" — no re-reading the whole buffer.
+    /// Wins over `lookback_secs` when both are set.
+    #[serde(default)]
+    pub since_ms: Option<u64>,
+    /// Relative window: only entries from the last N seconds. Convenient
+    /// for a one-shot "what landed recently?"; for repeated polling prefer
+    /// `since_ms`. Default (with no `since_ms`) is "all retained".
     #[serde(default)]
     pub lookback_secs: Option<f64>,
-    /// Cap the number of entries returned (newest kept). 0 / unset
-    /// = no cap.
+    /// `tail` — keep only the newest `limit` entries (0 / unset = no cap).
+    /// Applied after the time filter, so `limit: 5` is "the last 5 lines".
     #[serde(default)]
     pub limit: Option<usize>,
 }
@@ -360,6 +368,11 @@ pub struct StartCaptureArgs {
     /// Wideband IQ only. `cf32` (default) or `wav-s16`.
     #[serde(default)]
     pub format: Option<String>,
+    /// Wideband IQ only. Proceed even when an active transcription session
+    /// would be torn down by the preset swap (default false = refuse).
+    /// Ignored by the non-disruptive live narrowband path.
+    #[serde(default)]
+    pub force: bool,
     /// Optional "why" note surfaced in the UI's activity transcript.
     #[serde(default)]
     pub note: Option<String>,
@@ -390,6 +403,11 @@ pub struct StartCaptureAudioArgs {
     /// `/tmp/ferrite-captures/audio-<unix_ms>-<freq>mhz.wav`.
     #[serde(default)]
     pub out: Option<String>,
+    /// Proceed even when an active transcription session would be torn
+    /// down by the recording-preset swap (default false = refuse with a
+    /// clear error, so a live transcribe graph isn't silently dropped).
+    #[serde(default)]
+    pub force: bool,
     /// Optional "why" note surfaced in the UI's activity transcript.
     #[serde(default)]
     pub note: Option<String>,
@@ -1137,6 +1155,9 @@ impl FerriteServer {
             "category={}",
             args.category.as_deref().unwrap_or("decoder")
         )];
+        if let Some(since) = args.since_ms {
+            q.push(format!("since={since}"));
+        }
         if let Some(lb) = args.lookback_secs {
             q.push(format!("lookback={lb}"));
         }
@@ -1384,12 +1405,43 @@ impl FerriteServer {
         serialize_job(&job)
     }
 
+    /// Refuse a preset-swapping capture when it would silently tear down
+    /// an active transcription (or other audio-profile) session. The
+    /// `start_capture_audio` / wideband-IQ paths load a `*-record` preset,
+    /// which replaces the whole running graph — including an injected
+    /// `VoiceTranscribe` tap. Without this guard the tap just vanishes and
+    /// decodes stop with no error (the trap that bit a live session). The
+    /// caller can pass `force: true` to proceed anyway.
+    async fn guard_active_audio_profile(&self, force: bool, what: &str) -> Result<(), McpError> {
+        if force {
+            return Ok(());
+        }
+        let profile = self.http.get("/api/profile").await.unwrap_or(Value::Null);
+        let transcribing = profile
+            .get("transcribe")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if transcribing {
+            return Err(McpError::invalid_params(
+                format!(
+                    "{what} loads a recording preset, which would tear down the active \
+                     transcription session (the running graph is replaced). Stop transcription \
+                     first (`transcribe` enabled=false) or pass `force: true` to proceed anyway."
+                ),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn start_capture_audio_op(
         &self,
         args: StartCaptureAudioArgs,
     ) -> Result<Value, McpError> {
         let duration = args.duration_s.unwrap_or(10.0);
         validate_duration(duration)?;
+        self.guard_active_audio_profile(args.force, "start_capture_audio")
+            .await?;
         let rate = args.sample_rate_hz.unwrap_or(2_400_000.0);
         let bw = args.bandwidth_hz.unwrap_or(rate);
         let preset = args
@@ -1438,6 +1490,8 @@ impl FerriteServer {
         let freq = args.freq_hz.ok_or_else(|| {
             McpError::invalid_params("wideband IQ capture requires `freq_hz`", None)
         })?;
+        self.guard_active_audio_profile(args.force, "wideband IQ capture")
+            .await?;
         let rate = args.sample_rate_hz.unwrap_or(2_000_000.0);
         let bw = args.bandwidth_hz.unwrap_or(rate);
         let format = args.format.clone().unwrap_or_else(|| "cf32".into());
@@ -1737,7 +1791,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Toggle the in-browser speech-to-text tap on a voice preset. Splices a VoiceTranscribe block before the AudioSink (`transcribe` implies `audio`). Whisper.cpp runs in the operator's browser — a UI tab must be connected for decodes to flow. Read the result back with `recent_decodes` filtered to `decoder::transcribe`. Use a *listen* preset (`wbfm`, `nbfm`, `usb`, `lsb`, `wbam`), not a headless `*-record` preset."
+        description = "Toggle the speech-to-text tap on a voice preset. Splices a VoiceTranscribe block before the AudioSink (`transcribe` implies `audio`). `placement: \"node\"` is **headless** — whisper.cpp runs in `ferrited`, no browser needed (sets the audio split to `server`, pulling the whole audio chain node-side); `\"browser\"` runs whisper in a connected UI tab. Either way read decodes with `recent_decodes` filtered to `decoder::transcribe`. Use a *listen* preset (`wbfm`, `nbfm`, `usb`, `lsb`, `wbam`), not a headless `*-record` preset."
     )]
     async fn transcribe(
         &self,
@@ -1747,7 +1801,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Recent decoder-log entries — the AI's 'did any decode land?' check. `category` filters on a tracing target prefix (defaults to `decoder` = everything decoder-side); examples: `decoder::rtl_433`, `decoder::pocsag`, `decoder::transcribe`, `decoder::ft8`, `decoder::ais`. `lookback_secs` (default 30) bounds how far back to scan; `limit` (default 0 = no cap) trims to the newest N entries."
+        description = "Recent decoder-log entries — the AI's 'did any decode land?' check. `category` filters on a tracing target prefix (defaults to `decoder` = everything decoder-side); examples: `decoder::rtl_433`, `decoder::pocsag`, `decoder::transcribe`, `decoder::ft8`, `decoder::ais`. **For incremental polling pass `since_ms` = the previous response's `now` field** to get only what's new (the response always echoes a `now` watermark that advances even through quiet stretches). One-shot: `lookback_secs` is a relative window; `limit` is `tail` (newest N). The decoder ring retains ~4096 entries, so without `since_ms`/`lookback_secs`/`limit` you get the whole buffer — set one of them."
     )]
     async fn recent_decodes(
         &self,
