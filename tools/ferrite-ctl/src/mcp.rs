@@ -329,6 +329,15 @@ pub struct SignalsArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DecodesArgs {
+    /// Decoder kind to fetch — `aprs`, `adsb`, `ais`, `ft8`, `wspr`,
+    /// `pager`, `transcribe`, `signals`, `rds`, … Omit for the whole
+    /// store (every kind at once).
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PresetDetailArgs {
     /// Preset basename — matches `flowgraphs/<name>.json` on the
     /// daemon. Use `list_presets` to see what's loadable.
@@ -1082,6 +1091,14 @@ impl FerriteServer {
         let path = match args.max_age_ms {
             Some(ms) => format!("/api/signals?max_age_ms={ms}"),
             None => "/api/signals".to_string(),
+        };
+        self.http.get(&path).await
+    }
+
+    pub(crate) async fn decodes_op(&self, args: DecodesArgs) -> Result<Value, McpError> {
+        let path = match args.kind {
+            Some(k) => format!("/api/decodes/{k}"),
+            None => "/api/decodes".to_string(),
         };
         self.http.get(&path).await
     }
@@ -1867,6 +1884,16 @@ impl FerriteServer {
         Parameters(args): Parameters<SignalsArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_json(&self.signals_op(args).await?)
+    }
+
+    #[tool(
+        description = "Structured decoder output from the server-side DecoderStore — the single home for every event-emitting demod (APRS, ADS-B, AIS, FT8, WSPR, pager, transcribe, signals, RDS, …). With `kind` returns that kind as `{recent:[…], current:{…}}`: `recent` is a time-ordered append log (ft8/wspr/pager/transcribe/…); `current` is a keyed table (adsb by icao, aprs by call, ais by mmsi) or the single latest snapshot (signals/rds/rssi). Omit `kind` for the whole store `{seq, kinds:{…}}`. This is the same structured state the advanced UI views paint — captured server-side, so it works headless. Prefer this over scraping `recent_decodes` text for these decoders. Records carry `{seq, at_ms, key?, data}` where `data` is the decoder's JSON verbatim."
+    )]
+    async fn decodes(
+        &self,
+        Parameters(args): Parameters<DecodesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.decodes_op(args).await?)
     }
 
     #[tool(

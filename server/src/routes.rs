@@ -710,6 +710,35 @@ pub async fn get_flowdiag(
     Json(state.flowdiag().await)
 }
 
+/// `GET /api/decodes` — full structured-decoder snapshot from the
+/// server-side `DecoderStore` (every kind: aprs/adsb/ft8/signals/…), as
+/// `{ seq, kinds: { <kind>: { recent[], current{} } } }`. The single read
+/// path for MCP/headless and the browser mirror's initial fetch.
+pub async fn get_decodes(
+    State(state): State<AppState>,
+) -> Json<crate::decoder_store::StoreSnapshot> {
+    Json(state.decoder_store().snapshot())
+}
+
+/// `GET /api/decodes/:kind` — one decoder kind's state (`recent` log +
+/// `current` keyed table). `null` when the kind has produced nothing.
+pub async fn get_decodes_kind(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+) -> Json<Option<crate::decoder_store::KindState>> {
+    Json(state.decoder_store().snapshot_kind(&kind))
+}
+
+/// `POST /api/decodes/:kind/reset` — clear one decoder kind (operator /
+/// MCP "clear"). Broadcasts a reset delta to mirrors.
+pub async fn reset_decodes_kind(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+) -> Json<serde_json::Value> {
+    state.decoder_store().reset_kind(&kind);
+    Json(serde_json::json!({ "ok": true, "kind": kind }))
+}
+
 /// `GET /api/source/readback` — the latest 1 Hz cached SoapySource
 /// driver readback (current gain, AGC state, etc.). `null` when the
 /// pipeline is stopped, the source is not a `SoapySource`, or the
