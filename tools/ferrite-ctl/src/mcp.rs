@@ -1472,6 +1472,39 @@ impl FerriteServer {
         Ok(())
     }
 
+    /// Refuse a capture that would run against a software/test source. A
+    /// preset-swap capture inherits the live source; if that's a SineSource
+    /// (or a restart's fallback) you capture plausible-looking noise, not
+    /// RF — the worst kind of wrong data. `force` overrides (e.g. you really
+    /// do want to record the synthetic source).
+    async fn guard_hardware_source(&self, force: bool, what: &str) -> Result<(), McpError> {
+        if force {
+            return Ok(());
+        }
+        let source = self.http.get("/api/source").await.unwrap_or(Value::Null);
+        let type_name = source
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if type_name != "SoapySource" {
+            let what_src = if type_name.is_empty() {
+                "a non-hardware source".to_string()
+            } else {
+                format!("a {type_name}")
+            };
+            return Err(McpError::invalid_params(
+                format!(
+                    "{what} would run against {what_src} — a software/test source, not real RF, \
+                     so you'd record noise that looks like a signal. Select a device first \
+                     (`device select <args>`) or pass `force: true` to capture the synthetic source."
+                ),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn start_capture_audio_op(
         &self,
         args: StartCaptureAudioArgs,
@@ -1479,6 +1512,8 @@ impl FerriteServer {
         let duration = args.duration_s.unwrap_or(10.0);
         validate_duration(duration)?;
         self.guard_active_audio_profile(args.force, "start_capture_audio")
+            .await?;
+        self.guard_hardware_source(args.force, "audio capture")
             .await?;
         let rate = args.sample_rate_hz.unwrap_or(2_400_000.0);
         let bw = args.bandwidth_hz.unwrap_or(rate);
@@ -1529,6 +1564,8 @@ impl FerriteServer {
             McpError::invalid_params("wideband IQ capture requires `freq_hz`", None)
         })?;
         self.guard_active_audio_profile(args.force, "wideband IQ capture")
+            .await?;
+        self.guard_hardware_source(args.force, "wideband IQ capture")
             .await?;
         let rate = args.sample_rate_hz.unwrap_or(2_000_000.0);
         let bw = args.bandwidth_hz.unwrap_or(rate);
@@ -1876,7 +1913,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Start an async IQ capture. Default (`wideband=false`) tees the post-channelizer cf32 stream (block `chan`) non-disruptively — the user's UI session keeps running. Set `wideband=true` for a full-rate `Source → FileIqSink` slice straight off the SDR via the `capture_fm` preset (clobbers the live session; requires `freq_hz`, honours `sample_rate_hz`/`bandwidth_hz`/`gain_db`/`format`). **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar JSON. `duration_s` is the wall-clock cap (block enforces it server-side). Optional `freq_hz` retunes first. Defaults `out` to `/tmp/ferrite-captures/iq-<unix_ms>-<freq>mhz.cf32`."
+        description = "Start an async IQ capture. Default (`wideband=false`) tees the post-channelizer cf32 stream (block `chan`) non-disruptively — the user's UI session keeps running. Set `wideband=true` for a full-rate `Source → FileIqSink` slice straight off the SDR via the `capture_fm` preset (clobbers the live session; requires `freq_hz`, honours `sample_rate_hz`/`bandwidth_hz`/`gain_db`/`format`). **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar JSON. `duration_s` is the wall-clock cap (block enforces it server-side). Optional `freq_hz` retunes first. Defaults `out` to `/tmp/ferrite-captures/iq-<unix_ms>-<freq>mhz.cf32`. The wideband path inherits the live source (antenna/notch/gain), so it refuses against a software/test source (SineSource) — `device select` first, or pass `force:true` to record the synthetic source."
     )]
     async fn start_capture_iq(
         &self,
@@ -1896,7 +1933,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Start an async demodulated-audio capture to a WAV on disk. Disruptive — swaps in a recording preset (default `fm-audio-record`; also `am-audio-record`, `capture-aprs`, `capture-pager`), tunes to `freq_hz`, and runs a `Source → … → FileAudioSink` slice, so it clobbers the live UI session. **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar. `duration_s` defaults to 10; `sample_rate_hz` to 2.4e6; `bandwidth_hz` to the rate. Defaults `out` to `/tmp/ferrite-captures/audio-<unix_ms>-<freq>mhz.wav`."
+        description = "Start an async demodulated-audio capture to a WAV on disk. Disruptive — swaps in a recording preset (default `fm-audio-record`; also `am-audio-record`, `capture-aprs`, `capture-pager`), tunes to `freq_hz`, and runs a `Source → … → FileAudioSink` slice, so it clobbers the live UI session. **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar. `duration_s` defaults to 10; `sample_rate_hz` to 2.4e6; `bandwidth_hz` to the rate. Defaults `out` to `/tmp/ferrite-captures/audio-<unix_ms>-<freq>mhz.wav`. Inherits the live source, so it refuses against a software/test source (SineSource) — `device select` first, or `force:true`."
     )]
     async fn start_capture_audio(
         &self,
