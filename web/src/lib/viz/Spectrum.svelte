@@ -12,6 +12,7 @@
   import { bandplanUsa } from '$lib/presets/bandplan';
   import { waterfallStore } from './waterfallStore.svelte';
   import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
+  import { signals } from '$lib/signals/store.svelte';
 
   interface Props {
     client: FrameClient;
@@ -369,7 +370,22 @@
       sdrCenterHz: axes?.center_freq_hz,
       vfoHz: vfoBlock ? vfoAbsHz : undefined,
       vfoWidthHz: vfoBlock ? vfoWidthHz : undefined,
+      peaksHz: signals.signals.map((s) => s.freq_hz),
     });
+  });
+
+  // Hold a ref on the strongest-signal store whenever the preset
+  // advertises a `ui:signals` sink, so the peak squares paint even when
+  // the right-pane list view is closed. Refcounted in the store, so this
+  // coexists with the list view's own attach.
+  let signalsStreamId = $derived(pipeline.uiSinks.signals?.stream_id);
+  $effect(() => {
+    const c = pipeline.client;
+    if (c && signalsStreamId !== undefined) {
+      signals.attach(c, signalsStreamId);
+      return () => signals.release();
+    }
+    return () => {};
   });
 
   // Frequency-allocation ribbon above the trace. Toggle is persisted in

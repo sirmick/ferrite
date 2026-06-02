@@ -52,18 +52,31 @@ class SignalsStore {
 
   private unsubscribe?: () => void;
   private streamId?: number;
+  // Multiple consumers attach to the same singleton — the right-pane
+  // list view *and* the spectrum / narrow-spectrum peak overlays. Each
+  // holds a ref; the subscription only tears down once the last one
+  // releases, so closing the list pane doesn't blank the FFT markers.
+  private refs = 0;
 
   attach(client: FrameClient, streamId: number): void {
+    this.refs += 1;
     if (this.streamId === streamId && this.unsubscribe) return;
-    this.detach();
+    this.unsubscribe?.();
     this.streamId = streamId;
     this.unsubscribe = client.subscribe(streamId, (frame) => this.onFrame(frame));
+  }
+
+  /** Drop one consumer's hold; tears down on the last release. */
+  release(): void {
+    this.refs = Math.max(0, this.refs - 1);
+    if (this.refs === 0) this.detach();
   }
 
   detach(): void {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     this.streamId = undefined;
+    this.refs = 0;
     this.signals = [];
     this.centerFreqHz = null;
     this.spanHz = null;

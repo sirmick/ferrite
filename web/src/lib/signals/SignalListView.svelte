@@ -17,9 +17,8 @@
   $effect(() => {
     if (client && streamId !== undefined) {
       signals.attach(client, streamId);
-      return () => signals.detach();
+      return () => signals.release();
     }
-    signals.detach();
     return () => {};
   });
 

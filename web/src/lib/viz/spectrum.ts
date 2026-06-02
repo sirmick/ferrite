@@ -56,6 +56,11 @@ export interface SpectrumMarkers {
   sdrCenterHz?: number;
   vfoHz?: number;
   vfoWidthHz?: number;
+  /** Absolute centre frequencies (Hz) of auto-detected signals from the
+   *  node-side `SignalList`. Each in-view peak is painted as a small
+   *  square sitting on the live trace tip — a visual cue that mirrors
+   *  the strongest-signal watchlist. Out-of-window peaks are skipped. */
+  peaksHz?: number[];
 }
 
 /** Display-only horizontal view window. Crops the rendered FFT to a
@@ -478,7 +483,56 @@ export class SpectrumRenderer {
       ctx.lineWidth = Math.max(1, Math.floor(Math.min(window.devicePixelRatio || 1, 2)));
       this.strokeRow(this.row, plot);
     }
+    // Peak squares sit on top of the trace so they read as little flags
+    // pinned to the detected carriers, not hidden under the envelope.
+    this.drawPeaks(plot);
     ctx.restore();
+  }
+
+  /** Little squares marking each in-view auto-detected peak. The square
+   *  is placed on the live trace tip at the peak's frequency (or near the
+   *  top of the plot when there's no live row yet), giving a persistent
+   *  visual flag for the strongest-signal watchlist. */
+  private drawPeaks(plot: { x: number; y: number; w: number; h: number }): void {
+    const peaks = this.markers.peaksHz;
+    if (!peaks || peaks.length === 0) return;
+    const win = this.renderWindow();
+    if (!win) return;
+    const { ctx } = this;
+    const half = win.rateHz / 2;
+    const fMin = win.centerHz - half;
+    const fMax = win.centerHz + half;
+    if (!(fMax > fMin)) return;
+    const toX = (hz: number) => plot.x + ((hz - fMin) / (fMax - fMin)) * plot.w;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const size = Math.max(4, Math.round(5 * dpr));
+
+    // Map an in-view peak frequency to the y of the live trace tip there.
+    const lut = this.row && this.row.length > 0 ? this.byteToYLut(plot) : undefined;
+    const n = this.row?.length ?? 0;
+    const fullMin = this.axes ? this.axes.centerHz - this.axes.rateHz / 2 : fMin;
+    const fullSpan = this.axes ? this.axes.rateHz : fMax - fMin;
+
+    ctx.fillStyle = 'rgba(56, 232, 255, 0.9)';
+    ctx.strokeStyle = 'rgba(6, 22, 30, 0.9)';
+    ctx.lineWidth = Math.max(1, Math.floor(dpr));
+    ctx.shadowColor = 'rgba(56, 232, 255, 0.55)';
+    ctx.shadowBlur = 4 * dpr;
+    for (const hz of peaks) {
+      if (hz < fMin || hz > fMax) continue;
+      const x = toX(hz);
+      let y = plot.y + size; // fallback: near the top of the plot
+      if (lut && n > 0 && fullSpan > 0) {
+        const bin = Math.round(((hz - fullMin) / fullSpan) * (n - 1));
+        if (bin >= 0 && bin < n) y = lut[this.row![bin]] - size;
+      }
+      y = Math.max(plot.y + size / 2, Math.min(plot.y + plot.h - size / 2, y));
+      const sx = Math.round(x - size / 2) + 0.5;
+      const sy = Math.round(y - size / 2) + 0.5;
+      ctx.fillRect(sx, sy, size, size);
+      ctx.strokeRect(sx, sy, size, size);
+    }
+    ctx.shadowBlur = 0;
   }
 
   private drawMarkers(plot: { x: number; y: number; w: number; h: number }): void {
