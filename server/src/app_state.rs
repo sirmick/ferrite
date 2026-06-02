@@ -272,7 +272,9 @@ impl AppState {
         // every preset with a `ui:fft`, rather than hand-wired per preset.
         inject_signal_list_taps(&mut composed);
         let profile = self.inner.profile.read().await;
-        apply_profile(&mut composed, &profile);
+        // Registry-aware so the Browser/Server placement cut keeps
+        // NativeOnly/WasmOnly blocks on the side they can actually run.
+        apply_profile(&mut composed, &profile, &InventorySpecRegistry);
         inject_voice_transcribe(&mut composed, &profile);
         Ok(composed)
     }

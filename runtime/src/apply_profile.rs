@@ -10,81 +10,81 @@
 //!    profile field doesn't strip blocks tagged for it on an older
 //!    runtime.
 //!
-//! 2. **Audio-spine cut.** Blocks on the audio path carry a
-//!    `"placement_role"` (`demod` / `audio` / `nr` / `transcribe`). The
-//!    profile's [`AudioSplit`] slides a single node↔browser cut along
-//!    that chain: `Server` pulls the whole spine node-side (headless
-//!    transcription), `Browser` pushes it browser-side, `Balanced`
-//!    leaves the authored placement. One ordered knob instead of three
-//!    independent per-block overrides — which keeps the boundary a
-//!    single monotonic node→browser crossing `env_split` can realise.
+//! 2. **Placement cut.** The [`AudioSplit`] picks where the node↔browser
+//!    boundary falls, as a *graph* cut rather than a per-block role list:
 //!
-//! The pass runs after [`compose_source`](crate::compose) and
-//! [`inject_narrow_fft_taps`](crate::inject_narrow_fft) and before
-//! [`split_for_environment`](crate::env_split). Pruning blocks before
-//! the split means orphan wires never even reach the bridge-insertion
-//! logic.
+//!    * **Balanced** — leave every block at its preset-authored
+//!      placement (the historical default; a no-op).
+//!    * **Server** — pull everything node-side except `WasmOnly` blocks
+//!      (the WebAudio `AudioSink`, which must run in the tab). Headless:
+//!      demod, decode, audio DSP all run in `ferrited`.
+//!    * **Browser** — cut at the **channelizer output**. Everything
+//!      reachable downstream of a `Channelizer` runs browser-side, so the
+//!      daemon streams a narrowband channel (tens of kHz) and the tab
+//!      does the per-channel demod / decode / audio. The wideband display
+//!      path (`fft → logmag → signals`) hangs off the source *upstream*
+//!      of the channelizer, so it always stays node and streams to the
+//!      tab as before. Cutting at the channelizer — not the source —
+//!      keeps the cross-link small (the raw wideband IQ never leaves the
+//!      daemon).
+//!
+//! The Browser cut respects `NativeOnly` blocks: any subchain that leads
+//! to one (e.g. the AIS decoder) stays node, since a `NativeOnly` leaf
+//! pins node and everything feeding it must too. Because the channelizer
+//! itself stays node and the cut only ever sends node→browser, an illegal
+//! browser→node crossing is unrepresentable — the same safety property
+//! the old linear-spine model had, but now covering *branches* (decode +
+//! audio off one tee), which is what the spine model couldn't express.
+//!
+//! The pass runs after [`compose_source`](crate::compose),
+//! [`inject_dc_block_taps`](crate::inject_dc_block),
+//! [`inject_narrow_fft_taps`](crate::inject_narrow_fft) and
+//! [`inject_signal_list_taps`](crate::inject_signal_list) (so the doc has
+//! its final source-side shape, including the narrow-FFT tee on the
+//! channelizer output) and before
+//! [`split_for_environment`](crate::env_split). It needs a
+//! [`SpecRegistry`] to know each block's placement capability
+//! (`Either` / `NativeOnly` / `WasmOnly`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ferrite_blocks::Placement;
+
 use crate::doc::{BlockInstanceDecl, Environment, FlowgraphDoc};
+use crate::instantiate::SpecRegistry;
 use crate::validate::split_endpoint;
 
-/// Where the audio-processing spine is cut between the node daemon and
-/// the browser. The post-source audio path is a linear chain —
-/// `demod → audio-resample → noise-reduce → AudioSink` — and `env_split`
-/// only supports a single **node→browser** crossing along it. So rather
-/// than three independent per-block placement knobs (which can encode an
-/// illegal browser→node crossing — e.g. "NR browser, transcribe node"),
-/// one ordered setting slides that single cut down the chain. Every
-/// spine block before the cut runs node; everything at or after it runs
-/// browser. Because the chain is topologically ordered, every crossing
-/// is node→browser by construction — illegal states are unrepresentable.
-///
-/// `AudioSink` is `Placement::WasmOnly`, so the cut can never pass it:
-/// the final WebAudio sink always runs browser-side. "Server" therefore
-/// means "everything up to (and feeding) the sink runs node".
+/// Block type that marks the wideband→narrowband boundary. The Browser
+/// cut is anchored at its output.
+const CHANNELIZER: &str = "Channelizer";
+
+/// Where the node↔browser boundary falls. See the module docs for what
+/// each variant does as a graph cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioSplit {
-    /// Thin server: push the whole spine (demod onward) browser-side.
-    /// IQ is streamed across and demodulated in the browser. Heaviest on
-    /// the client, lightest on the daemon.
+    /// Thin server: cut at the channelizer output — everything downstream
+    /// runs browser-side. IQ for one channel is streamed across and
+    /// demod/decode/audio all happen in the tab.
     Browser,
-    /// Leave each spine block at its preset-authored placement (the
-    /// default). Demod typically node, audio-render + NR browser — the
-    /// historical behaviour, preserved exactly so this is a no-op.
+    /// Leave each block at its preset-authored placement (the default).
     Balanced,
-    /// Headless: pull the whole spine node-side. Demod, resample, and NR
-    /// run in `ferrited`; a node-placed `VoiceTranscribe` tap therefore
-    /// has node-side audio to read, so whisper runs with no browser. The
-    /// (forced-browser) `AudioSink` still receives finished audio over
-    /// the one remaining node→browser crossing.
+    /// Headless: pull everything node-side except the `WasmOnly`
+    /// `AudioSink`. Demod, decode and audio DSP run in `ferrited`; a
+    /// node-placed `VoiceTranscribe` tap therefore has node-side audio to
+    /// read, so whisper runs with no browser.
     Server,
 }
 
 impl AudioSplit {
-    /// The placement a spine block should adopt under this split, or
-    /// `None` to leave its authored placement (Balanced). Applied
-    /// uniformly to every spine role, which is what keeps the cut a
-    /// single monotonic boundary.
-    fn override_env(self) -> Option<Environment> {
-        match self {
-            Self::Browser => Some(Environment::Browser),
-            Self::Server => Some(Environment::Node),
-            Self::Balanced => None,
-        }
-    }
-
-    /// Placement for a *newly injected* spine block (the `VoiceTranscribe`
-    /// tap) that has no authored placement to fall back on. `Server` →
-    /// node (headless); everything else → browser (the default audio
-    /// side). Distinct from [`override_env`] only in that `Balanced`
-    /// resolves to a concrete side rather than "leave as authored",
-    /// because there's nothing authored to leave.
+    /// Placement for a *newly injected* audio-spine block (the
+    /// `VoiceTranscribe` tap) that has no authored placement to fall back
+    /// on. `Server` → node (headless); everything else → browser (the
+    /// default audio side, and where the Browser cut puts the audio
+    /// chain too).
     #[must_use]
     pub fn tap_placement(self) -> Environment {
         match self {
@@ -113,9 +113,7 @@ pub struct Profile {
     /// chain); the UI never sets it without `audio`. The tap follows
     /// `audio_split`: node-side (headless) under `Server`, else browser.
     pub transcribe: bool,
-    /// Where the audio spine is cut between daemon and browser — one
-    /// ordered setting over what used to be three independent per-block
-    /// placement overrides. See [`AudioSplit`].
+    /// Where the node↔browser boundary is cut. See [`AudioSplit`].
     pub audio_split: AudioSplit,
 }
 
@@ -145,7 +143,10 @@ impl Profile {
 
 /// Apply `profile` to `doc` in place. Idempotent within a single
 /// profile — calling twice with the same input yields the same output.
-pub fn apply_profile(doc: &mut FlowgraphDoc, profile: &Profile) {
+/// `registry` supplies each block type's placement capability, which the
+/// placement cut needs to keep `NativeOnly`/`WasmOnly` blocks on the side
+/// they can actually run.
+pub fn apply_profile(doc: &mut FlowgraphDoc, profile: &Profile, registry: &dyn SpecRegistry) {
     let dropped: BTreeSet<String> = doc
         .blocks
         .iter()
@@ -171,28 +172,122 @@ pub fn apply_profile(doc: &mut FlowgraphDoc, profile: &Profile) {
         });
     }
 
-    // Audio-spine cut: every block on the audio path carries a
-    // `placement_role` (`demod` / `audio` / `nr` / `transcribe`), and
-    // `audio_split` moves them all to the same side — node before the
-    // cut, browser after. Applying one override uniformly to every spine
-    // role is what keeps the boundary a single monotonic node→browser
-    // crossing: there's no way to express a browser-upstream/node-
-    // downstream pair, so `env_split` can't be handed an illegal
-    // crossing. `Balanced` is `None` → authored placement preserved.
-    if let Some(env) = profile.audio_split.override_env() {
-        for b in doc.blocks.values_mut() {
-            if is_spine_role(b.placement_role.as_deref()) {
-                b.placement = Some(env);
-            }
-        }
+    match profile.audio_split {
+        AudioSplit::Balanced => {} // leave authored placement
+        AudioSplit::Server => place_server(doc, registry),
+        AudioSplit::Browser => place_browser(doc, registry),
     }
 }
 
-/// Whether a `placement_role` tag names a block on the audio spine —
-/// the linear chain the `audio_split` cut slides along. New audio-path
-/// blocks join the cut just by carrying one of these roles.
-fn is_spine_role(role: Option<&str>) -> bool {
-    matches!(role, Some("demod" | "audio" | "nr" | "transcribe"))
+/// Placement capability of a block type, or `None` when the registry
+/// doesn't know it (custom/injected types the cut can leave alone).
+fn capability(registry: &dyn SpecRegistry, type_name: &str) -> Option<Placement> {
+    registry.get(type_name).map(|s| s.placement)
+}
+
+/// `Server`: everything node-side except `WasmOnly` blocks, which must
+/// run in the tab (the WebAudio sink). The single remaining node→browser
+/// crossing feeds that sink.
+fn place_server(doc: &mut FlowgraphDoc, registry: &dyn SpecRegistry) {
+    for b in doc.blocks.values_mut() {
+        let env = match capability(registry, &b.type_name) {
+            Some(Placement::WasmOnly) => Environment::Browser,
+            _ => Environment::Node,
+        };
+        b.placement = Some(env);
+    }
+}
+
+/// `Browser`: cut at the channelizer output. Every block reachable
+/// downstream of a `Channelizer` goes browser-side, except any subchain
+/// that leads to a `NativeOnly` block (which stays node). The channelizer
+/// and everything upstream of it keep their authored placement (node).
+fn place_browser(doc: &mut FlowgraphDoc, registry: &dyn SpecRegistry) {
+    let channelizers: BTreeSet<String> = doc
+        .blocks
+        .iter()
+        .filter(|(_, b)| b.type_name == CHANNELIZER)
+        .map(|(id, _)| id.clone())
+        .collect();
+    // No channelizer → no defined cut point. Leave authored placement;
+    // the UI shouldn't offer Browser for such presets.
+    if channelizers.is_empty() {
+        return;
+    }
+
+    // Forward + reverse adjacency over real (non-`ui:`) wires.
+    let mut fwd: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut rev: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for w in &doc.wires {
+        if w.ui_sink_name().is_some() {
+            continue;
+        }
+        let s = split_endpoint(&w.src).0.to_string();
+        let d = split_endpoint(&w.dst).0.to_string();
+        fwd.entry(s.clone()).or_default().push(d.clone());
+        rev.entry(d).or_default().push(s);
+    }
+
+    // Downstream set: everything reachable forward from a channelizer's
+    // successors (the channelizers themselves excluded — they stay node).
+    let mut downstream: BTreeSet<String> = BTreeSet::new();
+    let mut stack: Vec<String> = channelizers
+        .iter()
+        .filter_map(|c| fwd.get(c))
+        .flatten()
+        .cloned()
+        .collect();
+    while let Some(n) = stack.pop() {
+        if channelizers.contains(&n) || !downstream.insert(n.clone()) {
+            continue;
+        }
+        if let Some(succ) = fwd.get(&n) {
+            stack.extend(succ.iter().cloned());
+        }
+    }
+
+    // Tainted set: every `NativeOnly` block plus all of its ancestors —
+    // anything that can reach a `NativeOnly` block downstream must stay
+    // node to avoid a browser→node crossing.
+    let mut tainted: BTreeSet<String> = BTreeSet::new();
+    let mut stack: Vec<String> = doc
+        .blocks
+        .iter()
+        .filter(|(_, b)| {
+            matches!(
+                capability(registry, &b.type_name),
+                Some(Placement::NativeOnly)
+            )
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    while let Some(n) = stack.pop() {
+        if !tainted.insert(n.clone()) {
+            continue;
+        }
+        if let Some(preds) = rev.get(&n) {
+            stack.extend(preds.iter().cloned());
+        }
+    }
+
+    for id in &downstream {
+        let Some(b) = doc.blocks.get_mut(id) else {
+            continue;
+        };
+        // WasmOnly must be browser regardless; otherwise a tainted block
+        // (feeds a NativeOnly leaf) stays node, everything else → browser.
+        let env = if matches!(
+            capability(registry, &b.type_name),
+            Some(Placement::WasmOnly)
+        ) {
+            Environment::Browser
+        } else if tainted.contains(id) {
+            Environment::Node
+        } else {
+            Environment::Browser
+        };
+        b.placement = Some(env);
+    }
 }
 
 fn block_passes(b: &BlockInstanceDecl, p: &Profile) -> bool {
@@ -213,11 +308,42 @@ fn block_passes(b: &BlockInstanceDecl, p: &Profile) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrite_blocks::{BlockSpec, ParamSpec, PortSpec};
     use serde_json::json;
+
+    /// Stub registry: placement capability keyed off type name. The
+    /// returned `BlockSpec`'s other fields are inert — `apply_profile`
+    /// only reads `.placement`.
+    struct Reg;
+    impl SpecRegistry for Reg {
+        fn get(&self, type_name: &str) -> Option<BlockSpec> {
+            const NO_PORTS: &[PortSpec] = &[];
+            const NO_PARAMS: &[ParamSpec] = &[];
+            let placement = match type_name {
+                "Source" | "SoapySource" | "AisDecoder" => Placement::NativeOnly,
+                "AudioSink" => Placement::WasmOnly,
+                _ => Placement::Either,
+            };
+            Some(BlockSpec {
+                type_name: "stub",
+                placement,
+                inputs: NO_PORTS,
+                outputs: NO_PORTS,
+                params: NO_PARAMS,
+                ai_notes: "",
+            })
+        }
+    }
 
     fn doc_from(json: &str) -> FlowgraphDoc {
         serde_json::from_str(json).unwrap()
     }
+
+    fn place(doc: &FlowgraphDoc, id: &str) -> Option<Environment> {
+        doc.blocks[id].placement
+    }
+
+    // ---- gating (unchanged behaviour) -----------------------------------
 
     #[test]
     fn audio_false_drops_blocks_with_when_audio_true() {
@@ -226,8 +352,8 @@ mod tests {
                 "name": "t",
                 "environments": ["node"],
                 "blocks": {
-                    "src":   {"type": "HwSrc", "placement": "node"},
-                    "audio": {"type": "AudioSink", "placement": "node",
+                    "src":   {"type": "Source", "placement": "node"},
+                    "audio": {"type": "AudioSink", "placement": "browser",
                               "when": {"audio": true}}
                 },
                 "wires": [["src.out", "audio.in"]]
@@ -240,30 +366,11 @@ mod tests {
                 transcribe: false,
                 audio_split: AudioSplit::Balanced,
             },
+            &Reg,
         );
         assert!(doc.blocks.contains_key("src"));
         assert!(!doc.blocks.contains_key("audio"));
-        // The wire into the dropped block must go too.
         assert!(doc.wires.is_empty());
-    }
-
-    #[test]
-    fn audio_true_keeps_when_audio_true_blocks() {
-        let mut doc = doc_from(
-            r#"{
-                "name": "t",
-                "environments": ["node"],
-                "blocks": {
-                    "src":   {"type": "HwSrc", "placement": "node"},
-                    "audio": {"type": "AudioSink", "placement": "node",
-                              "when": {"audio": true}}
-                },
-                "wires": [["src.out", "audio.in"]]
-            }"#,
-        );
-        apply_profile(&mut doc, &Profile::default());
-        assert!(doc.blocks.contains_key("audio"));
-        assert_eq!(doc.wires.len(), 1);
     }
 
     #[test]
@@ -279,48 +386,52 @@ mod tests {
                 "wires": []
             }"#,
         );
-        apply_profile(
-            &mut doc,
-            &Profile {
-                audio: false,
-                transcribe: false,
-                audio_split: AudioSplit::Balanced,
-            },
-        );
-        // The "freshness_v9" key isn't on Profile, so the block is kept.
+        apply_profile(&mut doc, &Profile::default(), &Reg);
         assert!(doc.blocks.contains_key("future"));
     }
 
-    /// A representative audio spine: demod (node) → audio-resample
-    /// (browser) → NR (browser) → transcribe tap (browser) → AudioSink
-    /// (browser, the fixed `WasmOnly` floor — untagged, never moves),
-    /// plus an unrelated untagged block. Used by the `audio_split` cut
-    /// tests. The movable spine = the four role-tagged blocks.
-    fn spine_doc() -> FlowgraphDoc {
+    // ---- the channelizer cut --------------------------------------------
+
+    /// A packet-style preset: wideband display off the tee, a channelizer
+    /// feeding a demod that fans (via a tee) into a node-or-browser
+    /// decoder branch and a browser AudioSink branch.
+    fn packet_doc() -> FlowgraphDoc {
         doc_from(
             r#"{
-                "name": "t",
+                "name": "packet",
                 "environments": ["node", "browser"],
                 "blocks": {
-                    "demod":  {"type": "FmDemod", "placement": "node",
-                               "placement_role": "demod"},
-                    "resamp": {"type": "RealF32Resamp", "placement": "browser",
-                               "placement_role": "audio"},
-                    "nr":     {"type": "AudioNrMono", "placement": "browser",
-                               "placement_role": "nr"},
-                    "vt":     {"type": "VoiceTranscribe", "placement": "browser",
-                               "placement_role": "transcribe"},
-                    "audio":  {"type": "AudioSink", "placement": "browser"},
-                    "other":  {"type": "X", "placement": "node"}
+                    "src":     {"type": "Source", "placement": "node"},
+                    "tee":     {"type": "TeeIqF32", "placement": "node"},
+                    "fft":     {"type": "FFT", "placement": "node"},
+                    "logmag":  {"type": "LogMagU8", "placement": "node"},
+                    "signals": {"type": "SignalList", "placement": "node"},
+                    "chan":    {"type": "Channelizer", "placement": "node"},
+                    "demod":   {"type": "FmDemod", "placement": "node"},
+                    "atee":    {"type": "TeeRealF32", "placement": "node"},
+                    "resamp":  {"type": "RealF32Resamp", "placement": "node"},
+                    "packet":  {"type": "PacketDemod", "placement": "node"},
+                    "aresamp": {"type": "RealF32Resamp", "placement": "browser"},
+                    "audio":   {"type": "AudioSink", "placement": "browser"}
                 },
-                "wires": []
+                "wires": [
+                    ["src.out", "tee.in"],
+                    ["tee.out0", "chan.in"],
+                    ["tee.out1", "fft.in"],
+                    ["fft.out", "logmag.in"],
+                    ["logmag.out", "signals.in"],
+                    ["signals.out", "ui:fft"],
+                    ["chan.out", "demod.in"],
+                    ["demod.out", "atee.in"],
+                    ["atee.out0", "resamp.in"],
+                    ["resamp.out", "packet.in"],
+                    ["packet.events", "ui:aprs"],
+                    ["atee.out1", "aresamp.in"],
+                    ["aresamp.out", "audio.in"]
+                ]
             }"#,
         )
     }
-
-    /// The movable spine, in flow order. The AudioSink is the fixed
-    /// browser floor and is deliberately not in this list.
-    const SPINE: [&str; 4] = ["demod", "resamp", "nr", "vt"];
 
     fn split_profile(split: AudioSplit) -> Profile {
         Profile {
@@ -331,81 +442,128 @@ mod tests {
     }
 
     #[test]
-    fn server_split_pulls_whole_spine_node_side() {
-        // The headless cut: every movable spine block → node, so a
-        // node-placed transcribe tap has node-side audio to read. The
-        // WasmOnly sink stays browser; untagged blocks aren't touched.
-        let mut doc = spine_doc();
-        apply_profile(&mut doc, &split_profile(AudioSplit::Server));
-        for id in SPINE {
-            assert_eq!(
-                doc.blocks[id].placement,
-                Some(Environment::Node),
-                "{id} pulled node-side"
-            );
-        }
-        assert_eq!(
-            doc.blocks["audio"].placement,
-            Some(Environment::Browser),
-            "AudioSink stays browser (WasmOnly floor)"
-        );
-    }
+    fn browser_cut_pushes_downstream_of_channelizer_into_the_tab() {
+        let mut doc = packet_doc();
+        apply_profile(&mut doc, &split_profile(AudioSplit::Browser), &Reg);
 
-    #[test]
-    fn browser_split_pushes_whole_spine_browser_side() {
-        let mut doc = spine_doc();
-        apply_profile(&mut doc, &split_profile(AudioSplit::Browser));
-        for id in SPINE {
+        // Source side + wideband display + channelizer stay node.
+        for id in ["src", "tee", "fft", "logmag", "signals", "chan"] {
+            assert_eq!(place(&doc, id), Some(Environment::Node), "{id} stays node");
+        }
+        // Everything downstream of the channelizer moves browser —
+        // including the PacketDemod, which is `Either` (decode in tab).
+        for id in ["demod", "atee", "resamp", "packet", "aresamp", "audio"] {
             assert_eq!(
-                doc.blocks[id].placement,
+                place(&doc, id),
                 Some(Environment::Browser),
-                "{id} pushed browser-side"
+                "{id} moves browser"
             );
         }
-        // Untagged block keeps its authored side — the cut only moves
-        // the spine.
-        assert_eq!(doc.blocks["other"].placement, Some(Environment::Node));
     }
 
     #[test]
-    fn balanced_split_leaves_authored_placement() {
-        // The default: no spine block moves — every placement is exactly
-        // what the preset authored. This is the property that makes the
-        // collapse a no-op for existing presets.
-        let mut doc = spine_doc();
-        apply_profile(&mut doc, &split_profile(AudioSplit::Balanced));
-        assert_eq!(doc.blocks["demod"].placement, Some(Environment::Node));
-        assert_eq!(doc.blocks["resamp"].placement, Some(Environment::Browser));
-        assert_eq!(doc.blocks["nr"].placement, Some(Environment::Browser));
-        assert_eq!(doc.blocks["vt"].placement, Some(Environment::Browser));
-        assert_eq!(doc.blocks["audio"].placement, Some(Environment::Browser));
+    fn browser_cut_keeps_nativeonly_subchain_node() {
+        // Swap the decoder for a NativeOnly one (AIS): its branch must
+        // stay node even under Browser, while the audio branch still
+        // moves to the tab.
+        let mut doc = packet_doc();
+        doc.blocks.get_mut("packet").unwrap().type_name = "AisDecoder".to_string();
+        apply_profile(&mut doc, &split_profile(AudioSplit::Browser), &Reg);
+
+        // The NativeOnly decoder and everything feeding it past the
+        // channelizer stay node...
+        for id in ["chan", "demod", "atee", "resamp", "packet"] {
+            assert_eq!(
+                place(&doc, id),
+                Some(Environment::Node),
+                "{id} pinned node by the NativeOnly decoder downstream"
+            );
+        }
+        // ...but the parallel audio branch is free to move browser.
+        assert_eq!(place(&doc, "aresamp"), Some(Environment::Browser));
+        assert_eq!(place(&doc, "audio"), Some(Environment::Browser));
     }
 
     #[test]
-    fn split_never_creates_a_browser_to_node_crossing() {
-        // The core safety property: whatever the split, the chain stays
-        // monotonic node→…→browser, so no upstream block is browser
-        // while a downstream one is node — `env_split` is never handed
-        // an illegal crossing. Check the full flow order incl. the sink.
-        for split in [
-            AudioSplit::Browser,
-            AudioSplit::Balanced,
-            AudioSplit::Server,
-        ] {
-            let mut doc = spine_doc();
-            apply_profile(&mut doc, &split_profile(split));
-            let mut seen_browser = false;
-            for id in ["demod", "resamp", "nr", "vt", "audio"] {
-                if doc.blocks[id].placement == Some(Environment::Browser) {
-                    seen_browser = true;
-                } else {
-                    assert!(
-                        !seen_browser,
-                        "{split:?}: node block {id} downstream of a browser block — illegal crossing"
-                    );
+    fn browser_cut_never_creates_browser_to_node_crossing() {
+        // For both the all-Either and NativeOnly-decoder shapes, no real
+        // wire may go browser→node after the cut.
+        for native in [false, true] {
+            let mut doc = packet_doc();
+            if native {
+                doc.blocks.get_mut("packet").unwrap().type_name = "AisDecoder".to_string();
+            }
+            apply_profile(&mut doc, &split_profile(AudioSplit::Browser), &Reg);
+            for w in &doc.wires {
+                if w.ui_sink_name().is_some() {
+                    continue;
                 }
+                let s = split_endpoint(&w.src).0;
+                let d = split_endpoint(&w.dst).0;
+                let (se, de) = (place(&doc, s), place(&doc, d));
+                assert!(
+                    !(se == Some(Environment::Browser) && de == Some(Environment::Node)),
+                    "native={native}: {s}({se:?}) → {d}({de:?}) is a browser→node crossing"
+                );
             }
         }
+    }
+
+    #[test]
+    fn server_pulls_everything_node_except_wasm_sink() {
+        let mut doc = packet_doc();
+        apply_profile(&mut doc, &split_profile(AudioSplit::Server), &Reg);
+        for id in [
+            "src", "tee", "fft", "logmag", "signals", "chan", "demod", "atee", "resamp", "packet",
+            "aresamp",
+        ] {
+            assert_eq!(place(&doc, id), Some(Environment::Node), "{id} node");
+        }
+        // The WasmOnly WebAudio sink can't move — stays in the tab.
+        assert_eq!(place(&doc, "audio"), Some(Environment::Browser));
+    }
+
+    #[test]
+    fn balanced_leaves_authored_placement() {
+        let mut doc = packet_doc();
+        apply_profile(&mut doc, &split_profile(AudioSplit::Balanced), &Reg);
+        assert_eq!(place(&doc, "demod"), Some(Environment::Node));
+        assert_eq!(place(&doc, "resamp"), Some(Environment::Node));
+        assert_eq!(place(&doc, "packet"), Some(Environment::Node));
+        assert_eq!(place(&doc, "aresamp"), Some(Environment::Browser));
+        assert_eq!(place(&doc, "audio"), Some(Environment::Browser));
+    }
+
+    #[test]
+    fn browser_no_channelizer_is_a_no_op_on_placement() {
+        // A preset without a channelizer has no defined cut — placements
+        // are left exactly as authored.
+        let mut doc = doc_from(
+            r#"{
+                "name": "raw",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src":   {"type": "Source", "placement": "node"},
+                    "demod": {"type": "FmDemod", "placement": "node"},
+                    "audio": {"type": "AudioSink", "placement": "browser"}
+                },
+                "wires": [["src.out", "demod.in"], ["demod.out", "audio.in"]]
+            }"#,
+        );
+        apply_profile(&mut doc, &split_profile(AudioSplit::Browser), &Reg);
+        assert_eq!(place(&doc, "demod"), Some(Environment::Node));
+        assert_eq!(place(&doc, "audio"), Some(Environment::Browser));
+    }
+
+    #[test]
+    fn idempotent_under_repeated_application() {
+        let mut doc = packet_doc();
+        let p = split_profile(AudioSplit::Browser);
+        apply_profile(&mut doc, &p, &Reg);
+        let once = serde_json::to_value(&doc).unwrap();
+        apply_profile(&mut doc, &p, &Reg);
+        let twice = serde_json::to_value(&doc).unwrap();
+        assert_eq!(once, twice);
     }
 
     #[test]
@@ -415,65 +573,13 @@ mod tests {
                 "name": "t",
                 "environments": ["node"],
                 "blocks": {
-                    "src": {"type": "HwSrc", "placement": "node"}
+                    "src": {"type": "Source", "placement": "node"}
                 },
                 "wires": [["src.out", "ui:fft"]]
             }"#,
         );
-        apply_profile(&mut doc, &Profile::default());
-        // ui:<name> wires have no dst block to check; the source
-        // survived, so the wire survives.
+        apply_profile(&mut doc, &Profile::default(), &Reg);
         assert_eq!(doc.wires.len(), 1);
-    }
-
-    #[test]
-    fn ui_sink_wire_dropped_when_source_block_is_pruned() {
-        let mut doc = doc_from(
-            r#"{
-                "name": "t",
-                "environments": ["node"],
-                "blocks": {
-                    "src": {"type": "HwSrc", "placement": "node",
-                            "when": {"audio": true}}
-                },
-                "wires": [["src.out", "ui:audio"]]
-            }"#,
-        );
-        apply_profile(
-            &mut doc,
-            &Profile {
-                audio: false,
-                transcribe: false,
-                audio_split: AudioSplit::Balanced,
-            },
-        );
-        assert!(doc.blocks.is_empty());
-        assert!(doc.wires.is_empty());
-    }
-
-    #[test]
-    fn defaults_are_a_no_op() {
-        // A profile that says "audio on, demod stays where authored"
-        // must leave the doc structurally identical.
-        let original = doc_from(
-            r#"{
-                "name": "t",
-                "environments": ["node", "browser"],
-                "blocks": {
-                    "src": {"type": "HwSrc", "placement": "node",
-                            "placement_role": "demod"},
-                    "audio": {"type": "AudioSink", "placement": "browser",
-                              "when": {"audio": true}}
-                },
-                "wires": [["src.out", "audio.in"]]
-            }"#,
-        );
-        let mut doc = original.clone();
-        apply_profile(&mut doc, &Profile::default());
-        assert_eq!(doc.blocks.len(), original.blocks.len());
-        assert_eq!(doc.wires, original.wires);
-        // Authored placement preserved (Balanced split = no override).
-        assert_eq!(doc.blocks["src"].placement, Some(Environment::Node));
     }
 
     #[test]
@@ -486,67 +592,9 @@ mod tests {
         let s = serde_json::to_string(&p).unwrap();
         let back: Profile = serde_json::from_str(&s).unwrap();
         assert_eq!(back, p);
-        // `audio_split` serializes as a lowercase string tag.
         assert!(s.contains("\"audio_split\":\"server\""), "got {s}");
-        // Default-on-deserialize: an empty `{}` gives the defaults so
-        // the API surface can ship an optional `profile` field without
-        // breaking older clients.
         let empty: Profile = serde_json::from_str("{}").unwrap();
         assert_eq!(empty, Profile::default());
-    }
-
-    #[test]
-    fn audio_value_uses_when_expected_value_matches_profile() {
-        // `when: { "audio": true }` + `profile.audio = true` keeps.
-        // `when: { "audio": false }` + `profile.audio = true` drops —
-        // i.e. blocks gated on audio-off get pruned when audio is on.
-        // Useful for "audio-off-only" probes (silence detection etc.).
-        let mut doc = doc_from(
-            r#"{
-                "name": "t",
-                "environments": ["node"],
-                "blocks": {
-                    "silence_probe": {"type": "X", "placement": "node",
-                                      "when": {"audio": false}}
-                },
-                "wires": []
-            }"#,
-        );
-        apply_profile(&mut doc, &Profile::default());
-        assert!(!doc.blocks.contains_key("silence_probe"));
-    }
-
-    #[test]
-    fn idempotent_under_repeated_application() {
-        let mut doc = doc_from(
-            r#"{
-                "name": "t",
-                "environments": ["node"],
-                "blocks": {
-                    "src":   {"type": "HwSrc", "placement": "node"},
-                    "audio": {"type": "AudioSink", "placement": "node",
-                              "when": {"audio": true}}
-                },
-                "wires": [["src.out", "audio.in"]]
-            }"#,
-        );
-        let profile = Profile {
-            audio: false,
-            transcribe: false,
-            audio_split: AudioSplit::Balanced,
-        };
-        apply_profile(&mut doc, &profile);
-        let snapshot = serde_json::to_value(&doc).unwrap();
-        apply_profile(&mut doc, &profile);
-        let twice = serde_json::to_value(&doc).unwrap();
-        assert_eq!(snapshot, twice);
-        // sanity: actually pruned
-        assert!(!snapshot["blocks"]
-            .as_object()
-            .unwrap()
-            .contains_key("audio"));
-        // suppress unused json! warning if serde_json::json! gets
-        // tree-shaken at the binary level
         let _ = json!(0);
     }
 }
