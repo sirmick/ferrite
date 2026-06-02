@@ -79,6 +79,12 @@ pub struct SignalListParams {
     /// does the debouncing). Raise it to ignore CW-width blips on a band
     /// where you only care about wide carriers.
     pub min_bw_hz: f32,
+    /// Drop candidate groups *wider* than this (Hz). `0` = no ceiling. The
+    /// carrier-hunter knob: broadcast-overload humps and DC sidelobes are
+    /// hundreds of kHz wide and otherwise dominate the top-K; cap it near a
+    /// channel width (e.g. 12 kHz for AM, 5 kHz for narrow tones) to surface
+    /// real carriers instead of blobs.
+    pub max_bw_hz: f32,
     /// Maximum signals reported per emission, strongest first.
     pub top_k: usize,
     /// Persistence window: a track is evicted after this many consecutive
@@ -108,6 +114,7 @@ impl Default for SignalListParams {
             size: 16_384,
             threshold_db: 10.0,
             min_bw_hz: 0.0,
+            max_bw_hz: 0.0,
             top_k: 16,
             persist_window: 5,
             persist_hits: 3,
@@ -263,16 +270,36 @@ impl SignalList {
             }
             let width_bins = i - start;
             let bw_hz = width_bins as f64 * bin_hz;
-            if bw_hz < f64::from(self.params.min_bw_hz) {
+            // Bandwidth gate: drop runs narrower than `min_bw_hz` (noise
+            // spikes) or — when `max_bw_hz > 0` — wider than it. The ceiling
+            // turns `signals` into a carrier hunter: broadcast-overload humps
+            // and DC sidelobes are 100s of kHz wide and crowd out the narrow
+            // tones you're actually after.
+            if bw_hz < f64::from(self.params.min_bw_hz)
+                || (self.params.max_bw_hz > 0.0 && bw_hz > f64::from(self.params.max_bw_hz))
+            {
+                continue;
+            }
+            let freq_hz = self.bin_to_hz(peak_idx);
+            // Drop unphysical negative absolute frequencies — the lower span
+            // half below 0 Hz is image/alias junk, not receivable RF.
+            if freq_hz < 0.0 {
                 continue;
             }
             out.push(Candidate {
-                freq_hz: self.bin_to_hz(peak_idx),
+                freq_hz,
                 power_db: byte_to_dbfs(peak),
                 bw_hz,
                 snr_db: byte_to_dbfs(peak) - floor_db,
             });
         }
+        // Coalesce candidates closer than `track_bucket_hz` into one — a
+        // carrier whose above-threshold run is split by a noise notch yields
+        // several adjacent runs in a single frame, which would otherwise
+        // become several separate tracks (the persistence bucket only dedups
+        // *across* frames, one candidate per track per frame). Merge keeps
+        // the strongest sub-peak's freq/power/snr and the union bandwidth.
+        let out = coalesce_candidates(out, f64::from(self.params.track_bucket_hz).max(1.0));
         (out, floor_db, threshold_db)
     }
 
@@ -409,6 +436,40 @@ fn round2(v: f32) -> f64 {
     f64::from((v * 100.0).round()) / 100.0
 }
 
+/// Merge same-frame candidates whose centres are within `merge_dist_hz` of
+/// each other into one — collapses a single carrier that fragmented into
+/// several adjacent above-threshold runs (noise notches on the carrier)
+/// into one detection. Keeps the strongest sub-peak's freq/power/snr and
+/// the union bandwidth so the reported width still spans the whole carrier.
+fn coalesce_candidates(mut cands: Vec<Candidate>, merge_dist_hz: f64) -> Vec<Candidate> {
+    if cands.len() < 2 {
+        return cands;
+    }
+    cands.sort_by(|a, b| {
+        a.freq_hz
+            .partial_cmp(&b.freq_hz)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut out: Vec<Candidate> = Vec::with_capacity(cands.len());
+    for c in cands {
+        if let Some(last) = out.last_mut() {
+            if (c.freq_hz - last.freq_hz).abs() <= merge_dist_hz {
+                let lo = (last.freq_hz - last.bw_hz / 2.0).min(c.freq_hz - c.bw_hz / 2.0);
+                let hi = (last.freq_hz + last.bw_hz / 2.0).max(c.freq_hz + c.bw_hz / 2.0);
+                if c.power_db > last.power_db {
+                    last.freq_hz = c.freq_hz;
+                    last.power_db = c.power_db;
+                    last.snr_db = c.snr_db;
+                }
+                last.bw_hz = hi - lo;
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[ferrite_blocks_macros::ferrite_block]
 impl Block for SignalList {
     fn spec() -> BlockSpec {
@@ -473,6 +534,19 @@ impl Block for SignalList {
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
                     ai_notes: "Ignore above-threshold groups narrower than this. 0 keeps everything (persistence debounces spikes).",
+                },
+                ParamSpec {
+                    key: "max_bw_hz",
+                    label: "Max bandwidth",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 1_000_000.0,
+                        step: 1_000.0,
+                        default: 0.0,
+                        unit: "Hz",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Carrier-hunter ceiling: drop groups wider than this. 0 = no limit. Set near a channel width (~12 kHz AM, ~5 kHz narrow tones) to filter out broadcast-overload humps and DC sidelobes that would otherwise dominate the list.",
                 },
                 ParamSpec {
                     key: "top_k",
@@ -964,5 +1038,87 @@ mod tests {
             3,
             "top_k=3 caps the list"
         );
+    }
+
+    #[test]
+    fn max_bw_drops_wide_blobs_keeps_narrow_carriers() {
+        // A wide overload hump next to a narrow carrier; the ceiling should
+        // surface only the carrier.
+        let n = 16384;
+        let mut b = block(
+            n,
+            SignalListParams {
+                persist_hits: 1,
+                emit_interval_ms: 0.0,
+                threshold_db: 8.0,
+                max_bw_hz: 10_000.0,
+                track_bucket_hz: 1_000.0,
+                ..Default::default()
+            },
+        );
+        // bin_hz = 2.4e6/16384 ≈ 146 Hz. A ~300-bin-wide hump (~44 kHz) and a
+        // ~5-bin (~730 Hz) carrier, well separated.
+        let row = make_row(n, -120.0, &[(5000, 150, -70.0), (10000, 3, -75.0)]);
+        let v = push(&mut b, &row).unwrap();
+        let sigs = v["signals"].as_array().unwrap();
+        assert_eq!(sigs.len(), 1, "wide blob filtered, narrow carrier kept");
+        // The survivor is the narrow one near bin 10000.
+        let f = sigs[0]["freq_hz"].as_f64().unwrap();
+        let expected = 100_000_000.0 + (10000.0 - 8192.0) / 16384.0 * 2_400_000.0;
+        assert!(
+            (f - expected).abs() < 5_000.0,
+            "survivor is the narrow carrier"
+        );
+    }
+
+    #[test]
+    fn negative_absolute_freqs_are_filtered() {
+        // Centre low enough that the span's lower half maps below 0 Hz.
+        let n = 4096;
+        let mut b = SignalList::new(SignalListParams {
+            size: n,
+            persist_hits: 1,
+            emit_interval_ms: 0.0,
+            threshold_db: 8.0,
+            ..Default::default()
+        })
+        .unwrap();
+        b.sample_rate_hz = 2_400_000.0;
+        b.center_freq_hz = 300_000.0; // span -900k..1500k → bins below 0 Hz
+                                      // A bump deep in the negative-frequency half (bin 200 → way below 0).
+        let row = make_row(n, -120.0, &[(200, 10, -70.0), (3000, 10, -75.0)]);
+        let v = push(&mut b, &row).unwrap();
+        let sigs = v["signals"].as_array().unwrap();
+        assert!(
+            sigs.iter().all(|s| s["freq_hz"].as_f64().unwrap() >= 0.0),
+            "no negative absolute frequencies reported"
+        );
+        assert!(!sigs.is_empty(), "the positive-side carrier still survives");
+    }
+
+    #[test]
+    fn split_carrier_coalesces_into_one() {
+        // A carrier whose run is broken into three adjacent sub-runs by a
+        // notch should report as ONE track, not three.
+        let n = 8192;
+        let mut b = block(
+            n,
+            SignalListParams {
+                persist_hits: 1,
+                emit_interval_ms: 0.0,
+                threshold_db: 8.0,
+                track_bucket_hz: 5_000.0,
+                ..Default::default()
+            },
+        );
+        // bin_hz ≈ 293 Hz. Three 1-bin peaks at 4000/4003/4006 (~880 Hz apart,
+        // well within the 5 kHz bucket) with sub-threshold gaps between them.
+        let mut row = make_row(n, -120.0, &[]);
+        for bin in [4000usize, 4003, 4006] {
+            row[bin] = dbfs_to_byte(-70.0);
+        }
+        let v = push(&mut b, &row).unwrap();
+        let sigs = v["signals"].as_array().unwrap();
+        assert_eq!(sigs.len(), 1, "split carrier coalesces to one track");
     }
 }
