@@ -338,6 +338,17 @@ pub struct DecodesArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DecodesResetArgs {
+    /// Decoder kind to clear (e.g. `adsb`, `aprs`, `ft8`). Drops its
+    /// accumulated records (log + keyed table) and bumps the store seq so
+    /// mirrors clear too.
+    pub kind: String,
+    /// Optional "why" note surfaced in the UI's activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PresetDetailArgs {
     /// Preset basename — matches `flowgraphs/<name>.json` on the
     /// daemon. Use `list_presets` to see what's loadable.
@@ -1101,6 +1112,17 @@ impl FerriteServer {
             None => "/api/decodes".to_string(),
         };
         self.http.get(&path).await
+    }
+
+    pub(crate) async fn decodes_reset_op(&self, args: DecodesResetArgs) -> Result<Value, McpError> {
+        self.http
+            .post(
+                &format!("/api/decodes/{}/reset", args.kind),
+                json!({}),
+                "decodes-reset",
+                args.note.as_deref(),
+            )
+            .await
     }
 
     pub(crate) async fn load_preset_op(&self, args: LoadPresetArgs) -> Result<Value, McpError> {
@@ -1894,6 +1916,16 @@ impl FerriteServer {
         Parameters(args): Parameters<DecodesArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_json(&self.decodes_op(args).await?)
+    }
+
+    #[tool(
+        description = "Clear one decoder kind in the DecoderStore — drops its accumulated records (the recent log + the keyed table) and bumps the store seq so browser mirrors clear too. Use after retuning to a new band/channel so stale ADS-B aircraft / APRS stations / decode lines don't linger, or to start a clean capture. Kinds reset themselves automatically on preset load / graph rebuild; this is the explicit on-demand path."
+    )]
+    async fn reset_decodes(
+        &self,
+        Parameters(args): Parameters<DecodesResetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.decodes_reset_op(args).await?)
     }
 
     #[tool(
