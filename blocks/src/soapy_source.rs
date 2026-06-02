@@ -43,6 +43,7 @@
 
 use std::{
     collections::BTreeMap,
+    mem::ManuallyDrop,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -93,7 +94,20 @@ struct ReaderCounters {
     /// to `now()` — a gap > a few ticks' worth of samples is a sign
     /// the driver hung (common with RTL-SDR on reset / USB glitches).
     last_sample_at_ns: AtomicU64,
+    /// Set by the reader when the device stops delivering for
+    /// [`HUNG_STALL`] (a wedged driver / unresponsive service). Read in
+    /// [`SoapySource`]'s `Drop` to decide whether `SoapySDRDevice_unmake`
+    /// is safe to call: against a wedged SDRplay service `ReleaseDevice()`
+    /// throws a C++ `runtime_error` that can't unwind through Rust and
+    /// aborts the whole process — so on a hung device we leak the handle
+    /// (the service restart frees it) rather than crash.
+    hung: AtomicBool,
 }
+
+/// No samples delivered for this long ⇒ treat the driver as hung. Long
+/// enough that a healthy active stream (which delivers continuously, even
+/// noise) never trips it; short enough to catch a wedge before teardown.
+const HUNG_STALL: Duration = Duration::from_secs(3);
 
 /// Construction-time params. All fields are optional in the JSON preset;
 /// missing fields fall back to [`Default`].
@@ -232,8 +246,11 @@ fn raw_gain_to_user(device: &Device, dir: Direction, ch: usize, raw_db: f64) -> 
 }
 
 pub struct SoapySource {
+    // `ManuallyDrop` so `Drop` can *skip* `SoapySDRDevice_unmake` when the
+    // driver is hung — see the `Drop` impl. Derefs to `Device`, so call
+    // sites (`self.device.frequency(..)`, `&self.device`) are unchanged.
     #[allow(dead_code)]
-    device: Device,
+    device: ManuallyDrop<Device>,
     #[allow(dead_code)]
     channel: usize,
     sample_rate_hz: f64,
@@ -438,7 +455,7 @@ impl SoapySource {
         }
 
         Ok(Self {
-            device,
+            device: ManuallyDrop::new(device),
             channel: ch,
             sample_rate_hz: actual_rate,
             center_freq_hz: actual_freq,
@@ -809,12 +826,27 @@ impl Drop for SoapySource {
         if let Some(handle) = self.reader.take() {
             let _ = handle.join();
         }
-        // `self.device` is unmade microseconds from now, when the
-        // struct's fields drop after this body returns. Stamp the
-        // close anchor here: the sub-millisecond skew vs. the actual
-        // `SoapySDRDevice_unmake` is immaterial against a ~1 s settle
-        // window, and keeping the field a plain `Device` (not
-        // `Option`) avoids rippling `.as_ref()` through every helper.
+        if self.counters.hung.load(Ordering::Relaxed) {
+            // The driver stopped delivering — the service is wedged.
+            // `SoapySDRDevice_unmake` (the `Device` Drop) calls the SDRplay
+            // `ReleaseDevice()`, which throws `sdrplay_api_ServiceNotResponding`
+            // as a C++ exception; it can't unwind through Rust and aborts the
+            // whole daemon. Skip it: leak the (already-dead) handle. The next
+            // `device reload` / `systemctl restart sdrplay` frees it cleanly,
+            // and the leak is one dangling handle, not a recurring cost.
+            tracing::warn!(
+                target: "driver",
+                "SoapySource dropped with a hung driver; leaking the device \
+                 handle to avoid an unmake() that would abort the process \
+                 (restart the SDR service to reclaim it)"
+            );
+            // Do NOT run the device's Drop (the throwing unmake).
+        } else {
+            // Healthy: release normally.
+            unsafe { ManuallyDrop::drop(&mut self.device) };
+        }
+        // Stamp the close anchor so the next open waits out the driver's
+        // teardown settle window.
         soapy_retry::mark_device_closed();
     }
 }
@@ -847,6 +879,11 @@ fn run_reader(
     };
     let gap_tolerance_ns = (ns_per_sample * 2.0) as i64;
 
+    // Wall-clock of the last delivered samples. If the device stops
+    // delivering for `HUNG_STALL`, flag the driver hung so `Drop` skips the
+    // throwing `unmake()`; a recovery clears it again.
+    let mut last_progress = std::time::Instant::now();
+
     while !stop.load(Ordering::Relaxed) {
         let result = {
             let dst: &mut [Complex<f32>] = &mut staging[..];
@@ -855,6 +892,9 @@ fn run_reader(
         };
         match result {
             Ok(0) => {
+                if last_progress.elapsed() > HUNG_STALL {
+                    counters.hung.store(true, Ordering::Relaxed);
+                }
                 thread::sleep(Duration::from_millis(1));
             }
             Ok(n) => {
@@ -883,6 +923,9 @@ fn run_reader(
                 if pushed > 0 {
                     let now_ns = start_instant.elapsed().as_nanos() as u64;
                     counters.last_sample_at_ns.store(now_ns, Ordering::Relaxed);
+                    // Delivering again — clear any prior stall flag.
+                    last_progress = std::time::Instant::now();
+                    counters.hung.store(false, Ordering::Relaxed);
                 }
                 if pushed < n {
                     counters
@@ -893,7 +936,11 @@ fn run_reader(
             Err(err) if err.code == ErrorCode::Timeout => {
                 // Normal idle — try again. Brief sleep so the driver
                 // has a chance to fill its internal ring if the pipe
-                // was momentarily starved.
+                // was momentarily starved. But a *sustained* run of
+                // timeouts with no delivery is a wedged driver.
+                if last_progress.elapsed() > HUNG_STALL {
+                    counters.hung.store(true, Ordering::Relaxed);
+                }
                 thread::sleep(Duration::from_millis(1));
             }
             Err(err) if err.code == ErrorCode::Overflow => {
@@ -904,7 +951,10 @@ fn run_reader(
                 expected_time_ns = 0;
             }
             Err(err) => {
+                // A hard read error usually means the device is gone /
+                // wedged — flag it so Drop skips the throwing unmake().
                 tracing::warn!(?err, "soapy read error; ending reader");
+                counters.hung.store(true, Ordering::Relaxed);
                 let _ = stream.deactivate(None);
                 return;
             }
