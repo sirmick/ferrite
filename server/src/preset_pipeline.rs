@@ -23,7 +23,11 @@ use anyhow::{anyhow, Context, Result};
 use ferrite_blocks::ws_bridge::{
     BridgeSink, WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
 };
-use ferrite_blocks::{afc_new_shift, AutoTune, Channelizer, SoapyReadback, SoapySource};
+use ferrite_blocks::{
+    afc_new_shift, AutoTune, Channelizer, DecoderSink, EventStore, SoapyReadback, SoapySource,
+};
+
+use crate::decoder_store::DecoderStore;
 use ferrite_runtime::SOURCE_ID;
 use ferrite_runtime::{
     split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry, ReconfigurePlan,
@@ -64,6 +68,9 @@ pub struct PresetMount {
     /// block regardless of port type; the sink discriminates by the
     /// `Frame` variant it receives on each push.
     bridge_sink: Arc<dyn BridgeSink>,
+    /// Shared decoder store — re-attached to fresh `EventStore` blocks
+    /// after a rebuild, same as `bridge_sink`.
+    decoder_store: Arc<DecoderStore>,
     /// 1 Hz cache of the SoapySource driver readback (current gain,
     /// AGC state, etc.). Populated by the [`drive`] task each diag tick
     /// so HTTP handlers can serve a fresh snapshot without touching the
@@ -89,7 +96,7 @@ impl PresetMount {
         if plan.is_noop() {
             return Ok(plan);
         }
-        attach_bridge_sinks(&mut rt, &node_half, &self.bridge_sink)?;
+        attach_bridge_sinks(&mut rt, &node_half, &self.bridge_sink, &self.decoder_store)?;
         Ok(plan)
     }
 
@@ -110,7 +117,7 @@ impl PresetMount {
         // live path doesn't touch them. Re-attach unconditionally — it's
         // idempotent and keeps the call simple.
         if let Some(doc) = rt.applied_doc().cloned() {
-            attach_bridge_sinks(&mut rt, &doc, &self.bridge_sink)?;
+            attach_bridge_sinks(&mut rt, &doc, &self.bridge_sink, &self.decoder_store)?;
         }
         Ok(plan)
     }
@@ -176,6 +183,7 @@ pub fn spawn_preset(
     frames: FrameBus,
     tick_period: Duration,
     latest_diag: Arc<tokio::sync::RwLock<Option<ferrite_runtime::DiagSnapshot>>>,
+    decoder_store: Arc<DecoderStore>,
 ) -> Result<PresetMount> {
     let node_half = split_for_environment(doc, Environment::Node, &InventorySpecRegistry)
         .map_err(|e| anyhow!("env_split: {e}"))?;
@@ -189,7 +197,7 @@ pub fn spawn_preset(
     .context("runtime load_doc")?;
 
     let bridge_sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(frames));
-    attach_bridge_sinks(&mut runtime, &node_half, &bridge_sink)?;
+    attach_bridge_sinks(&mut runtime, &node_half, &bridge_sink, &decoder_store)?;
 
     runtime.init().context("runtime init")?;
     runtime.start().context("runtime start")?;
@@ -211,6 +219,7 @@ pub fn spawn_preset(
         },
         runtime,
         bridge_sink,
+        decoder_store,
         latest_source_readback,
     })
 }
@@ -224,9 +233,16 @@ fn attach_bridge_sinks(
     runtime: &mut Runtime,
     node_half: &FlowgraphDoc,
     sink: &Arc<dyn BridgeSink>,
+    store: &Arc<DecoderStore>,
 ) -> Result<()> {
     for (id, decl) in &node_half.blocks {
         match decl.type_name.as_str() {
+            "EventStore" => {
+                let es = runtime.block_typed::<EventStore>(id).ok_or_else(|| {
+                    anyhow!("runtime is missing expected EventStore {id:?} after load")
+                })?;
+                es.attach_store(Arc::clone(store) as Arc<dyn DecoderSink>);
+            }
             "WsBridgeTx" => {
                 let tx = runtime.block_typed::<WsBridgeTx>(id).ok_or_else(|| {
                     anyhow!("runtime is missing expected WsBridgeTx {id:?} after load")
@@ -461,6 +477,7 @@ mod tests {
             frames,
             Duration::from_millis(5),
             std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
         // First crossing gets CROSS_ENV_STREAM_BASE = 1000.
@@ -508,6 +525,7 @@ mod tests {
             frames,
             Duration::from_millis(5),
             std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
         // Give the task a couple of ticks to run.
@@ -529,6 +547,7 @@ mod tests {
             frames,
             Duration::from_millis(5),
             std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
         let t0 = std::time::Instant::now();
@@ -551,6 +570,7 @@ mod tests {
             frames,
             Duration::from_millis(5),
             std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
 
@@ -607,6 +627,7 @@ mod tests {
             frames,
             Duration::from_millis(5),
             std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
         let plan = mount.reconfigure(&doc).await.unwrap();
@@ -627,6 +648,7 @@ mod tests {
             frames,
             Duration::from_millis(5),
             std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
         // Wait for one frame first.

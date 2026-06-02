@@ -116,6 +116,10 @@ struct Inner {
     /// connected while stopped picks up frames the moment the pipeline
     /// spins back up.
     frames: FrameBus,
+    /// Server-authoritative decoder store — survives start/stop and
+    /// preset swaps (like `frames`); `EventStore` blocks attach to it
+    /// each load, REST/MCP read snapshots, WS mirrors stream its deltas.
+    decoder_store: Arc<crate::decoder_store::DecoderStore>,
     preset_doc: RwLock<FlowgraphDoc>,
     source_config: RwLock<SourceConfig>,
     /// Runtime profile (audio toggle, demod placement override) applied
@@ -164,6 +168,7 @@ impl AppState {
         Self {
             inner: Arc::new(Inner {
                 frames,
+                decoder_store: Arc::new(crate::decoder_store::DecoderStore::new()),
                 preset_doc: RwLock::new(preset),
                 source_config: RwLock::new(source),
                 profile: RwLock::new(Profile::default()),
@@ -226,6 +231,12 @@ impl AppState {
     #[must_use]
     pub fn subscribe(&self) -> mpsc::Receiver<FrameBytes> {
         self.inner.frames.subscribe(DEFAULT_SUBSCRIBER_CAPACITY)
+    }
+
+    /// The shared decoder store (REST snapshot, WS-mirror feed, MCP).
+    #[must_use]
+    pub fn decoder_store(&self) -> Arc<crate::decoder_store::DecoderStore> {
+        Arc::clone(&self.inner.decoder_store)
     }
 
     pub async fn status(&self) -> PipelineStatus {
@@ -730,6 +741,7 @@ impl AppState {
             self.inner.frames.clone(),
             self.inner.tick_period,
             Arc::clone(&self.inner.latest_diag),
+            Arc::clone(&self.inner.decoder_store),
         )?;
         *guard = Some(mount);
         Ok(())
@@ -1490,9 +1502,7 @@ mod tests {
         .unwrap();
         let state = AppState::new(preset, test_source(), Duration::from_millis(5));
         let sinks = state.ui_sinks().await.unwrap();
-        // `inject_signal_list_taps` splices a SignalList onto the ui:fft
-        // terminus at compose, so the enumeration now carries both the
-        // FftU8 waterfall tap and the JsonEvent `signals` watchlist.
+        // The FftU8 waterfall tap is still a WS UI sink.
         let fft = sinks
             .iter()
             .find(|s| s.name == "fft")
@@ -1502,19 +1512,23 @@ mod tests {
             fft.stream_id >= ferrite_runtime::CROSS_ENV_STREAM_BASE,
             "fft tap gets a cross-env stream id"
         );
-        let signals = sinks
-            .iter()
-            .find(|s| s.name == "signals")
-            .expect("injected ui:signals enumerated");
-        assert_eq!(signals.payload_type, "JsonEvent");
+        // `inject_signal_list_taps` still splices a SignalList onto ui:fft,
+        // but its `ui:signals` events terminus is now an `EventStore`
+        // (feeds the DecoderStore), NOT a WS UI sink — so it no longer
+        // shows up in the ui-sink enumeration.
+        assert!(
+            !sinks.iter().any(|s| s.name == "signals"),
+            "signals is a DecoderStore kind now, not a WS ui sink"
+        );
     }
 
     #[tokio::test]
-    async fn ui_sinks_reports_json_event_payload_for_events_stream() {
-        // A decoder produces `Events`; a `ui:events` terminus must surface
-        // in the API as `payload_type: "JsonEvent"` so the browser knows
-        // to decode the payload as JSON instead of IQ or FFT bytes. The
-        // `src` placeholder is present but unused here — compose_source
+    async fn ui_sinks_omits_event_streams_now_routed_to_store() {
+        // A decoder produces `Events`; its `ui:events` terminus is now an
+        // `EventStore` feeding the server DecoderStore — NOT a WS UI sink.
+        // So it must NOT appear in the ui-sink enumeration (the browser
+        // reads decoder state from the store mirror, not a WS stream).
+        // The `src` placeholder is present but unused here — compose_source
         // requires it to exist; validate_doc tolerates isolated blocks.
         let preset: FlowgraphDoc = serde_json::from_value(json!({
             "name": "ev",
@@ -1535,9 +1549,10 @@ mod tests {
         .unwrap();
         let state = AppState::new(preset, test_source(), Duration::from_millis(5));
         let sinks = state.ui_sinks().await.unwrap();
-        assert_eq!(sinks.len(), 1);
-        assert_eq!(sinks[0].name, "events");
-        assert_eq!(sinks[0].payload_type, "JsonEvent");
+        assert!(
+            !sinks.iter().any(|s| s.name == "events"),
+            "events terminus routes to the DecoderStore via EventStore, not a WS ui sink"
+        );
     }
 
     #[tokio::test]

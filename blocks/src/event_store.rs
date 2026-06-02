@@ -107,7 +107,9 @@ impl EventStore {
             let data = std::str::from_utf8(&line)
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                .unwrap_or_else(|| serde_json::Value::String(String::from_utf8_lossy(&line).into()));
+                .unwrap_or_else(|| {
+                    serde_json::Value::String(String::from_utf8_lossy(&line).into())
+                });
             sink.emit(&self.params.kind, data);
         } else {
             self.ready.push(line);
