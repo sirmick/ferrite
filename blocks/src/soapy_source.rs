@@ -130,6 +130,14 @@ pub struct SoapySourceParams {
     pub gain_db: Option<f64>,
     /// Optional AGC toggle. Drivers lacking AGC silently ignore the call.
     pub agc: Option<bool>,
+    /// Gain control mode: `"auto"` (the single `gain_db` dial — on HackRF
+    /// a footgun-free LNA→VGA→AMP split) or `"manual"` (explicit per-stage
+    /// `gain_elements`). Default `"auto"`.
+    pub gain_mode: String,
+    /// Manual per-stage gains, dB, keyed by the driver's gain-element name
+    /// (`source_capabilities` → `rx_channels[].gains[].name`; HackRF: LNA /
+    /// VGA / AMP). Applied when `gain_mode = "manual"`.
+    pub gain_elements: BTreeMap<String, f64>,
     /// Driver-level automatic DC-offset tracking. Suppresses the LO
     /// leakage spike at the tuned centre on zero-IF SDRs (SDRplay
     /// above ~30 MHz). HackRF's driver doesn't expose this — there
@@ -157,6 +165,8 @@ impl Default for SoapySourceParams {
             antenna: None,
             gain_db: None,
             agc: None,
+            gain_mode: "auto".to_string(),
+            gain_elements: BTreeMap::new(),
             dc_offset_correction: true,
             channel: 0,
             settings: BTreeMap::new(),
@@ -186,6 +196,11 @@ pub struct SoapyReadback {
     pub agc: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub antenna: Option<String>,
+    /// Realized per-stage gains, dB, keyed by element name (HackRF: LNA /
+    /// VGA / AMP). Lets the UI show the actual stage split and light an
+    /// "AMP on" indicator. Empty for drivers with no named gain elements.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub gain_elements: BTreeMap<String, f64>,
 }
 
 type RingHandle = Arc<Mutex<IqRing>>;
@@ -245,6 +260,94 @@ fn raw_gain_to_user(device: &Device, dir: Direction, ch: usize, raw_db: f64) -> 
     user_gain_to_raw(device, dir, ch, raw_db)
 }
 
+// ---------------------------------------------------------------------------
+// HackRF gain distribution
+// ---------------------------------------------------------------------------
+//
+// HackRF has three RX gain stages with very different roles: AMP (a +14 dB
+// front-end amp, easily overloaded), LNA/IF (0–40 dB, 8 dB grid — sets the
+// noise figure), and VGA/baseband (0–62 dB, 2 dB grid — fills the ADC,
+// doesn't change SNR). SoapyHackRF's own overall `setGain` silently flips
+// the AMP on at ≥52 dB, which desenses a strong-signal scene. We replace
+// that with a footgun-free split: front-gain first (LNA), then VGA, and the
+// AMP only in the top 14 dB — and we report the realized stages back so the
+// UI can show an "AMP on" indicator instead of springing it on the operator.
+
+const HACKRF_LNA_MAX_DB: f64 = 40.0;
+const HACKRF_LNA_STEP_DB: f64 = 8.0;
+const HACKRF_VGA_MAX_DB: f64 = 62.0;
+const HACKRF_VGA_STEP_DB: f64 = 2.0;
+const HACKRF_AMP_DB: f64 = 14.0;
+/// Auto-dial ceiling = LNA + VGA + AMP.
+const HACKRF_GAIN_MAX_DB: f64 = HACKRF_LNA_MAX_DB + HACKRF_VGA_MAX_DB + HACKRF_AMP_DB;
+
+fn driver_is_hackrf(driver_key: &str) -> bool {
+    driver_key.eq_ignore_ascii_case("hackrf")
+}
+
+/// Distribute a single `0..=116` dB dial across HackRF's `(LNA, VGA, AMP)`
+/// stages, footgun-free: LNA first (noise figure), then VGA (ADC fill),
+/// AMP only in the top 14 dB. Each output is snapped to its stage's
+/// hardware grid; the function is monotonic in the dial.
+fn hackrf_auto_split(dial_db: f64) -> (f64, f64, f64) {
+    let dial = dial_db.clamp(0.0, HACKRF_GAIN_MAX_DB);
+    // AMP engages only above the LNA+VGA span (0..=102); below that the
+    // dial is pure front+baseband and the AMP stays off.
+    let amp = if dial > HACKRF_LNA_MAX_DB + HACKRF_VGA_MAX_DB {
+        HACKRF_AMP_DB
+    } else {
+        0.0
+    };
+    let budget = dial - amp; // 0..=102
+    let lna = ((budget / HACKRF_LNA_STEP_DB).floor() * HACKRF_LNA_STEP_DB).min(HACKRF_LNA_MAX_DB);
+    let vga =
+        (((budget - lna) / HACKRF_VGA_STEP_DB).floor() * HACKRF_VGA_STEP_DB).min(HACKRF_VGA_MAX_DB);
+    (lna, vga, amp)
+}
+
+/// Apply the gain intent to the device. `manual` sets each named element
+/// directly (caps-driven per-stage control, any driver); `auto` uses the
+/// footgun-free split on HackRF or the driver's overall element elsewhere.
+fn apply_gain(
+    device: &Device,
+    dir: Direction,
+    ch: usize,
+    manual: bool,
+    gain_db: Option<f64>,
+    elements: &BTreeMap<String, f64>,
+) -> Result<()> {
+    if manual {
+        for (name, &val) in elements {
+            device
+                .set_gain_element(dir, ch, name.as_str(), val)
+                .with_context(|| format!("set gain element {name}={val}"))?;
+        }
+        return Ok(());
+    }
+    let Some(g) = gain_db else {
+        return Ok(());
+    };
+    let driver = device.driver_key().unwrap_or_default();
+    if driver_is_hackrf(&driver) {
+        let (lna, vga, amp) = hackrf_auto_split(g);
+        device
+            .set_gain_element(dir, ch, "LNA", lna)
+            .context("set LNA")?;
+        device
+            .set_gain_element(dir, ch, "VGA", vga)
+            .context("set VGA")?;
+        device
+            .set_gain_element(dir, ch, "AMP", amp)
+            .context("set AMP")?;
+    } else {
+        let raw = user_gain_to_raw(device, dir, ch, g);
+        device
+            .set_gain(dir, ch, raw)
+            .with_context(|| format!("set gain={g} (raw={raw})"))?;
+    }
+    Ok(())
+}
+
 pub struct SoapySource {
     // `ManuallyDrop` so `Drop` can *skip* `SoapySDRDevice_unmake` when the
     // driver is hung — see the `Drop` impl. Derefs to `Device`, so call
@@ -255,6 +358,11 @@ pub struct SoapySource {
     channel: usize,
     sample_rate_hz: f64,
     center_freq_hz: f64,
+    /// Live gain intent, mirrored so a partial live delta (just the dial,
+    /// or one stage) re-applies the whole picture coherently.
+    gain_mode: String,
+    gain_db: Option<f64>,
+    gain_elements: BTreeMap<String, f64>,
     /// Some before [`Block::init`]; taken and moved into the reader
     /// thread when init spawns it.
     stream: Option<RxStream<Complex<f32>>>,
@@ -406,12 +514,16 @@ impl SoapySource {
             // and fall through to manual gain if supplied.
             let _ = device.set_gain_mode(dir, ch, agc);
         }
-        if let Some(g) = params.gain_db {
-            let raw = user_gain_to_raw(&device, dir, ch, g);
-            device
-                .set_gain(dir, ch, raw)
-                .with_context(|| format!("set gain={g} (raw={raw})"))?;
-        }
+        let gain_manual = params.gain_mode.eq_ignore_ascii_case("manual");
+        apply_gain(
+            &device,
+            dir,
+            ch,
+            gain_manual,
+            params.gain_db,
+            &params.gain_elements,
+        )
+        .context("configure gain")?;
         for (key, value) in &params.settings {
             // Soapy's writeSetting is the catch-all for driver-specific
             // knobs surfaced via getSettingInfo. Treat failures as soft —
@@ -459,6 +571,9 @@ impl SoapySource {
             channel: ch,
             sample_rate_hz: actual_rate,
             center_freq_hz: actual_freq,
+            gain_mode: params.gain_mode.clone(),
+            gain_db: params.gain_db,
+            gain_elements: params.gain_elements.clone(),
             stream: Some(stream),
             ring: Arc::new(Mutex::new(IqRing::new(RING_CAPACITY))),
             counters: Arc::new(ReaderCounters::default()),
@@ -560,6 +675,16 @@ impl SoapySource {
                 .map(|raw| raw_gain_to_user(&self.device, dir, ch, raw)),
             agc: self.device.gain_mode(dir, ch).ok(),
             antenna: self.device.antenna(dir, ch).ok().filter(|s| !s.is_empty()),
+            gain_elements: self
+                .device
+                .list_gains(dir, ch)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|name| {
+                    let v = self.device.gain_element(dir, ch, name.as_str()).ok()?;
+                    Some((name, v))
+                })
+                .collect(),
         }
     }
 }
@@ -635,7 +760,17 @@ impl Block for SoapySource {
                         unit: "dB",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "Overall SoapySDR gain element. Mutually exclusive with `agc=true`; ferrite-ctl folds them atomically. Some drivers expose a separate LNA stage on top — see driver notes.",
+                    ai_notes: "Auto-dial gain (dB, higher = louder), used when `gain_mode=auto`. On HackRF this is split footgun-free across LNA→VGA→AMP (the +14 dB front-end AMP only engages in the top 14 dB), instead of SoapyHackRF's built-in curve that flips AMP on at ≥52 dB. On other drivers it's the overall gain element. Mutually exclusive with `agc=true`. The authoritative range is `source_capabilities`→`overall_gain_range_db` (e.g. HackRF 0–116), not this static hint.",
+                },
+                ParamSpec {
+                    key: "gain_mode",
+                    label: "Gain mode",
+                    kind: ParamKind::EnumString {
+                        values: &["auto", "manual"],
+                        default: "auto",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "`auto` drives gain from the single `gain_db` dial (footgun-free split on HackRF). `manual` drives each stage explicitly from `gain_elements` (per-stage control; the Advanced gain panel). Per-stage names + ranges come from `source_capabilities`→`rx_channels[].gains` (HackRF: LNA 0–40/8, VGA 0–62/2, AMP 0/14).",
                 },
                 ParamSpec {
                     key: "agc",
@@ -693,6 +828,8 @@ impl Block for SoapySource {
         const LIVE_KEYS: &[&str] = &[
             "center_freq_hz",
             "gain_db",
+            "gain_mode",
+            "gain_elements",
             "antenna",
             "agc",
             "dc_offset_correction",
@@ -708,11 +845,38 @@ impl Block for SoapySource {
                 .with_context(|| format!("live set_frequency={v}"))?;
             self.center_freq_hz = self.device.frequency(dir, ch).unwrap_or(v);
         }
-        if let Some(v) = obj.get("gain_db").and_then(|v| v.as_f64()) {
-            let raw = user_gain_to_raw(&self.device, dir, ch, v);
-            self.device
-                .set_gain(dir, ch, raw)
-                .with_context(|| format!("live set_gain={v} (raw={raw})"))?;
+        // Gain: any of mode / dial / per-stage may arrive in the delta;
+        // update the mirrored intent then re-apply the whole picture so a
+        // partial change stays coherent (e.g. flipping to manual after
+        // dragging a stage, or moving the dial in auto).
+        let mut gain_touched = false;
+        if let Some(v) = obj.get("gain_mode").and_then(|v| v.as_str()) {
+            self.gain_mode = v.to_string();
+            gain_touched = true;
+        }
+        if let Some(v) = obj.get("gain_db").and_then(serde_json::Value::as_f64) {
+            self.gain_db = Some(v);
+            gain_touched = true;
+        }
+        if let Some(map) = obj.get("gain_elements").and_then(|v| v.as_object()) {
+            for (name, val) in map {
+                if let Some(db) = val.as_f64() {
+                    self.gain_elements.insert(name.clone(), db);
+                }
+            }
+            gain_touched = true;
+        }
+        if gain_touched {
+            let manual = self.gain_mode.eq_ignore_ascii_case("manual");
+            apply_gain(
+                &self.device,
+                dir,
+                ch,
+                manual,
+                self.gain_db,
+                &self.gain_elements,
+            )
+            .context("live gain")?;
         }
         if let Some(v) = obj.get("antenna").and_then(|v| v.as_str()) {
             self.device
@@ -1008,7 +1172,11 @@ fn open_with_retry(args: &str) -> Result<Device> {
 
 #[cfg(test)]
 mod tests {
-    use super::{driver_has_inverted_gain, invert_gain, SoapySource, SoapySourceParams};
+    use super::{
+        driver_has_inverted_gain, driver_is_hackrf, hackrf_auto_split, invert_gain, SoapySource,
+        SoapySourceParams, HACKRF_AMP_DB, HACKRF_LNA_MAX_DB, HACKRF_LNA_STEP_DB, HACKRF_VGA_MAX_DB,
+        HACKRF_VGA_STEP_DB,
+    };
     use crate::block::{Block, Placement, PortType};
 
     #[test]
@@ -1019,6 +1187,63 @@ mod tests {
         assert!(!driver_has_inverted_gain("hackrf"));
         assert!(!driver_has_inverted_gain("airspy"));
         assert!(!driver_has_inverted_gain(""));
+    }
+
+    #[test]
+    fn hackrf_split_is_lna_first_amp_last_and_footgun_free() {
+        // Bottom: pure LNA on its 8 dB grid, no VGA, no AMP.
+        assert_eq!(hackrf_auto_split(0.0), (0.0, 0.0, 0.0));
+        assert_eq!(hackrf_auto_split(24.0), (24.0, 0.0, 0.0));
+        // At/around the SoapyHackRF footgun threshold (≥52) the AMP must
+        // still be OFF — that's the whole point.
+        let (_, _, amp52) = hackrf_auto_split(52.0);
+        assert_eq!(amp52, 0.0, "AMP must stay off at 52 dB (no footgun)");
+        // LNA caps at 40, then VGA fills.
+        let (lna, vga, amp) = hackrf_auto_split(70.0);
+        assert_eq!((lna, amp), (40.0, 0.0));
+        assert_eq!(vga, 30.0); // (70-40) on the 2 dB grid
+                               // AMP only in the top band; full scale lights all three.
+        assert_eq!(hackrf_auto_split(102.0), (40.0, 62.0, 0.0));
+        assert_eq!(hackrf_auto_split(116.0), (40.0, 62.0, 14.0));
+        // Clamps out of range.
+        assert_eq!(hackrf_auto_split(999.0), (40.0, 62.0, 14.0));
+        assert_eq!(hackrf_auto_split(-5.0), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn hackrf_split_total_tracks_the_dial_and_is_monotonic() {
+        let mut prev = -1.0;
+        for d in 0..=116 {
+            let (lna, vga, amp) = hackrf_auto_split(f64::from(d));
+            let total = lna + vga + amp;
+            // Realized total never exceeds the dial and stays within one
+            // VGA step + the AMP swap of it.
+            assert!(
+                total <= f64::from(d) + 0.001,
+                "dial {d}: total {total} > dial"
+            );
+            assert!(
+                f64::from(d) - total <= HACKRF_AMP_DB,
+                "dial {d}: total {total} too far under"
+            );
+            // Each stage within its hardware limits.
+            assert!((0.0..=HACKRF_LNA_MAX_DB).contains(&lna));
+            assert!((0.0..=HACKRF_VGA_MAX_DB).contains(&vga));
+            assert!(amp == 0.0 || amp == HACKRF_AMP_DB);
+            // LNA/VGA on their grids.
+            assert!((lna % HACKRF_LNA_STEP_DB).abs() < f64::EPSILON);
+            assert!((vga % HACKRF_VGA_STEP_DB).abs() < f64::EPSILON);
+            let _ = prev;
+            prev = total;
+        }
+    }
+
+    #[test]
+    fn driver_is_hackrf_is_case_insensitive() {
+        assert!(driver_is_hackrf("hackrf"));
+        assert!(driver_is_hackrf("HackRF"));
+        assert!(!driver_is_hackrf("sdrplay"));
+        assert!(!driver_is_hackrf("rtlsdr"));
     }
 
     #[test]
