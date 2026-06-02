@@ -3,6 +3,11 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# Feature worktrees (git worktree add branches/<name>) — big features
+# evolve in isolation here; the parent never tracks them. Merged back at
+# the end. See feature-worktree-workflow.
+/branches/
+
 # Editor / OS
 .DS_Store
 .idea/
