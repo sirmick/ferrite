@@ -114,6 +114,16 @@
   // SoapySource default). Only an explicit `false` turns it off.
   let currentDcOffset = $derived(params.dc_offset_correction !== false);
 
+  // Software complex IQ DC blocker — auto-injected node-side after the
+  // source on zero-IF radios (HackRF) to kill the LO/DC spike at the
+  // tuned centre. It's a separate block (`dcblock`), not a source param,
+  // so it's toggled via the generic block-param route. Absent block =>
+  // not injected (non-hardware source) => hide the control.
+  let dcBlock = $derived(pipeline.blocks.dcblock);
+  let dcBlockValues = $derived((dcBlock?.values ?? {}) as Record<string, unknown>);
+  let dcBlockEnabled = $derived(dcBlockValues.enabled !== false); // default on
+  let dcBlockCorner = $derived(numberOr(dcBlockValues.corner_hz, 200));
+
   function numberOr(v: unknown, fallback: number): number {
     const n = typeof v === 'number' ? v : Number(v);
     return Number.isFinite(n) ? n : fallback;
@@ -137,6 +147,16 @@
         gain_mode: 'manual',
         gain_elements: { ...gainElementValues, [name]: value },
       });
+    } finally {
+      pending = null;
+    }
+  }
+
+  // Toggle / tune the injected `dcblock` (separate block, not `src`).
+  async function commitDcBlock(key: string, value: unknown) {
+    pending = `dcblock.${key}`;
+    try {
+      await applyControl(`flow.dcblock.${key}`, value);
     } finally {
       pending = null;
     }
@@ -380,6 +400,35 @@
           />
         </label>
       {/if}
+      {#if dcBlock}
+        <label
+          class="row"
+          title="Software complex IQ DC blocker — removes the zero-IF LO/DC spike at the tuned centre before the FFT split (gone from waterfall + narrow FFT + strongest-signal list). Toggle off to A/B whether a centre bin is a real carrier or the artifact."
+        >
+          <span class="label">DC blocker</span>
+          <div class="range">
+            <input
+              type="checkbox"
+              checked={dcBlockEnabled}
+              disabled={busy || pending !== null}
+              onchange={(e) =>
+                commitDcBlock('enabled', (e.currentTarget as HTMLInputElement).checked)}
+            />
+            <input
+              type="number"
+              min="0"
+              max="20000"
+              step="10"
+              value={dcBlockCorner}
+              title="High-pass corner (Hz). ~200 nulls DC while leaving a carrier even 1 kHz off centre untouched. 0 = bypass."
+              disabled={busy || pending !== null || !dcBlockEnabled}
+              onchange={(e) =>
+                commitDcBlock('corner_hz', Number((e.currentTarget as HTMLInputElement).value))}
+            />
+            <span class="unit">Hz</span>
+          </div>
+        </label>
+      {/if}
       {#if antennas.length > 1}
         <label class="row" title={`RF port · ${antennas.length} options`}>
           <span class="label">antenna</span>
@@ -521,5 +570,9 @@
     color: #aaa;
     font-size: 0.75rem;
     user-select: none;
+  }
+  .unit {
+    color: #888;
+    font-size: 0.75rem;
   }
 </style>
