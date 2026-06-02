@@ -25,6 +25,7 @@ pub mod audio_sink;
 pub mod auto_tune;
 pub mod block;
 pub mod channelizer;
+pub mod dc_block;
 pub mod decimator;
 pub mod digital_spot;
 pub mod dtmf_audio_source;
@@ -103,6 +104,7 @@ pub use block::{
     MAX_PORTS,
 };
 pub use channelizer::{Channelizer, ChannelizerParams};
+pub use dc_block::{DcBlock, DcBlockParams};
 pub use decimator::{Decimator, DecimatorParams};
 pub use dtmf_audio_source::{DtmfAudioSource, DtmfAudioSourceParams};
 pub use dtmf_decoder::{DtmfDecoder, DtmfDecoderParams};
@@ -198,6 +200,7 @@ mod tests {
             "FileIqSource",
             "LogMagU8",
             "Decimator",
+            "DcBlock",
             "RealF32Resamp",
             "Channelizer",
             "FmDemod",

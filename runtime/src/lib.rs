@@ -17,6 +17,7 @@ pub mod compose;
 pub mod corpus;
 pub mod doc;
 pub mod env_split;
+pub mod inject_dc_block;
 pub mod inject_narrow_fft;
 pub mod inject_signal_list;
 pub mod inject_voice_transcribe;
@@ -36,6 +37,7 @@ pub use compose::{compose_source, ComposeError, SourceConfig, SOURCE_ID, SOURCE_
 pub use corpus::{validate_corpus, CorpusFinding};
 pub use doc::{BlockInstanceDecl, Environment, FlowgraphDoc, VariantDecl, Wire};
 pub use env_split::{split_for_environment, SplitError, CROSS_ENV_STREAM_BASE};
+pub use inject_dc_block::inject_dc_block_taps;
 pub use inject_narrow_fft::inject_narrow_fft_taps;
 pub use inject_signal_list::inject_signal_list_taps;
 pub use inject_voice_transcribe::inject_voice_transcribe;

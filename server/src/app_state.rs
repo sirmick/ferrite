@@ -17,9 +17,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{anyhow, Result};
 use ferrite_blocks::{registry, SoapyReadback};
 use ferrite_runtime::{
-    apply_profile, compose_source, inject_narrow_fft_taps, inject_signal_list_taps,
-    inject_voice_transcribe, split_for_environment, Environment, FlowgraphDoc,
-    InventorySpecRegistry, Profile, ReconfigurePlan, SourceConfig, SOURCE_ID,
+    apply_profile, compose_source, inject_dc_block_taps, inject_narrow_fft_taps,
+    inject_signal_list_taps, inject_voice_transcribe, split_for_environment, Environment,
+    FlowgraphDoc, InventorySpecRegistry, Profile, ReconfigurePlan, SourceConfig, SOURCE_ID,
 };
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -263,6 +263,10 @@ impl AppState {
     ) -> Result<FlowgraphDoc> {
         let mut composed =
             compose_source(preset, source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
+        // Remove the zero-IF DC spike at the IQ stream (hardware sources
+        // only) BEFORE the FFT taps split, so the spike is gone from the
+        // wideband + narrow FFT and the watchlist consistently.
+        inject_dc_block_taps(&mut composed);
         inject_narrow_fft_taps(&mut composed);
         // Strongest-signal watchlist on the wideband FFT — synthesised for
         // every preset with a `ui:fft`, rather than hand-wired per preset.
