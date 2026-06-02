@@ -153,6 +153,10 @@
     [
       "audio_nr.out",
       "audio.in"
+    ],
+    [
+      "rtl433.events",
+      "ui:rtl_433"
     ]
   ]
 }

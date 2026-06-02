@@ -43,8 +43,9 @@ const LOG_CAP: usize = 512;
 /// Per-kind fold policy. Block owns the schema; this owns the folding.
 fn policy_for(kind: &str) -> Policy {
     match kind {
-        "adsb" | "ais" => Policy::Upsert {
-            key_field: if kind == "ais" { "mmsi" } else { "icao" },
+        // Keyed tables — decoders that emit a structured entity id.
+        "adsb" => Policy::Upsert {
+            key_field: "icao",
             ttl_ms: 60_000,
         },
         // APRS stations persist for the session (no TTL expiry).
@@ -52,9 +53,11 @@ fn policy_for(kind: &str) -> Policy {
             key_field: "call",
             ttl_ms: 0,
         },
+        // Single-current snapshot.
         "rds" | "rssi" | "signals" => Policy::Replace,
-        // Everything else is an append log (ft8, wspr, pager, eas, dtmf,
-        // morse, rtl_433, transcribe, fldigi, …).
+        // Everything else is an append log — ft8, wspr, pager, eas, dtmf,
+        // cw, ais, rtl_433, transcribe, fldigi, …. (ais/rtl_433 can become
+        // keyed tables once they emit a parsed mmsi / device id.)
         _ => Policy::Append { cap: LOG_CAP },
     }
 }

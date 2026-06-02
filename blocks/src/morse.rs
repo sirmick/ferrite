@@ -28,8 +28,8 @@ use ferrite_multimon_ng::{Decoder, MultimonDemod};
 use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, ReconfigureScope, Work,
+    drain_events_port, push_event_json, Block, BlockFactory, BlockIo, BlockSpec, InitCtx,
+    InputPort, ParamKind, ParamSpec, Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 /// Required input sample rate. Hard contract from `demod_morse`.
@@ -54,6 +54,7 @@ pub struct MorseDemod {
     decoder: MultimonDemod,
     warned_off_rate: bool,
     input_rate_hz: f64,
+    events_out: Vec<u8>,
 }
 
 impl MorseDemod {
@@ -68,6 +69,7 @@ impl MorseDemod {
             decoder: MultimonDemod::new(Decoder::MorseCw),
             warned_off_rate: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
+            events_out: Vec::new(),
         })
     }
 
@@ -94,7 +96,10 @@ impl Block for MorseDemod {
                 name: "in",
                 port_type: PortType::RealF32,
             }],
-            outputs: &[],
+            outputs: &[PortSpec {
+                name: "events",
+                port_type: PortType::Events,
+            }],
             params: &[ParamSpec {
                 key: "sample_rate_hz",
                 label: "Input sample rate",
@@ -147,10 +152,12 @@ impl Block for MorseDemod {
         self.decoder.push(src);
         for line in self.decoder.drain_lines() {
             tracing::info!(target: "decoder::cw", "{line}");
+            push_event_json(&mut self.events_out, &serde_json::json!({ "text": line }));
         }
 
         let mut w = Work::new();
         w.consumed[0] = consumed;
+        drain_events_port(io, &mut self.events_out, &mut w);
         Ok(w)
     }
 }

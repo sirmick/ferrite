@@ -165,6 +165,10 @@
     [
       "audio_nr.out",
       "audio.in"
+    ],
+    [
+      "eas.events",
+      "ui:eas"
     ]
   ]
 }
