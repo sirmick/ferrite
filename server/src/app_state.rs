@@ -823,8 +823,11 @@ impl AppState {
     ///    the spike lands outside the demodulated channel.
     ///
     /// `offset_ratio` is supplied by the caller from per-driver config
-    /// (HackRF: ~0.4 — see `web/src/lib/controls/sdr-presets/hackrf.json`;
-    /// most drivers: 0). When 0, the dodge collapses to "just retune".
+    /// (HackRF: ~0.7 — see `web/src/lib/controls/sdr-presets/hackrf.json`;
+    /// most drivers: 0). When 0, the dodge collapses to "just retune" and a
+    /// target can sit on DC (fine for DC-tracking drivers). When > 0 the
+    /// `dc_guard` below also forces a re-dodge if the target lands on/near
+    /// the current LO, so the carrier never stays parked on the spike.
     ///
     /// Two reconfigures (source delta + channelizer live param) — the
     /// channelizer hot-applies, the source hot-applies via the
@@ -909,12 +912,33 @@ impl AppState {
             Some((_, chan_rate)) => {
                 let keepout = 0.4 * chan_rate;
                 let dodge = offset_ratio * chan_rate;
+                // When a DC dodge is requested (offset_ratio > 0), the target
+                // must also sit at least this far *off* the current LO to
+                // "stick" — otherwise an in-span tune that lands on (or right
+                // beside) the LO would park the carrier on the DC spike/notch,
+                // exactly where a zero-IF radio can't hear it. Below the guard
+                // we re-snap so the dodge always actually moves it off DC.
+                // For DC-tracking drivers (offset_ratio == 0) the guard is 0 —
+                // they correct DC in hardware and may sit on centre.
+                let dc_guard = if offset_ratio > 0.0 {
+                    0.1 * chan_rate
+                } else {
+                    0.0
+                };
                 match cur_src_center {
-                    // Sticky: source already parked within keepout of target.
-                    Some(cur) if (freq_hz - cur).abs() <= keepout => (cur, freq_hz - cur),
-                    // Snap (also the first-tune / unknown-centre case): park
-                    // the source low of target by the dodge offset and let the
-                    // channelizer recover the carrier.
+                    // Sticky: source already parked off-DC but inside the
+                    // channel keepout window — reuse the LO, just re-shift.
+                    Some(cur)
+                        if {
+                            let off = (freq_hz - cur).abs();
+                            off <= keepout && off >= dc_guard
+                        } =>
+                    {
+                        (cur, freq_hz - cur)
+                    }
+                    // Snap (also the first-tune / unknown-centre case, and the
+                    // on-DC case above): park the source low of target by the
+                    // dodge offset and let the channelizer recover the carrier.
                     _ => (freq_hz - dodge, dodge),
                 }
             }
