@@ -106,6 +106,14 @@ pub struct SignalListParams {
     /// notch kills it; signals genuinely at the LO are unusual (you'd
     /// retune to one anyway). `0` disables the notch.
     pub dc_notch_hz: f32,
+    /// Peak-hold window (seconds). `0` = off (detect on the instantaneous
+    /// frame). When > 0, the detector runs on a per-bin **max-hold** that
+    /// decays a full-scale peak to the floor over this window — so a
+    /// *transient* burst (APRS chirps, FT8/packet, pagers) that an
+    /// instantaneous snapshot samples between is held long enough to be
+    /// detected. The trade is staleness: a signal lingers in the list up
+    /// to this long after it stops. ~8 s is a good band-survey value.
+    pub peak_hold_secs: f32,
 }
 
 impl Default for SignalListParams {
@@ -121,6 +129,7 @@ impl Default for SignalListParams {
             track_bucket_hz: 2_500.0,
             emit_interval_ms: 250.0,
             dc_notch_hz: 25_000.0,
+            peak_hold_secs: 0.0,
         }
     }
 }
@@ -164,10 +173,18 @@ pub struct SignalList {
     /// an empty watchlist ("quiet" vs "threshold too high").
     last_noise_floor_db: f32,
     last_threshold_db: f32,
+    /// Per-bin max-hold accumulator (byte units) when `peak_hold_secs > 0`;
+    /// empty otherwise. Decays toward 0 between frames so a transient peak
+    /// lingers ~`peak_hold_secs`, then detection runs on this instead of the
+    /// raw frame.
+    held: Vec<u8>,
     /// JSON bytes waiting to drain to the `events` output.
     pending: Vec<u8>,
     #[cfg(not(target_arch = "wasm32"))]
     last_emit: Option<Instant>,
+    /// Instant of the previous frame, for time-based peak-hold decay.
+    #[cfg(not(target_arch = "wasm32"))]
+    last_frame_at: Option<Instant>,
 }
 
 impl SignalList {
@@ -197,9 +214,12 @@ impl SignalList {
             frame: 0,
             last_noise_floor_db: SERVER_FLOOR_DBFS,
             last_threshold_db: SERVER_FLOOR_DBFS,
+            held: Vec::new(),
             pending: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             last_emit: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_frame_at: None,
         })
     }
 
@@ -212,6 +232,37 @@ impl SignalList {
         #[allow(clippy::cast_precision_loss)]
         let offset = (bin as f64 - n / 2.0) / n * self.sample_rate_hz;
         self.center_freq_hz + offset
+    }
+
+    /// Fold one frame into the per-bin max-hold accumulator: each bin
+    /// decays toward 0 by the time elapsed since the last frame (a full-
+    /// scale peak fades over `peak_hold_secs`), then takes the max with the
+    /// new value. A transient burst's peak therefore lingers ~`peak_hold_secs`
+    /// so the snapshot detector can catch it between bursts.
+    fn update_held(&mut self, row: &[u8]) {
+        let n = self.params.size.min(row.len());
+        if self.held.len() != self.params.size {
+            self.held = vec![0u8; self.params.size];
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let decay: u8 = {
+            let now = Instant::now();
+            let dt = self
+                .last_frame_at
+                .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+            self.last_frame_at = Some(now);
+            let secs = self.params.peak_hold_secs.max(0.001);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let d = (255.0 / secs * dt).round().clamp(0.0, 255.0) as u8;
+            d
+        };
+        // NativeOnly block — wasm path is dead; a fixed per-frame decay keeps
+        // it compiling without pulling in a clock.
+        #[cfg(target_arch = "wasm32")]
+        let decay: u8 = 4;
+        for (h, &r) in self.held[..n].iter_mut().zip(&row[..n]) {
+            *h = h.saturating_sub(decay).max(r);
+        }
     }
 
     /// Scan one frame into raw candidate groups, returning them alongside
@@ -626,6 +677,19 @@ impl Block for SignalList {
                     reconfig_scope: ReconfigureScope::SelfBlock,
                     ai_notes: "Mask ±this around the tuned centre so the SDR's DC/LO spike isn't reported as the strongest signal. 0 disables; raise if a wider spike leaks through.",
                 },
+                ParamSpec {
+                    key: "peak_hold_secs",
+                    label: "Peak hold",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 60.0,
+                        step: 0.5,
+                        default: 0.0,
+                        unit: "s",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Detect on a decaying per-bin max-hold over this window instead of the instantaneous frame. 0 = off. Set ~8 s to catch bursty/transient signals (APRS chirps, FT8, packet, pagers) a snapshot would miss — at the cost of a signal lingering in the list up to this long after it stops.",
+                },
             ],
             ai_notes: "Strongest-signal detector on the wideband FFT byte stream. Inline pass-through (FftU8 in → FftU8 out, like RssiProbe): splice it between LogMagU8 and the ui:fft sink — logmag.out → signals.in → ui:fft, with the watchlist on signals.events → ui:signals. NativeOnly (node-side). Emits a ranked list of {id, freq_hz, power_db, bw_hz, snr_db} JSON events ~4 Hz, driving the UI's 'Strongest Signals' panel and the `signals` MCP verb; click/tune a row to retune there. The `dc_notch_hz` param masks the SDR's LO spike at the tuned centre so it isn't reported as the top signal.",
         }
@@ -664,6 +728,12 @@ impl Block for SignalList {
         self.center_freq_hz = new_center;
         if moved {
             self.tracks.clear();
+            // The held spectrum belongs to the old centre — drop it too.
+            self.held.clear();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.last_frame_at = None;
+            }
         }
         Ok(())
     }
@@ -712,7 +782,14 @@ impl Block for SignalList {
         }
 
         self.frame += 1;
-        let (cands, floor_db, threshold_db) = self.detect(&row[..n]);
+        // Detect on the peak-held spectrum (catches transient bursts) when
+        // enabled, else on the raw frame.
+        let use_hold = self.params.peak_hold_secs > 0.0;
+        if use_hold {
+            self.update_held(&row[..n]);
+        }
+        let spectrum: &[u8] = if use_hold { &self.held[..n] } else { &row[..n] };
+        let (cands, floor_db, threshold_db) = self.detect(spectrum);
         self.last_noise_floor_db = floor_db;
         self.last_threshold_db = threshold_db;
         self.update_tracks(&cands);
@@ -1131,5 +1208,51 @@ mod tests {
         let v = push(&mut b, &row).unwrap();
         let sigs = v["signals"].as_array().unwrap();
         assert_eq!(sigs.len(), 1, "split carrier coalesces to one track");
+    }
+
+    #[test]
+    fn peak_hold_keeps_a_transient_detected_after_it_stops() {
+        // A transient burst then a run of quiet frames. Without peak-hold the
+        // track evicts within `persist_window` misses; with peak-hold the
+        // held spectrum keeps the burst's peak, so it's re-detected every
+        // frame and stays in the list — the APRS-chirp case.
+        let n = 4096;
+        let burst = make_row(n, -120.0, &[(3000, 20, -70.0)]);
+        let quiet = make_row(n, -120.0, &[]);
+        let params = |hold: f32| SignalListParams {
+            size: n,
+            peak_hold_secs: hold,
+            persist_window: 3,
+            persist_hits: 1,
+            emit_interval_ms: 0.0,
+            threshold_db: 8.0,
+            ..Default::default()
+        };
+
+        // No hold: the transient is evicted once it stops.
+        let mut off = block(n, params(0.0));
+        push(&mut off, &burst);
+        let mut last = None;
+        for _ in 0..6 {
+            last = push(&mut off, &quiet);
+        }
+        assert_eq!(
+            last.unwrap()["signals"].as_array().unwrap().len(),
+            0,
+            "without peak-hold the transient is gone after it stops"
+        );
+
+        // Peak-hold: the held peak keeps it detected across the quiet frames.
+        let mut on = block(n, params(10.0));
+        push(&mut on, &burst);
+        let mut last = None;
+        for _ in 0..6 {
+            last = push(&mut on, &quiet);
+        }
+        assert_eq!(
+            last.unwrap()["signals"].as_array().unwrap().len(),
+            1,
+            "peak-hold retains the transient after it stops"
+        );
     }
 }
