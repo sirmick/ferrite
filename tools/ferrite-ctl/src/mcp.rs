@@ -561,7 +561,7 @@ enum JobStatus {
     Failed { error: String },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 struct CaptureJob {
     job_id: String,
     kind: CaptureKind,
@@ -575,6 +575,35 @@ struct CaptureJob {
     /// Sidecar JSON the recording block wrote next to `output_path`.
     /// Populated on success.
     sidecar: Option<Value>,
+}
+
+// Manual `Serialize` so `status` is a flat string ("running"/"done"/
+// "failed") with a sibling `error`, matching what `capture_status` docs
+// promise and what the CLI poll loop reads. The derived form (with
+// `JobStatus`'s `#[serde(tag = "status")]`) double-wrapped it as
+// `status: { "status": "running" }`, so the poll loop's `as_str()` check
+// always saw `None`, declared the job "not running", and returned a
+// partial file after one poll instead of waiting for the capture.
+impl Serialize for CaptureJob {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let (status, error) = match &self.status {
+            JobStatus::Running => ("running", None),
+            JobStatus::Done => ("done", None),
+            JobStatus::Failed { error } => ("failed", Some(error.as_str())),
+        };
+        let mut st = s.serialize_struct("CaptureJob", 9)?;
+        st.serialize_field("job_id", &self.job_id)?;
+        st.serialize_field("kind", &self.kind)?;
+        st.serialize_field("status", status)?;
+        st.serialize_field("error", &error)?;
+        st.serialize_field("output_path", &self.output_path)?;
+        st.serialize_field("duration_s", &self.duration_s)?;
+        st.serialize_field("started_at", &self.started_at)?;
+        st.serialize_field("finished_at", &self.finished_at)?;
+        st.serialize_field("sidecar", &self.sidecar)?;
+        st.end()
+    }
 }
 
 #[derive(Clone)]
