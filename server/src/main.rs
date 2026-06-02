@@ -35,6 +35,7 @@ mod app_state;
 mod band_plan;
 mod block_schema;
 mod bridge_sink;
+mod decoder_store;
 mod device;
 mod device_cache;
 mod frame_bus;
