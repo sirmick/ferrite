@@ -10,9 +10,14 @@
 
   import { pipeline } from '$lib/pipeline.svelte';
   import { signals } from '$lib/signals/store.svelte';
+  import BlockParams from '$lib/controls/BlockParams.svelte';
 
   let streamId = $derived(pipeline.uiSinks.signals?.stream_id);
   let client = $derived(pipeline.client);
+  // The node-side SignalList detector backing this panel. Its Min SNR
+  // (detection threshold) + Top N knobs are live (SelfBlock), so editing
+  // them re-ranks the list — and the FFT peak squares — immediately.
+  let signalsBlock = $derived(pipeline.blocks['signals']);
 
   $effect(() => {
     if (client && streamId !== undefined) {
@@ -86,6 +91,12 @@
       </table>
     {/if}
   </div>
+
+  {#if signalsBlock}
+    <footer class="border-t border-slate-800 p-2">
+      <BlockParams block={signalsBlock} only={['threshold_db', 'top_k']} />
+    </footer>
+  {/if}
 </div>
 
 <style></style>

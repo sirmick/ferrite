@@ -542,7 +542,7 @@ impl Block for SignalList {
                 },
                 ParamSpec {
                     key: "threshold_db",
-                    label: "Detect threshold",
+                    label: "Min SNR",
                     kind: ParamKind::Range {
                         min: 3.0,
                         max: 60.0,
@@ -581,7 +581,7 @@ impl Block for SignalList {
                 },
                 ParamSpec {
                     key: "top_k",
-                    label: "Max signals",
+                    label: "Top N",
                     kind: ParamKind::Range {
                         min: 1.0,
                         max: 64.0,
