@@ -85,6 +85,27 @@
   let gainDisplay = $derived(
     overallGainRange ? gainDisplayValue(currentGain, overallGainRange, gainInverted) : currentGain,
   );
+  // Per-stage gain elements (HackRF: LNA / VGA / AMP) for the Advanced
+  // manual panel and the convenience-dial AMP indicator.
+  let gainStages = $derived(channel?.gains ?? []);
+  let gainMode = $derived(
+    typeof params.gain_mode === 'string' ? (params.gain_mode as string) : 'auto',
+  );
+  let manualGain = $derived(gainMode === 'manual');
+  let gainElementValues = $derived((params.gain_elements ?? {}) as Record<string, number>);
+  // The easily-overloaded +14 dB front-end amp (a 0/14 stage named "AMP").
+  // In auto it engages only once the dial passes the sum of the other
+  // stages' maxima — mirror that threshold from caps so the badge matches
+  // the backend split without hardcoding 102.
+  let ampStage = $derived(gainStages.find((g) => g.name === 'AMP') ?? null);
+  let ampThreshold = $derived(
+    ampStage
+      ? gainStages
+          .filter((g) => g.name !== 'AMP')
+          .reduce((sum, g) => sum + (g.range_db?.max ?? 0), 0)
+      : Number.POSITIVE_INFINITY,
+  );
+  let ampOn = $derived(manualGain ? (gainElementValues.AMP ?? 0) > 0 : currentGain > ampThreshold);
   let currentAntenna = $derived(
     typeof params.antenna === 'string' ? (params.antenna as string) : (antennas[0] ?? ''),
   );
@@ -102,6 +123,20 @@
     pending = key;
     try {
       await applyControl(`flow.src.${key}`, value);
+    } finally {
+      pending = null;
+    }
+  }
+
+  // A per-stage edit implies manual mode: send both atomically so the
+  // server applies the stage value under `gain_mode=manual` in one delta.
+  async function commitStage(name: string, value: number) {
+    pending = `gain_elements.${name}`;
+    try {
+      await pipeline.patchSourceParams({
+        gain_mode: 'manual',
+        gain_elements: { ...gainElementValues, [name]: value },
+      });
     } finally {
       pending = null;
     }
@@ -261,6 +296,63 @@
             />
           </div>
         </label>
+        {#if ampStage && !manualGain}
+          <div
+            class="row"
+            title={`HackRF front-end +14 dB amp — engages above ${ampThreshold} dB on the auto dial. Overloads easily on strong signals.`}
+          >
+            <span class="label">AMP</span>
+            <span class="amp-badge" class:on={ampOn}>{ampOn ? 'ON · +14 dB' : 'off'}</span>
+          </div>
+        {/if}
+      {/if}
+      {#if gainStages.length > 0}
+        <details class="advanced-gain">
+          <summary>Advanced gain (per stage)</summary>
+          <label
+            class="row"
+            title="Manual = set each stage yourself; Auto = the single gain dial above."
+          >
+            <span class="label">Manual</span>
+            <input
+              type="checkbox"
+              checked={manualGain}
+              disabled={busy || pending !== null}
+              onchange={(e) =>
+                commit(
+                  'gain_mode',
+                  (e.currentTarget as HTMLInputElement).checked ? 'manual' : 'auto',
+                )}
+            />
+          </label>
+          {#each gainStages as stage (stage.name)}
+            <label class="row" title={rangeTooltip(stage.range_db, 'dB')}>
+              <span class="label">{stage.name}</span>
+              <div class="range">
+                <input
+                  type="range"
+                  min={stage.range_db.min}
+                  max={stage.range_db.max}
+                  step={stage.range_db.step ?? 1}
+                  value={gainElementValues[stage.name] ?? stage.range_db.min}
+                  disabled={busy || pending !== null || !manualGain}
+                  oninput={(e) =>
+                    commitStage(stage.name, Number((e.currentTarget as HTMLInputElement).value))}
+                />
+                <input
+                  type="number"
+                  min={stage.range_db.min}
+                  max={stage.range_db.max}
+                  step={stage.range_db.step ?? 1}
+                  value={gainElementValues[stage.name] ?? stage.range_db.min}
+                  disabled={busy || pending !== null || !manualGain}
+                  onchange={(e) =>
+                    commitStage(stage.name, Number((e.currentTarget as HTMLInputElement).value))}
+                />
+              </div>
+            </label>
+          {/each}
+        </details>
       {/if}
       {#if hasAgc}
         <label class="row" title="set_gain_mode(true) — driver's internal AGC loop">
@@ -408,5 +500,26 @@
   }
   .range input[type='number'] {
     width: 5rem;
+  }
+  .amp-badge {
+    font-size: 0.7rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 0.25rem;
+    background: #333;
+    color: #999;
+    user-select: none;
+  }
+  .amp-badge.on {
+    background: #7a3b00;
+    color: #ffb066;
+  }
+  .advanced-gain {
+    margin: 0.2rem 0 0.1rem;
+  }
+  .advanced-gain summary {
+    cursor: pointer;
+    color: #aaa;
+    font-size: 0.75rem;
+    user-select: none;
   }
 </style>
