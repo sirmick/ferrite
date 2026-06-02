@@ -643,17 +643,28 @@ impl Block for SignalList {
     }
 
     fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
-        // Re-read on retune so reported frequencies track the new centre.
-        self.sample_rate_hz = ctx.input_rate("in").unwrap_or(self.sample_rate_hz);
-        self.center_freq_hz = ctx
+        // Re-read the input centre/rate.
+        let new_rate = ctx.input_rate("in").unwrap_or(self.sample_rate_hz);
+        let new_center = ctx
             .input_meta
             .iter()
             .find(|(n, _)| *n == "in")
             .map(|(_, m)| m.center_freq_hz)
             .unwrap_or(self.center_freq_hz);
-        // A retune invalidates the old frequency buckets — clear tracks so
-        // stale signals from the previous centre don't linger.
-        self.tracks.clear();
+        // Only invalidate the tracked set when the centre/rate ACTUALLY
+        // changed (a real retune). The runtime re-runs `update_rates` on
+        // every reconfigure — AFC nudges, unrelated source-param edits, a
+        // re-compose — and clearing unconditionally blanked the whole list
+        // for `persist_hits` frames each time, which the UI saw as the list
+        // flickering out and back. A genuine retune still resets the
+        // now-stale frequency buckets.
+        let moved = (new_center - self.center_freq_hz).abs() > 0.5
+            || (new_rate - self.sample_rate_hz).abs() > 0.5;
+        self.sample_rate_hz = new_rate;
+        self.center_freq_hz = new_center;
+        if moved {
+            self.tracks.clear();
+        }
         Ok(())
     }
 
