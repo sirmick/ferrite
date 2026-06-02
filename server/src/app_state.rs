@@ -17,9 +17,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{anyhow, Result};
 use ferrite_blocks::{registry, SoapyReadback};
 use ferrite_runtime::{
-    apply_profile, compose_source, inject_narrow_fft_taps, inject_voice_transcribe,
-    split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry, Profile,
-    ReconfigurePlan, SourceConfig, SOURCE_ID,
+    apply_profile, compose_source, inject_narrow_fft_taps, inject_signal_list_taps,
+    inject_voice_transcribe, split_for_environment, Environment, FlowgraphDoc,
+    InventorySpecRegistry, Profile, ReconfigurePlan, SourceConfig, SOURCE_ID,
 };
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -264,6 +264,9 @@ impl AppState {
         let mut composed =
             compose_source(preset, source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
         inject_narrow_fft_taps(&mut composed);
+        // Strongest-signal watchlist on the wideband FFT — synthesised for
+        // every preset with a `ui:fft`, rather than hand-wired per preset.
+        inject_signal_list_taps(&mut composed);
         let profile = self.inner.profile.read().await;
         apply_profile(&mut composed, &profile);
         inject_voice_transcribe(&mut composed, &profile);
@@ -1457,10 +1460,23 @@ mod tests {
         .unwrap();
         let state = AppState::new(preset, test_source(), Duration::from_millis(5));
         let sinks = state.ui_sinks().await.unwrap();
-        assert_eq!(sinks.len(), 1);
-        assert_eq!(sinks[0].name, "fft");
-        assert_eq!(sinks[0].stream_id, 1000);
-        assert_eq!(sinks[0].payload_type, "FftU8");
+        // `inject_signal_list_taps` splices a SignalList onto the ui:fft
+        // terminus at compose, so the enumeration now carries both the
+        // FftU8 waterfall tap and the JsonEvent `signals` watchlist.
+        let fft = sinks
+            .iter()
+            .find(|s| s.name == "fft")
+            .expect("ui:fft enumerated");
+        assert_eq!(fft.payload_type, "FftU8");
+        assert!(
+            fft.stream_id >= ferrite_runtime::CROSS_ENV_STREAM_BASE,
+            "fft tap gets a cross-env stream id"
+        );
+        let signals = sinks
+            .iter()
+            .find(|s| s.name == "signals")
+            .expect("injected ui:signals enumerated");
+        assert_eq!(signals.payload_type, "JsonEvent");
     }
 
     #[tokio::test]
