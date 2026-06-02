@@ -73,7 +73,10 @@ pub fn apply(current: &SourceConfig, next: &mut SourceConfig, caps: &DeviceCapab
     }
 
     // --- SDRplay broadcast notches: follow the tuned span. ---
-    if caps.driver_key == "sdrplay" {
+    // Case-insensitive: the opened device reports driver_key "SDRplay",
+    // while the Soapy args string uses lowercase `driver=sdrplay` — match
+    // either so the notch policy actually fires headless.
+    if caps.driver_key.eq_ignore_ascii_case("sdrplay") {
         if let Some(center) = params.get("center_freq_hz").and_then(Value::as_f64) {
             let rate = params
                 .get("sample_rate_hz")
@@ -320,7 +323,9 @@ mod tests {
     // --- apply(): the full server decision logic, hardware-free ---
 
     fn sdrplay_caps() -> DeviceCapabilities {
-        caps_with_bw("sdrplay", SDRPLAY_LADDER)
+        // Real casing the opened device reports — guards the case-insensitive
+        // driver match (the Soapy args string is lowercase `driver=sdrplay`).
+        caps_with_bw("SDRplay", SDRPLAY_LADDER)
     }
 
     fn src(params: serde_json::Value) -> SourceConfig {
