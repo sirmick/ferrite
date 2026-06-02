@@ -399,11 +399,8 @@ async fn main() -> Result<()> {
         )
         .route("/api/source/readback", get(routes::get_source_readback))
         .route("/api/decodes", get(routes::get_decodes))
-        .route("/api/decodes/{kind}", get(routes::get_decodes_kind))
-        .route(
-            "/api/decodes/{kind}/reset",
-            post(routes::reset_decodes_kind),
-        )
+        .route("/api/decodes/:kind", get(routes::get_decodes_kind))
+        .route("/api/decodes/:kind/reset", post(routes::reset_decodes_kind))
         .route("/api/tune", post(routes::post_tune))
         .route("/api/pipeline", get(routes::pipeline_status))
         .route("/api/pipeline/start", post(routes::pipeline_start))

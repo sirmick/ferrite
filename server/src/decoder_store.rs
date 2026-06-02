@@ -29,6 +29,8 @@ pub enum Policy {
     /// Keyed table with TTL — latest record per entity (ADS-B/AIS/APRS).
     Upsert {
         key_field: &'static str,
+        /// Read by `expire` (wired into the diag-tick in P4).
+        #[allow(dead_code)]
         ttl_ms: u64,
     },
     /// Single current record holding the whole payload (RDS/RSSI/signals).
@@ -90,7 +92,8 @@ pub enum DeltaOp {
     Add { record: Record },
     /// Set the keyed entity / single-current record (upsert / replace).
     Upsert { record: Record },
-    /// Drop a keyed entity (TTL expiry).
+    /// Drop a keyed entity (TTL expiry). Constructed by `expire` (P4).
+    #[allow(dead_code)]
     Expire { key: String },
     /// Clear the whole kind.
     Reset,
@@ -138,7 +141,8 @@ impl DecoderStore {
         }
     }
 
-    /// Subscribe to the live delta stream (the WS mirror feed, P2).
+    /// Subscribe to the live delta stream (the WS mirror feed, wired in P2).
+    #[allow(dead_code)]
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<StateDelta> {
         self.tx.subscribe()
@@ -232,8 +236,9 @@ impl DecoderStore {
         });
     }
 
-    /// Drop stale keyed entities for TTL kinds. Call from the diag-tick.
-    /// Returns the number expired.
+    /// Drop stale keyed entities for TTL kinds. Wired into the diag-tick
+    /// in P4. Returns the number expired.
+    #[allow(dead_code)]
     pub fn expire(&self, now: u64) -> usize {
         let mut g = self.inner.lock().unwrap();
         let mut expired: Vec<(String, String)> = Vec::new();
