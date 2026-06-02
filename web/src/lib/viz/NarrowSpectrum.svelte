@@ -148,19 +148,9 @@
     renderer?.setFeatures({ fade, maxHold });
   });
 
-  // Paint the same auto-detected peaks as the wide pane — in the narrow
-  // view only the few that fall inside the channel slice are visible
-  // (the renderer clamps to the window). Refcounted attach so the store
-  // stays alive independent of the right-pane list view.
-  let signalsStreamId = $derived(pipeline.uiSinks.signals?.stream_id);
-  $effect(() => {
-    if (client && signalsStreamId !== undefined) {
-      signals.attach(client, signalsStreamId);
-      return () => signals.release();
-    }
-    return () => {};
-  });
-
+  // Paint the same auto-detected peaks as the wide pane (the renderer
+  // clamps to the channel window). The watchlist comes from the
+  // always-connected decoder mirror — no per-consumer attach.
   $effect(() => {
     renderer?.setMarkers({ peaksHz: signals.signals.map((s) => s.freq_hz) });
   });

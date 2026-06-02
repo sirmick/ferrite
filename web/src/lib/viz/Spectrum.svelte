@@ -374,19 +374,9 @@
     });
   });
 
-  // Hold a ref on the strongest-signal store whenever the preset
-  // advertises a `ui:signals` sink, so the peak squares paint even when
-  // the right-pane list view is closed. Refcounted in the store, so this
-  // coexists with the list view's own attach.
-  let signalsStreamId = $derived(pipeline.uiSinks.signals?.stream_id);
-  $effect(() => {
-    const c = pipeline.client;
-    if (c && signalsStreamId !== undefined) {
-      signals.attach(c, signalsStreamId);
-      return () => signals.release();
-    }
-    return () => {};
-  });
+  // The strongest-signal watchlist comes from the always-connected
+  // decoder mirror now (no per-consumer WS attach needed) — the peak
+  // squares just read `signals.signals`.
 
   // Frequency-allocation ribbon above the trace. Toggle is persisted in
   // the client control store; the data itself is a static build-time

@@ -144,8 +144,7 @@ impl DecoderStore {
         }
     }
 
-    /// Subscribe to the live delta stream (the WS mirror feed, wired in P2).
-    #[allow(dead_code)]
+    /// Subscribe to the live delta stream (the WS mirror feed).
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<StateDelta> {
         self.tx.subscribe()

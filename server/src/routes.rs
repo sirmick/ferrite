@@ -122,6 +122,65 @@ async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroa
     }
 }
 
+/// `GET /ws/decodes` — the decoder-store mirror feed. On connect sends a
+/// full snapshot (`{"snapshot": {seq, kinds}}`), then streams each change
+/// as `{"delta": {kind, seq, op}}`. The browser keeps a 1:1 mirror and
+/// de-dupes by `seq` (skips deltas ≤ the snapshot's seq). REST
+/// `/api/decodes` is the same data for MCP/headless.
+pub async fn ws_decodes(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    let store = state.decoder_store();
+    ws.on_upgrade(move |socket| ws_decodes_forward(socket, store))
+}
+
+async fn ws_decodes_forward(
+    mut socket: WebSocket,
+    store: std::sync::Arc<crate::decoder_store::DecoderStore>,
+) {
+    // Subscribe *before* snapshotting so no delta is lost in the gap; the
+    // client de-dupes any overlap by `seq`.
+    let mut rx = store.subscribe();
+    let snapshot = serde_json::json!({ "snapshot": store.snapshot() });
+    if socket
+        .send(Message::Text(snapshot.to_string()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(25));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            recv = rx.recv() => match recv {
+                Ok(delta) => {
+                    let msg = serde_json::json!({ "delta": delta }).to_string();
+                    if socket.send(Message::Text(msg)).await.is_err() {
+                        return;
+                    }
+                }
+                // On lag, tell the client to re-fetch the snapshot via REST
+                // rather than try to reconcile a gap.
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = socket
+                        .send(Message::Text(r#"{"resync":true}"#.to_string()))
+                        .await;
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            _ = keepalive.tick() => {
+                if socket.send(Message::Ping(Vec::new())).await.is_err() {
+                    return;
+                }
+            }
+            client = socket.recv() => match client {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+}
+
 /// Default location of the ferrite-ai sidecar — TCP on localhost. The
 /// sidecar holds an Anthropic Claude Agent SDK session per browser
 /// connection; ferrited reverse-proxies its WS so the browser only
