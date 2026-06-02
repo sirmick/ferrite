@@ -735,6 +735,11 @@ pub struct TuneRequest {
     pub span_hz: Option<f64>,
     #[serde(default)]
     pub offset_ratio: f64,
+    /// Opt-in: when the target is already inside the digitised span, retune
+    /// the channelizer only and leave the LO/graph put — no source restart,
+    /// no node-side worker reload. Falls back to a normal tune out-of-span.
+    #[serde(default)]
+    pub keep_lo: bool,
 }
 
 /// `POST /api/tune` — single tuning intent. Every caller that "asks to
@@ -751,10 +756,11 @@ pub async fn post_tune(
         freq_hz = req.freq_hz,
         span_hz = ?req.span_hz,
         offset_ratio = req.offset_ratio,
+        keep_lo = req.keep_lo,
         "POST /api/tune"
     );
     let plan = state
-        .tune(req.freq_hz, req.span_hz, req.offset_ratio)
+        .tune(req.freq_hz, req.span_hz, req.offset_ratio, req.keep_lo)
         .await
         .map_err(|e| bad_request("TUNE_FAILED", format!("{e:#}")))?;
     let mut resp = reconfigure_response(plan);

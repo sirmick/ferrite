@@ -246,6 +246,14 @@ pub struct TuneArgs {
     /// rate→BW ladder so the IF filter tracks the new rate.
     #[serde(default)]
     pub sample_rate_hz: Option<f64>,
+    /// Stay-in-span retune (opt-in). When the target is already inside the
+    /// current digitised span, retune the channelizer only and leave the LO
+    /// and graph in place — no source restart, so a node-side worker (e.g.
+    /// whisper) doesn't reload and a wideband survey's centre stays fixed
+    /// while you hop stations. Falls back to a normal LO-moving tune if the
+    /// target is outside the span. Ideal for the `signals` → hop → listen loop.
+    #[serde(default)]
+    pub keep_lo: bool,
     /// Optional "why" note surfaced in the UI's activity transcript.
     #[serde(default)]
     pub note: Option<String>,
@@ -1081,6 +1089,7 @@ impl FerriteServer {
                     "freq_hz": args.freq_hz,
                     "span_hz": args.span_hz,
                     "offset_ratio": args.offset_ratio.unwrap_or(0.0),
+                    "keep_lo": args.keep_lo,
                 }),
                 "tune",
                 note,
@@ -1842,7 +1851,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Tune the radio to listen at `freq_hz`. Routes through POST /api/tune so the per-driver DC-spike dodge applies (the operator-visible listen freq stays at the requested value; the source LO may move so the spike doesn't land in the demodulated channel). Supply `offset_ratio` from the per-driver SDR-preset JSON (HackRF ~0.7, DC-tracking drivers leave at 0); `span_hz` raises the source rate if larger than current. Optionally fold in `gain_db` (manual gain — folds `agc=false` so it lands), `bandwidth_hz`, and `sample_rate_hz` (auto-derives BW from the driver ladder when set without `bandwidth_hz`) in the same call."
+        description = "Tune the radio to listen at `freq_hz`. Routes through POST /api/tune so the per-driver DC-spike dodge applies (the operator-visible listen freq stays at the requested value; the source LO may move so the spike doesn't land in the demodulated channel). Supply `offset_ratio` from the per-driver SDR-preset JSON (HackRF ~0.7, DC-tracking drivers leave at 0); `span_hz` raises the source rate if larger than current. Optionally fold in `gain_db` (manual gain — folds `agc=false` so it lands), `bandwidth_hz`, and `sample_rate_hz` (auto-derives BW from the driver ladder when set without `bandwidth_hz`) in the same call. Set `keep_lo:true` to hop *within the current span* by retuning the channelizer only — no LO move, no graph restart (so a running transcribe worker doesn't reload and the survey centre stays put); it falls back to a normal tune when the target is outside the span. Use it for the `signals` → hop → listen loop."
     )]
     async fn tune(
         &self,

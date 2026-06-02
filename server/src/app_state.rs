@@ -830,6 +830,7 @@ impl AppState {
         freq_hz: f64,
         span_hz: Option<f64>,
         offset_ratio: f64,
+        keep_lo: bool,
     ) -> Result<Option<ReconfigurePlan>> {
         if !freq_hz.is_finite() {
             return Err(anyhow!("tune: freq_hz must be finite, got {freq_hz}"));
@@ -870,6 +871,29 @@ impl AppState {
             .get("sample_rate_hz")
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
+
+        // In-span fast path (opt-in via `keep_lo`): when the target already
+        // falls inside the digitised span, retune the *channelizer only* —
+        // leave the LO and the whole graph untouched. This avoids the source
+        // restart a normal tune triggers (which recomposes the graph and
+        // reloads any node-side worker, e.g. whisper — a ~20-30 s blackout)
+        // and keeps a wideband survey's centre stable while you hop between
+        // stations. Falls through to the normal LO-moving path when the
+        // target is outside the usable span, or the LO/channelizer is unknown.
+        if keep_lo {
+            if let (Some(cur), Some((chan_id, chan_rate))) = (cur_src_center, &chan) {
+                // Keep the extracted channel fully inside the span (half the
+                // sample rate, less half the channel width as edge margin).
+                let usable_half = cur_rate / 2.0 - chan_rate / 2.0;
+                if cur_rate > 0.0 && usable_half > 0.0 && (freq_hz - cur).abs() <= usable_half {
+                    let shift = freq_hz - cur;
+                    let plan = self
+                        .apply_block_params(chan_id, serde_json::json!({ "freq_shift_hz": shift }))
+                        .await?;
+                    return Ok(plan);
+                }
+            }
+        }
 
         // Compute new src_center + chan.freq_shift_hz from the dodge math.
         let (new_src_center, new_freq_shift) = match &chan {

@@ -101,6 +101,11 @@ enum Cmd {
         /// drivers 0). Must exceed 0.5 when non-zero.
         #[arg(long)]
         offset: Option<f64>,
+        /// Stay-in-span: if the target is already inside the current span,
+        /// retune the channelizer only (no LO move, no graph restart, no
+        /// worker reload). Ideal for hopping stations during a survey.
+        #[arg(long)]
+        keep_lo: bool,
     },
     /// Patch parameter(s) on a pipeline block. `key=value` pairs;
     /// values parse as JSON when possible (numbers, booleans), else
@@ -514,6 +519,7 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             gain,
             span,
             offset,
+            keep_lo,
         } => {
             let args = TuneArgs {
                 freq_hz: parse_si(&freq)?,
@@ -522,6 +528,7 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 gain_db: gain,
                 bandwidth_hz: parse_si_opt(bw.as_deref())?,
                 sample_rate_hz: parse_si_opt(rate.as_deref())?,
+                keep_lo,
                 note: None,
             };
             emit(&server.tune_op(args).await.map_err(op_err)?, json)
