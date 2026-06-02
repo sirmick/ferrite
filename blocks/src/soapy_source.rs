@@ -770,7 +770,7 @@ impl Block for SoapySource {
                         default: "auto",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "`auto` drives gain from the single `gain_db` dial (footgun-free split on HackRF). `manual` drives each stage explicitly from `gain_elements` (per-stage control; the Advanced gain panel). Per-stage names + ranges come from `source_capabilities`→`rx_channels[].gains` (HackRF: LNA 0–40/8, VGA 0–62/2, AMP 0/14).",
+                    ai_notes: "`auto` drives gain from the single `gain_db` dial (footgun-free split on HackRF) — the convenience path, prefer it. `manual` drives each stage explicitly from `gain_elements` (the Advanced gain panel). ⚠️ Only switch to `manual` when you specifically need per-stage control; for normal use set `gain_db` and leave this `auto`. Per-stage names + ranges come from `source_capabilities`→`rx_channels[].gains` (HackRF: LNA 0–40/8, VGA 0–62/2, AMP 0/14).",
                 },
                 ParamSpec {
                     key: "agc",

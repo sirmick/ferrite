@@ -107,10 +107,17 @@ enum Cmd {
         #[arg(long)]
         keep_lo: bool,
     },
-    /// Patch parameter(s) on a pipeline block. `key=value` pairs;
-    /// values parse as JSON when possible (numbers, booleans), else
-    /// string. The `src` block accepts gain_db / agc / antenna /
-    /// bandwidth_hz / dc_offset_correction / settings.
+    /// Patch parameter(s) on a pipeline block — the advanced/direct
+    /// surface. `key=value` pairs; values parse as JSON when possible
+    /// (numbers, booleans), else string. The `src` block accepts
+    /// gain_db / gain_mode / gain_elements / agc / antenna / bandwidth_hz
+    /// / dc_offset_correction / settings.
+    ///
+    /// Prefer the convenience paths where one exists: use `tune` for
+    /// frequency (NOT `param src center_freq_hz` / `param chan
+    /// freq_shift_hz` — they skip the DC-spike dodge and can park the
+    /// carrier on DC), and the `gain_db` auto dial (NOT
+    /// `gain_mode=manual`/`gain_elements`) unless you need per-stage gain.
     Param {
         /// Block id, e.g. `demod`, `audio_nr`, `chan`, `src`.
         block: String,
