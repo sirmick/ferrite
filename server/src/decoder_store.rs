@@ -61,6 +61,10 @@ fn policy_for(kind: &str) -> Policy {
         "rds" => Policy::Merge,
         // Single-current snapshot (whole payload each emit).
         "rssi" | "signals" => Policy::Replace,
+        // AI transcript — append log of conversation turns (one record per
+        // user/assistant turn), folded by ferrited's `/ws/chat` proxy +
+        // `chat-inject` path. Read by MCP via `decodes ai`.
+        "ai" => Policy::Append { cap: LOG_CAP },
         // Everything else is an append log — ft8, wspr, pager, eas, dtmf,
         // cw, ais, rtl_433, transcribe, fldigi, …. (ais/rtl_433 can become
         // keyed tables once they emit a parsed mmsi / device id.)
@@ -357,6 +361,18 @@ mod tests {
         assert!(k.current.is_empty());
         assert_eq!(k.recent[0].data["call"], "AA");
         assert_eq!(k.recent[1].seq, 2);
+    }
+
+    #[test]
+    fn ai_transcript_is_an_append_log() {
+        let s = DecoderStore::new();
+        s.apply("ai", serde_json::json!({"role": "user", "text": "hi"}));
+        s.apply("ai", serde_json::json!({"role": "assistant", "text": "hello"}));
+        let k = s.snapshot_kind("ai").unwrap();
+        assert_eq!(k.recent.len(), 2, "turns append in order");
+        assert!(k.current.is_empty(), "no keyed table for a transcript");
+        assert_eq!(k.recent[0].data["role"], "user");
+        assert_eq!(k.recent[1].data["text"], "hello");
     }
 
     #[test]

@@ -45,11 +45,24 @@ Global monotonic `seq` = the WS/REST delta cursor. Policy lives in a static Rust
 | ai | append | – | /ws/chat proxy tap + chat-inject hub |
 
 **AI transcript** also lives in the store (kind `ai`, append log of conversation
-turns) so it's server-side, survives a refresh, is headless/MCP-visible, and the
-AI panel paints it from the same mirror. It's not a flowgraph decoder: ferrited's
-`/ws/chat` reverse-proxy taps each turn (both directions) and writes a record;
-the existing `chat-inject` hub (headless drivers) writes too. The browser AI
-store becomes a mirror adapter like the rest. (P4.)
+turns) so it's server-side, survives a refresh, and is headless/MCP-visible via
+`decodes ai` / `reset_decodes ai` (the kind-generic verbs — no new MCP surface).
+It's not a flowgraph decoder: ferrited's `/ws/chat` reverse-proxy taps it — user
+prompts on the browser→sidecar leg (`fold_ai_user_frame`), assistant text from
+the sidecar's full end-of-turn `assistant` messages (`fold_ai_assistant_frame`).
+The `chat-inject` hub (headless drivers) folds in `post_chat_inject`
+(`fold_ai_inject_batch`) — done there, not in the per-connection proxy, so it's
+recorded even with no tab open and the proxy's inject branch can't double-count.
+Snapshots (`conversation_snapshot`) are deliberately *not* folded, so reconnects
+don't re-log history. **DONE.**
+
+Decision — the browser AI panel is **not** converted to a mirror adapter (unlike
+the decoder views). It's a bidirectional *streaming* client: token-by-token
+cursor, tool cards, and session/reset/snapshot semantics the sidecar owns
+authoritatively. The store kind `ai` is the turn-granular server-side record for
+MCP/headless read-back; the panel keeps streaming live from the sidecar (already
+a faithful mirror of the authority). Gutting it would regress the chat UX for no
+gain.
 
 ## Components
 **Backend**
