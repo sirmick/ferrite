@@ -34,11 +34,12 @@ interface AdsbRec {
   trk?: number;
   msgs?: number;
   age?: number;
+  /** Server-accumulated position track (last 20 `[lon,lat]` fixes). */
+  track?: [number, number][];
 }
 
-// Drop an aircraft absent from the snapshot this long; trail ring length.
+// Drop an aircraft absent from the snapshot this long.
 const STALE_MS = 60_000;
-const TRAIL_MAX = 60;
 
 const aircraftD = $derived.by<Aircraft[]>(() => {
   const now = Date.now();
@@ -74,25 +75,18 @@ const stationsD = $derived.by<MapStation[]>(() =>
     })),
 );
 
-// Flight paths for still-live aircraft, built from the `recent` frame log
-// grouped by ICAO (consecutive-dupe-filtered, last TRAIL_MAX fixes).
+// Flight paths — read straight off the server-accumulated `track` the
+// store folds into each aircraft's current record (last 20 `[lon,lat]`
+// fixes, dedup + cap done server-side). One source of truth shared by
+// every browser tab + MCP; survives reloads.
 const trailsD = $derived.by<MapTrail[]>(() => {
-  const live = new Set(aircraftD.map((a) => a.id));
-  const byId = new Map<string, [number, number][]>();
-  for (const r of decoders.kind('adsb').recent) {
-    const o = r.data as AdsbRec;
-    const id = o.icao ?? r.key ?? '';
-    if (!live.has(id) || typeof o.lat !== 'number' || typeof o.lon !== 'number') continue;
-    const ring = byId.get(id) ?? [];
-    const last = ring[ring.length - 1];
-    if (!last || last[0] !== o.lon || last[1] !== o.lat) {
-      ring.push([o.lon, o.lat]);
-      if (ring.length > TRAIL_MAX) ring.shift();
-    }
-    byId.set(id, ring);
-  }
   const out: MapTrail[] = [];
-  for (const [id, p] of byId) if (p.length >= 2) out.push({ id, path: p });
+  for (const r of Object.values(decoders.kind('adsb').current)) {
+    const o = r.data as AdsbRec;
+    const id = o.icao ?? r.key;
+    if (!id || !Array.isArray(o.track) || o.track.length < 2) continue;
+    out.push({ id, path: o.track });
+  }
   return out;
 });
 

@@ -62,6 +62,7 @@
         <div class="h-full min-h-0">
           <StationMap
             stations={aprs.mapStations}
+            trails={aprs.trails}
             selectedId={selected}
             onselect={(id) => (selected = id)}
             storageKey="ferrite.map.aprs"

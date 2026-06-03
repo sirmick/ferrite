@@ -21,8 +21,25 @@
   }
 
   const columns = [
-    { key: 'flight' as const, label: 'Flight', format: (a: Aircraft) => a.flight || '—' },
-    { key: 'id' as const, label: 'ICAO' },
+    {
+      key: 'flight' as const,
+      label: 'Flight',
+      format: (a: Aircraft) => a.flight || '—',
+      // FlightAware tracks by flight ident (the ADS-B callsign, e.g.
+      // UAL123). Only link when we actually have one.
+      href: (a: Aircraft) =>
+        a.flight.trim()
+          ? `https://www.flightaware.com/live/flight/${encodeURIComponent(a.flight.trim())}`
+          : null,
+    },
+    {
+      key: 'id' as const,
+      label: 'ICAO',
+      // Look up the airframe (registration, type, photos) by its 24-bit
+      // ICAO hex address.
+      href: (a: Aircraft) =>
+        a.id ? `https://www.planespotters.net/hex/${encodeURIComponent(a.id.toUpperCase())}` : null,
+    },
     {
       key: 'alt' as const,
       label: 'Alt ft',

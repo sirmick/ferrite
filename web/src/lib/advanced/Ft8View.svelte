@@ -158,6 +158,8 @@
             selectedId={selectedCall}
             onselect={(id) => (selectedCall = id)}
             storageKey="ferrite.map.ft8"
+            defaultView={{ center: [0, 25], zoom: 1.2 }}
+            autoFitDefault={false}
           />
         </div>
       {/snippet}

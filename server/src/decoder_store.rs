@@ -32,6 +32,11 @@ pub enum Policy {
         /// Read by `expire` (wired into the diag-tick in P4).
         #[allow(dead_code)]
         ttl_ms: u64,
+        /// Accumulate a capped `[lon,lat]` position track into each
+        /// record's `data.track`, carried forward across position-less
+        /// frames. Powers the ADS-B/APRS map trails without the frontend
+        /// re-deriving them from the shared `recent` log. Reads `lat`/`lon`.
+        track: bool,
     },
     /// Single current record holding the whole payload (RSSI/signals).
     Replace,
@@ -51,11 +56,13 @@ fn policy_for(kind: &str) -> Policy {
         "adsb" => Policy::Upsert {
             key_field: "icao",
             ttl_ms: 60_000,
+            track: true,
         },
         // APRS stations persist for the session (no TTL expiry).
         "aprs" => Policy::Upsert {
             key_field: "call",
             ttl_ms: 0,
+            track: true,
         },
         // RDS emits partial groups → accumulate into one record.
         "rds" => Policy::Merge,
@@ -205,8 +212,24 @@ impl DecoderStore {
                 }
                 DeltaOp::Add { record }
             }
-            Policy::Upsert { key_field, .. } => {
+            Policy::Upsert {
+                key_field, track, ..
+            } => {
                 let key = extract_key(&data, key_field);
+                let mut data = data;
+                if track {
+                    // Carry the prior track forward and append this fix.
+                    let prev = entry
+                        .current
+                        .get(&key)
+                        .and_then(|r| r.data.get("track"))
+                        .cloned();
+                    if let Some(t) = push_track(prev, &data) {
+                        if let Some(obj) = data.as_object_mut() {
+                            obj.insert("track".to_string(), t);
+                        }
+                    }
+                }
                 let record = Record {
                     seq,
                     at_ms: now_ms(),
@@ -343,6 +366,36 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Max position fixes retained per entity in `data.track`.
+const TRACK_MAX: usize = 20;
+
+/// Append this record's `[lon,lat]` to the running position track,
+/// carrying the prior track forward. Frames without a numeric `lat`/`lon`
+/// (e.g. velocity-only ADS-B messages) keep the existing track unchanged;
+/// consecutive duplicate fixes are dropped; the track is capped at
+/// [`TRACK_MAX`]. Returns `None` only when there's no track to set yet (no
+/// position has ever been seen for this entity).
+fn push_track(prev: Option<Value>, data: &Value) -> Option<Value> {
+    let mut track: Vec<Value> = match prev {
+        Some(Value::Array(a)) => a,
+        _ => Vec::new(),
+    };
+    let lon = data.get("lon").and_then(Value::as_f64);
+    let lat = data.get("lat").and_then(Value::as_f64);
+    let (Some(lon), Some(lat)) = (lon, lat) else {
+        // No new fix — preserve whatever history we had (if any).
+        return (!track.is_empty()).then_some(Value::Array(track));
+    };
+    let point = serde_json::json!([lon, lat]);
+    if track.last() != Some(&point) {
+        track.push(point);
+        while track.len() > TRACK_MAX {
+            track.remove(0);
+        }
+    }
+    Some(Value::Array(track))
+}
+
 /// Pull the table key from a record. Strings used verbatim; non-strings
 /// (numeric mmsi) fall back to their JSON text. Missing → empty string
 /// (still upserts, into a single "" slot, rather than dropping).
@@ -374,7 +427,10 @@ mod tests {
     fn ai_transcript_is_an_append_log() {
         let s = DecoderStore::new();
         s.apply("ai", serde_json::json!({"role": "user", "text": "hi"}));
-        s.apply("ai", serde_json::json!({"role": "assistant", "text": "hello"}));
+        s.apply(
+            "ai",
+            serde_json::json!({"role": "assistant", "text": "hello"}),
+        );
         let k = s.snapshot_kind("ai").unwrap();
         assert_eq!(k.recent.len(), 2, "turns append in order");
         assert!(k.current.is_empty(), "no keyed table for a transcript");
@@ -392,6 +448,48 @@ mod tests {
         assert_eq!(k.current.len(), 2, "two distinct aircraft");
         assert_eq!(k.current["abc"].data["alt"], 2000, "latest wins");
         assert_eq!(k.current["abc"].key.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn upsert_accumulates_capped_dedup_position_track() {
+        let s = DecoderStore::new();
+        // Two distinct fixes + a repeat + a position-less (velocity) frame.
+        s.apply(
+            "adsb",
+            serde_json::json!({"icao": "abc", "lon": 1.0, "lat": 2.0}),
+        );
+        s.apply(
+            "adsb",
+            serde_json::json!({"icao": "abc", "lon": 1.0, "lat": 2.0}),
+        ); // dup
+        s.apply(
+            "adsb",
+            serde_json::json!({"icao": "abc", "lon": 3.0, "lat": 4.0}),
+        );
+        s.apply("adsb", serde_json::json!({"icao": "abc", "gs": 400})); // no fix
+        let k = s.snapshot_kind("adsb").unwrap();
+        let track = k.current["abc"].data["track"].as_array().unwrap();
+        assert_eq!(track.len(), 2, "dedup + position-less frame don't grow it");
+        assert_eq!(track[0], serde_json::json!([1.0, 2.0]));
+        assert_eq!(track[1], serde_json::json!([3.0, 4.0]));
+        // The carried-forward track rides along on the velocity-only record.
+        assert_eq!(k.current["abc"].data["track"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn upsert_track_caps_at_track_max() {
+        let s = DecoderStore::new();
+        for i in 0..(TRACK_MAX + 5) {
+            #[allow(clippy::cast_precision_loss)]
+            s.apply(
+                "adsb",
+                serde_json::json!({"icao": "abc", "lon": i as f64, "lat": 0.0}),
+            );
+        }
+        let k = s.snapshot_kind("adsb").unwrap();
+        let track = k.current["abc"].data["track"].as_array().unwrap();
+        assert_eq!(track.len(), TRACK_MAX, "oldest fixes dropped");
+        assert_eq!(track[0], serde_json::json!([5.0, 0.0]), "first 5 evicted");
     }
 
     #[test]

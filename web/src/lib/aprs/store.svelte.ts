@@ -10,7 +10,7 @@
 //   - `lines`       — append-only console of every frame
 
 import { decoders } from '$lib/decoders/store.svelte';
-import type { MapStation } from '$lib/viz/StationMap.svelte';
+import type { MapStation, MapTrail } from '$lib/viz/StationMap.svelte';
 import type { ConsoleLine } from '$lib/viz/TextConsole.svelte';
 
 export interface AprsStation {
@@ -34,6 +34,8 @@ interface AprsRec {
   text?: string;
   path?: string;
   raw?: string;
+  /** Server-accumulated position track (last 20 `[lon,lat]` fixes). */
+  track?: [number, number][];
 }
 
 const stationsD = $derived.by<AprsStation[]>(() => {
@@ -81,6 +83,22 @@ const mapStationsD = $derived.by<MapStation[]>(() =>
     })),
 );
 
+// Position trails per callsign — read straight off the server-accumulated
+// `track` in each station's current record (last 20 `[lon,lat]` fixes,
+// dedup + cap server-side; see adsb/store.svelte.ts). Fixed igates stay a
+// single point (filtered out by the >= 2 check); mobile stations (cars,
+// balloons, trackers) draw a real track.
+const trailsD = $derived.by<MapTrail[]>(() => {
+  const out: MapTrail[] = [];
+  for (const r of Object.values(decoders.kind('aprs').current)) {
+    const o = r.data as AprsRec;
+    const id = o.call ?? r.key;
+    if (!id || !Array.isArray(o.track) || o.track.length < 2) continue;
+    out.push({ id, path: o.track });
+  }
+  return out;
+});
+
 const linesD = $derived.by<ConsoleLine[]>(() =>
   decoders.kind('aprs').recent.map((r) => {
     const o = r.data as AprsRec;
@@ -102,6 +120,9 @@ export const aprs = {
   },
   get mapStations(): MapStation[] {
     return mapStationsD;
+  },
+  get trails(): MapTrail[] {
+    return trailsD;
   },
   get lines(): ConsoleLine[] {
     return linesD;
