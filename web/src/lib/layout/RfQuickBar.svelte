@@ -11,7 +11,7 @@
   // row up in AppToolbar so they're always reachable. Reads pipeline
   // state directly; no props.
   import { pipeline, currentAxes } from '$lib/pipeline.svelte';
-  import { quickRateChoices, bandwidthForRate } from '$lib/controls/optionsModel';
+  import { quickRateChoices } from '$lib/controls/optionsModel';
   import Nixie from '$lib/controls/Nixie.svelte';
   import LiveControls from '$lib/controls/LiveControls.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
@@ -78,16 +78,14 @@
   function onRateChange(ev: Event) {
     const v = Number((ev.target as HTMLSelectElement).value);
     if (!Number.isFinite(v) || v === axes?.sample_rate_hz) return;
-    // Atomic two-key write: Fs + BW must land in one patch so the
-    // server sees both in the same reconfigure pass (driver-specific
-    // IF filter ladder on SDRplay / HackRF etc.).
-    const caps = pipeline.sourceCaps;
-    const patch: Record<string, unknown> = { sample_rate_hz: v };
-    if (caps?.kind === 'hardware') {
-      const bw = bandwidthForRate(caps.capabilities, v);
-      if (bw !== null) patch.bandwidth_hz = bw;
-    }
-    void pipeline.patchSourceParams(patch);
+    // Send the rate alone. The daemon's source policy derives the
+    // matching anti-alias bandwidth from the driver's IF-filter ladder
+    // (server/src/source_policy.rs) in the same reconfigure pass, and
+    // patchSourceParams re-reads the authoritative config afterwards —
+    // so the BW the hardware actually got lands back here without the
+    // browser computing its own copy. One authority, identical for the
+    // mouse, ferrite-ctl, and a headless AI.
+    void pipeline.patchSourceParams({ sample_rate_hz: v });
   }
 
   function commitCenter(hz: number) {

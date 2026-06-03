@@ -15,6 +15,7 @@ members = [
     "blocks/native/fldigi",
     "blocks/native/whisper",
     "runtime",
+    "sdr-tables",
     "tools/ferrite-ctl",
 ]
 

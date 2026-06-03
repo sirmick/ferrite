@@ -20,7 +20,6 @@ use clap::{Parser, Subcommand};
 use serde_json::{Map, Value};
 
 mod mcp;
-mod sdr_tables;
 
 use mcp::{
     BandAtArgs, BlockParamsArgs, CaptureStatusArgs, ChatPostArgs, FerriteServer, Http,
@@ -442,7 +441,7 @@ async fn main() -> ExitCode {
         };
     }
     if matches!(cli.cmd, Cmd::GenTables) {
-        return match sdr_tables::write_web_ladders() {
+        return match ferrite_sdr_tables::write_web_ladders() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("ferrite-ctl: {e:#}");
@@ -855,39 +854,9 @@ fn print_entry(e: &Value, json: bool) {
     }
 }
 
-/// Pull the SoapySDR driver name out of an `args` string. Soapy accepts
-/// plain `"sdrplay"` or a kv form `"driver=sdrplay,serial=xxx"`. Returns
-/// `""` when neither shape parses. Shared with the tune op's rate→BW
-/// auto-derive (`mcp::FerriteServer::tune_op`).
-pub(crate) fn driver_key_from_args(args: &str) -> String {
-    let trimmed = args.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    if let Some((_, rest)) = trimmed.split_once("driver=") {
-        return rest.split(&[',', ' ']).next().unwrap_or("").to_string();
-    }
-    if !trimmed.contains('=') && !trimmed.contains(',') {
-        return trimmed.to_string();
-    }
-    String::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn driver_key_from_args_handles_both_shapes() {
-        assert_eq!(driver_key_from_args("sdrplay"), "sdrplay");
-        assert_eq!(driver_key_from_args("driver=sdrplay"), "sdrplay");
-        assert_eq!(
-            driver_key_from_args("driver=sdrplay,serial=224001D748"),
-            "sdrplay"
-        );
-        assert_eq!(driver_key_from_args(""), "");
-        assert_eq!(driver_key_from_args("   "), "");
-    }
 
     #[test]
     fn parse_si_handles_suffixes() {

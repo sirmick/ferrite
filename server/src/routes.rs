@@ -438,10 +438,7 @@ fn ai_text_from_content(content: &serde_json::Value) -> String {
 /// assistant record. `chat_post` POSTs one self-contained role-turn per
 /// call, so reducing within the batch is sufficient. tool_use
 /// (`input_json_delta`) frames are a different delta type and are ignored.
-fn fold_ai_inject_batch(
-    store: &crate::decoder_store::DecoderStore,
-    events: &[serde_json::Value],
-) {
+fn fold_ai_inject_batch(store: &crate::decoder_store::DecoderStore, events: &[serde_json::Value]) {
     let mut assistant = String::new();
     for ev in events {
         match ev.get("type").and_then(serde_json::Value::as_str) {
@@ -454,12 +451,14 @@ fn fold_ai_inject_batch(
             }
             Some("stream_event") => {
                 let delta = ev.get("event").and_then(|e| e.get("delta"));
-                let is_text =
-                    delta.and_then(|d| d.get("type")).and_then(serde_json::Value::as_str)
-                        == Some("text_delta");
+                let is_text = delta
+                    .and_then(|d| d.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("text_delta");
                 if is_text {
-                    if let Some(t) =
-                        delta.and_then(|d| d.get("text")).and_then(serde_json::Value::as_str)
+                    if let Some(t) = delta
+                        .and_then(|d| d.get("text"))
+                        .and_then(serde_json::Value::as_str)
                     {
                         assistant.push_str(t);
                     }
@@ -543,7 +542,6 @@ pub async fn recent_decoder(
     }
     Ok(Json(RecentResponse { entries, now }))
 }
-
 
 // Make `LogEntry` serialize-friendly. Defined here rather than in
 // log_stream.rs so log_stream stays serde-free; the API layer is the
@@ -817,9 +815,7 @@ pub async fn list_block_schemas() -> Json<Vec<crate::block_schema::BlockSchemaDt
 /// `flowdiag` (per-block throughput) folded by the pipeline diag tick.
 /// MCP slices the kind it needs out of this; the browser mirror uses it
 /// for the initial fetch + resync (the live feed is `/ws/state`).
-pub async fn get_state(
-    State(state): State<AppState>,
-) -> Json<crate::decoder_store::StoreSnapshot> {
+pub async fn get_state(State(state): State<AppState>) -> Json<crate::decoder_store::StoreSnapshot> {
     Json(state.decoder_store().snapshot())
 }
 
@@ -838,15 +834,16 @@ pub async fn reset_state_kind(
 /// floor the caller wants spanned (band presets compute this from the
 /// band's low/high). `offset_ratio` is the per-driver DC-spike dodge —
 /// fraction of the channelizer's output rate to keep between
-/// `src_center` and the target when a snap happens. Defaults to 0,
-/// meaning "don't dodge, just tune".
+/// `src_center` and the target when a snap happens. Omit it (the common
+/// case) and the daemon fills the per-driver default keyed on the bound
+/// `driver_key`; pass an explicit value to override (`0` = don't dodge).
 #[derive(Deserialize)]
 pub struct TuneRequest {
     pub freq_hz: f64,
     #[serde(default)]
     pub span_hz: Option<f64>,
     #[serde(default)]
-    pub offset_ratio: f64,
+    pub offset_ratio: Option<f64>,
     /// Opt-in: when the target is already inside the digitised span, retune
     /// the channelizer only and leave the LO/graph put — no source restart,
     /// no node-side worker reload. Falls back to a normal tune out-of-span.
@@ -867,7 +864,7 @@ pub async fn post_tune(
     tracing::info!(
         freq_hz = req.freq_hz,
         span_hz = ?req.span_hz,
-        offset_ratio = req.offset_ratio,
+        offset_ratio = ?req.offset_ratio,
         keep_lo = req.keep_lo,
         "POST /api/tune"
     );
@@ -1529,8 +1526,10 @@ mod ai_fold_tests {
         // A tool batch (input_json_delta) adds nothing to the transcript.
         fold_ai_inject_batch(
             &s,
-            &[serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
-                "delta":{"type":"input_json_delta","partial_json":"{}"}}})],
+            &[
+                serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
+                "delta":{"type":"input_json_delta","partial_json":"{}"}}}),
+            ],
         );
         let k = s.snapshot_kind("ai").unwrap();
         assert_eq!(k.recent.len(), 2);

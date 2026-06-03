@@ -826,12 +826,18 @@ impl AppState {
     ///    target sits `offset_ratio × output_rate_hz` off centre — i.e.
     ///    the spike lands outside the demodulated channel.
     ///
-    /// `offset_ratio` is supplied by the caller from per-driver config
-    /// (HackRF: ~0.7 — see `web/src/lib/controls/sdr-presets/hackrf.json`;
-    /// most drivers: 0). When 0, the dodge collapses to "just retune" and a
-    /// target can sit on DC (fine for DC-tracking drivers). When > 0 the
-    /// `dc_guard` below also forces a re-dodge if the target lands on/near
-    /// the current LO, so the carrier never stays parked on the spike.
+    /// `offset_ratio` is `None` for the common case — the daemon fills the
+    /// per-driver default from [`source_policy::tune_offset_ratio_for`]
+    /// (keyed on the bound `driver_key`: HackRF / SDRplay 0.7, others 0), so
+    /// every client dodges identically with no per-caller knowledge. A
+    /// `Some` value overrides it (capture pins `Some(0.0)` to land wideband
+    /// IQ on-centre). When the resolved ratio is 0 the dodge collapses to
+    /// "just retune" and a target can sit on DC (fine for DC-tracking
+    /// drivers). When > 0 the `dc_guard` below also forces a re-dodge if the
+    /// target lands on/near the current LO, so the carrier never stays
+    /// parked on the spike.
+    ///
+    /// [`source_policy::tune_offset_ratio_for`]: crate::source_policy::tune_offset_ratio_for
     ///
     /// Two reconfigures (source delta + channelizer live param) — the
     /// channelizer hot-applies, the source hot-applies via the
@@ -845,7 +851,7 @@ impl AppState {
         &self,
         freq_hz: f64,
         span_hz: Option<f64>,
-        offset_ratio: f64,
+        offset_ratio: Option<f64>,
         keep_lo: bool,
     ) -> Result<Option<ReconfigurePlan>> {
         if !freq_hz.is_finite() {
@@ -853,6 +859,11 @@ impl AppState {
         }
         let preset = self.inner.preset_doc.read().await.clone();
         let source = self.inner.source_config.read().await.clone();
+        // Resolve the DC-spike dodge ratio: an explicit caller value wins
+        // (capture passes 0 to land IQ on-centre); otherwise fall back to
+        // the daemon-owned per-driver default so the UI, ferrite-ctl, and a
+        // headless AI all dodge identically without each knowing the table.
+        let offset_ratio = self.resolve_offset_ratio(offset_ratio, &source).await;
         let composed = self.compose_full(&preset, &source).await?;
 
         // First channelizer in the composed graph (preset convention:
@@ -981,6 +992,38 @@ impl AppState {
             }
         }
         Ok(last_plan)
+    }
+
+    /// Resolve the DC-spike dodge ratio for a tune. An explicit `caller`
+    /// value is authoritative (the override path — e.g. capture pins `0` to
+    /// keep wideband IQ centred on target). When absent, look up the
+    /// daemon-owned per-driver default keyed on the bound device's
+    /// `driver_key` — the single home for per-SDR dodge behaviour, shared by
+    /// every client. Software sources (Sine/File) and a failed caps probe
+    /// yield `0` (no dodge), never an error: a tune must not be blocked by a
+    /// policy lookup.
+    async fn resolve_offset_ratio(&self, caller: Option<f64>, source: &SourceConfig) -> f64 {
+        if let Some(r) = caller {
+            return r;
+        }
+        if source.type_name != "SoapySource" {
+            return 0.0;
+        }
+        let Some(args) = source
+            .params
+            .as_object()
+            .and_then(|p| p.get("args"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            return 0.0;
+        };
+        match self.inner.device_cache.ensure_args(args).await {
+            Ok(caps) => crate::source_policy::tune_offset_ratio_for(&caps.driver_key),
+            Err(e) => {
+                tracing::warn!(error = ?e, "resolve_offset_ratio: caps probe failed; no dodge");
+                0.0
+            }
+        }
     }
 }
 

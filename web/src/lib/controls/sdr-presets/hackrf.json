@@ -6,7 +6,6 @@
   "max_sample_rate_hz": 20000000,
   "gain_label": "gain (dB)",
   "overall_gain_max_db": 116,
-  "tune_offset_ratio": 0.7,
   "gain_description": "Auto gain dial, **0–116 dB**, split footgun-free by Ferrite across HackRF's three stages: LNA first (0–40 dB / 8 dB steps, noise figure), then VGA (0–62 dB / 2 dB steps, ADC fill), and the +14 dB front-end AMP only in the top 14 dB — with an indicator when it engages. Ferrite sets each stage element directly (not the driver's overall setGain, which rejects >62), so the full 0–116 range is reachable. Use the Advanced gain panel for manual per-stage control. No AGC — gain is always manual on HackRF.",
   "setting_overrides": {
     "amp_en": {

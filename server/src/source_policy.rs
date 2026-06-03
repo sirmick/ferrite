@@ -55,6 +55,29 @@ pub fn apply(current: &SourceConfig, next: &mut SourceConfig, caps: &DeviceCapab
         return;
     };
 
+    // --- Sample rate: seed a device-open default, then clamp to the
+    // per-driver usable ceiling. The default fills ONLY when the caller left
+    // the rate implicit — a fresh `select_device` sends just `args`, so a
+    // headless driver lands on the same rate the UI's `defaultsFor` picks
+    // instead of the block default. (Every other path merges into the full
+    // config first, so the rate is already present and the fill is a no-op.)
+    // The clamp keeps a requested rate under the firmware-usable max
+    // (SDRplay advertises 10.66 MS/s but `activateStream` fails above 10) for
+    // every caller. Both run before the BW/notch derivation so those key off
+    // the resolved rate.
+    if !params.contains_key("sample_rate_hz") {
+        if let Some(def) = ferrite_sdr_tables::default_sample_rate_for(&caps.driver_key) {
+            params.insert("sample_rate_hz".into(), serde_json::json!(def));
+        }
+    }
+    if let Some(rate) = params.get("sample_rate_hz").and_then(Value::as_f64) {
+        if let Some(max) = ferrite_sdr_tables::max_sample_rate_for(&caps.driver_key) {
+            if rate > max {
+                params.insert("sample_rate_hz".into(), serde_json::json!(max));
+            }
+        }
+    }
+
     // --- Anti-alias bandwidth: derive from the (possibly new) rate. ---
     if let Some(rate) = params.get("sample_rate_hz").and_then(Value::as_f64) {
         let new_bw = params.get("bandwidth_hz").and_then(Value::as_f64);
@@ -64,7 +87,14 @@ pub fn apply(current: &SourceConfig, next: &mut SourceConfig, caps: &DeviceCapab
         // an IF wider than the digitizer (the 8 MHz-into-2.4 failure).
         let stale = new_bw.is_none_or(|b| b <= 0.0 || b > rate);
         if !caller_set_bw && (rate_changed || stale) {
-            if let Some(bw) = bandwidth_from_caps(caps, rate) {
+            // Prefer the curated per-driver IF-filter ladder (the real
+            // discrete filters the hardware has) over the device's advertised
+            // ranges: HackRF advertises a *continuous* range, so a caps-only
+            // pick would land on `rate` itself rather than the nearest real
+            // filter. Fall back to caps for drivers with no ladder.
+            let bw = ferrite_sdr_tables::recommended_bandwidth_for(&caps.driver_key, rate)
+                .or_else(|| bandwidth_from_caps(caps, rate));
+            if let Some(bw) = bw {
                 if Some(bw) != new_bw {
                     params.insert("bandwidth_hz".into(), serde_json::json!(bw));
                 }
@@ -182,10 +212,50 @@ pub fn sdrplay_notch_settings(center_hz: f64, rate_hz: f64) -> [(&'static str, &
     ]
 }
 
+/// Per-driver DC-spike dodge ratio — the fraction of the channelizer's
+/// output rate by which [`AppState::tune`] parks the source LO off the
+/// listen target, so the zero-IF LO/DC spike falls *outside* the
+/// demodulated channel and the channelizer recovers the carrier. This is
+/// the daemon-owned default applied whenever the caller doesn't pass an
+/// explicit `offset_ratio`, so the UI, ferrite-ctl, and a headless AI all
+/// dodge identically off one table — the per-SDR behaviour lives here, not
+/// in each client.
+///
+/// `0.7` clears a full-width channel (the spike at the LO sits a channel
+/// half-width-plus outside the passband). `0` means "no dodge": DC-tracking
+/// or low-IF drivers that don't produce an in-band spike, or correct it in
+/// hardware. Keyed case-insensitively on the device-reported `driver_key`.
+///
+/// [`AppState::tune`]: crate::app_state::AppState::tune
+#[must_use]
+pub fn tune_offset_ratio_for(driver_key: &str) -> f64 {
+    match driver_key.to_ascii_lowercase().as_str() {
+        // No hardware DC correction — the dodge is the only fix.
+        "hackrf" => 0.7,
+        // Zero-IF above ~30 MHz; the dodge complements `dc_offset_correction`
+        // so a carrier never sits on the tracker's residual spike.
+        "sdrplay" => 0.7,
+        // RTL-SDR, Airspy, … : DC-tracking / low-IF, no dodge needed.
+        _ => 0.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::device::{DeviceCapabilities, DeviceInfo, RangeSpec, RxChannelCapabilities};
+
+    #[test]
+    fn tune_offset_ratio_is_per_driver_and_case_insensitive() {
+        assert_eq!(tune_offset_ratio_for("hackrf"), 0.7);
+        assert_eq!(tune_offset_ratio_for("HackRF"), 0.7);
+        assert_eq!(tune_offset_ratio_for("sdrplay"), 0.7);
+        assert_eq!(tune_offset_ratio_for("SDRplay"), 0.7);
+        // DC-tracking / unknown drivers don't dodge.
+        assert_eq!(tune_offset_ratio_for("rtlsdr"), 0.0);
+        assert_eq!(tune_offset_ratio_for("airspy"), 0.0);
+        assert_eq!(tune_offset_ratio_for(""), 0.0);
+    }
 
     fn rung(hz: f64) -> RangeSpec {
         RangeSpec {
@@ -365,6 +435,41 @@ mod tests {
         );
         apply(&current, &mut next, &sdrplay_caps());
         assert_eq!(bw(&next), Some(1_536_000.0));
+    }
+
+    fn rate(cfg: &SourceConfig) -> Option<f64> {
+        cfg.params.get("sample_rate_hz").and_then(|v| v.as_f64())
+    }
+
+    #[test]
+    fn apply_clamps_rate_to_driver_ceiling() {
+        // SDRplay advertises 10.66 MS/s but the firmware streams ≤ 10.
+        let current = src(serde_json::json!({ "sample_rate_hz": 2_000_000.0 }));
+        let mut next =
+            src(serde_json::json!({ "sample_rate_hz": 10_660_000.0, "center_freq_hz": 100.0e6 }));
+        apply(&current, &mut next, &sdrplay_caps());
+        assert_eq!(rate(&next), Some(10_000_000.0));
+    }
+
+    #[test]
+    fn apply_fills_default_rate_on_bare_device_select() {
+        // A headless `select_device` sends just `args` — no rate. The daemon
+        // seeds the per-driver default so it matches the UI's `defaultsFor`.
+        let current = src(serde_json::json!({}));
+        let mut next = src(serde_json::json!({ "args": "driver=sdrplay" }));
+        apply(&current, &mut next, &sdrplay_caps());
+        assert_eq!(rate(&next), Some(2_000_000.0));
+    }
+
+    #[test]
+    fn apply_leaves_present_sub_ceiling_rate_untouched() {
+        // A normal patch already carries the rate; the fill is a no-op and a
+        // sub-ceiling rate isn't clamped.
+        let current = src(serde_json::json!({ "sample_rate_hz": 2_000_000.0 }));
+        let mut next =
+            src(serde_json::json!({ "sample_rate_hz": 6_000_000.0, "center_freq_hz": 100.0e6 }));
+        apply(&current, &mut next, &sdrplay_caps());
+        assert_eq!(rate(&next), Some(6_000_000.0));
     }
 
     #[test]

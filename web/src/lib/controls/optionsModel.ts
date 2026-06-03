@@ -225,12 +225,6 @@ export function settingOverridesFor(caps: DeviceCapabilities): Record<string, Se
   return lookupPreset(caps.driver_key)?.setting_overrides ?? {};
 }
 
-/** Frequency-band-conditioned setting toggles for the device — see
- *  `AutoSetting`. Returns an empty array when none are declared. */
-export function autoSettingsFor(caps: DeviceCapabilities): AutoSetting[] {
-  return lookupPreset(caps.driver_key)?.auto_settings ?? [];
-}
-
 /** Per-driver master-gain label override (e.g. "IF gain (dB)" for
  *  SDRplay where the overall gain element doesn't include the LNA
  *  stage). Returns the canonical default when no override is set. */
@@ -261,14 +255,6 @@ export function overallGainRangeFor(caps: DeviceCapabilities): RangeSpec | null 
   return range;
 }
 
-/** DC-spike dodge ratio for the active driver. Caller passes this to
- *  `POST /api/tune` as `offset_ratio`; the server uses it to compute
- *  the source-centre snap on out-of-range tunes. Returns 0 when the
- *  driver has no preset entry — meaning "no dodge, just tune". */
-export function tuneOffsetRatioFor(caps: DeviceCapabilities): number {
-  return lookupPreset(caps.driver_key)?.tune_offset_ratio ?? 0;
-}
-
 /** Historically: whether to flip the slider for drivers whose Soapy
  *  "overall gain" element is in reduction terms (high raw = quiet,
  *  notably SDRplay's SoapySDRPlay3). The flip now lives server-side in
@@ -297,52 +283,11 @@ export function gainRawValue(displayed: number, _range: RangeSpec, _inverted: bo
   return displayed;
 }
 
-/** Lookup helper variant keyed directly by `driver_key` for callers that
- *  don't carry the full capabilities struct. */
-export function autoSettingsForDriver(driverKey: string): AutoSetting[] {
-  return lookupPreset(driverKey)?.auto_settings ?? [];
-}
-
 /** Free-form markdown notes the AI sidecar should attach to its
  *  system prompt for this driver. Empty string when no notes are
  *  declared. */
 export function aiOperatorNotesForDriver(driverKey: string): string {
   return lookupPreset(driverKey)?.ai_operator_notes ?? '';
-}
-
-/** Compute the desired settings dict for a given centre frequency. The
- *  return value is the *delta* — only entries whose value differs from
- *  `currentSettings` are included. An empty result means no patch is
- *  needed. The caller (typically pipeline.svelte.ts's `$effect`) writes
- *  the merged delta to `params.settings` on tune. */
-export function autoSettingsDelta(
-  driverKey: string,
-  centerFreqHz: number,
-  currentSettings: Record<string, string>,
-): Record<string, string> {
-  const rules = autoSettingsForDriver(driverKey);
-  const delta: Record<string, string> = {};
-  for (const rule of rules) {
-    const inBand = rule.freq_bands_hz.some(([lo, hi]) => centerFreqHz >= lo && centerFreqHz <= hi);
-    const want = inBand ? rule.value_in_band : rule.value_out_of_band;
-    const have = currentSettings[rule.key];
-    if (have !== want) {
-      delta[rule.key] = want;
-    }
-  }
-  return delta;
-}
-
-/**
- * Ladder-derived bandwidth for this driver given a sample rate. Returns
- * `null` when the preset has no ladder (RTL-SDR, HackRF, …) — caller
- * should omit `bandwidth_hz` from the patch and let the driver keep its
- * own behaviour. Used by the header's quick sample-rate dropdown to
- * apply `{sample_rate_hz, bandwidth_hz}` atomically, matching the rule
- * `defaultsFor` uses on device-open.
- */
-export function bandwidthForRate(caps: DeviceCapabilities, rateHz: number): number | null {
-  return pickFromLadder(ladderFor(caps.driver_key), rateHz);
 }
 
 /**
@@ -382,14 +327,12 @@ export function defaultsFor(caps: DeviceCapabilities): OptionsState | null {
     ) ?? rateChoices;
 
   const bandwidthChoices = fullBandwidthChoices(caps);
-  // Driver-specific: some drivers (SDRplay) need an explicit IF filter
-  // picked for them because the driver default is either too narrow
-  // (brick-walls the waterfall) or too wide (silent upclock of Fs).
-  // Others (RTL-SDR) do the right thing without a `set_bandwidth`
-  // call. The ladder is the Rust-owned single source of truth (see
-  // `ladderFor`), so the rule is "has a ladder? derive; missing?
-  // skip", with no per-driver code paths.
-  const bandwidth_hz = pickFromLadder(ladderFor(caps.driver_key), sample_rate_hz);
+  // Leave the anti-alias bandwidth implicit: the daemon derives it from the
+  // rate at the `patch_source` choke point (server `source_policy`, off the
+  // same IF-filter ladder), so the UI doesn't carry its own copy of that
+  // rule. `patchSource` re-reads the authoritative config after applying,
+  // so the dialog reflects the value the daemon picked.
+  const bandwidth_hz = null;
 
   const freqRange = ch.frequency_ranges_hz[0] ?? { min: 0, max: 6e9, step: null };
 
@@ -495,22 +438,6 @@ interface SdrPreset {
    */
   overall_gain_max_db?: number;
   /**
-   * DC-spike dodge: fraction of the channelizer's output rate to keep
-   * between the source's centre and the operator's tune target. Used by
-   * `POST /api/tune` — when the target is outside the keepout window of
-   * the current src centre, the server snaps `src_center = target -
-   * ratio × chan.output_rate_hz` and sets `chan.freq_shift_hz = +ratio
-   * × chan.output_rate_hz` so the LO leakage spike lands well outside
-   * the demodulated passband. The channelizer's lowpass passes ±0.5 ×
-   * output_rate around the channel centre, so the ratio MUST exceed 0.5
-   * or the spike sits inside the demodulated channel; ~0.7 leaves clean
-   * margin. Zero-IF radios with no built-in cancellation (notably
-   * HackRF) need this; drivers with a tuned RF stage and DC tracking
-   * (SDRplay, RTL-SDR) can leave it unset (default 0 → no dodge, target
-   * lands at `src_center`).
-   */
-  tune_offset_ratio?: number;
-  /**
    * Invert the master gain slider's displayed value vs the raw
    * `gain_db` param. SoapySDRPlay3 reports per-element ranges as
    * gain *reduction* in dB (`gRdB` for IFGR, `LNAstate` for RFGR);
@@ -525,15 +452,6 @@ interface SdrPreset {
    * un-inverted.
    */
   gain_inverted?: boolean;
-  /**
-   * Frequency-band-conditioned setting toggles. The shipped use case is
-   * SDRplay's hardware notches: `rfnotch_ctrl` covers AM (540 kHz–1.7 MHz)
-   * + FM broadcast (88–108 MHz), `dabnotch_ctrl` covers DAB Band III
-   * (170–240 MHz). Out-of-band the notch is harmless and helps
-   * intermod-rejection; in-band it actively attenuates the user's target.
-   * Listing those bands here lets the UI auto-toggle on tune.
-   */
-  auto_settings?: AutoSetting[];
   /**
    * Free-form operator notes for the AI sidecar — antenna mapping,
    * gain / AGC semantics, hardware-notch behaviour, sample-rate
@@ -561,22 +479,6 @@ export interface SettingOverride {
   option_labels?: Record<string, string>;
 }
 
-export interface AutoSetting {
-  /** `getSettingInfo.key` we toggle. */
-  key: string;
-  /** `[lo, hi]` Hz pairs (inclusive). The setting is in-band when the
-   *  centre freq falls inside ANY of these pairs. */
-  freq_bands_hz: Array<[number, number]>;
-  /** Value to write when in-band. Driver-specific stringly-typed
-   *  (matches `getSettingInfo`'s `value` field). */
-  value_in_band: string;
-  /** Value to write when out-of-band. */
-  value_out_of_band: string;
-  /** Free-text rationale shown in the UI tooltip and the auto-apply
-   *  log line. */
-  rationale?: string;
-}
-
 /**
  * IF-filter ladder for a driver, from the Rust-owned single source of
  * truth (`if-filter-ladders.generated.json`). Keyed by lowercased
@@ -587,22 +489,6 @@ export interface AutoSetting {
 function ladderFor(driverKey: string | undefined): number[] | undefined {
   if (!driverKey) return undefined;
   return (IF_FILTER_LADDERS as Record<string, number[]>)[driverKey.toLowerCase()];
-}
-
-/**
- * Pick the largest ladder entry that does not exceed `fs`. A filter
- * wider than Fs either aliases (HackRF) or makes the driver silently
- * raise Fs to match (SDRplay); staying ≤ Fs avoids both. Returns `null`
- * when the ladder is absent or empty, which the source block treats as
- * "skip `set_bandwidth`" (rtlsdr, hackrf).
- */
-function pickFromLadder(ladder: number[] | undefined, fs: number): number | null {
-  if (!ladder || ladder.length === 0) return null;
-  let best: number | null = null;
-  for (const bw of ladder) {
-    if (bw <= fs && (best === null || bw > best)) best = bw;
-  }
-  return best;
 }
 
 /**
