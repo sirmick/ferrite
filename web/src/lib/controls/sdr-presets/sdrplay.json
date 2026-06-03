@@ -4,7 +4,6 @@
   "sample_rate_hz": 2000000,
   "sample_rate_choices_hz": [500000, 1000000, 2000000, 4000000, 6000000, 8000000, 10000000],
   "max_sample_rate_hz": 10000000,
-  "gain_inverted": false,
   "gain_label": "gain (dB)",
   "gain_description": "Master driver-gain element. Wire convention: higher value = more received signal (`SoapySource` inverts at the boundary for SDRplay's reduction-shaped element, so the operator/UI/CLI all agree on \"high = loud\"). Range 0\u201366 dB; the driver distributes across IFGR (20\u201359 dB) and RFGR (0\u201327 dB). The separate `rfgain_sel` LNA stage is a still-inverted *attenuator* index (lower index = less attenuation = louder); see its own tooltip.",
   "setting_overrides": {

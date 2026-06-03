@@ -256,7 +256,7 @@
        actions (mutate global state), the status chips on the left stay
        at the natural reading position. -->
   <div class="ml-auto flex flex-wrap items-center gap-x-2 gap-y-1">
-    <!-- Display: two adjacent column selectors under one label.
+    <!-- Two adjacent column selectors.
          · Main  — the wide column: FFT/Waterfall vs the active preset's
            mode-specific view (Journal / FT8 / ADS-B / APRS / Transcript;
            `activeAdvancedView` resolves one on every catalog preset).
@@ -264,9 +264,8 @@
          · Right — the channel-detail column: Off / FFT-Waterfall, plus
            "Strongest Signals" when the preset advertises `ui:signals`.
          Per-dropdown words hide on narrow screens (the shapes are
-         self-evident); the group keeps the `Display:` label. -->
+         self-evident). -->
     <div class="flex items-center gap-2 text-[11px] text-[color:var(--color-muted)]">
-      <span class="hidden md:inline">Display:</span>
       <label class="flex items-center gap-1">
         <span class="hidden lg:inline">Main</span>
         <select

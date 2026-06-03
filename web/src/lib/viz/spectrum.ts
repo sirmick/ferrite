@@ -483,16 +483,17 @@ export class SpectrumRenderer {
       ctx.lineWidth = Math.max(1, Math.floor(Math.min(window.devicePixelRatio || 1, 2)));
       this.strokeRow(this.row, plot);
     }
-    // Peak squares sit on top of the trace so they read as little flags
+    // Peak crosses sit on top of the trace so they read as little flags
     // pinned to the detected carriers, not hidden under the envelope.
     this.drawPeaks(plot);
     ctx.restore();
   }
 
-  /** Little squares marking each in-view auto-detected peak. The square
-   *  is placed on the live trace tip at the peak's frequency (or near the
-   *  top of the plot when there's no live row yet), giving a persistent
-   *  visual flag for the strongest-signal watchlist. */
+  /** A small diagonal cross (✕) marking each in-view auto-detected peak,
+   *  centred *exactly* on the live trace tip at the peak's frequency (or
+   *  near the top of the plot when there's no live row yet). The two arms
+   *  intersect at a single pixel on the carrier, so it reads as a precise
+   *  flag pinned to the signal rather than a fat block hovering above it. */
   private drawPeaks(plot: { x: number; y: number; w: number; h: number }): void {
     const peaks = this.markers.peaksHz;
     if (!peaks || peaks.length === 0) return;
@@ -505,7 +506,9 @@ export class SpectrumRenderer {
     if (!(fMax > fMin)) return;
     const toX = (hz: number) => plot.x + ((hz - fMin) / (fMax - fMin)) * plot.w;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const size = Math.max(4, Math.round(5 * dpr));
+    // Half-length of each cross arm — kept small so the glyph marks a
+    // point, not an area.
+    const r = Math.max(3, Math.round(3 * dpr));
 
     // Map an in-view peak frequency to the y of the live trace tip there.
     const lut = this.row && this.row.length > 0 ? this.byteToYLut(plot) : undefined;
@@ -513,26 +516,30 @@ export class SpectrumRenderer {
     const fullMin = this.axes ? this.axes.centerHz - this.axes.rateHz / 2 : fMin;
     const fullSpan = this.axes ? this.axes.rateHz : fMax - fMin;
 
-    ctx.fillStyle = 'rgba(56, 232, 255, 0.9)';
-    ctx.strokeStyle = 'rgba(6, 22, 30, 0.9)';
-    ctx.lineWidth = Math.max(1, Math.floor(dpr));
-    ctx.shadowColor = 'rgba(56, 232, 255, 0.55)';
-    ctx.shadowBlur = 4 * dpr;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(56, 232, 255, 0.85)';
+    ctx.lineWidth = Math.max(1, dpr);
+    ctx.lineCap = 'round';
     for (const hz of peaks) {
       if (hz < fMin || hz > fMax) continue;
       const x = toX(hz);
-      let y = plot.y + size; // fallback: near the top of the plot
+      let y = plot.y + r; // fallback: near the top of the plot
       if (lut && n > 0 && fullSpan > 0) {
         const bin = Math.round(((hz - fullMin) / fullSpan) * (n - 1));
-        if (bin >= 0 && bin < n) y = lut[this.row![bin]] - size;
+        if (bin >= 0 && bin < n) y = lut[this.row![bin]!]!;
       }
-      y = Math.max(plot.y + size / 2, Math.min(plot.y + plot.h - size / 2, y));
-      const sx = Math.round(x - size / 2) + 0.5;
-      const sy = Math.round(y - size / 2) + 0.5;
-      ctx.fillRect(sx, sy, size, size);
-      ctx.strokeRect(sx, sy, size, size);
+      // Centre the cross on the carrier tip, clamped so both arms stay
+      // inside the plot.
+      const cx = Math.round(x);
+      const cy = Math.round(Math.max(plot.y + r, Math.min(plot.y + plot.h - r, y)));
+      ctx.beginPath();
+      ctx.moveTo(cx - r, cy - r);
+      ctx.lineTo(cx + r, cy + r);
+      ctx.moveTo(cx - r, cy + r);
+      ctx.lineTo(cx + r, cy - r);
+      ctx.stroke();
     }
-    ctx.shadowBlur = 0;
+    ctx.restore();
   }
 
   private drawMarkers(plot: { x: number; y: number; w: number; h: number }): void {

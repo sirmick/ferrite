@@ -8,14 +8,7 @@
 
   import { pipeline } from '$lib/pipeline.svelte';
   import { applyControl } from '$lib/control/dispatch';
-  import {
-    gainDescriptionFor,
-    gainDisplayValue,
-    gainInvertedFor,
-    gainLabelFor,
-    gainRawValue,
-    overallGainRangeFor,
-  } from './optionsModel';
+  import { gainDescriptionFor, gainLabelFor, overallGainRangeFor } from './optionsModel';
 
   let caps = $derived(
     pipeline.sourceCaps?.kind === 'hardware' ? pipeline.sourceCaps.capabilities : null,
@@ -41,13 +34,10 @@
   // Default-on: only an explicit `false` disables the driver tracker.
   let dcOffset = $derived(params.dc_offset_correction !== false);
 
-  // Master-slider semantics — see optionsModel.ts. SDRplay-style
-  // drivers report gain reduction; we invert the displayed value so
-  // the slider's "higher = more amplification" intuition holds.
-  let gainInverted = $derived(caps ? gainInvertedFor(caps) : false);
-  let gainDisplay = $derived(
-    overallRange ? gainDisplayValue(gainDb, overallRange, gainInverted) : gainDb,
-  );
+  // The wire `gain_db` is already user-facing (high = more amplification);
+  // SoapySource inverts at the boundary for reduction-shaped drivers
+  // (SDRplay), so the slider binds straight to it.
+  let gainDisplay = $derived(gainDb);
 
   let visible = $derived(
     !!channel && (overallRange !== null || antennas.length > 1 || hasAgc || hasDcOffset),
@@ -73,16 +63,13 @@
   let gainDebounce: ReturnType<typeof setTimeout> | undefined;
   let pendingGain: number | undefined;
 
-  /// Slider's onInput sends the **displayed** value; we map it back to
-  /// the raw `gain_db` here before dispatching. With `gain_inverted=
-  /// false` this is identity, so non-SDRplay drivers see no behaviour
-  /// change.
+  /// Slider's onInput sends the gain value straight through — the wire
+  /// `gain_db` is already user-facing; SoapySource handles any driver-side
+  /// inversion at the boundary.
   function commitGainDisplay(displayed: number) {
-    const range = overallRange;
-    if (!range) return;
-    const raw = gainRawValue(displayed, range, gainInverted);
-    if (raw === gainDb) return;
-    pendingGain = raw;
+    if (!overallRange) return;
+    if (displayed === gainDb) return;
+    pendingGain = displayed;
     if (gainDebounce !== undefined) clearTimeout(gainDebounce);
     gainDebounce = setTimeout(() => {
       gainDebounce = undefined;
