@@ -42,6 +42,14 @@ Global monotonic `seq` = the WS/REST delta cursor. Policy lives in a static Rust
 | pager / eas / dtmf / morse / rtl_433 | append | – | pager / eas / dtmf_decoder / … |
 | transcribe | append | – | voice_transcribe |
 | fldigi | append | – | fldigi_modes |
+| ai | append | – | /ws/chat proxy tap + chat-inject hub |
+
+**AI transcript** also lives in the store (kind `ai`, append log of conversation
+turns) so it's server-side, survives a refresh, is headless/MCP-visible, and the
+AI panel paints it from the same mirror. It's not a flowgraph decoder: ferrited's
+`/ws/chat` reverse-proxy taps each turn (both directions) and writes a record;
+the existing `chat-inject` hub (headless drivers) writes too. The browser AI
+store becomes a mirror adapter like the rest. (P4.)
 
 ## Components
 **Backend**
