@@ -3,7 +3,7 @@
 // `AdsbDemod`/aircraft_spot emit a ~1 Hz per-aircraft snapshot
 // (aircraft_spot.rs), wired to `ui:adsb` → the server `DecoderStore`
 // (kind `adsb`, Upsert-by-ICAO which also keeps a capped frame log in
-// `recent`), mirrored over `/ws/decodes`. This keeps the original
+// `recent`), mirrored over `/ws/state`. This keeps the original
 // surface: `aircraft` (table), `stations` (map markers), `trails` (recent
 // flight paths). Staleness pruning runs locally off each record's
 // timestamp (the server's TTL expiry lands in P4).
@@ -109,6 +109,6 @@ export const adsb = {
   attach(_client?: unknown, _streamId?: unknown): void {},
   detach(): void {},
   reset(): void {
-    void fetch('/api/decodes/adsb/reset', { method: 'POST' }).catch(() => {});
+    void fetch('/api/state/adsb/reset', { method: 'POST' }).catch(() => {});
   },
 };

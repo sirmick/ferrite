@@ -159,7 +159,7 @@ pub use tee_real_f32::TeeRealF32;
 pub use voice_transcribe::{VoiceTranscribe, VoiceTranscribeParams};
 pub use ws_bridge::{
     BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxF32, WsBridgeRxParams,
-    WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
+    WsBridgeTx, WsBridgeTxF32, WsBridgeTxFftU8,
 };
 #[cfg(feature = "wspr")]
 pub use wspr::{WsprDemod, WsprDemodParams};
@@ -226,7 +226,6 @@ mod tests {
             "WsBridgeTx",
             "WsBridgeTxF32",
             "WsBridgeTxFftU8",
-            "WsBridgeTxEvents",
             "WsBridgeRx",
             "WsBridgeRxF32",
             "AudioSink",

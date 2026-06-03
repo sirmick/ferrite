@@ -20,9 +20,7 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use ferrite_blocks::ws_bridge::{
-    BridgeSink, WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
-};
+use ferrite_blocks::ws_bridge::{BridgeSink, WsBridgeTx, WsBridgeTxF32, WsBridgeTxFftU8};
 use ferrite_blocks::{
     afc_new_shift, AutoTune, Channelizer, DecoderSink, EventStore, SoapyReadback, SoapySource,
 };
@@ -69,14 +67,10 @@ pub struct PresetMount {
     /// `Frame` variant it receives on each push.
     bridge_sink: Arc<dyn BridgeSink>,
     /// Shared decoder store — re-attached to fresh `EventStore` blocks
-    /// after a rebuild, same as `bridge_sink`.
+    /// after a rebuild, same as `bridge_sink`. Also where the [`drive`]
+    /// task folds the live `readback` / `flowdiag` snapshots each diag
+    /// tick, so the store is the single home for all live state.
     decoder_store: Arc<DecoderStore>,
-    /// 1 Hz cache of the SoapySource driver readback (current gain,
-    /// AGC state, etc.). Populated by the [`drive`] task each diag tick
-    /// so HTTP handlers can serve a fresh snapshot without touching the
-    /// runtime mutex — and so AGC-driven gain moves reach the UI/AI
-    /// between explicit `PATCH /api/source` writes.
-    latest_source_readback: Arc<tokio::sync::RwLock<Option<SoapyReadback>>>,
 }
 
 impl PresetMount {
@@ -144,14 +138,6 @@ impl PresetMount {
         rt.block_typed::<SoapySource>(SOURCE_ID)
             .map(|b| b.readback())
     }
-
-    /// Latest cached SoapySource readback from the 1 Hz diag-tick poll.
-    /// Cheap (`Option::clone`) — does not touch the runtime mutex.
-    /// `None` until the first tick has populated it, the source is
-    /// not a `SoapySource`, or the pipeline has just been (re)started.
-    pub async fn cached_source_readback(&self) -> Option<SoapyReadback> {
-        self.latest_source_readback.read().await.clone()
-    }
 }
 
 impl PresetHandle {
@@ -182,7 +168,6 @@ pub fn spawn_preset(
     doc: &FlowgraphDoc,
     frames: FrameBus,
     tick_period: Duration,
-    latest_diag: Arc<tokio::sync::RwLock<Option<ferrite_runtime::DiagSnapshot>>>,
     decoder_store: Arc<DecoderStore>,
 ) -> Result<PresetMount> {
     let node_half = split_for_environment(doc, Environment::Node, &InventorySpecRegistry)
@@ -203,14 +188,12 @@ pub fn spawn_preset(
     runtime.start().context("runtime start")?;
 
     let runtime = Arc::new(Mutex::new(runtime));
-    let latest_source_readback = Arc::new(tokio::sync::RwLock::new(None));
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join = tokio::spawn(drive(
         Arc::clone(&runtime),
         tick_period,
         shutdown_rx,
-        latest_diag,
-        Arc::clone(&latest_source_readback),
+        Arc::clone(&decoder_store),
     ));
     Ok(PresetMount {
         handle: PresetHandle {
@@ -220,7 +203,6 @@ pub fn spawn_preset(
         runtime,
         bridge_sink,
         decoder_store,
-        latest_source_readback,
     })
 }
 
@@ -258,12 +240,6 @@ fn attach_bridge_sinks(
             "WsBridgeTxFftU8" => {
                 let tx = runtime.block_typed::<WsBridgeTxFftU8>(id).ok_or_else(|| {
                     anyhow!("runtime is missing expected WsBridgeTxFftU8 {id:?} after load")
-                })?;
-                tx.attach_sink(Arc::clone(sink));
-            }
-            "WsBridgeTxEvents" => {
-                let tx = runtime.block_typed::<WsBridgeTxEvents>(id).ok_or_else(|| {
-                    anyhow!("runtime is missing expected WsBridgeTxEvents {id:?} after load")
                 })?;
                 tx.attach_sink(Arc::clone(sink));
             }
@@ -335,25 +311,35 @@ fn afc_step(rt: &mut Runtime, targets: &mut AfcTargets) {
     }
 }
 
+/// Milliseconds since the Unix epoch — the clock `DecoderStore::expire`
+/// compares record `at_ms` against.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 async fn drive(
     runtime: Arc<Mutex<Runtime>>,
     tick_period: Duration,
     shutdown: oneshot::Receiver<()>,
-    latest_diag: Arc<tokio::sync::RwLock<Option<ferrite_runtime::DiagSnapshot>>>,
-    latest_source_readback: Arc<tokio::sync::RwLock<Option<SoapyReadback>>>,
+    decoder_store: Arc<DecoderStore>,
 ) -> Result<()> {
     let mut interval = tokio::time::interval(tick_period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tokio::pin!(shutdown);
-    // 1 Hz flow-table probe — dumps one JSON-encoded `DiagSnapshot` via
-    // tracing so an operator tailing ferrited stdout (or the browser-side
-    // Flow tab) can see per-block sample throughput, process-time, and
-    // ring fill without instrumenting anything else. Logged at INFO
-    // with target="flowdiag" so `RUST_LOG=flowdiag=info` isolates it.
-    let mut diag_interval = tokio::time::interval(Duration::from_secs(1));
+    // 4 Hz diagnostics tick. Each fire folds the live source `readback`
+    // (gain/AGC/antenna) and the per-block `flowdiag` snapshot into the
+    // `DecoderStore` as Replace kinds, and sweeps TTL'd keyed tables
+    // (`expire`, e.g. stale ADS-B aircraft). The store is the single
+    // home for live state: MCP slices it from `GET /api/state`, the UI
+    // mirrors it over WS — no dedicated readback/flowdiag routes or
+    // browser polls.
+    let mut diag_interval = tokio::time::interval(Duration::from_millis(250));
     diag_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Skip the immediate tick so the first sample covers a real 1-sec
-    // window rather than the sliver between `start` and now.
+    // Skip the immediate tick so the first sample covers a real window
+    // rather than the sliver between `start` and now.
     diag_interval.tick().await;
 
     // AFC: close AutoTune's estimate onto the channelizer shift via the
@@ -415,27 +401,33 @@ async fn drive(
                                 );
                             }
                         }
-                        // Driver readback (gain, agc, etc.) at 1 Hz so
-                        // AGC-driven gain moves reach the UI/AI between
-                        // explicit PATCH /api/source writes.
+                        // Driver readback (gain, agc, etc.) so AGC-driven
+                        // gain moves reach the UI/AI between explicit
+                        // PATCH /api/source writes.
                         new_readback = Some(src.readback());
                     }
                     drop(rt);
+                    // Fold the readback into the store as the `readback`
+                    // kind (Replace). Only for SoapySource — software
+                    // sources have no driver state to report.
                     if let Some(rb) = new_readback {
-                        *latest_source_readback.write().await = Some(rb);
+                        if let Ok(v) = serde_json::to_value(&rb) {
+                            decoder_store.apply("readback", v);
+                        }
                     }
                 }
                 let rt = runtime.lock().await;
                 let snap = rt.diag_snapshot();
                 drop(rt);
-                // Publish the snapshot on the dedicated flowdiag
-                // channel (served by `GET /api/flowdiag`) instead of
-                // the tracing/log stream — always available regardless
-                // of `RUST_LOG`, and never clutters the LogPanel. The
-                // UI derives per-block CPU% from successive snapshots'
-                // `process_ns_cum`, so the old periodic `flowcpu` log
-                // line is gone too (was the other 1 Hz log offender).
-                *latest_diag.write().await = Some(snap);
+                // Fold the flow-diagnostics snapshot into the store as the
+                // `flowdiag` kind (Replace). The UI derives per-block CPU%
+                // from successive snapshots' `process_ns_cum`; MCP reads
+                // the latest via `GET /api/state`.
+                if let Ok(v) = serde_json::to_value(&snap) {
+                    decoder_store.apply("flowdiag", v);
+                }
+                // Sweep TTL'd keyed tables (stale ADS-B aircraft, …).
+                decoder_store.expire(now_ms());
             }
             _ = afc_interval.tick() => {
                 let mut rt = runtime.lock().await;
@@ -476,7 +468,6 @@ mod tests {
             &doc,
             frames,
             Duration::from_millis(5),
-            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
@@ -524,7 +515,6 @@ mod tests {
             &doc,
             frames,
             Duration::from_millis(5),
-            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
@@ -546,7 +536,6 @@ mod tests {
             &doc,
             frames,
             Duration::from_millis(5),
-            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
@@ -569,7 +558,6 @@ mod tests {
             &doc,
             frames,
             Duration::from_millis(5),
-            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
@@ -626,7 +614,6 @@ mod tests {
             &doc,
             frames,
             Duration::from_millis(5),
-            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();
@@ -647,7 +634,6 @@ mod tests {
             &doc,
             frames,
             Duration::from_millis(5),
-            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             std::sync::Arc::new(crate::decoder_store::DecoderStore::new()),
         )
         .unwrap();

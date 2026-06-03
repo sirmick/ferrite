@@ -88,11 +88,19 @@ gain.
 auto on `EventStore::init` (preset-load/rebuild) · live retune resets active kinds · TTL expiry (tables) · explicit MCP/UI.
 
 ## Execution (hard cut, staged to stay green)
-- **P1** store + native EventStore + attach walk + env_split swap for **adsb** + REST + MCP `decodes adsb` + reset. Prove headless via ADS-B sample **replay**.
-- **P2** WS `State` frame + browser mirror; repoint ADS-B view; delete adsb store.
-- **P3** all remaining kinds; delete the other 7 stores; wasm EventStore POST path.
-- **P4** fold readback/flowdiag/signals/rssi into the store; retire readback poll + transcribe content-sniff hack.
-- **P5** delete WsBridgeTxEvents + dead bridge code + goldens.
+- **P1** store + native EventStore + attach walk + env_split swap for **adsb** + REST + MCP `decodes adsb` + reset. Prove headless via ADS-B sample **replay**. **DONE.**
+- **P2** WS `State` frame + browser mirror; repoint ADS-B view; delete adsb store. **DONE.**
+- **P3** all remaining kinds; delete the other 7 stores; wasm EventStore POST path. **DONE.**
+- **P4** fold readback/flowdiag into the store (Replace kinds, diag tick now **4 Hz**); wire `expire()` (TTL sweep) onto the tick; repoint browser readback + flowdiag off their 1 Hz polls onto the mirror; migrate `rssi` to the mirror too. **DONE.**
+- **P5** delete `WsBridgeTxEvents` + dead bridge code. **DONE.** (No goldens referenced it.)
+
+### The "entire store" unification (P4/P5 outcome)
+The store is now the single home for **all** live state — decoder kinds + `signals` + `ai` + `readback` + `flowdiag`. One read surface:
+- REST `GET /api/state` → the whole store; `POST /api/state/:kind/reset`. WS `GET /ws/state` → snapshot + deltas (the browser mirror; `/api/state` is its resync fetch).
+- The dedicated `/api/flowdiag`, `/api/source/readback`, `/api/signals` routes + their `AppState` RwLock caches are **deleted**. The diag tick writes straight into the store; on `stop()` it resets the `readback`/`flowdiag` kinds.
+- **MCP slices one snapshot:** `state_op()` GETs `/api/state` once; `flowdiag` / `source_readback` / `signals` / `decodes` each parse their kind out of it (`store_current` helper; `signals` keeps its `max_age_ms` freshness gate via the record `at_ms`). No per-domain routes, no new MCP verbs.
+- **MCP is pull-only** — no streaming; the WS feed is browser-only. (`GET /api/state?since_seq=N` delta-poll is a possible future add — store `seq` makes it cheap — but still polling, not push.)
+- Browser: `pipeline` readback poll + `flowStore` flowdiag poll → `$effect`s over `decoders.kind('readback'|'flowdiag')`; deleted `api/flowdiag.ts` + `fetchSourceReadback`.
 
 ## Open calls
 - APRS TTL: long/session vs ADS-B/AIS short-ttl. (lean: APRS persist, adsb/ais expire)

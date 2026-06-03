@@ -122,17 +122,17 @@ async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroa
     }
 }
 
-/// `GET /ws/decodes` — the decoder-store mirror feed. On connect sends a
-/// full snapshot (`{"snapshot": {seq, kinds}}`), then streams each change
-/// as `{"delta": {kind, seq, op}}`. The browser keeps a 1:1 mirror and
+/// `GET /ws/state` — the store mirror feed. On connect sends a full
+/// snapshot (`{"snapshot": {seq, kinds}}`), then streams each change as
+/// `{"delta": {kind, seq, op}}`. The browser keeps a 1:1 mirror and
 /// de-dupes by `seq` (skips deltas ≤ the snapshot's seq). REST
-/// `/api/decodes` is the same data for MCP/headless.
-pub async fn ws_decodes(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+/// `/api/state` is the same data for MCP/headless.
+pub async fn ws_state(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     let store = state.decoder_store();
-    ws.on_upgrade(move |socket| ws_decodes_forward(socket, store))
+    ws.on_upgrade(move |socket| ws_state_forward(socket, store))
 }
 
-async fn ws_decodes_forward(
+async fn ws_state_forward(
     mut socket: WebSocket,
     store: std::sync::Arc<crate::decoder_store::DecoderStore>,
 ) {
@@ -544,94 +544,6 @@ pub async fn recent_decoder(
     Ok(Json(RecentResponse { entries, now }))
 }
 
-/// `GET /api/signals?max_age_ms=<ms>` — the current strongest-signal
-/// watchlist as detected by the `SignalList` block at the wideband FFT.
-///
-/// This is a **snapshot, not history**: it returns the single most-recent
-/// `decoder::signals` emission, which already carries the full ranked list
-/// for that frame (`{signals:[…], center_freq_hz, span_hz, frame}`). The
-/// block re-emits the whole watchlist every ~250 ms, so the latest entry
-/// *is* the live list. If nothing was emitted within `max_age_ms` (default
-/// 2000 — i.e. the preset has no `SignalList`, or detection stalled), the
-/// watchlist is reported empty rather than stale. `max_age_ms=0` disables
-/// the freshness gate and returns the last retained emission at any age.
-///
-/// Pairs with `POST /api/tune`: read a row's `freq_hz`, tune there.
-#[derive(Deserialize)]
-pub struct SignalsQuery {
-    pub max_age_ms: Option<u64>,
-}
-
-pub async fn get_signals(
-    State(state): State<AppState>,
-    Query(q): Query<SignalsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let logs = state.logs().ok_or_else(|| {
-        bad_request(
-            "LOGS_DISABLED",
-            "log broadcast not configured on this server",
-        )
-    })?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
-    let max_age = q.max_age_ms.unwrap_or(2000);
-    let since = if max_age == 0 {
-        0
-    } else {
-        now.saturating_sub(max_age)
-    };
-
-    // Newest `decoder::signals` line within the freshness window. `recent`
-    // returns oldest→newest, so the tail is the current watchlist.
-    let entries = logs.recent(since, Some("decoder::signals"));
-    let latest = entries.last();
-    let at_ms = latest.map(|e| e.at_ms);
-    let payload = latest
-        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.message).ok())
-        .filter(serde_json::Value::is_object);
-
-    // Either the parsed emission or a typed-empty watchlist; then stamp
-    // `at_ms` (when it was emitted) and `now` (server clock) so a poller
-    // can tell live from stale.
-    let mut out = payload.unwrap_or_else(|| {
-        serde_json::json!({
-            "signals": [],
-            "center_freq_hz": serde_json::Value::Null,
-            "span_hz": serde_json::Value::Null,
-            "frame": serde_json::Value::Null,
-        })
-    });
-    // Surface whether we're on real hardware vs a software/test source, so a
-    // blind caller can't mistake a SineSource tone (or a restart's fallback)
-    // for a dead band. `source_kind: "software"` + a note means "you're not
-    // tuned to RF — `device select` first."
-    let source = state.get_source().await;
-    let is_hw = source.type_name == "SoapySource";
-    if let Some(obj) = out.as_object_mut() {
-        obj.insert(
-            "at_ms".into(),
-            at_ms.map_or(serde_json::Value::Null, Into::into),
-        );
-        obj.insert("now".into(), now.into());
-        obj.insert(
-            "source_kind".into(),
-            serde_json::json!(if is_hw { "hardware" } else { "software" }),
-        );
-        if !is_hw {
-            obj.insert(
-                "note".into(),
-                serde_json::json!(format!(
-                    "source is '{}' — a software/test source, not real RF. \
-                     Run `device select <args>` before surveying.",
-                    source.type_name
-                )),
-            );
-        }
-    }
-    Ok(Json(out))
-}
 
 // Make `LogEntry` serialize-friendly. Defined here rather than in
 // log_stream.rs so log_stream stays serde-free; the API layer is the
@@ -898,57 +810,27 @@ pub async fn list_block_schemas() -> Json<Vec<crate::block_schema::BlockSchemaDt
     Json(crate::block_schema::all_block_schemas())
 }
 
-/// `GET /api/flowdiag` — the latest node-side flow-diagnostics
-/// snapshot (per-block sample throughput / process-time / ring fill),
-/// or `null` when the pipeline is stopped or hasn't produced one yet.
-/// A dedicated channel (not the log stream): always available
-/// regardless of `RUST_LOG`, never clutters the LogPanel. The browser
-/// Flow view polls this ~1 Hz for the `node` side; the `browser` side
-/// is fed locally in-browser.
-pub async fn get_flowdiag(
-    State(state): State<AppState>,
-) -> Json<Option<ferrite_runtime::DiagSnapshot>> {
-    Json(state.flowdiag().await)
-}
-
-/// `GET /api/decodes` — full structured-decoder snapshot from the
-/// server-side `DecoderStore` (every kind: aprs/adsb/ft8/signals/…), as
-/// `{ seq, kinds: { <kind>: { recent[], current{} } } }`. The single read
-/// path for MCP/headless and the browser mirror's initial fetch.
-pub async fn get_decodes(
+/// `GET /api/state` — the entire server-side store as
+/// `{ seq, kinds: { <kind>: { recent[], current{} } } }`. One read path
+/// for all live state: decoder kinds (aprs/adsb/ft8/…), `signals`, the
+/// AI transcript (`ai`), plus the live `readback` (driver gain/AGC) and
+/// `flowdiag` (per-block throughput) folded by the pipeline diag tick.
+/// MCP slices the kind it needs out of this; the browser mirror uses it
+/// for the initial fetch + resync (the live feed is `/ws/state`).
+pub async fn get_state(
     State(state): State<AppState>,
 ) -> Json<crate::decoder_store::StoreSnapshot> {
     Json(state.decoder_store().snapshot())
 }
 
-/// `GET /api/decodes/:kind` — one decoder kind's state (`recent` log +
-/// `current` keyed table). `null` when the kind has produced nothing.
-pub async fn get_decodes_kind(
-    State(state): State<AppState>,
-    Path(kind): Path<String>,
-) -> Json<Option<crate::decoder_store::KindState>> {
-    Json(state.decoder_store().snapshot_kind(&kind))
-}
-
-/// `POST /api/decodes/:kind/reset` — clear one decoder kind (operator /
+/// `POST /api/state/:kind/reset` — clear one store kind (operator /
 /// MCP "clear"). Broadcasts a reset delta to mirrors.
-pub async fn reset_decodes_kind(
+pub async fn reset_state_kind(
     State(state): State<AppState>,
     Path(kind): Path<String>,
 ) -> Json<serde_json::Value> {
     state.decoder_store().reset_kind(&kind);
     Json(serde_json::json!({ "ok": true, "kind": kind }))
-}
-
-/// `GET /api/source/readback` — the latest 1 Hz cached SoapySource
-/// driver readback (current gain, AGC state, etc.). `null` when the
-/// pipeline is stopped, the source is not a `SoapySource`, or the
-/// pipeline hasn't produced a tick yet. The UI polls this so AGC-driven
-/// gain motion shows up between explicit `PATCH /api/source` writes.
-pub async fn get_source_readback(
-    State(state): State<AppState>,
-) -> Json<Option<ferrite_blocks::SoapyReadback>> {
-    Json(state.cached_source_readback().await)
 }
 
 /// Body of `POST /api/tune`. `freq_hz` is the target listen frequency

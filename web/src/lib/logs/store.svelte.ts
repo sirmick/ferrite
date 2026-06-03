@@ -2,9 +2,10 @@
 // sources: the `/ws/logs` stream (server tracing), the browser console
 // (patched in `init()`), and explicit calls from session/WS code paths.
 
-// flowdiag no longer rides the log stream — it has its own channel
-// (GET /api/flowdiag for node, in-process for browser; see flowStore /
-// FlowPanel). The log store stays log-only.
+// flowdiag no longer rides the log stream — the node side is folded into
+// the store (`flowdiag` kind) and mirrored over /ws/state; the browser
+// side is fed in-process (see flowStore / FlowPanel). The log store
+// stays log-only.
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace';
 export type LogSource = 'server' | 'client' | 'vite';

@@ -196,9 +196,8 @@ mod tests {
         // Post-B2 collapse: one node-side FmDemod feeds a TeeRealF32
         // (`audio_tee`) that fans out to the node-side RDS decoder
         // (out0) and the browser audio chain (out1, via auto-inserted
-        // WsBridgeTxF32). Keeping RDS on the node side is forced by
-        // the WsBridgeTxEvents NativeOnly placement — a browser-placed
-        // event source can't currently feed a ui: sink.
+        // WsBridgeTxF32). RDS stays node-side here (the authored
+        // placement), terminating in an `EventStore` (kind `rds`).
         let rds = &s.wire_plan["rds"];
         assert_eq!(rds["in"].source_block, "audio_tee");
         assert_eq!(rds["in"].source_port, "out0");

@@ -1,7 +1,8 @@
 //! `EventStore` — terminal sink for `events` ports that feeds the
 //! server-side decoder store (the WS-replicated `DecoderStore`).
 //!
-//! Replaces `WsBridgeTxEvents` for decoder `ui:<kind>` event sinks. Each
+//! The terminator `env_split` inserts for every decoder `ui:<kind>` event
+//! sink (it superseded the removed `WsBridgeTxEvents` WS path). Each
 //! complete newline-delimited JSON line on the input is parsed and pushed
 //! to the attached [`DecoderSink`] under this block's `kind`. The server
 //! implements `DecoderSink` against its `DecoderStore`; the block stays
@@ -144,7 +145,7 @@ impl Block for EventStore {
                     ai_notes: "Clear this kind in the store when the graph (re)loads, so a new decode session starts clean.",
                 },
             ],
-            ai_notes: "Terminal sink for decoder `events` ports — feeds the server-side DecoderStore (WS-replicated to the browser, REST snapshot for MCP). Replaces WsBridgeTxEvents for decoder ui:<kind> sinks. Placement::Either: node writes the store directly; browser buffers for the host to POST.",
+            ai_notes: "Terminal sink for decoder `events` ports — feeds the server-side store (WS-replicated to the browser over /ws/state, REST snapshot at /api/state for MCP). Placement::Either: node writes the store directly; browser buffers for the host to POST.",
         }
     }
 

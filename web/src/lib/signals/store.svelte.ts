@@ -2,7 +2,7 @@
 // decoder mirror (`$lib/decoders/store`). The node-side `SignalList`
 // block's `ui:signals` events terminus feeds the server `DecoderStore`
 // (kind `signals`, Replace-fold: one record holding the whole snapshot),
-// which is mirrored to the browser over `/ws/decodes`. This file keeps
+// which is mirrored to the browser over `/ws/state`. This file keeps
 // the original `signals.signals` / `centerFreqHz` / `spanHz` surface so
 // the spectrum overlays + the Signals panel read it unchanged.
 //

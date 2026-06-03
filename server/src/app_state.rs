@@ -134,12 +134,6 @@ struct Inner {
     /// `/api/devices` and `/api/source/capabilities`; pruned when a
     /// device disappears from `enumerate`.
     device_cache: DeviceCache,
-    /// Latest node-side flow-diagnostics snapshot, refreshed ~1 Hz by
-    /// the running pipeline's diag loop. Served verbatim by
-    /// `GET /api/flowdiag` — a dedicated channel so flowdiag is always
-    /// available regardless of `RUST_LOG` and never clutters the log
-    /// stream. `None` until the first snapshot (or while stopped).
-    latest_diag: Arc<RwLock<Option<ferrite_runtime::DiagSnapshot>>>,
 }
 
 #[derive(Clone)]
@@ -175,20 +169,12 @@ impl AppState {
                 pipeline: Mutex::new(None),
                 tick_period,
                 device_cache: DeviceCache::new(),
-                latest_diag: Arc::new(RwLock::new(None)),
             }),
             logs: None,
             presets_dir: None,
             captures_dir: None,
             view_bridge: crate::view_bridge::ViewBridge::default(),
         }
-    }
-
-    /// Latest node-side [`ferrite_runtime::DiagSnapshot`], or `None`
-    /// when the pipeline is stopped / hasn't produced one yet. Backs
-    /// `GET /api/flowdiag`.
-    pub async fn flowdiag(&self) -> Option<ferrite_runtime::DiagSnapshot> {
-        self.inner.latest_diag.read().await.clone()
     }
 
     #[must_use]
@@ -355,7 +341,6 @@ impl AppState {
                 "WsBridgeTx" => "IqF32",
                 "WsBridgeTxF32" => "F32",
                 "WsBridgeTxFftU8" => "FftU8",
-                "WsBridgeTxEvents" => "JsonEvent",
                 _ => continue,
             };
             let params = decl.params.as_ref().and_then(|p| p.as_object());
@@ -384,20 +369,6 @@ impl AppState {
         let pipeline = self.inner.pipeline.lock().await;
         if let Some(mount) = pipeline.as_ref() {
             mount.source_readback().await
-        } else {
-            None
-        }
-    }
-
-    /// 1 Hz-polled snapshot of the source driver's state, populated by
-    /// the pipeline's diag tick. Cheap (no runtime mutex hit) and stays
-    /// fresh while the pipeline runs — surfaces AGC-driven gain motion
-    /// to the UI/AI between explicit `PATCH /api/source` writes.
-    /// `None` when the pipeline is stopped or hasn't ticked once yet.
-    pub async fn cached_source_readback(&self) -> Option<SoapyReadback> {
-        let pipeline = self.inner.pipeline.lock().await;
-        if let Some(mount) = pipeline.as_ref() {
-            mount.cached_source_readback().await
         } else {
             None
         }
@@ -760,7 +731,6 @@ impl AppState {
             &composed,
             self.inner.frames.clone(),
             self.inner.tick_period,
-            Arc::clone(&self.inner.latest_diag),
             Arc::clone(&self.inner.decoder_store),
         )?;
         *guard = Some(mount);
@@ -809,9 +779,11 @@ impl AppState {
         let Some(mount) = guard.take() else {
             return false;
         };
-        // Drop the stale snapshot so `GET /api/flowdiag` reports
-        // "stopped" (empty) rather than a frozen last frame.
-        *self.inner.latest_diag.write().await = None;
+        // Clear the live-state kinds so a stopped pipeline reports
+        // "stopped" (empty) rather than a frozen last frame. The diag
+        // tick that fed them is about to end with the task.
+        self.inner.decoder_store.reset_kind("flowdiag");
+        self.inner.decoder_store.reset_kind("readback");
         // Fold the runtime's live param edits back into preset_doc —
         // the single deliberate writer that replaces the per-edit
         // mirror-back removed from apply_block_params. Snapshot before

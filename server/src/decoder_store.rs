@@ -59,8 +59,12 @@ fn policy_for(kind: &str) -> Policy {
         },
         // RDS emits partial groups → accumulate into one record.
         "rds" => Policy::Merge,
-        // Single-current snapshot (whole payload each emit).
-        "rssi" | "signals" => Policy::Replace,
+        // Single-current snapshot (whole payload each emit). `readback`
+        // (live SoapySource driver state) and `flowdiag` (per-block
+        // throughput/health) are folded by the pipeline diag tick — the
+        // store is the one home for all live state, sliced by MCP and
+        // mirrored to the UI over WS.
+        "rssi" | "signals" | "readback" | "flowdiag" => Policy::Replace,
         // AI transcript — append log of conversation turns (one record per
         // user/assistant turn), folded by ferrited's `/ws/chat` proxy +
         // `chat-inject` path. Read by MCP via `decodes ai`.
@@ -170,8 +174,11 @@ impl DecoderStore {
         }
     }
 
-    /// One kind's state (for `GET /api/decodes/:kind` / `decodes <kind>`).
+    /// One kind's state. The HTTP read path is the whole-store
+    /// `GET /api/state` (MCP slices the kind it wants), so this has no
+    /// in-crate caller outside tests — kept as a public accessor.
     #[must_use]
+    #[allow(dead_code)]
     pub fn snapshot_kind(&self, kind: &str) -> Option<KindState> {
         self.inner.lock().unwrap().kinds.get(kind).cloned()
     }

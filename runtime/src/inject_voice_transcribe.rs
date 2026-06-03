@@ -108,9 +108,10 @@ pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc, profile: &Profile) {
         doc.wires.push(Wire::new(format!("{vt_id}.out"), sink_in));
 
         // Transcript spots → the UI. `events` rides the same `ui:<name>`
-        // path FT8/WSPR use: env_split turns it into a WsBridgeTxEvents
-        // (node) or an EventsSink loopback (browser) automatically, so
-        // the panel sees the transcript regardless of which side decodes.
+        // path FT8/WSPR use: env_split terminates it in an `EventStore`
+        // (kind `transcribe`) that folds into the server store — node
+        // writes it directly, browser POSTs — so the panel sees the
+        // transcript regardless of which side decodes.
         doc.wires.push(Wire::new(
             format!("{vt_id}.events"),
             "ui:transcribe".to_string(),

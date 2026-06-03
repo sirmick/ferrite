@@ -129,7 +129,6 @@ async fn dtmf_e2e_preset_round_trips_digits_across_cross_env_bridge() {
         &doc,
         frames,
         Duration::from_millis(5),
-        std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         std::sync::Arc::new(decoder_store::DecoderStore::new()),
     )
     .expect("node half spawns");

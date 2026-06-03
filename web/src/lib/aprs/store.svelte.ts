@@ -2,7 +2,7 @@
 //
 // `PacketDemod`→aprs emits per-frame JSON (aprs.rs), wired to `ui:aprs` →
 // the server `DecoderStore` (kind `aprs`, Upsert-by-call which also keeps
-// a capped frame log in `recent`), mirrored over `/ws/decodes`. This
+// a capped frame log in `recent`), mirrored over `/ws/state`. This
 // keeps the original surface:
 //   - `stations`    — latest frame per callsign, with last-known position
 //                     + a heard-frame count (table + selection)
@@ -109,6 +109,6 @@ export const aprs = {
   attach(_client?: unknown, _streamId?: unknown): void {},
   detach(): void {},
   reset(): void {
-    void fetch('/api/decodes/aprs/reset', { method: 'POST' }).catch(() => {});
+    void fetch('/api/state/aprs/reset', { method: 'POST' }).catch(() => {});
   },
 };

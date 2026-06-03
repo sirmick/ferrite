@@ -2,7 +2,7 @@
 //
 // `Ft8Demod` (ft8/ft4 → kind `ft8`) and `WsprDemod` (→ kind `wspr`) emit
 // newline-delimited spot records (digital_spot.rs). Both kinds are append
-// logs in the server `DecoderStore`, mirrored over `/ws/decodes`. This
+// logs in the server `DecoderStore`, mirrored over `/ws/state`. This
 // adapter unions them (the shared view shows all three modes, keyed by
 // `t`) and keeps the original surface:
 //   - `decodes`  — raw spot rows, newest last, capped (table)
@@ -125,7 +125,7 @@ export const ft8 = {
   attach(_client?: unknown, _streamId?: unknown): void {},
   detach(): void {},
   reset(): void {
-    void fetch('/api/decodes/ft8/reset', { method: 'POST' }).catch(() => {});
-    void fetch('/api/decodes/wspr/reset', { method: 'POST' }).catch(() => {});
+    void fetch('/api/state/ft8/reset', { method: 'POST' }).catch(() => {});
+    void fetch('/api/state/wspr/reset', { method: 'POST' }).catch(() => {});
   },
 };

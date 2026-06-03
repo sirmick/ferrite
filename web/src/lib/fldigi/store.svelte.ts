@@ -5,7 +5,7 @@
 // newline-delimited JSON record per decoded chunk on their `events` port
 // — `{"t":"fldigi","mode":"<label>","text":"<decoded>"}` (fldigi_modes.rs)
 // — wired to `ui:fldigi` → the server `DecoderStore` (kind `fldigi`,
-// append log), mirrored to the browser over `/ws/decodes`. This keeps the
+// append log), mirrored to the browser over `/ws/state`. This keeps the
 // original `fldigi.lines` / `fldigi.mode` surface so FldigiView is
 // unchanged; it's a continuous text console rendered by TextConsole.
 
@@ -45,6 +45,6 @@ export const fldigi = {
   detach(): void {},
   /** Operator Reset — clears the kind server-side; the mirror follows. */
   reset(): void {
-    void fetch('/api/decodes/fldigi/reset', { method: 'POST' }).catch(() => {});
+    void fetch('/api/state/fldigi/reset', { method: 'POST' }).catch(() => {});
   },
 };

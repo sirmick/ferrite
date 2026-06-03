@@ -1,8 +1,8 @@
-// Browser mirror of the server-side `DecoderStore` — a 1:1 replica kept
-// in sync over `/ws/decodes` (snapshot on connect, then deltas). Every
-// decoder UI (APRS, ADS-B, FT8, signals, …) paints out of this one store
-// instead of its own bespoke WS subscription. REST `/api/decodes` is the
-// same data for MCP/headless.
+// Browser mirror of the server-side store — a 1:1 replica kept in sync
+// over `/ws/state` (snapshot on connect, then deltas). Every live-state
+// UI (APRS, ADS-B, FT8, signals, flowdiag, readback, …) paints out of
+// this one store instead of its own bespoke WS subscription or poll.
+// REST `/api/state` is the same data for MCP/headless.
 //
 // Wire protocol (text JSON, one message per line):
 //   {"snapshot": { seq, kinds: { <kind>: { recent[], current{} } } }}
@@ -96,13 +96,13 @@ class DecoderMirror {
 
 export const decoders = new DecoderMirror();
 
-/** Connect the mirror to `/ws/decodes` with linear-backoff reconnect.
+/** Connect the mirror to `/ws/state` with linear-backoff reconnect.
  *  Call once at app start (alongside the log stream). */
 export function connectDecoders(): () => void {
   let ws: WebSocket | null = null;
   let closed = false;
   let retry = 0;
-  const url = wsUrlFor('/ws/decodes');
+  const url = wsUrlFor('/ws/state');
 
   const open = () => {
     if (closed) return;
@@ -119,7 +119,7 @@ export function connectDecoders(): () => void {
       else if (msg.delta) decoders.applyDelta(msg.delta);
       else if (msg.resync) {
         // Broadcast lagged — re-fetch the authoritative snapshot.
-        void fetch('/api/decodes')
+        void fetch('/api/state')
           .then((r) => r.json())
           .then((s: Snapshot) => decoders.replaceSnapshot(s))
           .catch(() => {});

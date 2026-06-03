@@ -138,7 +138,7 @@ pub fn split_for_environment(
             // name (`aprs` / `adsb` / `ft8` / `signals` / …); the
             // `__ui_<name>_<sid>` id keeps numbering deterministic across
             // halves even though `EventStore` ignores the stream id.
-            if tx_type == "WsBridgeTxEvents" {
+            if tx_type == "EventStore" {
                 insert_bridge(
                     &mut new_blocks,
                     doc,
@@ -345,10 +345,13 @@ fn producer_output_rate_hz(doc: &FlowgraphDoc, source_endpoint: &str) -> Option<
     rate_of_block(doc, block_id, 0)
 }
 
-/// Resolve the source port's type and map it to the matching WsBridgeTx
-/// variant. Supported today: IqF32 → `WsBridgeTx`, FftU8 → `WsBridgeTxFftU8`,
-/// Events → `WsBridgeTxEvents`. Other port types would need their own Tx
-/// block before a `ui:<name>` wire can carry them.
+/// Resolve the source port's type and map it to the block that terminates
+/// a `ui:<name>` wire. Sample ports get a `WsBridgeTx*` (IqF32 →
+/// `WsBridgeTx`, RealF32 → `WsBridgeTxF32`, FftU8 → `WsBridgeTxFftU8`);
+/// `Events` ports get an `EventStore` instead — decoder records fold into
+/// the server-side `DecoderStore`, they don't ship over the sample WS.
+/// Other port types would need their own terminator before a `ui:<name>`
+/// wire can carry them.
 fn pick_ui_tx_type(
     doc: &FlowgraphDoc,
     registry: &dyn SpecRegistry,
@@ -375,7 +378,7 @@ fn pick_ui_tx_type(
         PortType::IqF32 => Ok("WsBridgeTx"),
         PortType::RealF32 => Ok("WsBridgeTxF32"),
         PortType::FftU8 => Ok("WsBridgeTxFftU8"),
-        PortType::Events => Ok("WsBridgeTxEvents"),
+        PortType::Events => Ok("EventStore"),
         other => Err(SplitError::UnsupportedUiPortType {
             ui_name: ui_name.to_string(),
             endpoint: source.to_string(),

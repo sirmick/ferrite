@@ -12,12 +12,12 @@
 
   import { flow, type FlowSide } from '$lib/logs/flowStore.svelte';
 
-  // The node-side snapshot comes over its own channel (GET
-  // /api/flowdiag), not the log stream. The 1 Hz poll lives at the
-  // store layer (`flowStore.svelte.ts`) so it runs whenever the app
-  // is up — not just when this panel is mounted. Gating it on
-  // FlowPanel visibility broke `HealthDots`, which depends on the
-  // freshness of `flow.node` regardless of which tab is open.
+  // The node-side snapshot arrives via the store mirror (`flowdiag`
+  // kind over /ws/state), not the log stream. The ingest effect lives at
+  // the store layer (`flowStore.svelte.ts`) so it runs whenever the app
+  // is up — not just when this panel is mounted. Gating it on FlowPanel
+  // visibility broke `HealthDots`, which depends on the freshness of
+  // `flow.node` regardless of which tab is open.
   // The browser side is fed directly from the runner; nothing to
   // poll there.
 

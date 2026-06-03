@@ -4,7 +4,7 @@
 // pipeline. The `params` object is source-type-specific (SineSource,
 // SoapySource, FileSource).
 
-import type { ReconfigureResponse, SoapyReadback } from '$lib/api/flowgraph';
+import type { ReconfigureResponse } from '$lib/api/flowgraph';
 import { ApiError } from '$lib/api/errors';
 
 export interface SourceConfig {
@@ -31,16 +31,6 @@ export async function patchSource(cfg: SourceConfig): Promise<ReconfigureRespons
     throw new ApiError(r.status, `source patch failed (${r.status}): ${text}`);
   }
   return (await r.json()) as ReconfigureResponse;
-}
-
-/** `GET /api/source/readback` — 1 Hz-polled driver state cache.
- *  Returns `null` when the pipeline is stopped, the source isn't a
- *  SoapySource, or the diag tick hasn't fired yet. AGC-driven gain
- *  motion lands here between explicit `PATCH /api/source` writes. */
-export async function fetchSourceReadback(): Promise<SoapyReadback | null> {
-  const r = await fetch('/api/source/readback');
-  if (!r.ok) return null;
-  return (await r.json()) as SoapyReadback | null;
 }
 
 /** Body of `POST /api/tune` — see the server route for the dodge math.

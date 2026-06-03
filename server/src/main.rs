@@ -397,15 +397,12 @@ async fn main() -> Result<()> {
             "/api/source/capabilities",
             get(routes::get_source_capabilities),
         )
-        .route("/api/source/readback", get(routes::get_source_readback))
-        .route("/api/decodes", get(routes::get_decodes))
-        .route("/api/decodes/:kind", get(routes::get_decodes_kind))
-        .route("/api/decodes/:kind/reset", post(routes::reset_decodes_kind))
+        .route("/api/state", get(routes::get_state))
+        .route("/api/state/:kind/reset", post(routes::reset_state_kind))
         .route("/api/tune", post(routes::post_tune))
         .route("/api/pipeline", get(routes::pipeline_status))
         .route("/api/pipeline/start", post(routes::pipeline_start))
         .route("/api/pipeline/stop", post(routes::pipeline_stop))
-        .route("/api/flowdiag", get(routes::get_flowdiag))
         .route("/api/pipeline/blocks", get(routes::list_pipeline_blocks))
         .route(
             "/api/pipeline/blocks/:id/params",
@@ -423,12 +420,11 @@ async fn main() -> Result<()> {
             get(routes::get_profile).patch(routes::patch_profile),
         )
         .route("/api/decoder/recent", get(routes::recent_decoder))
-        .route("/api/signals", get(routes::get_signals))
         .route("/api/debug/log", post(routes::browser_log))
         .route("/api/screenshot", post(routes::save_screenshot))
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
-        .route("/ws/decodes", get(routes::ws_decodes))
+        .route("/ws/state", get(routes::ws_state))
         .route("/ws/chat", get(routes::ws_chat))
         .route("/api/ai/chat-inject", post(routes::post_chat_inject))
         .route("/api/ui-views/:pane", get(routes::get_ui_view))
