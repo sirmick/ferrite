@@ -374,7 +374,10 @@ mod tests {
     fn ai_transcript_is_an_append_log() {
         let s = DecoderStore::new();
         s.apply("ai", serde_json::json!({"role": "user", "text": "hi"}));
-        s.apply("ai", serde_json::json!({"role": "assistant", "text": "hello"}));
+        s.apply(
+            "ai",
+            serde_json::json!({"role": "assistant", "text": "hello"}),
+        );
         let k = s.snapshot_kind("ai").unwrap();
         assert_eq!(k.recent.len(), 2, "turns append in order");
         assert!(k.current.is_empty(), "no keyed table for a transcript");

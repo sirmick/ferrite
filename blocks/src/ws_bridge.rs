@@ -48,7 +48,6 @@ use crate::{
     spsc_ring::SpscRing,
 };
 
-
 /// Transport contract shared by every `WsBridgeTx*` block. The runtime
 /// constructs one sink per preset (today that's the postcard encoder +
 /// broadcast channel in `ferrited::session`) and hands the same
@@ -770,8 +769,7 @@ impl BlockFactory for WsBridgeTxFftU8 {
 mod tests {
     use super::{
         BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxF32,
-        WsBridgeRxParams, WsBridgeTx, WsBridgeTxF32, WsBridgeTxFftU8,
-        DEFAULT_RX_BUFFER_SAMPLES,
+        WsBridgeRxParams, WsBridgeTx, WsBridgeTxF32, WsBridgeTxFftU8, DEFAULT_RX_BUFFER_SAMPLES,
     };
     use crate::{
         block::{Block, BlockIo, InBuf, InitCtx, InputPort, OutBuf, OutputPort, PortMeta, Work},
