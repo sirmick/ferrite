@@ -438,10 +438,7 @@ fn ai_text_from_content(content: &serde_json::Value) -> String {
 /// assistant record. `chat_post` POSTs one self-contained role-turn per
 /// call, so reducing within the batch is sufficient. tool_use
 /// (`input_json_delta`) frames are a different delta type and are ignored.
-fn fold_ai_inject_batch(
-    store: &crate::decoder_store::DecoderStore,
-    events: &[serde_json::Value],
-) {
+fn fold_ai_inject_batch(store: &crate::decoder_store::DecoderStore, events: &[serde_json::Value]) {
     let mut assistant = String::new();
     for ev in events {
         match ev.get("type").and_then(serde_json::Value::as_str) {
@@ -454,12 +451,14 @@ fn fold_ai_inject_batch(
             }
             Some("stream_event") => {
                 let delta = ev.get("event").and_then(|e| e.get("delta"));
-                let is_text =
-                    delta.and_then(|d| d.get("type")).and_then(serde_json::Value::as_str)
-                        == Some("text_delta");
+                let is_text = delta
+                    .and_then(|d| d.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("text_delta");
                 if is_text {
-                    if let Some(t) =
-                        delta.and_then(|d| d.get("text")).and_then(serde_json::Value::as_str)
+                    if let Some(t) = delta
+                        .and_then(|d| d.get("text"))
+                        .and_then(serde_json::Value::as_str)
                     {
                         assistant.push_str(t);
                     }
@@ -543,7 +542,6 @@ pub async fn recent_decoder(
     }
     Ok(Json(RecentResponse { entries, now }))
 }
-
 
 // Make `LogEntry` serialize-friendly. Defined here rather than in
 // log_stream.rs so log_stream stays serde-free; the API layer is the
@@ -817,9 +815,7 @@ pub async fn list_block_schemas() -> Json<Vec<crate::block_schema::BlockSchemaDt
 /// `flowdiag` (per-block throughput) folded by the pipeline diag tick.
 /// MCP slices the kind it needs out of this; the browser mirror uses it
 /// for the initial fetch + resync (the live feed is `/ws/state`).
-pub async fn get_state(
-    State(state): State<AppState>,
-) -> Json<crate::decoder_store::StoreSnapshot> {
+pub async fn get_state(State(state): State<AppState>) -> Json<crate::decoder_store::StoreSnapshot> {
     Json(state.decoder_store().snapshot())
 }
 
@@ -1529,8 +1525,10 @@ mod ai_fold_tests {
         // A tool batch (input_json_delta) adds nothing to the transcript.
         fold_ai_inject_batch(
             &s,
-            &[serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
-                "delta":{"type":"input_json_delta","partial_json":"{}"}}})],
+            &[
+                serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
+                "delta":{"type":"input_json_delta","partial_json":"{}"}}}),
+            ],
         );
         let k = s.snapshot_kind("ai").unwrap();
         assert_eq!(k.recent.len(), 2);
