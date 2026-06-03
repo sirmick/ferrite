@@ -331,6 +331,26 @@ impl AppState {
             .map_err(|e| anyhow!("env_split: {e}"))?;
         let mut out = Vec::new();
         for decl in node_half.blocks.values() {
+            // Decoder event sinks are `EventStore` blocks now (feeding the
+            // DecoderStore, not a WS stream). Still advertise them — keyed
+            // by their `kind`, payload_type `decodes` — so the UI knows
+            // which decoder views/panels the active preset offers (it reads
+            // the data from the mirror, not a stream_id).
+            if decl.type_name == "EventStore" {
+                if let Some(kind) = decl
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("kind"))
+                    .and_then(|v| v.as_str())
+                {
+                    out.push(UiSink {
+                        name: kind.to_string(),
+                        stream_id: 0,
+                        payload_type: "decodes",
+                    });
+                }
+                continue;
+            }
             let payload_type = match decl.type_name.as_str() {
                 "WsBridgeTx" => "IqF32",
                 "WsBridgeTxF32" => "F32",
@@ -1512,14 +1532,15 @@ mod tests {
             fft.stream_id >= ferrite_runtime::CROSS_ENV_STREAM_BASE,
             "fft tap gets a cross-env stream id"
         );
-        // `inject_signal_list_taps` still splices a SignalList onto ui:fft,
-        // but its `ui:signals` events terminus is now an `EventStore`
-        // (feeds the DecoderStore), NOT a WS UI sink — so it no longer
-        // shows up in the ui-sink enumeration.
-        assert!(
-            !sinks.iter().any(|s| s.name == "signals"),
-            "signals is a DecoderStore kind now, not a WS ui sink"
-        );
+        // `inject_signal_list_taps` splices a SignalList onto ui:fft; its
+        // `ui:signals` events terminus is an `EventStore` now, advertised
+        // as a `decodes` kind (data read from the store mirror, not a WS
+        // stream) rather than a `JsonEvent` stream.
+        let signals = sinks
+            .iter()
+            .find(|s| s.name == "signals")
+            .expect("signals advertised as a decoder kind");
+        assert_eq!(signals.payload_type, "decodes");
     }
 
     #[tokio::test]
@@ -1549,10 +1570,15 @@ mod tests {
         .unwrap();
         let state = AppState::new(preset, test_source(), Duration::from_millis(5));
         let sinks = state.ui_sinks().await.unwrap();
-        assert!(
-            !sinks.iter().any(|s| s.name == "events"),
-            "events terminus routes to the DecoderStore via EventStore, not a WS ui sink"
-        );
+        // The `ui:events` terminus is an `EventStore` → advertised as a
+        // `decodes` kind (stream_id 0, data read from the store), not a
+        // `JsonEvent` WS stream.
+        let ev = sinks
+            .iter()
+            .find(|s| s.name == "events")
+            .expect("events advertised as a decoder kind");
+        assert_eq!(ev.payload_type, "decodes");
+        assert_eq!(ev.stream_id, 0);
     }
 
     #[tokio::test]

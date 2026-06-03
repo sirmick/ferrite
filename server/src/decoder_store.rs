@@ -33,8 +33,12 @@ pub enum Policy {
         #[allow(dead_code)]
         ttl_ms: u64,
     },
-    /// Single current record holding the whole payload (RDS/RSSI/signals).
+    /// Single current record holding the whole payload (RSSI/signals).
     Replace,
+    /// Single current record built by shallow-merging each event's fields
+    /// into it — for decoders that emit *partial* updates the consumer is
+    /// meant to accumulate (RDS: `pi` in one group, `ps` in another).
+    Merge,
 }
 
 /// Default cap for append logs.
@@ -53,8 +57,10 @@ fn policy_for(kind: &str) -> Policy {
             key_field: "call",
             ttl_ms: 0,
         },
-        // Single-current snapshot.
-        "rds" | "rssi" | "signals" => Policy::Replace,
+        // RDS emits partial groups → accumulate into one record.
+        "rds" => Policy::Merge,
+        // Single-current snapshot (whole payload each emit).
+        "rssi" | "signals" => Policy::Replace,
         // Everything else is an append log — ft8, wspr, pager, eas, dtmf,
         // cw, ais, rtl_433, transcribe, fldigi, …. (ais/rtl_433 can become
         // keyed tables once they emit a parsed mmsi / device id.)
@@ -197,6 +203,13 @@ impl DecoderStore {
                     data,
                 };
                 entry.current.insert(key, record.clone());
+                // Tables also keep a capped frame log in `recent`, so
+                // consumers can derive history the latest-per-key `current`
+                // can't (APRS packet console, ADS-B trails, per-key counts).
+                entry.recent.push_back(record.clone());
+                while entry.recent.len() > LOG_CAP {
+                    entry.recent.pop_front();
+                }
                 DeltaOp::Upsert { record }
             }
             Policy::Replace => {
@@ -210,6 +223,31 @@ impl DecoderStore {
                 entry
                     .current
                     .insert(REPLACE_KEY.to_string(), record.clone());
+                DeltaOp::Upsert { record }
+            }
+            Policy::Merge => {
+                // Shallow-merge the new fields into the accumulated record.
+                let mut merged = entry
+                    .current
+                    .get(REPLACE_KEY)
+                    .map(|r| r.data.clone())
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                if let (Some(dst), Some(src)) = (merged.as_object_mut(), data.as_object()) {
+                    for (k, v) in src {
+                        dst.insert(k.clone(), v.clone());
+                    }
+                }
+                let record = Record {
+                    seq,
+                    at_ms: now_ms(),
+                    key: None,
+                    data: merged,
+                };
+                entry
+                    .current
+                    .insert(REPLACE_KEY.to_string(), record.clone());
+                // Send the full merged record — mirrors just replace.
                 DeltaOp::Upsert { record }
             }
         };

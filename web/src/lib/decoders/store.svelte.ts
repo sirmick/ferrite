@@ -71,7 +71,16 @@ class DecoderMirror {
         }
         break;
       case 'upsert':
-        if (d.record) k.current[d.record.key ?? REPLACE_KEY] = d.record;
+        if (d.record) {
+          k.current[d.record.key ?? REPLACE_KEY] = d.record;
+          // Tables also keep a capped frame log (matches the server) —
+          // unless this is a Replace/Merge kind (no real key), which only
+          // ever wants the single current record.
+          if (d.record.key !== undefined) {
+            k.recent.push(d.record);
+            if (k.recent.length > LOG_CAP) k.recent.splice(0, k.recent.length - LOG_CAP);
+          }
+        }
         break;
       case 'expire':
         if (d.key) delete k.current[d.key];
