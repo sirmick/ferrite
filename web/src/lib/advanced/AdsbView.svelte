@@ -5,23 +5,13 @@
   // `ui:adsb` sink. Selection is keyed by ICAO so the map triangle and
   // the table row stay coupled both ways.
 
-  import { pipeline } from '$lib/pipeline.svelte';
   import { adsb, type Aircraft } from '$lib/adsb/store.svelte';
   import DecodeTable from '$lib/viz/DecodeTable.svelte';
   import StationMap from '$lib/viz/StationMap.svelte';
   import Split from '$lib/layout/Split.svelte';
 
-  let streamId = $derived(pipeline.uiSinks.adsb?.stream_id);
-  let client = $derived(pipeline.client);
-
-  $effect(() => {
-    if (client && streamId !== undefined) {
-      adsb.attach(client, streamId);
-      return () => adsb.detach();
-    }
-    adsb.detach();
-    return () => {};
-  });
+  // Aircraft come from the always-connected decoder mirror (kind `adsb`)
+  // — no per-view WS attach.
 
   // Selection is the ICAO id — shared verbatim by table + map.
   let selected = $state<string | null>(null);

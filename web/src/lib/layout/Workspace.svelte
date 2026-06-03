@@ -57,7 +57,10 @@
   // block's `ui:signals`), `off` collapses the column. The column shows
   // whenever the selected pane has its backing sink.
   let hasNarrowSink = $derived(pipeline.uiSinks.fft_narrow !== undefined);
-  let hasSignalsSink = $derived(pipeline.uiSinks.signals !== undefined);
+  // The signals watchlist now lives in the decoder store (kind `signals`),
+  // not a WS ui sink — its availability tracks the injected SignalList
+  // block, not a sink.
+  let hasSignalsSink = $derived(pipeline.blocks.signals !== undefined);
   let rightPane = $derived(clientControls.get('client.workspace.rightPane'));
   let showNarrow = $derived(hasNarrowSink && rightPane === 'channel');
   let showSignals = $derived(hasSignalsSink && rightPane === 'signals');

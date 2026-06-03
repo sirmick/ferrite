@@ -26,7 +26,9 @@
   // sink). The `signals` option only appears when the preset advertises
   // a `ui:signals` sink (the SignalList block's strongest-signal stream).
   let hasNarrow = $derived(pipeline.uiSinks.fft_narrow !== undefined);
-  let hasSignals = $derived(pipeline.uiSinks.signals !== undefined);
+  // Signals watchlist is a decoder-store kind now (not a WS ui sink) —
+  // availability tracks the injected SignalList block.
+  let hasSignals = $derived(pipeline.blocks.signals !== undefined);
   let rightPane = $derived(clientControls.get('client.workspace.rightPane'));
 
   // Advanced-view toggle. The active preset's registered view (or

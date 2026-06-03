@@ -116,6 +116,10 @@ struct Inner {
     /// connected while stopped picks up frames the moment the pipeline
     /// spins back up.
     frames: FrameBus,
+    /// Server-authoritative decoder store — survives start/stop and
+    /// preset swaps (like `frames`); `EventStore` blocks attach to it
+    /// each load, REST/MCP read snapshots, WS mirrors stream its deltas.
+    decoder_store: Arc<crate::decoder_store::DecoderStore>,
     preset_doc: RwLock<FlowgraphDoc>,
     source_config: RwLock<SourceConfig>,
     /// Runtime profile (audio toggle, demod placement override) applied
@@ -130,12 +134,6 @@ struct Inner {
     /// `/api/devices` and `/api/source/capabilities`; pruned when a
     /// device disappears from `enumerate`.
     device_cache: DeviceCache,
-    /// Latest node-side flow-diagnostics snapshot, refreshed ~1 Hz by
-    /// the running pipeline's diag loop. Served verbatim by
-    /// `GET /api/flowdiag` — a dedicated channel so flowdiag is always
-    /// available regardless of `RUST_LOG` and never clutters the log
-    /// stream. `None` until the first snapshot (or while stopped).
-    latest_diag: Arc<RwLock<Option<ferrite_runtime::DiagSnapshot>>>,
 }
 
 #[derive(Clone)]
@@ -164,26 +162,19 @@ impl AppState {
         Self {
             inner: Arc::new(Inner {
                 frames,
+                decoder_store: Arc::new(crate::decoder_store::DecoderStore::new()),
                 preset_doc: RwLock::new(preset),
                 source_config: RwLock::new(source),
                 profile: RwLock::new(Profile::default()),
                 pipeline: Mutex::new(None),
                 tick_period,
                 device_cache: DeviceCache::new(),
-                latest_diag: Arc::new(RwLock::new(None)),
             }),
             logs: None,
             presets_dir: None,
             captures_dir: None,
             view_bridge: crate::view_bridge::ViewBridge::default(),
         }
-    }
-
-    /// Latest node-side [`ferrite_runtime::DiagSnapshot`], or `None`
-    /// when the pipeline is stopped / hasn't produced one yet. Backs
-    /// `GET /api/flowdiag`.
-    pub async fn flowdiag(&self) -> Option<ferrite_runtime::DiagSnapshot> {
-        self.inner.latest_diag.read().await.clone()
     }
 
     #[must_use]
@@ -226,6 +217,12 @@ impl AppState {
     #[must_use]
     pub fn subscribe(&self) -> mpsc::Receiver<FrameBytes> {
         self.inner.frames.subscribe(DEFAULT_SUBSCRIBER_CAPACITY)
+    }
+
+    /// The shared decoder store (REST snapshot, WS-mirror feed, MCP).
+    #[must_use]
+    pub fn decoder_store(&self) -> Arc<crate::decoder_store::DecoderStore> {
+        Arc::clone(&self.inner.decoder_store)
     }
 
     pub async fn status(&self) -> PipelineStatus {
@@ -320,11 +317,30 @@ impl AppState {
             .map_err(|e| anyhow!("env_split: {e}"))?;
         let mut out = Vec::new();
         for decl in node_half.blocks.values() {
+            // Decoder event sinks are `EventStore` blocks now (feeding the
+            // DecoderStore, not a WS stream). Still advertise them — keyed
+            // by their `kind`, payload_type `decodes` — so the UI knows
+            // which decoder views/panels the active preset offers (it reads
+            // the data from the mirror, not a stream_id).
+            if decl.type_name == "EventStore" {
+                if let Some(kind) = decl
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("kind"))
+                    .and_then(|v| v.as_str())
+                {
+                    out.push(UiSink {
+                        name: kind.to_string(),
+                        stream_id: 0,
+                        payload_type: "decodes",
+                    });
+                }
+                continue;
+            }
             let payload_type = match decl.type_name.as_str() {
                 "WsBridgeTx" => "IqF32",
                 "WsBridgeTxF32" => "F32",
                 "WsBridgeTxFftU8" => "FftU8",
-                "WsBridgeTxEvents" => "JsonEvent",
                 _ => continue,
             };
             let params = decl.params.as_ref().and_then(|p| p.as_object());
@@ -353,20 +369,6 @@ impl AppState {
         let pipeline = self.inner.pipeline.lock().await;
         if let Some(mount) = pipeline.as_ref() {
             mount.source_readback().await
-        } else {
-            None
-        }
-    }
-
-    /// 1 Hz-polled snapshot of the source driver's state, populated by
-    /// the pipeline's diag tick. Cheap (no runtime mutex hit) and stays
-    /// fresh while the pipeline runs — surfaces AGC-driven gain motion
-    /// to the UI/AI between explicit `PATCH /api/source` writes.
-    /// `None` when the pipeline is stopped or hasn't ticked once yet.
-    pub async fn cached_source_readback(&self) -> Option<SoapyReadback> {
-        let pipeline = self.inner.pipeline.lock().await;
-        if let Some(mount) = pipeline.as_ref() {
-            mount.cached_source_readback().await
         } else {
             None
         }
@@ -729,7 +731,7 @@ impl AppState {
             &composed,
             self.inner.frames.clone(),
             self.inner.tick_period,
-            Arc::clone(&self.inner.latest_diag),
+            Arc::clone(&self.inner.decoder_store),
         )?;
         *guard = Some(mount);
         Ok(())
@@ -777,9 +779,11 @@ impl AppState {
         let Some(mount) = guard.take() else {
             return false;
         };
-        // Drop the stale snapshot so `GET /api/flowdiag` reports
-        // "stopped" (empty) rather than a frozen last frame.
-        *self.inner.latest_diag.write().await = None;
+        // Clear the live-state kinds so a stopped pipeline reports
+        // "stopped" (empty) rather than a frozen last frame. The diag
+        // tick that fed them is about to end with the task.
+        self.inner.decoder_store.reset_kind("flowdiag");
+        self.inner.decoder_store.reset_kind("readback");
         // Fold the runtime's live param edits back into preset_doc —
         // the single deliberate writer that replaces the per-edit
         // mirror-back removed from apply_block_params. Snapshot before
@@ -1490,9 +1494,7 @@ mod tests {
         .unwrap();
         let state = AppState::new(preset, test_source(), Duration::from_millis(5));
         let sinks = state.ui_sinks().await.unwrap();
-        // `inject_signal_list_taps` splices a SignalList onto the ui:fft
-        // terminus at compose, so the enumeration now carries both the
-        // FftU8 waterfall tap and the JsonEvent `signals` watchlist.
+        // The FftU8 waterfall tap is still a WS UI sink.
         let fft = sinks
             .iter()
             .find(|s| s.name == "fft")
@@ -1502,19 +1504,24 @@ mod tests {
             fft.stream_id >= ferrite_runtime::CROSS_ENV_STREAM_BASE,
             "fft tap gets a cross-env stream id"
         );
+        // `inject_signal_list_taps` splices a SignalList onto ui:fft; its
+        // `ui:signals` events terminus is an `EventStore` now, advertised
+        // as a `decodes` kind (data read from the store mirror, not a WS
+        // stream) rather than a `JsonEvent` stream.
         let signals = sinks
             .iter()
             .find(|s| s.name == "signals")
-            .expect("injected ui:signals enumerated");
-        assert_eq!(signals.payload_type, "JsonEvent");
+            .expect("signals advertised as a decoder kind");
+        assert_eq!(signals.payload_type, "decodes");
     }
 
     #[tokio::test]
-    async fn ui_sinks_reports_json_event_payload_for_events_stream() {
-        // A decoder produces `Events`; a `ui:events` terminus must surface
-        // in the API as `payload_type: "JsonEvent"` so the browser knows
-        // to decode the payload as JSON instead of IQ or FFT bytes. The
-        // `src` placeholder is present but unused here — compose_source
+    async fn ui_sinks_omits_event_streams_now_routed_to_store() {
+        // A decoder produces `Events`; its `ui:events` terminus is now an
+        // `EventStore` feeding the server DecoderStore — NOT a WS UI sink.
+        // So it must NOT appear in the ui-sink enumeration (the browser
+        // reads decoder state from the store mirror, not a WS stream).
+        // The `src` placeholder is present but unused here — compose_source
         // requires it to exist; validate_doc tolerates isolated blocks.
         let preset: FlowgraphDoc = serde_json::from_value(json!({
             "name": "ev",
@@ -1535,9 +1542,15 @@ mod tests {
         .unwrap();
         let state = AppState::new(preset, test_source(), Duration::from_millis(5));
         let sinks = state.ui_sinks().await.unwrap();
-        assert_eq!(sinks.len(), 1);
-        assert_eq!(sinks[0].name, "events");
-        assert_eq!(sinks[0].payload_type, "JsonEvent");
+        // The `ui:events` terminus is an `EventStore` → advertised as a
+        // `decodes` kind (stream_id 0, data read from the store), not a
+        // `JsonEvent` WS stream.
+        let ev = sinks
+            .iter()
+            .find(|s| s.name == "events")
+            .expect("events advertised as a decoder kind");
+        assert_eq!(ev.payload_type, "decodes");
+        assert_eq!(ev.stream_id, 0);
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@
   import { pipeline } from '$lib/pipeline.svelte';
   import { logs, patchConsole } from '$lib/logs/store.svelte';
   import { connectServerLogs } from '$lib/logs/client';
+  import { connectDecoders } from '$lib/decoders/store.svelte';
   import { connectAi } from '$lib/ai/client';
   import { installAutoSettingsEffect } from '$lib/controls/autoSettings.svelte';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
@@ -41,6 +42,7 @@
   onMount(() => {
     patchConsole();
     const disconnectLogs = connectServerLogs();
+    const disconnectDecodes = connectDecoders();
     const disconnectAi = connectAi();
     void pipeline.init();
     browserRuntime.init();
@@ -58,6 +60,7 @@
       document.removeEventListener('keydown', unlock);
       void browserRuntime.teardown();
       disconnectLogs();
+      disconnectDecodes();
       disconnectAi();
       pipeline.teardown();
     };

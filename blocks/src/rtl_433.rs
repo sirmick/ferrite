@@ -53,8 +53,8 @@ use ferrite_rtl_433::{DecoderSet, Rtl433Demod as Decoder};
 use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, ReconfigureScope, Work,
+    drain_events_port, Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind,
+    ParamSpec, Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 /// rtl_433's native sample rate. The block warns if the upstream rate
@@ -99,6 +99,7 @@ pub struct Rtl433Demod {
     dec: Decoder,
     warned_off_rate: bool,
     input_rate_hz: f64,
+    events_out: Vec<u8>,
     construct_rate_hz: u32,
 }
 
@@ -119,6 +120,7 @@ impl Rtl433Demod {
             dec,
             warned_off_rate: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
+            events_out: Vec::new(),
             construct_rate_hz: rate,
         })
     }
@@ -148,7 +150,10 @@ impl Block for Rtl433Demod {
                 name: "in",
                 port_type: PortType::IqF32,
             }],
-            outputs: &[],
+            outputs: &[PortSpec {
+                name: "events",
+                port_type: PortType::Events,
+            }],
             params: &[
                 ParamSpec {
                     key: "sample_rate_hz",
@@ -213,10 +218,15 @@ impl Block for Rtl433Demod {
         self.dec.push_iq(src);
         while let Some(event) = self.dec.drain_event() {
             tracing::info!(target: "decoder::rtl_433", "{event}");
+            // `event` is already a JSON record — emit it verbatim (one
+            // newline-delimited line) rather than re-wrapping it.
+            self.events_out.extend_from_slice(event.as_bytes());
+            self.events_out.push(b'\n');
         }
 
         let mut w = Work::new();
         w.consumed[0] = consumed;
+        drain_events_port(io, &mut self.events_out, &mut w);
         Ok(w)
     }
 }

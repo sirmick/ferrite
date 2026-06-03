@@ -12,20 +12,11 @@
   import { signals } from '$lib/signals/store.svelte';
   import BlockParams from '$lib/controls/BlockParams.svelte';
 
-  let streamId = $derived(pipeline.uiSinks.signals?.stream_id);
-  let client = $derived(pipeline.client);
-  // The node-side SignalList detector backing this panel. Its Min SNR
-  // (detection threshold) + Top N knobs are live (SelfBlock), so editing
-  // them re-ranks the list — and the FFT peak squares — immediately.
+  // The watchlist comes from the always-connected decoder mirror via the
+  // `signals` adapter — no per-view WS attach. The node-side SignalList
+  // detector backing this panel has live Min SNR (detection threshold) +
+  // Top N knobs, so editing them re-ranks the list + FFT squares at once.
   let signalsBlock = $derived(pipeline.blocks['signals']);
-
-  $effect(() => {
-    if (client && streamId !== undefined) {
-      signals.attach(client, streamId);
-      return () => signals.release();
-    }
-    return () => {};
-  });
 
   // MHz with enough digits to distinguish adjacent broadcast channels.
   function fmtMhz(hz: number): string {

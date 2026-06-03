@@ -153,6 +153,10 @@
       "pager.in"
     ],
     [
+      "pager.events",
+      "ui:pager"
+    ],
+    [
       "audio_tee.out1",
       "audio_resamp.in"
     ],

@@ -29,9 +29,20 @@ use ferrite_multimon_ng::{pocsag as pocsag_cfg, Decoder, MultimonDemod};
 use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, ReconfigureScope, Work,
+    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutBuf, ParamKind, ParamSpec,
+    Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
+
+/// Append one decoded line to the `events` queue as a JSON record
+/// `{proto, text}` — the structured form the DecoderStore folds. Newline
+/// delimited (the `EventStore` sink splits on `\n`).
+fn push_pager_event(out: &mut Vec<u8>, proto: &str, line: &str) {
+    let rec = serde_json::json!({ "proto": proto, "text": line });
+    if let Ok(mut bytes) = serde_json::to_vec(&rec) {
+        out.append(&mut bytes);
+        out.push(b'\n');
+    }
+}
 
 /// Required input sample rate. Hard contract from multimon-ng's
 /// `demod_poc12`.
@@ -76,6 +87,9 @@ pub struct PagerDemod {
     /// it doesn't spam every tick.
     warned_off_rate: bool,
     input_rate_hz: f64,
+    /// Newline-delimited JSON pager records queued for the `events` port
+    /// (→ `ui:pager` → DecoderStore).
+    events_out: Vec<u8>,
 }
 
 impl PagerDemod {
@@ -101,6 +115,7 @@ impl PagerDemod {
             ],
             warned_off_rate: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
+            events_out: Vec::new(),
         })
     }
 
@@ -127,7 +142,10 @@ impl Block for PagerDemod {
                 name: "in",
                 port_type: PortType::RealF32,
             }],
-            outputs: &[],
+            outputs: &[PortSpec {
+                name: "events",
+                port_type: PortType::Events,
+            }],
             params: &[
                 ParamSpec {
                     key: "sample_rate_hz",
@@ -207,14 +225,18 @@ impl Block for PagerDemod {
             if lines.is_empty() {
                 continue;
             }
+            let proto = match d.kind() {
+                Decoder::Flex | Decoder::FlexNext => "FLEX",
+                _ => "POCSAG",
+            };
             match d.kind() {
                 Decoder::Pocsag512 | Decoder::Pocsag1200 | Decoder::Pocsag2400 => {
-                    for line in lines {
+                    for line in &lines {
                         tracing::info!(target: "decoder::pocsag", "{line}");
                     }
                 }
                 Decoder::Flex | Decoder::FlexNext => {
-                    for line in lines {
+                    for line in &lines {
                         tracing::info!(target: "decoder::flex", "{line}");
                     }
                 }
@@ -224,15 +246,35 @@ impl Block for PagerDemod {
                 // breaking pager.rs's match exhaustiveness.
                 other => {
                     debug_assert!(false, "pager: unexpected decoder kind {other:?}");
-                    for line in lines {
+                    for line in &lines {
                         tracing::info!(target: "decoder::pocsag", "{line}");
                     }
                 }
+            }
+            for line in &lines {
+                push_pager_event(&mut self.events_out, proto, line);
             }
         }
 
         let mut w = Work::new();
         w.consumed[0] = consumed;
+
+        // Drain queued JSON into the events port (→ ui:pager → store).
+        if !self.events_out.is_empty() {
+            for port in io.outputs.iter_mut() {
+                if port.name == "events" {
+                    if let OutBuf::Events(dst) = &mut port.buf {
+                        let take = self.events_out.len().min(dst.len());
+                        if take > 0 {
+                            dst[..take].copy_from_slice(&self.events_out[..take]);
+                            self.events_out.drain(..take);
+                            w.produced[0] = take;
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(w)
     }
 }

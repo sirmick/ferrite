@@ -185,6 +185,24 @@ fn ok_json(value: &Value) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![Content::text(s)]))
 }
 
+/// The store's single-current slot key for `Replace`/`Merge` kinds —
+/// matches `decoder_store::REPLACE_KEY` server-side.
+const STORE_REPLACE_KEY: &str = "current";
+
+/// Slice a single-current kind's payload out of a `GET /api/state`
+/// snapshot (`kinds.<kind>.current.current.data`), or `Null` when the
+/// kind has produced nothing.
+fn store_current(snapshot: &Value, kind: &str) -> Value {
+    snapshot
+        .get("kinds")
+        .and_then(|k| k.get(kind))
+        .and_then(|k| k.get("current"))
+        .and_then(|c| c.get(STORE_REPLACE_KEY))
+        .and_then(|r| r.get("data"))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
 // ─── tool request schemas ───────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -326,6 +344,26 @@ pub struct SignalsArgs {
     /// age (useful right after stopping the pipeline).
     #[serde(default)]
     pub max_age_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DecodesArgs {
+    /// Decoder kind to fetch — `aprs`, `adsb`, `ais`, `ft8`, `wspr`,
+    /// `pager`, `transcribe`, `signals`, `rds`, … Omit for the whole
+    /// store (every kind at once).
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DecodesResetArgs {
+    /// Decoder kind to clear (e.g. `adsb`, `aprs`, `ft8`). Drops its
+    /// accumulated records (log + keyed table) and bumps the store seq so
+    /// mirrors clear too.
+    pub kind: String,
+    /// Optional "why" note surfaced in the UI's activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -946,18 +984,28 @@ impl FerriteServer {
         self.http.get("/api/source/capabilities").await
     }
 
+    /// The entire server store (`GET /api/state`) — every live kind in one
+    /// payload: decoder output, `signals`, the `ai` transcript, plus the
+    /// folded `readback` / `flowdiag` snapshots. The single read path; the
+    /// per-domain verbs below slice the kind they need out of this.
+    pub(crate) async fn state_op(&self) -> Result<Value, McpError> {
+        self.http.get("/api/state").await
+    }
+
     /// Per-block flow diagnostics (sample throughput / process-time /
     /// ring fill) for the running pipeline, or `null` when stopped. The
     /// "are samples actually moving?" health check beyond `status.ready`.
+    /// Sliced from the store's `flowdiag` kind.
     pub(crate) async fn flowdiag_op(&self) -> Result<Value, McpError> {
-        self.http.get("/api/flowdiag").await
+        Ok(store_current(&self.state_op().await?, "flowdiag"))
     }
 
-    /// Latest 1 Hz driver readback (actual gain, AGC state, antenna,
-    /// bandwidth as the hardware reports them) — confirms a `set_block_param`
-    /// gain/AGC change really landed. `null` when stopped or non-Soapy.
+    /// Latest driver readback (actual gain, AGC state, antenna, bandwidth
+    /// as the hardware reports them) — confirms a `set_block_param` gain/AGC
+    /// change really landed. `null` when stopped or non-Soapy. Sliced from
+    /// the store's `readback` kind (folded by the pipeline diag tick).
     pub(crate) async fn source_readback_op(&self) -> Result<Value, McpError> {
-        self.http.get("/api/source/readback").await
+        Ok(store_current(&self.state_op().await?, "readback"))
     }
 
     /// The curated `samples/` tree of replayable IQ/audio fixtures —
@@ -1075,15 +1123,54 @@ impl FerriteServer {
             .await
     }
 
-    /// Current strongest-signal watchlist (GET /api/signals) — the live
-    /// ranked list from the `SignalList` block at the wideband FFT, not a
-    /// history. Each row's `freq_hz` feeds straight into `tune`.
+    /// Current strongest-signal watchlist — the live ranked list from the
+    /// `SignalList` block at the wideband FFT, not a history. Each row's
+    /// `freq_hz` feeds straight into `tune`. Sliced from the store's
+    /// `signals` kind; `max_age_ms` (default 2000) gates on the record's
+    /// `at_ms` so a stale list (pipeline stopped / no `SignalList`) reports
+    /// empty rather than frozen. `max_age_ms=0` disables the gate.
     pub(crate) async fn signals_op(&self, args: SignalsArgs) -> Result<Value, McpError> {
-        let path = match args.max_age_ms {
-            Some(ms) => format!("/api/signals?max_age_ms={ms}"),
-            None => "/api/signals".to_string(),
-        };
-        self.http.get(&path).await
+        let snapshot = self.state_op().await?;
+        let rec = snapshot
+            .get("kinds")
+            .and_then(|k| k.get("signals"))
+            .and_then(|k| k.get("current"))
+            .and_then(|c| c.get(STORE_REPLACE_KEY));
+        let max_age = args.max_age_ms.unwrap_or(2000);
+        if let Some(rec) = rec {
+            if max_age > 0 {
+                let at = rec.get("at_ms").and_then(Value::as_u64).unwrap_or(0);
+                if now_ms().saturating_sub(u128::from(at)) > u128::from(max_age) {
+                    return Ok(json!({ "signals": [], "stale": true }));
+                }
+            }
+            return Ok(rec.get("data").cloned().unwrap_or(Value::Null));
+        }
+        Ok(json!({ "signals": [] }))
+    }
+
+    /// The whole store, or one kind (`kinds.<kind>`) when `kind` is set.
+    pub(crate) async fn decodes_op(&self, args: DecodesArgs) -> Result<Value, McpError> {
+        let snapshot = self.state_op().await?;
+        match args.kind {
+            Some(k) => Ok(snapshot
+                .get("kinds")
+                .and_then(|m| m.get(&k))
+                .cloned()
+                .unwrap_or(Value::Null)),
+            None => Ok(snapshot),
+        }
+    }
+
+    pub(crate) async fn decodes_reset_op(&self, args: DecodesResetArgs) -> Result<Value, McpError> {
+        self.http
+            .post(
+                &format!("/api/state/{}/reset", args.kind),
+                json!({}),
+                "decodes-reset",
+                args.note.as_deref(),
+            )
+            .await
     }
 
     pub(crate) async fn load_preset_op(&self, args: LoadPresetArgs) -> Result<Value, McpError> {
@@ -1867,6 +1954,26 @@ impl FerriteServer {
         Parameters(args): Parameters<SignalsArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_json(&self.signals_op(args).await?)
+    }
+
+    #[tool(
+        description = "Structured decoder output from the server-side DecoderStore — the single home for every event-emitting demod (APRS, ADS-B, AIS, FT8, WSPR, pager, transcribe, signals, RDS, …). With `kind` returns that kind as `{recent:[…], current:{…}}`: `recent` is a time-ordered append log (ft8/wspr/pager/transcribe/…); `current` is a keyed table (adsb by icao, aprs by call, ais by mmsi) or the single latest snapshot (signals/rds/rssi). Omit `kind` for the whole store `{seq, kinds:{…}}`. This is the same structured state the advanced UI views paint — captured server-side, so it works headless. Prefer this over scraping `recent_decodes` text for these decoders. Records carry `{seq, at_ms, key?, data}` where `data` is the decoder's JSON verbatim."
+    )]
+    async fn decodes(
+        &self,
+        Parameters(args): Parameters<DecodesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.decodes_op(args).await?)
+    }
+
+    #[tool(
+        description = "Clear one decoder kind in the DecoderStore — drops its accumulated records (the recent log + the keyed table) and bumps the store seq so browser mirrors clear too. Use after retuning to a new band/channel so stale ADS-B aircraft / APRS stations / decode lines don't linger, or to start a clean capture. Kinds reset themselves automatically on preset load / graph rebuild; this is the explicit on-demand path."
+    )]
+    async fn reset_decodes(
+        &self,
+        Parameters(args): Parameters<DecodesResetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.decodes_reset_op(args).await?)
     }
 
     #[tool(

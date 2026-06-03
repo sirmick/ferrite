@@ -9,24 +9,14 @@
   // map recentres nothing (operator-driven pan only); click a
   // station → its most-recent row highlights and scrolls into view.
 
-  import { pipeline } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { ft8, type FtDecode } from '$lib/ft8/store.svelte';
   import DecodeTable from '$lib/viz/DecodeTable.svelte';
   import StationMap, { type MapStation } from '$lib/viz/StationMap.svelte';
   import Split from '$lib/layout/Split.svelte';
 
-  let streamId = $derived(pipeline.uiSinks.ft8?.stream_id);
-  let client = $derived(pipeline.client);
-
-  $effect(() => {
-    if (client && streamId !== undefined) {
-      ft8.attach(client, streamId);
-      return () => ft8.detach();
-    }
-    ft8.detach();
-    return () => {};
-  });
+  // Spots come from the always-connected decoder mirror (kinds `ft8` +
+  // `wspr`, unioned in the store) — no per-view WS attach.
 
   // Operator QTH grid comes from client settings, not the stream.
   $effect(() => {

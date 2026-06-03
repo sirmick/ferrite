@@ -158,6 +158,10 @@
     [
       "logmag.out",
       "ui:fft"
+    ],
+    [
+      "ais.events",
+      "ui:ais"
     ]
   ]
 }

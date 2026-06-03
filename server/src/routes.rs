@@ -122,6 +122,65 @@ async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroa
     }
 }
 
+/// `GET /ws/state` — the store mirror feed. On connect sends a full
+/// snapshot (`{"snapshot": {seq, kinds}}`), then streams each change as
+/// `{"delta": {kind, seq, op}}`. The browser keeps a 1:1 mirror and
+/// de-dupes by `seq` (skips deltas ≤ the snapshot's seq). REST
+/// `/api/state` is the same data for MCP/headless.
+pub async fn ws_state(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    let store = state.decoder_store();
+    ws.on_upgrade(move |socket| ws_state_forward(socket, store))
+}
+
+async fn ws_state_forward(
+    mut socket: WebSocket,
+    store: std::sync::Arc<crate::decoder_store::DecoderStore>,
+) {
+    // Subscribe *before* snapshotting so no delta is lost in the gap; the
+    // client de-dupes any overlap by `seq`.
+    let mut rx = store.subscribe();
+    let snapshot = serde_json::json!({ "snapshot": store.snapshot() });
+    if socket
+        .send(Message::Text(snapshot.to_string()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(25));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            recv = rx.recv() => match recv {
+                Ok(delta) => {
+                    let msg = serde_json::json!({ "delta": delta }).to_string();
+                    if socket.send(Message::Text(msg)).await.is_err() {
+                        return;
+                    }
+                }
+                // On lag, tell the client to re-fetch the snapshot via REST
+                // rather than try to reconcile a gap.
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = socket
+                        .send(Message::Text(r#"{"resync":true}"#.to_string()))
+                        .await;
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            _ = keepalive.tick() => {
+                if socket.send(Message::Ping(Vec::new())).await.is_err() {
+                    return;
+                }
+            }
+            client = socket.recv() => match client {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+}
+
 /// Default location of the ferrite-ai sidecar — TCP on localhost. The
 /// sidecar holds an Anthropic Claude Agent SDK session per browser
 /// connection; ferrited reverse-proxies its WS so the browser only
@@ -148,13 +207,18 @@ fn chat_inject_hub() -> &'static broadcast::Sender<String> {
 /// closes. If the sidecar isn't reachable, we surface a structured
 /// error event the UI's chat panel renders, then close the client
 /// socket so the front end can show "ferrite-ai offline" cleanly.
-pub async fn ws_chat(ws: WebSocketUpgrade) -> impl IntoResponse {
+pub async fn ws_chat(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     let upstream_url =
         std::env::var("FERRITE_AI_URL").unwrap_or_else(|_| DEFAULT_FERRITE_AI_URL.to_string());
-    ws.on_upgrade(move |socket| ws_chat_proxy(socket, upstream_url))
+    let store = state.decoder_store();
+    ws.on_upgrade(move |socket| ws_chat_proxy(socket, upstream_url, store))
 }
 
-async fn ws_chat_proxy(mut client_ws: WebSocket, upstream_url: String) {
+async fn ws_chat_proxy(
+    mut client_ws: WebSocket,
+    upstream_url: String,
+    store: std::sync::Arc<crate::decoder_store::DecoderStore>,
+) {
     let upstream = match tokio_tungstenite::connect_async(&upstream_url).await {
         Ok((s, _resp)) => s,
         Err(e) => {
@@ -177,11 +241,17 @@ async fn ws_chat_proxy(mut client_ws: WebSocket, upstream_url: String) {
     // Browser → sidecar: text/binary forward, close on Close. We don't
     // attempt to translate ping/pong — both sides exchange them via
     // their own keepalives.
+    let store_c2u = std::sync::Arc::clone(&store);
     let c2u = async move {
         while let Some(msg) = cli_rx.next().await {
             let Ok(msg) = msg else { break };
             let upstream_msg = match msg {
-                Message::Text(t) => TungMessage::Text(t),
+                Message::Text(t) => {
+                    // Record the operator's prompt in the `ai` transcript on
+                    // its way upstream (the sidecar never echoes it back).
+                    fold_ai_user_frame(&store_c2u, t.as_str());
+                    TungMessage::Text(t)
+                }
                 Message::Binary(b) => TungMessage::Binary(b),
                 Message::Close(_) => break,
                 Message::Ping(_) | Message::Pong(_) => continue,
@@ -200,13 +270,23 @@ async fn ws_chat_proxy(mut client_ws: WebSocket, upstream_url: String) {
     // socket, so we select over them: a headless driver's mirrored
     // turns interleave with the (usually idle) sidecar stream.
     let mut inject_rx = chat_inject_hub().subscribe();
+    let store_u2c = std::sync::Arc::clone(&store);
     let u2c = async move {
         loop {
             tokio::select! {
                 up = up_rx.next() => {
                     let Some(Ok(msg)) = up else { break };
                     let client_msg = match msg {
-                        TungMessage::Text(t) => Message::Text(t),
+                        TungMessage::Text(t) => {
+                            // Record the assistant's reply text from the
+                            // sidecar's full end-of-turn `assistant` message
+                            // (the live cursor still streams from deltas in
+                            // the browser; this is the turn-granular log).
+                            // Injected frames are folded in `post_chat_inject`,
+                            // not here, so they aren't double-counted.
+                            fold_ai_assistant_frame(&store_u2c, t.as_str());
+                            Message::Text(t)
+                        }
                         TungMessage::Binary(b) => Message::Binary(b),
                         TungMessage::Close(_) => break,
                         TungMessage::Ping(_) | TungMessage::Pong(_) | TungMessage::Frame(_) => {
@@ -254,7 +334,15 @@ async fn ws_chat_proxy(mut client_ws: WebSocket, upstream_url: String) {
 /// browser subscribers the frames reached. Deliberately *not* tagged
 /// for `ai_activity_layer` (the ops layer omits the command header) so
 /// mirroring a conversation doesn't also flood the activity transcript.
-pub async fn post_chat_inject(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+///
+/// Injected turns are also folded into the `ai` decoder-store kind here
+/// (not in the per-connection `/ws/chat` proxy), so a headless driver's
+/// conversation is recorded even with no browser tab open — and so the
+/// proxy's inject branch can't double-count what this already logged.
+pub async fn post_chat_inject(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
     let events: Vec<serde_json::Value> = match body {
         serde_json::Value::Array(a) => a,
         serde_json::Value::Object(o) if o.contains_key("events") => o
@@ -264,6 +352,7 @@ pub async fn post_chat_inject(Json(body): Json<serde_json::Value>) -> impl IntoR
             .unwrap_or_default(),
         other => vec![other],
     };
+    fold_ai_inject_batch(&state.decoder_store(), &events);
     let hub = chat_inject_hub();
     let subscribers = hub.receiver_count();
     let mut sent = 0usize;
@@ -273,6 +362,118 @@ pub async fn post_chat_inject(Json(body): Json<serde_json::Value>) -> impl IntoR
         }
     }
     Json(serde_json::json!({ "subscribers": subscribers, "events": sent }))
+}
+
+/// Fold a browser→sidecar frame into the `ai` transcript when it carries a
+/// user prompt. A send payload is `{ text, mode, … }` with no `type`;
+/// control envelopes (`reset_session` / `stop` / `request_snapshot`) carry
+/// a `type` field and are skipped.
+fn fold_ai_user_frame(store: &crate::decoder_store::DecoderStore, frame: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(frame) else {
+        return;
+    };
+    if v.get("type").is_some() {
+        return; // control envelope, not a prompt
+    }
+    let Some(text) = v.get("text").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    let mut rec = serde_json::json!({ "role": "user", "text": text });
+    if let Some(mode) = v.get("mode").and_then(serde_json::Value::as_str) {
+        rec["mode"] = serde_json::json!(mode);
+    }
+    store.apply("ai", rec);
+}
+
+/// Fold a sidecar→browser frame into the `ai` transcript when it's a full
+/// assistant message carrying text (emitted at end-of-turn and per
+/// tool-loop step). The browser accumulates the same text from
+/// `stream_event` deltas for the live cursor; this records it
+/// turn-granular for MCP read-back.
+fn fold_ai_assistant_frame(store: &crate::decoder_store::DecoderStore, frame: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(frame) else {
+        return;
+    };
+    if v.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+        return;
+    }
+    let text = v
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .map(ai_text_from_content)
+        .unwrap_or_default();
+    if text.is_empty() {
+        return;
+    }
+    store.apply(
+        "ai",
+        serde_json::json!({ "role": "assistant", "text": text }),
+    );
+}
+
+/// Join the `text` of every text block in an Agent SDK message `content`
+/// (an array of typed blocks, or a bare string). tool_use / tool_result /
+/// image blocks are skipped.
+fn ai_text_from_content(content: &serde_json::Value) -> String {
+    let Some(arr) = content.as_array() else {
+        return content.as_str().unwrap_or_default().to_string();
+    };
+    let mut out = String::new();
+    for block in arr {
+        if block.get("type").and_then(serde_json::Value::as_str) == Some("text") {
+            if let Some(t) = block.get("text").and_then(serde_json::Value::as_str) {
+                out.push_str(t);
+            }
+        }
+    }
+    out
+}
+
+/// Fold a chat-inject batch into the `ai` transcript. Mirrors the
+/// `chat_post` event vocabulary: a `ferrite_ai_user_turn` becomes a user
+/// record, and the `text_delta`s in an assistant batch coalesce into one
+/// assistant record. `chat_post` POSTs one self-contained role-turn per
+/// call, so reducing within the batch is sufficient. tool_use
+/// (`input_json_delta`) frames are a different delta type and are ignored.
+fn fold_ai_inject_batch(
+    store: &crate::decoder_store::DecoderStore,
+    events: &[serde_json::Value],
+) {
+    let mut assistant = String::new();
+    for ev in events {
+        match ev.get("type").and_then(serde_json::Value::as_str) {
+            Some("ferrite_ai_user_turn") => {
+                if let Some(text) = ev.get("text").and_then(serde_json::Value::as_str) {
+                    if !text.is_empty() {
+                        store.apply("ai", serde_json::json!({ "role": "user", "text": text }));
+                    }
+                }
+            }
+            Some("stream_event") => {
+                let delta = ev.get("event").and_then(|e| e.get("delta"));
+                let is_text =
+                    delta.and_then(|d| d.get("type")).and_then(serde_json::Value::as_str)
+                        == Some("text_delta");
+                if is_text {
+                    if let Some(t) =
+                        delta.and_then(|d| d.get("text")).and_then(serde_json::Value::as_str)
+                    {
+                        assistant.push_str(t);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if !assistant.is_empty() {
+        store.apply(
+            "ai",
+            serde_json::json!({ "role": "assistant", "text": assistant }),
+        );
+    }
 }
 
 /// `GET /api/decoder/recent?since=<unix_ms>&category=<prefix>` — pull
@@ -343,94 +544,6 @@ pub async fn recent_decoder(
     Ok(Json(RecentResponse { entries, now }))
 }
 
-/// `GET /api/signals?max_age_ms=<ms>` — the current strongest-signal
-/// watchlist as detected by the `SignalList` block at the wideband FFT.
-///
-/// This is a **snapshot, not history**: it returns the single most-recent
-/// `decoder::signals` emission, which already carries the full ranked list
-/// for that frame (`{signals:[…], center_freq_hz, span_hz, frame}`). The
-/// block re-emits the whole watchlist every ~250 ms, so the latest entry
-/// *is* the live list. If nothing was emitted within `max_age_ms` (default
-/// 2000 — i.e. the preset has no `SignalList`, or detection stalled), the
-/// watchlist is reported empty rather than stale. `max_age_ms=0` disables
-/// the freshness gate and returns the last retained emission at any age.
-///
-/// Pairs with `POST /api/tune`: read a row's `freq_hz`, tune there.
-#[derive(Deserialize)]
-pub struct SignalsQuery {
-    pub max_age_ms: Option<u64>,
-}
-
-pub async fn get_signals(
-    State(state): State<AppState>,
-    Query(q): Query<SignalsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let logs = state.logs().ok_or_else(|| {
-        bad_request(
-            "LOGS_DISABLED",
-            "log broadcast not configured on this server",
-        )
-    })?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
-    let max_age = q.max_age_ms.unwrap_or(2000);
-    let since = if max_age == 0 {
-        0
-    } else {
-        now.saturating_sub(max_age)
-    };
-
-    // Newest `decoder::signals` line within the freshness window. `recent`
-    // returns oldest→newest, so the tail is the current watchlist.
-    let entries = logs.recent(since, Some("decoder::signals"));
-    let latest = entries.last();
-    let at_ms = latest.map(|e| e.at_ms);
-    let payload = latest
-        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.message).ok())
-        .filter(serde_json::Value::is_object);
-
-    // Either the parsed emission or a typed-empty watchlist; then stamp
-    // `at_ms` (when it was emitted) and `now` (server clock) so a poller
-    // can tell live from stale.
-    let mut out = payload.unwrap_or_else(|| {
-        serde_json::json!({
-            "signals": [],
-            "center_freq_hz": serde_json::Value::Null,
-            "span_hz": serde_json::Value::Null,
-            "frame": serde_json::Value::Null,
-        })
-    });
-    // Surface whether we're on real hardware vs a software/test source, so a
-    // blind caller can't mistake a SineSource tone (or a restart's fallback)
-    // for a dead band. `source_kind: "software"` + a note means "you're not
-    // tuned to RF — `device select` first."
-    let source = state.get_source().await;
-    let is_hw = source.type_name == "SoapySource";
-    if let Some(obj) = out.as_object_mut() {
-        obj.insert(
-            "at_ms".into(),
-            at_ms.map_or(serde_json::Value::Null, Into::into),
-        );
-        obj.insert("now".into(), now.into());
-        obj.insert(
-            "source_kind".into(),
-            serde_json::json!(if is_hw { "hardware" } else { "software" }),
-        );
-        if !is_hw {
-            obj.insert(
-                "note".into(),
-                serde_json::json!(format!(
-                    "source is '{}' — a software/test source, not real RF. \
-                     Run `device select <args>` before surveying.",
-                    source.type_name
-                )),
-            );
-        }
-    }
-    Ok(Json(out))
-}
 
 // Make `LogEntry` serialize-friendly. Defined here rather than in
 // log_stream.rs so log_stream stays serde-free; the API layer is the
@@ -697,28 +810,27 @@ pub async fn list_block_schemas() -> Json<Vec<crate::block_schema::BlockSchemaDt
     Json(crate::block_schema::all_block_schemas())
 }
 
-/// `GET /api/flowdiag` — the latest node-side flow-diagnostics
-/// snapshot (per-block sample throughput / process-time / ring fill),
-/// or `null` when the pipeline is stopped or hasn't produced one yet.
-/// A dedicated channel (not the log stream): always available
-/// regardless of `RUST_LOG`, never clutters the LogPanel. The browser
-/// Flow view polls this ~1 Hz for the `node` side; the `browser` side
-/// is fed locally in-browser.
-pub async fn get_flowdiag(
+/// `GET /api/state` — the entire server-side store as
+/// `{ seq, kinds: { <kind>: { recent[], current{} } } }`. One read path
+/// for all live state: decoder kinds (aprs/adsb/ft8/…), `signals`, the
+/// AI transcript (`ai`), plus the live `readback` (driver gain/AGC) and
+/// `flowdiag` (per-block throughput) folded by the pipeline diag tick.
+/// MCP slices the kind it needs out of this; the browser mirror uses it
+/// for the initial fetch + resync (the live feed is `/ws/state`).
+pub async fn get_state(
     State(state): State<AppState>,
-) -> Json<Option<ferrite_runtime::DiagSnapshot>> {
-    Json(state.flowdiag().await)
+) -> Json<crate::decoder_store::StoreSnapshot> {
+    Json(state.decoder_store().snapshot())
 }
 
-/// `GET /api/source/readback` — the latest 1 Hz cached SoapySource
-/// driver readback (current gain, AGC state, etc.). `null` when the
-/// pipeline is stopped, the source is not a `SoapySource`, or the
-/// pipeline hasn't produced a tick yet. The UI polls this so AGC-driven
-/// gain motion shows up between explicit `PATCH /api/source` writes.
-pub async fn get_source_readback(
+/// `POST /api/state/:kind/reset` — clear one store kind (operator /
+/// MCP "clear"). Broadcasts a reset delta to mirrors.
+pub async fn reset_state_kind(
     State(state): State<AppState>,
-) -> Json<Option<ferrite_blocks::SoapyReadback>> {
-    Json(state.cached_source_readback().await)
+    Path(kind): Path<String>,
+) -> Json<serde_json::Value> {
+    state.decoder_store().reset_kind(&kind);
+    Json(serde_json::json!({ "ok": true, "kind": kind }))
 }
 
 /// Body of `POST /api/tune`. `freq_hz` is the target listen frequency
@@ -1345,5 +1457,85 @@ pub async fn get_view_state(State(state): State<AppState>) -> impl IntoResponse 
             crate::view_bridge::ViewError::NoViewer.to_string(),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod ai_fold_tests {
+    use super::*;
+    use crate::decoder_store::DecoderStore;
+
+    #[test]
+    fn user_frame_records_prompt_and_skips_control() {
+        let s = DecoderStore::new();
+        // A send payload (no `type`) → user record carrying mode.
+        fold_ai_user_frame(&s, r#"{"text":"what is on 2m?","mode":"explorer"}"#);
+        // Control envelopes are skipped.
+        fold_ai_user_frame(&s, r#"{"type":"reset_session","reason":"clear"}"#);
+        fold_ai_user_frame(&s, r#"{"type":"stop"}"#);
+        // Empty / malformed are skipped.
+        fold_ai_user_frame(&s, r#"{"text":""}"#);
+        fold_ai_user_frame(&s, "not json");
+        let k = s.snapshot_kind("ai").unwrap();
+        assert_eq!(k.recent.len(), 1, "only the real prompt is logged");
+        assert_eq!(k.recent[0].data["role"], "user");
+        assert_eq!(k.recent[0].data["text"], "what is on 2m?");
+        assert_eq!(k.recent[0].data["mode"], "explorer");
+    }
+
+    #[test]
+    fn assistant_frame_joins_text_blocks_and_drops_tool_only() {
+        let s = DecoderStore::new();
+        fold_ai_assistant_frame(
+            &s,
+            r#"{"type":"assistant","message":{"content":[
+                {"type":"text","text":"Tuning "},
+                {"type":"tool_use","id":"x","name":"tune","input":{}},
+                {"type":"text","text":"to 145.5."}]}}"#,
+        );
+        // A tool-only assistant message contributes no transcript text.
+        fold_ai_assistant_frame(
+            &s,
+            r#"{"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"y","name":"status","input":{}}]}}"#,
+        );
+        // Non-assistant frames are ignored.
+        fold_ai_assistant_frame(&s, r#"{"type":"ferrite_ai_done"}"#);
+        let k = s.snapshot_kind("ai").unwrap();
+        assert_eq!(k.recent.len(), 1);
+        assert_eq!(k.recent[0].data["role"], "assistant");
+        assert_eq!(k.recent[0].data["text"], "Tuning to 145.5.");
+    }
+
+    #[test]
+    fn inject_batch_folds_user_and_coalesced_assistant() {
+        let s = DecoderStore::new();
+        // A headless `chat_post role=user` batch.
+        fold_ai_inject_batch(
+            &s,
+            &[serde_json::json!({"type":"ferrite_ai_user_turn","text":"ping","t":1})],
+        );
+        // A headless `chat_post role=assistant` batch: text_delta + done.
+        fold_ai_inject_batch(
+            &s,
+            &[
+                serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
+                    "delta":{"type":"text_delta","text":"po"}}}),
+                serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
+                    "delta":{"type":"text_delta","text":"ng"}}}),
+                serde_json::json!({"type":"ferrite_ai_done"}),
+            ],
+        );
+        // A tool batch (input_json_delta) adds nothing to the transcript.
+        fold_ai_inject_batch(
+            &s,
+            &[serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
+                "delta":{"type":"input_json_delta","partial_json":"{}"}}})],
+        );
+        let k = s.snapshot_kind("ai").unwrap();
+        assert_eq!(k.recent.len(), 2);
+        assert_eq!(k.recent[0].data["text"], "ping");
+        assert_eq!(k.recent[1].data["role"], "assistant");
+        assert_eq!(k.recent[1].data["text"], "pong");
     }
 }

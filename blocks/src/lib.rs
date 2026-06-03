@@ -32,6 +32,7 @@ pub mod dtmf_audio_source;
 pub mod dtmf_decoder;
 #[cfg(feature = "multimon")]
 pub mod eas;
+pub mod event_store;
 pub mod events_sink;
 pub mod fft;
 pub mod file_audio_sink;
@@ -110,6 +111,7 @@ pub use dtmf_audio_source::{DtmfAudioSource, DtmfAudioSourceParams};
 pub use dtmf_decoder::{DtmfDecoder, DtmfDecoderParams};
 #[cfg(feature = "multimon")]
 pub use eas::{EasDemod, EasDemodParams};
+pub use event_store::{DecoderSink, EventStore, EventStoreParams};
 pub use events_sink::{EventsSink, EventsSinkParams};
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
 pub use file_audio_sink::{FileAudioSink, FileAudioSinkParams};
@@ -157,7 +159,7 @@ pub use tee_real_f32::TeeRealF32;
 pub use voice_transcribe::{VoiceTranscribe, VoiceTranscribeParams};
 pub use ws_bridge::{
     BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxF32, WsBridgeRxParams,
-    WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
+    WsBridgeTx, WsBridgeTxF32, WsBridgeTxFftU8,
 };
 #[cfg(feature = "wspr")]
 pub use wspr::{WsprDemod, WsprDemodParams};
@@ -217,13 +219,13 @@ mod tests {
             "DtmfAudioSource",
             "DtmfDecoder",
             "MorseAudioSource",
+            "EventStore",
             "EventsSink",
             "TeeIqF32",
             "TeeRealF32",
             "WsBridgeTx",
             "WsBridgeTxF32",
             "WsBridgeTxFftU8",
-            "WsBridgeTxEvents",
             "WsBridgeRx",
             "WsBridgeRxF32",
             "AudioSink",
