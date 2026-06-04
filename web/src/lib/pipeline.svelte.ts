@@ -22,7 +22,6 @@ import {
 import { fetchSource, patchSource, tune, type SourceConfig } from '$lib/api/source';
 import { untrack } from 'svelte';
 import { decoders } from '$lib/decoders/store.svelte';
-import { tuneOffsetRatioFor } from '$lib/controls/optionsModel';
 import {
   fetchPipelineStatus,
   startPipeline,
@@ -309,7 +308,12 @@ class PipelineStore {
   async patchSource(next: SourceConfig): Promise<ReconfigureResponse | null> {
     return this.withBusy(async () => {
       const resp = await patchSource(next);
-      this.source = applyReadback(next, resp.source_readback);
+      // Re-read the authoritative config the daemon stored: its source
+      // policy fills the derived bandwidth, clamps the rate to the driver
+      // ceiling, and seeds a device-open default, so the optimistic `next`
+      // we sent is incomplete. Overlay the live driver readback on top.
+      const server = await fetchSource();
+      this.source = applyReadback(server, resp.source_readback);
       await this.refreshComposed();
       this.sourceCaps = await fetchSourceCapabilities();
       return resp;
@@ -381,19 +385,16 @@ class PipelineStore {
   }
 
   /** Tuning intent — "listen at `freqHz`" (optionally span `spanHz`).
-   *  POSTs `/api/tune`, where the server applies the per-driver
-   *  DC-spike dodge and the keep-or-snap math against the active
-   *  channelizer. Every VFO origin (Nixie commit, ▲▼ buttons, Up/Down
-   *  keys, spectrum click — all funnel through `tuneVfoTo`) flows
-   *  here, so the dodge is uniform regardless of who asked. Looks up
-   *  `tune_offset_ratio` from the active driver's preset; 0 when the
-   *  source is software or the driver has no entry (= "just tune"). */
+   *  POSTs `/api/tune`, where the daemon applies the per-driver DC-spike
+   *  dodge (it owns the per-SDR ratio — we send no `offset_ratio`) and
+   *  the keep-or-snap math against the active channelizer. Every VFO
+   *  origin (Nixie commit, ▲▼ buttons, Up/Down keys, spectrum click —
+   *  all funnel through `tuneVfoTo`) flows here, so the dodge is uniform
+   *  regardless of who asked. */
   async tune(freqHz: number, spanHz?: number): Promise<ReconfigureResponse | null> {
     if (!Number.isFinite(freqHz)) return null;
-    const caps = this.sourceCaps;
-    const offsetRatio = caps?.kind === 'hardware' ? tuneOffsetRatioFor(caps.capabilities) : 0;
     return this.withBusy(async () => {
-      const resp = await tune({ freq_hz: freqHz, span_hz: spanHz, offset_ratio: offsetRatio });
+      const resp = await tune({ freq_hz: freqHz, span_hz: spanHz });
       // Reconcile the optimistic mirror with what actually landed —
       // /api/tune writes both src.center_freq_hz and chan.freq_shift_hz
       // server-side, so a fresh fetchSource + refreshComposed picks up

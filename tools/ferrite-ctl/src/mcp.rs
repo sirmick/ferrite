@@ -240,11 +240,12 @@ pub struct TuneArgs {
     /// clamps to its rate ladder).
     #[serde(default)]
     pub span_hz: Option<f64>,
-    /// Per-driver DC-spike dodge ratio (fraction of the channelizer's
-    /// `output_rate_hz`). Defaults to 0 = no dodge. HackRF needs
-    /// ~0.7; DC-tracking drivers (SDRplay, RTL-SDR, Airspy) leave it
-    /// at 0. **Must exceed 0.5** when non-zero, or the spike sits
-    /// inside the demodulated passband.
+    /// DC-spike dodge ratio (fraction of the channelizer's
+    /// `output_rate_hz`). **Omit it** — the daemon fills the per-driver
+    /// default keyed on the bound SDR (HackRF / SDRplay 0.7, DC-tracking
+    /// drivers 0), so you don't carry the table. Pass a value only to
+    /// override: `0` forces no dodge; a non-zero override **must exceed
+    /// 0.5**, or the spike sits inside the demodulated passband.
     #[serde(default)]
     pub offset_ratio: Option<f64>,
     /// Optional manual gain, dB (higher = louder on every driver).
@@ -1204,7 +1205,9 @@ impl FerriteServer {
                 json!({
                     "freq_hz": args.freq_hz,
                     "span_hz": args.span_hz,
-                    "offset_ratio": args.offset_ratio.unwrap_or(0.0),
+                    // Pass the Option through: `null` lets the daemon apply
+                    // the per-driver dodge default; `Some` overrides it.
+                    "offset_ratio": args.offset_ratio,
                     "keep_lo": args.keep_lo,
                 }),
                 "tune",
@@ -1216,23 +1219,13 @@ impl FerriteServer {
             return Ok(json!({ "tune": tune, "source": Value::Null }));
         }
 
-        // Build the source delta. Read current params so the rate→BW
-        // auto-derive can key off the bound driver.
-        let current = self.http.get("/api/source").await?;
+        // Build the source delta. The daemon derives the anti-alias
+        // bandwidth from the rate (`server/src/source_policy.rs`) when we
+        // send `sample_rate_hz` without an explicit `bandwidth_hz`, so the
+        // CLI no longer carries an IF-filter ladder of its own.
         let mut delta = Map::new();
         if let Some(r) = args.sample_rate_hz {
             delta.insert("sample_rate_hz".into(), json!(r));
-            if args.bandwidth_hz.is_none() {
-                let driver = current
-                    .get("params")
-                    .and_then(|p| p.get("args"))
-                    .and_then(Value::as_str)
-                    .map(crate::driver_key_from_args)
-                    .unwrap_or_default();
-                if let Some(bw) = crate::sdr_tables::recommended_bandwidth_for(&driver, r) {
-                    delta.insert("bandwidth_hz".into(), json!(bw));
-                }
-            }
         }
         if let Some(b) = args.bandwidth_hz {
             delta.insert("bandwidth_hz".into(), json!(b));
@@ -1987,7 +1980,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Tune the radio to listen at `freq_hz`. Routes through POST /api/tune so the per-driver DC-spike dodge applies (the operator-visible listen freq stays at the requested value; the source LO may move so the spike doesn't land in the demodulated channel). Supply `offset_ratio` from the per-driver SDR-preset JSON (HackRF ~0.7, DC-tracking drivers leave at 0); `span_hz` raises the source rate if larger than current. Optionally fold in `gain_db` (manual gain — folds `agc=false` so it lands), `bandwidth_hz`, and `sample_rate_hz` (auto-derives BW from the driver ladder when set without `bandwidth_hz`) in the same call. Set `keep_lo:true` to hop *within the current span* by retuning the channelizer only — no LO move, no graph restart (so a running transcribe worker doesn't reload and the survey centre stays put); it falls back to a normal tune when the target is outside the span. Use it for the `signals` → hop → listen loop."
+        description = "Tune the radio to listen at `freq_hz`. Routes through POST /api/tune so the per-driver DC-spike dodge applies (the operator-visible listen freq stays at the requested value; the source LO may move so the spike doesn't land in the demodulated channel). The daemon owns the dodge: it picks the right ratio for the bound SDR automatically, so leave `offset_ratio` unset (pass it only to override — `0` disables the dodge). `span_hz` raises the source rate if larger than current. Optionally fold in `gain_db` (manual gain — folds `agc=false` so it lands), `bandwidth_hz`, and `sample_rate_hz` (auto-derives BW from the driver ladder when set without `bandwidth_hz`) in the same call. Set `keep_lo:true` to hop *within the current span* by retuning the channelizer only — no LO move, no graph restart (so a running transcribe worker doesn't reload and the survey centre stays put); it falls back to a normal tune when the target is outside the span. Use it for the `signals` → hop → listen loop."
     )]
     async fn tune(
         &self,

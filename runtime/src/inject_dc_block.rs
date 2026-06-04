@@ -74,6 +74,21 @@ pub fn inject_dc_block_taps(doc: &mut FlowgraphDoc) {
     // same side (node, for a hardware source).
     let placement = doc.blocks.get(SOURCE_ID).and_then(|b| b.placement);
 
+    // Per-driver default-enabled (see `dc_block_default_enabled`). The
+    // opened device's `driver_key` isn't known at compose, so key off the
+    // composed source's `args` string (`driver=<name>`), like the rest of
+    // the per-driver policy. Absent args → treat as zero-IF (enabled).
+    let driver = doc
+        .blocks
+        .get(SOURCE_ID)
+        .and_then(|b| b.params.as_ref())
+        .and_then(|p| p.get("args"))
+        .and_then(serde_json::Value::as_str)
+        .map(driver_from_args)
+        .unwrap_or_default();
+    let params =
+        (!dc_block_default_enabled(&driver)).then(|| serde_json::json!({ "enabled": false }));
+
     // Re-point every consumer of src.out to dcblock.out, then feed the
     // blocker from src.out.
     let dcblock_out = format!("{DCBLOCK_ID}.out");
@@ -89,12 +104,39 @@ pub fn inject_dc_block_taps(doc: &mut FlowgraphDoc) {
         DCBLOCK_ID.to_string(),
         BlockInstanceDecl {
             type_name: "DcBlock".into(),
-            // Defaults: enabled, ~200 Hz corner. Operator toggles live.
-            params: None,
+            // Defaults: ~200 Hz corner, enabled on zero-IF radios and
+            // disabled on SDRplay (see `dc_block_default_enabled`). Operator
+            // toggles live either way.
+            params,
             placement,
             ..Default::default()
         },
     );
+}
+
+/// SoapySDR driver short name from a Soapy args string — the `driver=<name>`
+/// value of a kv form (`driver=sdrplay,serial=…`) or a bare `"sdrplay"`.
+/// Lowercased; empty when neither shape parses.
+fn driver_from_args(args: &str) -> String {
+    let a = args.trim();
+    a.split(',')
+        .find_map(|kv| kv.trim().strip_prefix("driver="))
+        .unwrap_or(if a.contains('=') { "" } else { a })
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Whether the auto-injected software complex-IQ DC blocker should default
+/// **enabled** for this driver. Zero-IF radios (RTL-SDR, HackRF, …) leak the
+/// LO straight to the ADC as a bright line at the tuned centre, so the
+/// blocker is on. SDRplay is not zero-IF (real tuner) and its hardware
+/// DC-offset tracker handles any residual, so the software blocker — which
+/// would otherwise risk nulling a real carrier parked at centre — defaults
+/// **off** there. The operator can toggle it live either way. Keyed on the
+/// lowercased Soapy driver short name, mirroring the per-driver style of
+/// `server::source_policy` (notch) and `tune_offset_ratio_for` (dodge).
+fn dc_block_default_enabled(driver: &str) -> bool {
+    !matches!(driver, "sdrplay")
 }
 
 #[cfg(test)]
@@ -151,6 +193,66 @@ mod tests {
             .wires
             .iter()
             .any(|w| w.src == "src.out" && w.dst == "tee.in"));
+    }
+
+    #[test]
+    fn driver_from_args_and_dc_default() {
+        // kv form, bare form, and the empty/absent case.
+        assert_eq!(driver_from_args("driver=sdrplay,serial=0001"), "sdrplay");
+        assert_eq!(driver_from_args("driver=HackRF"), "hackrf");
+        assert_eq!(driver_from_args("rtlsdr"), "rtlsdr");
+        assert_eq!(driver_from_args(""), "");
+        // SDRplay defaults off; zero-IF (and unknown/absent) default on.
+        assert!(!dc_block_default_enabled("sdrplay"));
+        assert!(dc_block_default_enabled("hackrf"));
+        assert!(dc_block_default_enabled("rtlsdr"));
+        assert!(dc_block_default_enabled(""));
+    }
+
+    #[test]
+    fn defaults_enabled_for_zero_if_hardware() {
+        // A SoapySource whose args don't name sdrplay (e.g. rtlsdr/hackrf)
+        // gets the blocker with no param override → block default (enabled).
+        let mut doc = parse(
+            br#"{
+                "name": "hw",
+                "environments": ["node"],
+                "blocks": {
+                    "src":  {"type": "SoapySource", "placement": "node",
+                             "params": {"args": "driver=rtlsdr"}},
+                    "chan": {"type": "Channelizer"}
+                },
+                "wires": [["src.out", "chan.in"]]
+            }"#,
+        );
+        inject_dc_block_taps(&mut doc);
+        let db = doc.blocks.get("dcblock").expect("dcblock injected");
+        assert_eq!(db.params, None, "zero-IF radio keeps the enabled default");
+    }
+
+    #[test]
+    fn defaults_disabled_for_sdrplay() {
+        // SDRplay isn't zero-IF — inject the blocker disabled so it can't
+        // null a real centre carrier (operator may still toggle it on).
+        let mut doc = parse(
+            br#"{
+                "name": "hw",
+                "environments": ["node"],
+                "blocks": {
+                    "src":  {"type": "SoapySource", "placement": "node",
+                             "params": {"args": "driver=sdrplay,serial=0001"}},
+                    "chan": {"type": "Channelizer"}
+                },
+                "wires": [["src.out", "chan.in"]]
+            }"#,
+        );
+        inject_dc_block_taps(&mut doc);
+        let db = doc.blocks.get("dcblock").expect("dcblock injected");
+        assert_eq!(
+            db.params,
+            Some(serde_json::json!({ "enabled": false })),
+            "SDRplay defaults the software DC blocker off"
+        );
     }
 
     #[test]

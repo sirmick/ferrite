@@ -44,8 +44,8 @@
 
   // Route through `pipeline.tune` so the per-driver DC-spike dodge
   // (HackRF & friends) is applied uniformly with the VFO/Nixie/▲▼ paths
-  // — the server picks src_center vs chan.freq_shift_hz from
-  // `tune_offset_ratio`. The legacy `e.vfo_offset_hz` (a hand-tuned
+  // — the daemon owns the per-driver dodge ratio and picks src_center vs
+  // chan.freq_shift_hz from it. The legacy `e.vfo_offset_hz` (a hand-tuned
   // per-band BFO/dodge nudge from before the central dodge existed) is
   // intentionally ignored; if a band entry needs a non-default shift,
   // model it on the demod side, not as a tune offset.

@@ -834,15 +834,16 @@ pub async fn reset_state_kind(
 /// floor the caller wants spanned (band presets compute this from the
 /// band's low/high). `offset_ratio` is the per-driver DC-spike dodge —
 /// fraction of the channelizer's output rate to keep between
-/// `src_center` and the target when a snap happens. Defaults to 0,
-/// meaning "don't dodge, just tune".
+/// `src_center` and the target when a snap happens. Omit it (the common
+/// case) and the daemon fills the per-driver default keyed on the bound
+/// `driver_key`; pass an explicit value to override (`0` = don't dodge).
 #[derive(Deserialize)]
 pub struct TuneRequest {
     pub freq_hz: f64,
     #[serde(default)]
     pub span_hz: Option<f64>,
     #[serde(default)]
-    pub offset_ratio: f64,
+    pub offset_ratio: Option<f64>,
     /// Opt-in: when the target is already inside the digitised span, retune
     /// the channelizer only and leave the LO/graph put — no source restart,
     /// no node-side worker reload. Falls back to a normal tune out-of-span.
@@ -863,7 +864,7 @@ pub async fn post_tune(
     tracing::info!(
         freq_hz = req.freq_hz,
         span_hz = ?req.span_hz,
-        offset_ratio = req.offset_ratio,
+        offset_ratio = ?req.offset_ratio,
         keep_lo = req.keep_lo,
         "POST /api/tune"
     );

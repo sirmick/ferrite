@@ -16,10 +16,7 @@
     fullBandwidthChoices,
     fullRateChoices,
     gainDescriptionFor,
-    gainDisplayValue,
-    gainInvertedFor,
     gainLabelFor,
-    gainRawValue,
     hiddenSettingsFor,
     overallGainRangeFor,
     settingOverridesFor,
@@ -71,20 +68,15 @@
   // it to drive the LNA stage too.
   let gainLabel = $derived(caps ? gainLabelFor(caps) : 'gain (dB)');
   let gainDescription = $derived(caps ? gainDescriptionFor(caps) : undefined);
-  // Per-driver inversion of the master gain slider — see optionsModel.ts.
-  let gainInverted = $derived(caps ? gainInvertedFor(caps) : false);
 
   let currentRate = $derived(numberOr(params.sample_rate_hz, rateChoices[0] ?? NaN));
   let currentBw = $derived(numberOr(params.bandwidth_hz, NaN));
   let currentFreqMHz = $derived(numberOr(params.center_freq_hz, NaN) / 1e6);
   let currentGain = $derived(numberOr(params.gain_db, overallGainRange?.min ?? 0));
-  // Inverted-aware displayed value (see optionsModel.ts). The slider
-  // binds to `gainDisplay` so the user-visible knob matches the
-  // universal "higher = more amplification" convention regardless of
-  // whether the driver reports gain or gain-reduction.
-  let gainDisplay = $derived(
-    overallGainRange ? gainDisplayValue(currentGain, overallGainRange, gainInverted) : currentGain,
-  );
+  // The wire `gain_db` is already user-facing (high = more amplification);
+  // SoapySource inverts at the boundary for reduction-shaped drivers
+  // (SDRplay), so the slider binds straight to the value.
+  let gainDisplay = $derived(currentGain);
   // Per-stage gain elements (HackRF: LNA / VGA / AMP) for the Advanced
   // manual panel and the convenience-dial AMP indicator.
   let gainStages = $derived(channel?.gains ?? []);
@@ -298,8 +290,7 @@
               value={gainDisplay}
               disabled={busy || pending !== null || currentAgc}
               oninput={(e) => {
-                const displayed = Number((e.currentTarget as HTMLInputElement).value);
-                commit('gain_db', gainRawValue(displayed, overallGainRange, gainInverted));
+                commit('gain_db', Number((e.currentTarget as HTMLInputElement).value));
               }}
             />
             <input
@@ -310,8 +301,7 @@
               value={gainDisplay}
               disabled={busy || pending !== null || currentAgc}
               onchange={(e) => {
-                const displayed = Number((e.currentTarget as HTMLInputElement).value);
-                commit('gain_db', gainRawValue(displayed, overallGainRange, gainInverted));
+                commit('gain_db', Number((e.currentTarget as HTMLInputElement).value));
               }}
             />
           </div>
@@ -415,9 +405,20 @@
                 commitDcBlock('enabled', (e.currentTarget as HTMLInputElement).checked)}
             />
             <input
+              type="range"
+              min="0"
+              max="2000"
+              step="10"
+              value={dcBlockCorner}
+              title="High-pass corner (Hz). ~200 nulls DC while leaving a carrier even 1 kHz off centre untouched. 0 = bypass."
+              disabled={busy || pending !== null || !dcBlockEnabled}
+              oninput={(e) =>
+                commitDcBlock('corner_hz', Number((e.currentTarget as HTMLInputElement).value))}
+            />
+            <input
               type="number"
               min="0"
-              max="20000"
+              max="2000"
               step="10"
               value={dcBlockCorner}
               title="High-pass corner (Hz). ~200 nulls DC while leaving a carrier even 1 kHz off centre untouched. 0 = bypass."

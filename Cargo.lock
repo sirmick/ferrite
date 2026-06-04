@@ -550,6 +550,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
+ "ferrite-sdr-tables",
  "reqwest",
  "rmcp",
  "serde",
@@ -640,6 +641,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-sdr-tables"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
 name = "ferrite-whisper"
 version = "0.9.0"
 dependencies = [
@@ -666,6 +675,7 @@ dependencies = [
  "clap",
  "ferrite-blocks",
  "ferrite-runtime",
+ "ferrite-sdr-tables",
  "futures-util",
  "http",
  "num-complex",

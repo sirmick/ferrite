@@ -14,14 +14,6 @@ interface SettingOverride {
   option_labels?: Record<string, string>;
 }
 
-interface AutoSetting {
-  key: string;
-  freq_bands_hz: Array<[number, number]>;
-  value_in_band: string;
-  value_out_of_band: string;
-  rationale?: string;
-}
-
 interface Preset {
   driver_key: string;
   label?: string;
@@ -30,12 +22,9 @@ interface Preset {
   max_sample_rate_hz?: number;
   hidden_settings?: string[];
   setting_overrides?: Record<string, SettingOverride>;
-  auto_settings?: AutoSetting[];
   gain_label?: string;
   gain_description?: string;
-  gain_inverted?: boolean;
   overall_gain_max_db?: number;
-  tune_offset_ratio?: number;
   ai_operator_notes?: string;
   notes?: string;
 }
@@ -48,24 +37,14 @@ const KNOWN_FIELDS = new Set([
   'max_sample_rate_hz',
   'hidden_settings',
   'setting_overrides',
-  'auto_settings',
   'gain_label',
   'gain_description',
-  'gain_inverted',
   'overall_gain_max_db',
-  'tune_offset_ratio',
   'ai_operator_notes',
   'notes',
 ]);
 
 const SETTING_OVERRIDE_FIELDS = new Set(['label', 'description', 'hidden', 'option_labels']);
-const AUTO_SETTING_FIELDS = new Set([
-  'key',
-  'freq_bands_hz',
-  'value_in_band',
-  'value_out_of_band',
-  'rationale',
-]);
 
 // Eager glob — same pattern optionsModel.ts uses so the test stays in
 // sync with what the runtime actually loads.
@@ -150,31 +129,6 @@ describe('sdr-presets schema', () => {
               expect(typeof v).toBe('string');
               expect(typeof l).toBe('string');
             }
-          }
-        }
-      });
-
-      it('auto_settings (if present) entries are well-formed', () => {
-        if (p.auto_settings === undefined) return;
-        expect(Array.isArray(p.auto_settings)).toBe(true);
-        for (const rule of p.auto_settings) {
-          for (const f of Object.keys(rule)) {
-            expect(
-              AUTO_SETTING_FIELDS,
-              `unexpected field '${f}' in ${name}.auto_settings`,
-            ).toContain(f);
-          }
-          expect(typeof rule.key).toBe('string');
-          expect(rule.key.length).toBeGreaterThan(0);
-          expect(typeof rule.value_in_band).toBe('string');
-          expect(typeof rule.value_out_of_band).toBe('string');
-          expect(Array.isArray(rule.freq_bands_hz)).toBe(true);
-          expect(rule.freq_bands_hz.length).toBeGreaterThan(0);
-          for (const band of rule.freq_bands_hz) {
-            expect(Array.isArray(band)).toBe(true);
-            expect(band.length).toBe(2);
-            expect(band[0]).toBeGreaterThan(0);
-            expect(band[1]).toBeGreaterThan(band[0]);
           }
         }
       });
