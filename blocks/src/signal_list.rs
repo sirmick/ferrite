@@ -64,6 +64,22 @@ fn byte_to_dbfs(b: u8) -> f32 {
     f32::from(b) * DB_PER_BYTE + SERVER_FLOOR_DBFS
 }
 
+/// Tier-1 noise-robustness knobs (see the detector's per-frame stability
+/// notes). All three damp the frame-to-frame churn that made the watchlist
+/// flicker and reshuffle:
+///   - `FLOOR_EMA_ALPHA`: smoothing weight for the per-frame noise-floor
+///     estimate. At ~30 fps, 0.1 → ~0.3 s time constant, so the detection
+///     threshold stops breathing and marginal signals stop toggling.
+///   - `TRACK_EMA_ALPHA`: EMA weight for a matched track's power/SNR (mirrors
+///     the existing frequency EMA) so the ranking key is stable, not the raw
+///     per-frame reading.
+///   - `RANK_QUANTUM_DB`: rank hysteresis — tracks within this many dB sort as
+///     equal and fall back to a stable tiebreak (id), so near-equal carriers
+///     stop swapping places every emission.
+const FLOOR_EMA_ALPHA: f32 = 0.1;
+const TRACK_EMA_ALPHA: f32 = 0.3;
+const RANK_QUANTUM_DB: f32 = 1.0;
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct SignalListParams {
@@ -114,7 +130,7 @@ impl Default for SignalListParams {
     fn default() -> Self {
         Self {
             size: 16_384,
-            threshold_db: 10.0,
+            threshold_db: 12.0,
             min_bw_hz: 0.0,
             max_bw_hz: 0.0,
             top_k: 16,
@@ -166,6 +182,10 @@ pub struct SignalList {
     /// an empty watchlist ("quiet" vs "threshold too high").
     last_noise_floor_db: f32,
     last_threshold_db: f32,
+    /// Smoothed noise-floor estimate in byte units (EMA over frames, weight
+    /// `FLOOR_EMA_ALPHA`). `None` until the first frame and reset on a retune
+    /// so it re-converges to the new band instead of dragging the old floor.
+    floor_byte_ema: Option<f32>,
     /// Per-bin max-hold accumulator (byte units) when `peak_hold_secs > 0`;
     /// empty otherwise. Decays toward 0 between frames so a transient peak
     /// lingers ~`peak_hold_secs`, then detection runs on this instead of the
@@ -207,6 +227,7 @@ impl SignalList {
             frame: 0,
             last_noise_floor_db: SERVER_FLOOR_DBFS,
             last_threshold_db: SERVER_FLOOR_DBFS,
+            floor_byte_ema: None,
             held: Vec::new(),
             pending: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -264,12 +285,14 @@ impl SignalList {
     /// list apart from "threshold too high for this band" — `0 signals` with
     /// `noise_floor_dbfs` well below `threshold_dbfs` means "quiet"; close
     /// together means "lower the threshold".
-    fn detect(&self, row: &[u8]) -> (Vec<Candidate>, f32, f32) {
+    fn detect(&self, row: &[u8], floor_byte: u8) -> (Vec<Candidate>, f32, f32) {
         let n = self.params.size.min(row.len());
         if n == 0 {
             return (Vec::new(), SERVER_FLOOR_DBFS, SERVER_FLOOR_DBFS);
         }
-        let floor_byte = compute_spectrum_stats(&row[..n]).p10;
+        // Floor is the smoothed estimate supplied by `work` (EMA across
+        // frames), not a fresh per-frame percentile — that's what keeps the
+        // threshold from breathing and toggling marginal signals.
         let floor_db = byte_to_dbfs(floor_byte);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let thresh_byte = (f32::from(floor_byte) + self.params.threshold_db / DB_PER_BYTE)
@@ -355,12 +378,13 @@ impl SignalList {
                 matched[idx] = true;
                 let t = &mut self.tracks[idx];
                 // Light EMA on frequency keeps a wide carrier's reported
-                // centre from jittering bin-to-bin; power/bw/snr take the
-                // fresh reading.
+                // centre from jittering bin-to-bin; power/snr get the same
+                // treatment so the ranking key is stable (raw per-frame power
+                // wobble was reshuffling the list). bw takes the fresh reading.
                 t.freq_hz = 0.7 * t.freq_hz + 0.3 * c.freq_hz;
-                t.power_db = c.power_db;
+                t.power_db = (1.0 - TRACK_EMA_ALPHA) * t.power_db + TRACK_EMA_ALPHA * c.power_db;
+                t.snr_db = (1.0 - TRACK_EMA_ALPHA) * t.snr_db + TRACK_EMA_ALPHA * c.snr_db;
                 t.bw_hz = c.bw_hz;
-                t.snr_db = c.snr_db;
                 t.hits = (t.hits + 1).min(self.params.persist_window);
                 t.misses = 0;
                 t.last_seen_frame = self.frame;
@@ -403,10 +427,18 @@ impl SignalList {
             .iter()
             .filter(|t| t.hits >= self.params.persist_hits)
             .collect();
+        // Rank by power, but quantize to `RANK_QUANTUM_DB` so two carriers
+        // within ~1 dB sort as equal and fall back to a stable tiebreak (the
+        // track id, assigned once at first detection). Without this, sub-dB
+        // power wobble swapped near-equal neighbours every emission and the
+        // list visibly churned. The reported `power_db` value stays precise —
+        // only the ordering key is coarsened.
+        let rank = |p: f32| (p / RANK_QUANTUM_DB).round();
         reported.sort_by(|a, b| {
-            b.power_db
-                .partial_cmp(&a.power_db)
+            rank(b.power_db)
+                .partial_cmp(&rank(a.power_db))
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.id.cmp(&b.id))
         });
         reported.truncate(self.params.top_k);
 
@@ -697,6 +729,8 @@ impl Block for SignalList {
             self.tracks.clear();
             // The held spectrum belongs to the old centre — drop it too.
             self.held.clear();
+            // The smoothed floor belongs to the old band; re-converge fresh.
+            self.floor_byte_ema = None;
             #[cfg(not(target_arch = "wasm32"))]
             {
                 self.last_frame_at = None;
@@ -756,7 +790,19 @@ impl Block for SignalList {
             self.update_held(&row[..n]);
         }
         let spectrum: &[u8] = if use_hold { &self.held[..n] } else { &row[..n] };
-        let (cands, floor_db, threshold_db) = self.detect(spectrum);
+        // Smooth the per-frame floor percentile across frames (EMA) so the
+        // detection threshold is stable — reset to the raw value on the first
+        // frame / after a retune (floor_byte_ema == None).
+        let floor_byte_raw = compute_spectrum_stats(spectrum).p10;
+        let smoothed = self
+            .floor_byte_ema
+            .map_or(f32::from(floor_byte_raw), |prev| {
+                prev + FLOOR_EMA_ALPHA * (f32::from(floor_byte_raw) - prev)
+            });
+        self.floor_byte_ema = Some(smoothed);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let floor_byte = smoothed.round().clamp(0.0, 255.0) as u8;
+        let (cands, floor_db, threshold_db) = self.detect(spectrum, floor_byte);
         self.last_noise_floor_db = floor_db;
         self.last_threshold_db = threshold_db;
         self.update_tracks(&cands);
@@ -1008,6 +1054,71 @@ mod tests {
         assert!(p0 > p1, "strongest first: {p0} then {p1}");
         // Strongest should be the right (6000-bin) peak → higher freq.
         assert!(sigs[0]["freq_hz"].as_f64().unwrap() > b.center_freq_hz);
+    }
+
+    #[test]
+    fn track_power_is_smoothed_across_frames() {
+        // A matched track's reported power is an EMA, not the raw latest
+        // reading — so a one-frame power jump doesn't snap the ranking key.
+        let n = 4096;
+        let mut b = block(
+            n,
+            SignalListParams {
+                persist_hits: 1,
+                emit_interval_ms: 0.0,
+                threshold_db: 8.0,
+                ..Default::default()
+            },
+        );
+        let weak = make_row(n, -120.0, &[(3000, 20, -60.0)]);
+        let strong = make_row(n, -120.0, &[(3000, 20, -50.0)]);
+
+        let p1 = push(&mut b, &weak).unwrap()["signals"][0]["power_db"]
+            .as_f64()
+            .unwrap();
+        assert!(
+            (-61.5..=-58.5).contains(&p1),
+            "fresh first reading ≈ -60: {p1}"
+        );
+
+        // Same track jumps +10 dB: EMA (0.7·old + 0.3·new) lands ~-57, NOT -50.
+        let p2 = push(&mut b, &strong).unwrap()["signals"][0]["power_db"]
+            .as_f64()
+            .unwrap();
+        assert!(
+            p2 > p1 + 1.0,
+            "power rose toward the new reading: {p1} → {p2}"
+        );
+        assert!(p2 < -52.0, "but did not snap to the raw -50: {p2}");
+    }
+
+    #[test]
+    fn noise_floor_is_smoothed_across_frames() {
+        // The floor estimate is an EMA, so one broadband-noise frame can't
+        // yank the detection threshold up and blank the list.
+        let n = 2048;
+        let mut b = block(
+            n,
+            SignalListParams {
+                emit_interval_ms: 0.0,
+                ..Default::default()
+            },
+        );
+        let quiet = make_row(n, -118.0, &[]);
+        let loud_floor = make_row(n, -100.0, &[]);
+        // Converge the EMA onto the quiet floor.
+        for _ in 0..5 {
+            push(&mut b, &quiet);
+        }
+        // One elevated-floor frame must barely move the reported floor
+        // (EMA α=0.1 → ~-116, not -100).
+        let floor = push(&mut b, &loud_floor).unwrap()["noise_floor_dbfs"]
+            .as_f64()
+            .unwrap();
+        assert!(
+            floor < -113.0 && floor > -119.0,
+            "one loud frame must not yank the smoothed floor toward -100: {floor}"
+        );
     }
 
     #[test]
