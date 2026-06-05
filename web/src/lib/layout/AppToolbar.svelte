@@ -117,6 +117,11 @@
     return s.type;
   });
 
+  // Cap the screenshot's long edge. Matches the size Claude downscales to,
+  // and keeps the base64 POST well under the server's body limit even from
+  // a high-DPI display.
+  const MAX_SHOT_EDGE = 1568;
+
   let shotBusy = $state(false);
   /** Capture the entire browser tab (or whatever the user picks) via
    *  `getDisplayMedia`, grab one frame, POST to `/api/screenshot`.
@@ -190,14 +195,24 @@
       // wait one rAF so the canvas grabs an actual picture, not a
       // black hole.
       await new Promise<void>((r) => requestAnimationFrame(() => r()));
-      const w = video.videoWidth || track.getSettings().width || 1;
-      const h = video.videoHeight || track.getSettings().height || 1;
+      const vw = video.videoWidth || track.getSettings().width || 1;
+      const vh = video.videoHeight || track.getSettings().height || 1;
+      // Downscale so the long edge is <= MAX_SHOT_EDGE. A high-DPI tab is
+      // captured at full *physical* resolution (3840+ px on a 4K/Retina
+      // display), which both blows past the server's body limit and
+      // exceeds what Claude ingests (it downscales to ~1568 px anyway) —
+      // the extra pixels add nothing readable. One scaled drawImage avoids
+      // a giant intermediate canvas.
+      const scale = Math.min(1, MAX_SHOT_EDGE / Math.max(vw, vh));
+      const w = Math.max(1, Math.round(vw * scale));
+      const h = Math.max(1, Math.round(vh * scale));
       const canvas = document.createElement('canvas');
       canvas.width = w;
       canvas.height = h;
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('2D canvas context unavailable');
-      ctx.drawImage(video, 0, 0, w, h);
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(video, 0, 0, vw, vh, 0, 0, w, h);
       const dataUrl = canvas.toDataURL('image/png');
       return dataUrlToBase64(dataUrl);
     } finally {

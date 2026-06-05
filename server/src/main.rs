@@ -17,6 +17,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{get, post},
     Router,
 };
@@ -421,7 +422,14 @@ async fn main() -> Result<()> {
         )
         .route("/api/decoder/recent", get(routes::recent_decoder))
         .route("/api/debug/log", post(routes::browser_log))
-        .route("/api/screenshot", post(routes::save_screenshot))
+        .route(
+            "/api/screenshot",
+            // A screenshot PNG (even downscaled) easily exceeds axum's
+            // default 2 MB JSON body cap once base64-inflated, which 413s
+            // the POST before the handler runs (the screenshot silently
+            // never lands). Lift the cap on just this route.
+            post(routes::save_screenshot).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
         .route("/ws/state", get(routes::ws_state))
