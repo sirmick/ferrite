@@ -81,7 +81,9 @@ jobs:
         # small enough for the fast lane).
         run: |
           mkdir -p web/static/models
-          curl -fL --retry 3 --retry-delay 5 \
+          # HuggingFace occasionally 429s/5xxs; retry hard (incl. on those)
+          # so a transient blip doesn't redden the whole web check.
+          curl -fL --retry 6 --retry-all-errors --retry-delay 10 --connect-timeout 30 \
             -o web/static/models/ggml-tiny.en-q5_1.bin \
             https://huggingface.co/ggml-org/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin
 
