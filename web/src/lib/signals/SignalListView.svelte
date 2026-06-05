@@ -1,12 +1,11 @@
 <script lang="ts">
   // Strongest-signal list — occupies the right (channel-detail) column
   // in place of the narrow FFT/waterfall when the operator picks
-  // Display → Right → "Strongest Signals" (only offered when the active
-  // preset advertises a `ui:signals` sink, i.e. wires the SignalList
-  // block at the wideband FFT). Rows are the auto-detected signals,
-  // ranked strongest-first; clicking a row tunes the VFO to that
-  // frequency. Keyed on the block's stable track `id` so rows update in
-  // place rather than re-rendering as signals come and go.
+  // Display → Right → "Strongest Signals" (offered when the active preset
+  // wires a SignalList at the wideband FFT). Rows are the auto-detected
+  // signals across the whole span, ranked strongest-first; clicking a row
+  // tunes the VFO to that frequency. Keyed on the block's stable track `id`
+  // so rows update in place rather than re-rendering as signals come/go.
 
   import { pipeline } from '$lib/pipeline.svelte';
   import { signals } from '$lib/signals/store.svelte';

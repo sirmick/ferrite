@@ -12,6 +12,7 @@
 //    "center_freq_hz":…,"span_hz":…,"noise_floor_dbfs":…,"frame":…}
 
 import { decoders } from '$lib/decoders/store.svelte';
+import { pipeline } from '$lib/pipeline.svelte';
 
 export interface Signal {
   /** Stable track id assigned by the block; survives across emissions. */
@@ -42,8 +43,12 @@ function snapshot(): SignalsSnapshot {
 /** Reactive view over the mirror's `signals` kind. The getters read
  *  `decoders.kinds` ($state), so Svelte components stay reactive. */
 export const signals = {
-  /** Current watchlist, strongest first. */
+  /** Current watchlist, strongest first. Empty unless the pipeline is
+   *  running: when it's stopped the store keeps the last snapshot frozen
+   *  (Replace fold, no expiry), which would otherwise leave a stale list +
+   *  FFT peak markers hanging over a dead/empty spectrum. */
   get signals(): Signal[] {
+    if (pipeline.status !== 'running') return [];
     const s = snapshot().signals;
     // Defensive re-sort: the block ranks by power, but never trust the
     // wire — consumers assume strongest-first.

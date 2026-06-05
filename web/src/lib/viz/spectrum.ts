@@ -517,16 +517,42 @@ export class SpectrumRenderer {
     const fullSpan = this.axes ? this.axes.rateHz : fMax - fMin;
 
     ctx.save();
-    ctx.strokeStyle = 'rgba(56, 232, 255, 0.85)';
+    // Orange — deliberately clashes with the cyan FFT trace so the peak
+    // flags read clearly against it.
+    ctx.strokeStyle = 'rgba(255, 122, 26, 0.95)';
     ctx.lineWidth = Math.max(1, dpr);
     ctx.lineCap = 'round';
     for (const hz of peaks) {
       if (hz < fMin || hz > fMax) continue;
-      const x = toX(hz);
+      let x = toX(hz);
       let y = plot.y + r; // fallback: near the top of the plot
       if (lut && n > 0 && fullSpan > 0) {
-        const bin = Math.round(((hz - fullMin) / fullSpan) * (n - 1));
-        if (bin >= 0 && bin < n) y = lut[this.row![bin]!]!;
+        const nb = Math.round(((hz - fullMin) / fullSpan) * (n - 1));
+        if (nb >= 0 && nb < n) {
+          // Snap to the local trace maximum within ~one pixel so the cross
+          // sits on the drawn peak. Corrects the bin↔freq parity drift —
+          // the detector bins frequencies by /N (`bin_to_hz`) while the
+          // trace is drawn by /(n-1) (`strokeRow`) — which otherwise lands
+          // a marker a bin off, onto a trough, at the channel FFT's coarse
+          // resolution (negligible on the 16k-bin wide FFT).
+          const binsPerPx = Math.max(
+            1,
+            Math.round(((fMax - fMin) * n) / (Math.max(1, plot.w) * fullSpan)),
+          );
+          const hw = Math.max(1, binsPerPx);
+          let pbin = nb;
+          let peak = -1;
+          for (let k = nb - hw; k <= nb + hw; k++) {
+            if (k >= 0 && k < n && this.row![k]! > peak) {
+              peak = this.row![k]!;
+              pbin = k;
+            }
+          }
+          // Place the cross at the trace's own x + height for that bin
+          // (matches strokeRow's bin→x mapping).
+          x = toX(fullMin + (pbin / (n - 1)) * fullSpan);
+          y = lut[this.row![pbin]!]!;
+        }
       }
       // Centre the cross on the carrier tip, clamped so both arms stay
       // inside the plot.
