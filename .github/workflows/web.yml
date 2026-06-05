@@ -83,9 +83,12 @@ jobs:
           mkdir -p web/static/models
           # HuggingFace occasionally 429s/5xxs; retry hard (incl. on those)
           # so a transient blip doesn't redden the whole web check.
+          # NB: model files live under the `ggerganov/whisper.cpp` HF repo —
+          # `ggml-org/whisper.cpp` (where the *source* moved) now 401s on the
+          # model blobs. Source pin and model repo are intentionally separate.
           curl -fL --retry 6 --retry-all-errors --retry-delay 10 --connect-timeout 30 \
             -o web/static/models/ggml-tiny.en-q5_1.bin \
-            https://huggingface.co/ggml-org/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin
 
       - name: pnpm install
         run: pnpm install --frozen-lockfile
