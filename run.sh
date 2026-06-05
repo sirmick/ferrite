@@ -33,6 +33,7 @@ PLACEHOLDER_FLOWGRAPH="${FERRITE_FLOWGRAPH:-flowgraphs/wbfm.json}"
 FERRITE_UI_PORT="${FERRITE_UI_PORT:-12000}"   # vite dev server (browser UI)
 FERRITED_PORT="${FERRITED_PORT:-12001}"        # ferrited REST + WS
 FERRITE_AI_PORT="${FERRITE_AI_PORT:-10002}"    # ferrite-ai sidecar (internal)
+FERRITE_SHERPA_PORT="${FERRITE_SHERPA_PORT:-10003}"  # sherpa-onnx ASR sidecar (server-side)
 
 # vite proxies /api + /ws here; the sidecar's internal ferrite-ctl drives
 # the same daemon (without this it defaults to 10001 → wrong/dead daemon).
@@ -101,11 +102,27 @@ echo "[run] ai state → $FERRITE_AI_STATE_DIR  (conversation transcripts)"
 # ferrited on 0.0.0.0:10001, logs prefixed via process substitution
 RUST_LOG="${RUST_LOG:-info}" \
   FERRITE_SCREENSHOTS_DIR="$FERRITE_SCREENSHOTS_DIR" \
+  FERRITE_SHERPA_ASR_URL="ws://127.0.0.1:${FERRITE_SHERPA_PORT}" \
   ./target/release/ferrited \
     --bind 0.0.0.0:${FERRITED_PORT} \
     --flowgraph "$PLACEHOLDER_FLOWGRAPH" \
     > >(prefix '[ferrited]') 2> >(prefix '[ferrited]' >&2) &
 FERRITED_PID=$!
+
+# sherpa-onnx ASR sidecar (server-side transcription). Only when it's been
+# provisioned (tools/sherpa-asr/setup.sh) — the node-side SherpaTranscribe
+# block (heavy/server audio-split profiles) connects to it over WS. Browser
+# profiles keep whisper, so this stays optional.
+SHERPA_PID=""
+if [ -x tools/sherpa-asr/venv/bin/python ]; then
+  SHERPA_MODEL_DIR="$(tools/sherpa-asr/setup.sh | tail -1)"
+  SHERPA_ASR_MODEL_DIR="$SHERPA_MODEL_DIR" SHERPA_ASR_PORT="$FERRITE_SHERPA_PORT" \
+    tools/sherpa-asr/venv/bin/python tools/sherpa-asr/server.py \
+    > >(prefix '[sherpa  ]') 2> >(prefix '[sherpa  ]' >&2) &
+  SHERPA_PID=$!
+else
+  echo "[run] sherpa-asr not provisioned — server-side transcription off (run tools/sherpa-asr/setup.sh)" >&2
+fi
 
 # ferrite-ai sidecar on FERRITE_AI_PORT (default 10002). ferrited's
 # /ws/chat handler reverse-proxies to this; the UI never connects
@@ -129,17 +146,17 @@ cleanup() {
   trap - INT TERM EXIT
   echo
   echo "[run] shutting down…"
-  kill "$FERRITED_PID" "$AI_PID" "$VITE_PID" 2>/dev/null || true
+  kill "$FERRITED_PID" "$AI_PID" "$VITE_PID" $SHERPA_PID 2>/dev/null || true
   # ferrite-ai is `npm start` → `sh -c` → `node`; killing the npm wrapper
   # may leave the node grandchild. Sweep anything still on the AI port.
   if command -v lsof >/dev/null 2>&1; then
-    local ai_left
-    ai_left=$(lsof -t -i :"$FERRITE_AI_PORT" 2>/dev/null || true)
-    [ -n "$ai_left" ] && kill $ai_left 2>/dev/null || true
+    local left
+    left=$(lsof -t -i :"$FERRITE_AI_PORT" -i :"$FERRITE_SHERPA_PORT" 2>/dev/null || true)
+    [ -n "$left" ] && kill $left 2>/dev/null || true
   fi
-  wait "$FERRITED_PID" "$AI_PID" "$VITE_PID" 2>/dev/null || true
+  wait "$FERRITED_PID" "$AI_PID" "$VITE_PID" $SHERPA_PID 2>/dev/null || true
 }
 trap cleanup INT TERM EXIT
 
 # Block until any one dies; cleanup then takes the others down.
-wait -n "$FERRITED_PID" "$AI_PID" "$VITE_PID" 2>/dev/null || true
+wait -n "$FERRITED_PID" "$AI_PID" "$VITE_PID" $SHERPA_PID 2>/dev/null || true

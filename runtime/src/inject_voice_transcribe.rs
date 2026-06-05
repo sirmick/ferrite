@@ -33,7 +33,7 @@
 use serde_json::json;
 
 use crate::apply_profile::Profile;
-use crate::doc::{BlockInstanceDecl, FlowgraphDoc, Wire};
+use crate::doc::{BlockInstanceDecl, Environment, FlowgraphDoc, Wire};
 
 /// Synthetic-block id prefix. `__` matches the convention `env_split`
 /// and `inject_narrow_fft` already use; no registry block starts `__`.
@@ -60,7 +60,7 @@ pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc, profile: &Profile) {
     let already_present = doc
         .blocks
         .values()
-        .any(|b| b.type_name == "VoiceTranscribe")
+        .any(|b| b.type_name == "VoiceTranscribe" || b.type_name == "SherpaTranscribe")
         || doc.blocks.keys().any(|k| k.starts_with(PREFIX));
     if already_present {
         return;
@@ -127,10 +127,19 @@ pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc, profile: &Profile) {
         // "transcribe"` for introspection / a later re-apply. `mode:
         // "on"` — the tap only exists when transcription is engaged.
         let placement = profile.audio_split.tap_placement();
+        // Engine follows placement: server-side (node) profiles transcribe
+        // with the sherpa-onnx sidecar (`SherpaTranscribe`); browser-placed
+        // taps keep whisper (`VoiceTranscribe`, WASM). Same `events` shape
+        // and `placement_role`, so everything downstream is unchanged.
+        let engine = if placement == Environment::Node {
+            "SherpaTranscribe"
+        } else {
+            "VoiceTranscribe"
+        };
         doc.blocks.insert(
             vt_id,
             BlockInstanceDecl {
-                type_name: "VoiceTranscribe".into(),
+                type_name: engine.into(),
                 params: Some(json!({ "mode": "on" })),
                 placement: Some(placement),
                 placement_role: Some("transcribe".to_string()),
@@ -292,6 +301,10 @@ mod tests {
             b.placement,
             Some(Environment::Node),
             "tap runs server-side for headless transcription"
+        );
+        assert_eq!(
+            b.type_name, "SherpaTranscribe",
+            "server-side profiles transcribe via the sherpa-onnx sidecar"
         );
         assert_eq!(b.placement_role.as_deref(), Some("transcribe"));
         assert!(doc

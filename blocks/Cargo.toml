@@ -96,6 +96,14 @@ soapysdr              = { version = "0.5", optional = true }
 tracing               = "0.1"
 wasm-bindgen          = { version = "0.2", optional = true }
 
+# Native-only: the `SherpaTranscribe` block's WebSocket client to the
+# sherpa-onnx sidecar. Pure-Rust, sync (driven on the block's worker
+# thread); no TLS rustls/native-tls pulled in (the sidecar is loopback
+# ws://). Scoped off wasm32 so the browser bundle never sees it — the
+# block is `Placement::NativeOnly` and stubs out on wasm anyway.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tungstenite           = { version = "0.24", default-features = false, features = ["handshake"] }
+
 # See note in runtime/Cargo.toml — wasm-pack's prebuilt wasm-opt binaries
 # only target x86_64 / aarch64; disable for cross-host portability.
 [package.metadata.wasm-pack.profile.release]
