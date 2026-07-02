@@ -215,10 +215,15 @@ impl Block for AmDemod {
         let n = src.len().min(dst.len());
         let g = self.params.audio_gain;
         for i in 0..n {
-            let x = src[i];
+            let z = src[i];
+            // Scrub non-finite samples to 0 before the envelope hits the
+            // DC tracker — one NaN would make `self.dc` NaN via the
+            // one-pole and every subsequent output NaN forever.
+            let re = if z.re.is_finite() { z.re } else { 0.0 };
+            let im = if z.im.is_finite() { z.im } else { 0.0 };
             // Envelope = carrier-DC pedestal + audio. Offset/phase
             // independent: |x| ignores where the carrier sits.
-            let env = x.re.hypot(x.im);
+            let env = re.hypot(im);
             if !self.primed {
                 self.dc = env;
                 self.primed = true;
@@ -373,6 +378,48 @@ mod tests {
         assert!(
             (ratio - 10.0).abs() < 0.01,
             "gain=10 should give 10× RMS, got ratio={ratio}"
+        );
+    }
+
+    #[test]
+    fn non_finite_sample_does_not_latch_dc_tracker() {
+        let fs = 48_000.0_f32;
+        let f_m = 1_000.0_f32;
+        let m = 0.5_f32;
+        let carrier = |n: usize| -> Vec<Complex<f32>> {
+            (0..n)
+                .map(|i| {
+                    let t = i as f32 / fs;
+                    let env = 1.0 + m * (TAU * f_m * t).cos();
+                    Complex::new(env, 0.0)
+                })
+                .collect()
+        };
+        let mut demod = AmDemod::new(AmDemodParams {
+            sample_rate_hz: fs,
+            audio_gain: 1.0,
+        })
+        .unwrap();
+        // Warm up the DC tracker.
+        run(&mut demod, &carrier(8192));
+        // Inject NaN / Inf into the complex stream.
+        let mut glitch = carrier(64);
+        glitch[10] = Complex::new(f32::NAN, 0.0);
+        glitch[20] = Complex::new(0.0, f32::INFINITY);
+        glitch[30] = Complex::new(f32::NEG_INFINITY, 0.0);
+        let g = run(&mut demod, &glitch);
+        assert!(g.iter().all(|y| y.is_finite()));
+        // The one-pole DC tracker must recover, not stay NaN forever.
+        let after = run(&mut demod, &carrier(8192));
+        assert!(
+            after.iter().all(|y| y.is_finite()),
+            "AM DC tracker latched non-finite after a NaN"
+        );
+        let tail = &after[2048..];
+        let rms = (tail.iter().map(|y| y * y).sum::<f32>() / tail.len() as f32).sqrt();
+        assert!(
+            rms > 0.2,
+            "AM audio did not recover after the glitch (rms={rms})"
         );
     }
 }

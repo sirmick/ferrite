@@ -111,6 +111,14 @@ impl AgcStage {
         // matters as long as it's >0.
         const EPS: f32 = 1e-6;
         for x in buf {
+            // Scrub non-finite samples to 0 first: a single NaN makes the
+            // release branch (`env + α·(mag−env)`) NaN forever, and
+            // `NaN.max(EPS)` collapses env to EPS so gain pins at
+            // `max_gain` — the AGC never recovers. Treating it as silence
+            // lets the envelope release back down normally.
+            if !x.is_finite() {
+                *x = 0.0;
+            }
             let mag = x.abs();
             // Seed from first non-zero sample. Without this, env
             // starts at 0, gain = target/ε = huge, clamped to
@@ -256,6 +264,43 @@ mod tests {
             (buf[0] - target).abs() < 1e-5,
             "input at target amplitude should pass through, got {} vs target {target}",
             buf[0],
+        );
+    }
+
+    #[test]
+    fn non_finite_sample_does_not_latch_gain() {
+        let fs = 48_000.0;
+        let mut s = AgcStage::new(-6.0, 50.0, 20.0, fs);
+        let tone = |n: usize| -> Vec<f32> {
+            (0..n)
+                .map(|i| 0.2 * (core::f32::consts::TAU * 1_000.0 * i as f32 / fs as f32).sin())
+                .collect()
+        };
+        // Warm up on a steady tone and record the settled level.
+        let mut warm = tone(4096);
+        s.run(&mut warm);
+        let before = rms(&warm[2048..]);
+        // Inject NaN / +Inf / -Inf mid-stream.
+        let mut glitch = tone(64);
+        glitch[10] = f32::NAN;
+        glitch[20] = f32::INFINITY;
+        glitch[30] = f32::NEG_INFINITY;
+        s.run(&mut glitch);
+        assert!(
+            glitch.iter().all(|v| v.is_finite()),
+            "AGC emitted a non-finite sample"
+        );
+        // Recover on a clean tone: gain must return, not pin at max_gain.
+        let mut after = tone(4096);
+        s.run(&mut after);
+        assert!(
+            after.iter().all(|v| v.is_finite()),
+            "AGC gain latched non-finite after a NaN"
+        );
+        let db = 20.0 * (rms(&after[2048..]) / before).log10();
+        assert!(
+            db.abs() < 1.0,
+            "AGC gain did not recover to within 1 dB: {db} dB"
         );
     }
 }
