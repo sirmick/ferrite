@@ -715,6 +715,21 @@ pub async fn get_flowgraph(State(state): State<AppState>) -> Json<FlowgraphDoc> 
     Json(state.get_flowgraph().await)
 }
 
+/// `GET /api/flowgraph/browser-half` — the composed doc carved for the
+/// browser environment, for the in-browser WASM runtime to run verbatim.
+/// See [`AppState::browser_half`]: this is the single source of truth for
+/// what the browser runs, so its `WsBridge` stream IDs line up with the
+/// node half by construction (no client-side re-derivation).
+pub async fn get_flowgraph_browser_half(
+    State(state): State<AppState>,
+) -> Result<Json<FlowgraphDoc>, (StatusCode, Json<ApiError>)> {
+    state
+        .browser_half()
+        .await
+        .map(Json)
+        .map_err(|e| bad_request("COMPOSE_FAILED", format!("{e:#}")))
+}
+
 /// `PATCH /api/flowgraph` — store a new preset. Reconfigures the
 /// running pipeline if there is one; otherwise the doc is queued for
 /// the next `start`.

@@ -15,6 +15,7 @@ import type { FlowgraphDoc } from '$lib/flowgraph';
 import { ApiError, wsUrlFor } from '$lib/api/errors';
 import {
   fetchFlowgraph,
+  fetchBrowserHalf,
   patchFlowgraph,
   type ReconfigureResponse,
   type SoapyReadback,
@@ -51,6 +52,14 @@ class PipelineStore {
   errorMessage = $state<string | null>(null);
 
   flowgraph = $state<FlowgraphDoc | null>(null);
+  /** The server's authoritative **browser-half** doc
+   *  (`GET /api/flowgraph/browser-half`) — what the in-browser runtime
+   *  runs verbatim. Re-fetched alongside every preset/source/profile
+   *  change (via `refreshComposed`) so it always matches the running
+   *  node half. The page-level `$effect` feeds this straight into
+   *  `browserRuntime.syncFlowgraph`; the browser no longer composes or
+   *  splits its own graph. `null` until the first fetch completes. */
+  browserHalf = $state<FlowgraphDoc | null>(null);
   source = $state<SourceConfig | null>(null);
   /** Node-advertised `ui:<name>` sinks (`/api/ui-sinks`), keyed by
    *  name. Populated on `init()` and re-fetched on preset/source
@@ -133,7 +142,7 @@ class PipelineStore {
     this.errorMessage = null;
     try {
       await initFrameDecoder();
-      const [fg, src, st, sinks, blocks, presets, caps, profile] = await Promise.all([
+      const [fg, src, st, sinks, blocks, presets, caps, profile, browserHalf] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
@@ -142,6 +151,7 @@ class PipelineStore {
         fetchPresets(),
         fetchSourceCapabilities(),
         fetchProfile(),
+        fetchBrowserHalf(),
       ]);
       this.flowgraph = fg;
       this.source = src;
@@ -151,6 +161,7 @@ class PipelineStore {
       this.presets = presets;
       this.sourceCaps = caps;
       this.profile = profile;
+      this.browserHalf = browserHalf;
       // Hydrate from URL params if present (`?audio=off` /
       // `?split=browser|balanced|server`); a one-shot apply on first
       // load so a shared link lands the user in the right state without
@@ -565,9 +576,14 @@ class PipelineStore {
    *  parallel. Called after every patch so local state stays coherent
    *  with what the server is actually running. */
   private async refreshComposed(): Promise<void> {
-    const [sinks, blocks] = await Promise.all([fetchUiSinks(), fetchPipelineBlocks()]);
+    const [sinks, blocks, browserHalf] = await Promise.all([
+      fetchUiSinks(),
+      fetchPipelineBlocks(),
+      fetchBrowserHalf(),
+    ]);
     this.nodeUiSinks = indexByName(sinks);
     this.nodeBlocks = indexById(blocks);
+    this.browserHalf = browserHalf;
   }
 
   /** Pull every server mirror (source + flowgraph + status + composed +
@@ -582,7 +598,7 @@ class PipelineStore {
   async refreshFromServer(): Promise<void> {
     if (this.phase !== 'ready') return;
     try {
-      const [fg, src, st, sinks, blocks, caps, profile] = await Promise.all([
+      const [fg, src, st, sinks, blocks, caps, profile, browserHalf] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
@@ -590,6 +606,7 @@ class PipelineStore {
         fetchPipelineBlocks(),
         fetchSourceCapabilities(),
         fetchProfile(),
+        fetchBrowserHalf(),
       ]);
       this.flowgraph = fg;
       this.source = src;
@@ -597,6 +614,7 @@ class PipelineStore {
       this.nodeUiSinks = indexByName(sinks);
       this.nodeBlocks = indexById(blocks);
       this.sourceCaps = caps;
+      this.browserHalf = browserHalf;
       // Profile too: a CLI-driven `transcribe on/off` flips this axis
       // without touching `setProfile`. Pulling it here keeps the
       // tri-state Audio control honest and lets the transcribe→voice-NR

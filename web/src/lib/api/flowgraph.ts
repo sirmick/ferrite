@@ -94,6 +94,19 @@ export async function fetchFlowgraph(): Promise<FlowgraphDoc> {
   return (await r.json()) as FlowgraphDoc;
 }
 
+/** GET /api/flowgraph/browser-half — the composed doc carved for the
+ *  browser environment, for the in-browser runtime to run verbatim.
+ *  Authoritative: derived from the *same* `compose_full` + split that
+ *  produced the running node half, so the auto-inserted `WsBridge`
+ *  stream IDs line up. Replaces the old client-side `composeSource` +
+ *  `injectVoiceTranscribe` re-derivation, which diverged from the node
+ *  under any non-`balanced` split. */
+export async function fetchBrowserHalf(): Promise<FlowgraphDoc> {
+  const r = await fetch('/api/flowgraph/browser-half');
+  if (!r.ok) throw new ApiError(r.status, `browser-half fetch failed (${r.status})`);
+  return (await r.json()) as FlowgraphDoc;
+}
+
 /** GET /api/blocks — sorted capability schema for every registered block. */
 export async function fetchBlockSchemas(): Promise<BlockSchema[]> {
   const r = await fetch('/api/blocks');

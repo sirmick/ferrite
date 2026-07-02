@@ -150,6 +150,24 @@ pub fn split_for_environment(
                 new_wires.push(Wire::new(wire.src.clone(), format!("{bridge_id}.in")));
                 continue;
             }
+            // `WsBridgeTx*` are NativeOnly node→browser transmitters: the
+            // browser runtime has no machinery to *run* one (it only wires
+            // `WsBridgeRx*` receivers and reads `ui:` sample streams off the
+            // WS directly). So a `ui:` sample sink whose producer is
+            // browser-placed (e.g. the injected narrow-FFT tap under
+            // `audio_split=browser`, where the narrowband chain lives
+            // browser-side) has no valid Tx — emitting one here put an
+            // un-instantiable `WsBridgeTxFftU8 { placement: browser }` in the
+            // browser half and aborted the whole graph load. Skip it: the
+            // slot is already consumed (numbering stays aligned with the node
+            // half), and browser-local rendering of such a stream is a
+            // separate, not-yet-wired path. The node half is unaffected
+            // (`env == Node` still emits the Tx for node-side producers, the
+            // normal wideband-FFT case). `EventStore` ui sinks are handled
+            // above and intentionally exempt — they terminate on either side.
+            if env == Environment::Browser {
+                continue;
+            }
             let mut bridge_params = json!({ "stream_id": sid, "ui_name": ui_name });
             // WsBridgeTxFftU8 emits one Frame::FftU8 per `frame_size`
             // bytes. Without this hint the block falls back to a 4096
@@ -653,6 +671,17 @@ mod tests {
         params: NO_PARAMS,
         ai_notes: "",
     };
+    // Either-placement FftU8 producer — lets a test pin a `ui:` sample
+    // producer browser-side (the injected narrow-FFT tap under
+    // `audio_split=browser`).
+    const FFT_EITHER_SRC: BlockSpec = BlockSpec {
+        type_name: "FftEitherSrc",
+        placement: Placement::Either,
+        inputs: NO_PORTS,
+        outputs: FFT_OUT,
+        params: NO_PARAMS,
+        ai_notes: "",
+    };
     const REAL_OUT: &[PortSpec] = &[PortSpec {
         name: "out",
         port_type: PortType::RealF32,
@@ -720,6 +749,7 @@ mod tests {
             ("WsBridgeTx", &WS_TX),
             ("WsBridgeRx", &WS_RX),
             ("FftHwSrc", &FFT_HW_SRC),
+            ("FftEitherSrc", &FFT_EITHER_SRC),
             ("RealHwSrc", &REAL_HW_SRC),
             ("WasmRealSink", &WASM_REAL_SINK),
             ("BitsHwSrc", &BITS_HW_SRC),
@@ -1198,6 +1228,40 @@ mod tests {
         // is browser-side; node drops it).
         let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
         assert!(!node.blocks.contains_key(&id));
+    }
+
+    #[test]
+    fn ui_sample_sink_with_browser_producer_emits_no_tx_on_browser_half() {
+        // `audio_split=browser` puts the injected narrow-FFT tap browser-
+        // side. Its `ui:fft_narrow` producer is then browser-placed. A
+        // `WsBridgeTx*` is NativeOnly and can't run in the browser, so the
+        // browser half must NOT synthesize one (doing so aborted the whole
+        // graph load). The node half drops the wire (producer != node).
+        let doc = doc_from(
+            r#"{
+                "name": "browser-ui-fft",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "fft": {"type": "FftEitherSrc", "placement": "browser"}
+                },
+                "wires": [["fft.out", "ui:fft_narrow"]]
+            }"#,
+        );
+        let browser = split_for_environment(&doc, Environment::Browser, &stub()).unwrap();
+        assert!(
+            browser
+                .blocks
+                .values()
+                .all(|b| b.type_name != "WsBridgeTxFftU8"),
+            "no node-only Tx may land on the browser half: {:?}",
+            browser.blocks
+        );
+        // Node half: producer is browser, so the ui wire is dropped — no Tx.
+        let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
+        assert!(node
+            .blocks
+            .values()
+            .all(|b| b.type_name != "WsBridgeTxFftU8"));
     }
 
     #[test]

@@ -146,6 +146,17 @@ pub fn inject_voice_transcribe(doc: &mut FlowgraphDoc, profile: &Profile) {
                 ..Default::default()
             },
         );
+
+        // Node (sherpa) path: the tap is node-side and sits inline before
+        // the AudioSink, which `apply_profile` (run just before this pass)
+        // already places on the browser — `AudioSink` is `WasmOnly`. So the
+        // `__vt.out → audio.in` wire crosses the env boundary; `env_split`
+        // bridges that RealF32 audio node→browser and the browser plays it.
+        // The browser learns the bridge's stream id from the *same* split
+        // via `GET /api/flowgraph/browser-half`, so audio AND transcript
+        // arrive together with no client-side re-derivation to diverge.
+        // Headless (no browser) still works — the bridged audio just has no
+        // consumer, and the node-side transcript is unaffected.
         break; // one tap is enough — leave any other sinks untouched
     }
 }
@@ -311,6 +322,53 @@ mod tests {
             .wires
             .iter()
             .any(|w| w.src == format!("{vt}.events") && w.dst == "ui:transcribe"));
+    }
+
+    #[test]
+    fn node_engine_leaves_audiosink_placement_to_apply_profile() {
+        // Server split: SherpaTranscribe runs node-side, inline before the
+        // AudioSink. This pass does NOT touch the sink's placement — that's
+        // `apply_profile`'s job (it runs first and places the `WasmOnly`
+        // AudioSink on the browser). Here we feed a sink already pinned
+        // browser, as the real pipeline would, and assert this pass leaves
+        // it alone. The resulting `__vt.out → audio.in` wire is the
+        // node→browser audio crossing `env_split` bridges; the browser
+        // gets the matching Rx via `/api/flowgraph/browser-half`.
+        let mut doc = parse(
+            br#"{
+                "name": "audio",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "src":   {"type": "SineSource"},
+                    "demod": {"type": "FmDemod"},
+                    "audio": {"type": "AudioSink", "placement": "browser"}
+                },
+                "wires": [["src.out", "demod.in"], ["demod.out", "audio.in"]]
+            }"#,
+        );
+        let profile = Profile {
+            audio: true,
+            transcribe: true,
+            audio_split: AudioSplit::Server,
+        };
+        inject_voice_transcribe(&mut doc, &profile);
+        assert_eq!(
+            doc.blocks
+                .get("__voice_transcribe_audio")
+                .unwrap()
+                .type_name,
+            "SherpaTranscribe"
+        );
+        assert_eq!(
+            doc.blocks.get("audio").unwrap().placement,
+            Some(Environment::Browser),
+            "sink placement is apply_profile's call; this pass leaves it untouched"
+        );
+        // The tap sits inline: demod → __vt → audio.
+        assert!(doc
+            .wires
+            .iter()
+            .any(|w| w.src == "__voice_transcribe_audio.out" && w.dst == "audio.in"));
     }
 
     #[test]
