@@ -10,11 +10,10 @@
   import { pipeline } from '$lib/pipeline.svelte';
   import { logs, patchConsole } from '$lib/logs/store.svelte';
   import { connectServerLogs } from '$lib/logs/client';
+  import { connectDecoders } from '$lib/decoders/store.svelte';
   import { connectAi } from '$lib/ai/client';
-  import { installAutoSettingsEffect } from '$lib/controls/autoSettings.svelte';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
   import { wsUrlFor } from '$lib/api/errors';
-  import { composeSource, injectVoiceTranscribe } from '$lib/flowgraph';
   import { applyControl } from '$lib/control/dispatch';
   import { viewState, type LeftTab } from '$lib/viz/viewState.svelte';
   import { onMount } from 'svelte';
@@ -33,14 +32,10 @@
     if (leftTab === 'logs' && logs.unreadErrors > 0) logs.ackErrors();
   });
 
-  // Auto-toggle hardware notch filters / driver-specific settings
-  // when the centre frequency crosses a configured band — see
-  // web/src/lib/controls/sdr-presets/<driver>.json `auto_settings`.
-  installAutoSettingsEffect();
-
   onMount(() => {
     patchConsole();
     const disconnectLogs = connectServerLogs();
+    const disconnectDecodes = connectDecoders();
     const disconnectAi = connectAi();
     void pipeline.init();
     browserRuntime.init();
@@ -58,34 +53,34 @@
       document.removeEventListener('keydown', unlock);
       void browserRuntime.teardown();
       disconnectLogs();
+      disconnectDecodes();
       disconnectAi();
       pipeline.teardown();
     };
   });
 
   // Browser runtime lifecycle: keep it in sync with the server-side
-  // pipeline. We compose preset + source into a runnable doc here
-  // (mirror of Rust's `compose_source`) — the wasm runtime needs the
-  // `src` placeholder replaced with the real source type, otherwise
-  // the `Source` sentinel looks like an unknown block. Structural
-  // flowgraph changes trigger a reload; start/stop follow the server's
-  // pipeline.status. Both calls are idempotent.
+  // pipeline. The doc we run is always the server's authoritative
+  // *browser half* (`GET /api/flowgraph/browser-half`, mirrored on
+  // `pipeline.browserHalf`) — composed, profile-applied, transcribe-
+  // injected and env-split by the *same* code path that produced the
+  // running node half. That makes the auto-inserted `WsBridge` stream
+  // ids line up by construction, so cross-env audio reaches the browser
+  // AudioSink under EVERY `audio_split`. The browser used to re-derive
+  // its own graph (`composeSource` + `injectVoiceTranscribe`, with no
+  // `apply_profile`); that diverged from the node's slot numbering and
+  // silently dropped audio (node→1000, browser→1001 on balanced; the
+  // analogous mismatch on server). Sourcing one doc from the server kills
+  // that whole class. Transcripts: server-side (sherpa) lands in the
+  // decoder store; browser-side (whisper) feeds the same `transcript`
+  // store via its Worker — the panel renders either.
+  //
+  // Structural changes trigger a reload; start/stop follow pipeline.status.
+  // Both calls are idempotent.
   $effect(() => {
-    const preset = pipeline.flowgraph;
-    const source = pipeline.source;
-    if (!preset || !source) return;
-    const composed = composeSource(preset, {
-      type: source.type,
-      params: source.params as Record<string, unknown>,
-    });
-    // Mirror the server's profile-gated VoiceTranscribe injection
-    // (runtime/src/inject_voice_transcribe.rs). The browser runtime
-    // builds its own graph from composeSource, so without this the tap
-    // exists only node-side. Same `transcribe` profile bit the
-    // receiver's Audio control sets — reading it here makes this effect
-    // re-sync the browser graph when the operator engages transcription.
-    const withVt = pipeline.profile.transcribe ? injectVoiceTranscribe(composed) : composed;
-    browserRuntime.syncFlowgraph(withVt, wsUrlFor('/ws/preset'));
+    const doc = pipeline.browserHalf;
+    if (!doc) return;
+    browserRuntime.syncFlowgraph(doc, wsUrlFor('/ws/preset'));
   });
   $effect(() => {
     browserRuntime.syncStatus(pipeline.status === 'running');

@@ -7,21 +7,11 @@
   // the shared TextConsole primitive, same as the APRS packet console.
   // The mode badge tracks live: FldigiAuto rewrites it on an RSID hit.
 
-  import { pipeline } from '$lib/pipeline.svelte';
   import { fldigi } from '$lib/fldigi/store.svelte';
   import TextConsole from '$lib/viz/TextConsole.svelte';
 
-  let streamId = $derived(pipeline.uiSinks.fldigi?.stream_id);
-  let client = $derived(pipeline.client);
-
-  $effect(() => {
-    if (client && streamId !== undefined) {
-      fldigi.attach(client, streamId);
-      return () => fldigi.detach();
-    }
-    fldigi.detach();
-    return () => {};
-  });
+  // Decoder output comes from the always-connected mirror now (kind
+  // `fldigi`) — no per-view WS attach.
 </script>
 
 <div class="flex h-full w-full min-h-0 flex-col bg-[color:var(--color-bg)]">

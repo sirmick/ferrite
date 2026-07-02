@@ -430,7 +430,7 @@ impl Block for Channelizer {
                     // The only "tune knob" on the VFO — the whole point is
                     // to retune without restarting the graph.
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "VFO offset in Hz applied before downsampling. Positive shifts the channel of interest left, negative right. This is the live-tune knob you reach for after the source is parked off-target to dodge the DC spike.",
+                    ai_notes: "VFO offset in Hz applied before downsampling. Positive shifts the channel of interest left, negative right. ⚠️ Advanced/direct knob — prefer the `tune` verb to change listen frequency: it moves the source LO (with the DC-spike dodge) AND sets this shift together. Setting freq_shift_hz alone re-points the channel without dodging the LO, so the carrier can end up on the DC spike. Reach for it directly only when deliberately re-pointing within a fixed LO span.",
                 },
                 ParamSpec {
                     key: "output_rate_hz",

@@ -32,6 +32,7 @@ anyhow      = "1"
 clap        = { version = "4", features = ["derive"] }
 ferrite-blocks = { path = "../blocks", features = ["soapysdr", "multimon", "adsb", "ais", "ft8", "wspr", "rtl_433", "fldigi"] }
 ferrite-runtime = { path = "../runtime" }
+ferrite-sdr-tables = { path = "../sdr-tables" }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 postcard    = { version = "1", default-features = false, features = ["alloc"] }
 soapysdr    = "0.5"

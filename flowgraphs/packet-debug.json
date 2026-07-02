@@ -54,6 +54,7 @@
     },
     "resamp": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "node",
       "params": {
         "output_rate_hz": 22050.0,

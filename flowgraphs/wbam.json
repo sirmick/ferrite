@@ -4,7 +4,7 @@
   "category": "FM/AM broadcast",
   "label": "AM broadcast",
   "description": "AM broadcast \u2014 medium-wave (540\u20131700 kHz), shortwave, and aviation AM (118\u2013137 MHz). Envelope demodulation.",
-  "ai_notes": "AM broadcast + shortwave SWL + aviation AM. Envelope detector, 5 kHz audio LPF. Hardware `agc` is force-pinned off (AM is amplitude-carried; hardware AGC fights the modulation). Audio NR: `blanker` + `agc`; `notch`/`spectral`/`neural` selectable in the UI for hissy bands or heterodynes. On SDRplay use the HF antenna port (see driver notes).",
+  "ai_notes": "AM broadcast + shortwave SWL + aviation AM. Envelope detector, 5 kHz audio LPF. Hardware `agc` is force-pinned off (AM is amplitude-carried; hardware AGC fights the modulation). Audio NR: `blanker` + `agc`; `notch`/`spectral`/`neural` selectable in the UI for hissy bands or heterodynes. On SDRplay use the HF antenna port (see driver notes). Wideband FFT carries a SignalList tap: call the `signals` verb for the strongest carriers across the ~2.4 MHz span (ranked by power, on the 'Strongest Signals' panel), then `tune` a row's freq_hz to listen. The tuned centre itself is DC-notched out of that list.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Amplitude_Modulation_(AM)",
   "sample_path": "samples/sigidwiki/AM_Sound.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/AM_Waterfall.jpg",
@@ -76,6 +76,7 @@
     },
     "shaper": {
       "type": "AudioShaper",
+      "placement_role": "audio",
       "placement": "browser",
       "when": {
         "audio": true
@@ -88,6 +89,7 @@
     },
     "resamp": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "browser",
       "when": {
         "audio": true
@@ -99,6 +101,7 @@
     },
     "audio_nr": {
       "type": "AudioNrMono",
+      "placement_role": "nr",
       "placement": "browser",
       "when": {
         "audio": true

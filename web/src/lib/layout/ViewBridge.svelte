@@ -58,12 +58,20 @@
       }
     }
     if (state.channel_detail_visible !== undefined) {
-      void applyControl('client.workspace.narrowVisible', state.channel_detail_visible);
+      // The wire still speaks a coarse on/off boolean for the right
+      // column; map it onto the 3-state `rightPane`: true → the channel
+      // FFT/waterfall, false → collapsed. (A headless caller can't yet
+      // select the strongest-signal list this way — that needs a richer
+      // wire field, added alongside the SignalList block.)
+      void applyControl(
+        'client.workspace.rightPane',
+        state.channel_detail_visible ? 'channel' : 'off',
+      );
     }
     // `left_tab` arrives over the wire (server side carries it in
     // UiViewStatePatch) but isn't applied yet — the left-side tab
     // selector doesn't live in a single client-store key the way
-    // mainPane / narrowVisible do. Drop silently rather than warn.
+    // mainPane / rightPane do. Drop silently rather than warn.
   }
 
   let ws: WebSocket | undefined;

@@ -16,6 +16,7 @@
   import { createPointerTune } from '$lib/control/pointerTune';
   import { hoverStore, hoverPctInWindow } from './hoverStore.svelte';
   import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
+  import { signals } from '$lib/signals/store.svelte';
 
   interface Props {
     client: FrameClient;
@@ -42,11 +43,23 @@
   let narrowCenterHz = $derived(wideAxes ? wideAxes.center_freq_hz + vfoShiftHz : undefined);
   let narrowRateHz = $derived.by(() => {
     if (!vfoValues || !wideAxes) return undefined;
-    const outRate = vfoValues.output_rate_hz;
-    if (typeof outRate === 'number' && outRate > 0) return outRate;
-    const factor = vfoValues.factor;
-    if (typeof factor === 'number' && factor > 0) return wideAxes.sample_rate_hz / factor;
-    return undefined;
+    const input = wideAxes.sample_rate_hz;
+    if (!(input > 0)) return undefined;
+    // The channelizer decimates by an INTEGER factor = round(input/output),
+    // so its ACTUAL output rate is input/factor — NOT the requested
+    // `output_rate_hz`. e.g. 2 MS/s ÷ round(2e6/240k)=8 = 250 kHz, not 240k.
+    // The narrow FFT + detector bin against the actual rate; if the axis
+    // uses the requested rate instead, the ~4% scale error walks the markers
+    // off the peaks (zero at centre, growing toward the edges). Prefer an
+    // explicit `factor` if the block exposes one, else derive it.
+    const outRate = typeof vfoValues.output_rate_hz === 'number' ? vfoValues.output_rate_hz : 0;
+    const factor =
+      typeof vfoValues.factor === 'number' && vfoValues.factor > 0
+        ? vfoValues.factor
+        : outRate > 0
+          ? Math.max(1, Math.round(input / outRate))
+          : 0;
+    return factor > 0 ? input / factor : undefined;
   });
 
   let canvas: HTMLCanvasElement | undefined = $state();
@@ -145,6 +158,14 @@
 
   $effect(() => {
     renderer?.setFeatures({ fade, maxHold });
+  });
+
+  // Markers from the single wideband watchlist. Signal freqs are absolute,
+  // so drawPeaks auto-filters to this pane's window and the peak-snap lands
+  // each on the nearest channel spike (now that the axis rate is the real
+  // decimated rate, absolute freqs map onto the channel correctly).
+  $effect(() => {
+    renderer?.setMarkers({ peaksHz: signals.signals.map((s) => s.freq_hz) });
   });
 </script>
 

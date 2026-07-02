@@ -41,7 +41,7 @@ fn build_both_envs(name: &str) -> (FlowgraphDoc, FlowgraphDoc) {
     let mut composed =
         compose_source(&preset, &sine_source()).unwrap_or_else(|e| panic!("{name} compose: {e}"));
     inject_narrow_fft_taps(&mut composed);
-    apply_profile(&mut composed, &Profile::default());
+    apply_profile(&mut composed, &Profile::default(), &InventorySpecRegistry);
 
     let mut halves = Vec::new();
     for env in [Environment::Node, Environment::Browser] {

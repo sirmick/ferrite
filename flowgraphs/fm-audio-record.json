@@ -34,6 +34,7 @@
     },
     "decim": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "node",
       "params": {
         "output_rate_hz": 48000.0,

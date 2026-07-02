@@ -264,6 +264,54 @@ mod tests {
     }
 
     #[test]
+    fn soapy_source_surfaces_sdr_knobs_with_notes() {
+        // Regression: the source block used to advertise only
+        // args/sample_rate/center_freq/gain/channel, hiding the most
+        // SDR-specific knobs (agc, antenna, dc_offset, bandwidth) from
+        // the AI's `list_block_types` introspection. Every settable
+        // param must appear with non-empty ai_notes.
+        let schemas = all_block_schemas();
+        let src = schemas
+            .iter()
+            .find(|s| s.type_name == "SoapySource")
+            .expect("SoapySource registered");
+        for key in [
+            "args",
+            "sample_rate_hz",
+            "center_freq_hz",
+            "bandwidth_hz",
+            "gain_db",
+            "agc",
+            "antenna",
+            "dc_offset_correction",
+            "channel",
+        ] {
+            let p = src
+                .params
+                .iter()
+                .find(|p| p.key == key)
+                .unwrap_or_else(|| panic!("SoapySource param {key} missing from schema"));
+            assert!(
+                !p.ai_notes.trim().is_empty(),
+                "SoapySource param {key} has empty ai_notes"
+            );
+        }
+        // The live-tunable knobs hot-apply (SelfBlock); bandwidth is a
+        // hardware-filter change that restarts the source.
+        let scope = |k: &str| {
+            src.params
+                .iter()
+                .find(|p| p.key == k)
+                .unwrap()
+                .reconfig_scope
+        };
+        assert_eq!(scope("agc"), "self");
+        assert_eq!(scope("antenna"), "self");
+        assert_eq!(scope("dc_offset_correction"), "self");
+        assert_eq!(scope("bandwidth_hz"), "sourceRestart");
+    }
+
+    #[test]
     fn range_param_serializes_with_kind_tag() {
         let schemas = all_block_schemas();
         let fm = schemas.iter().find(|s| s.type_name == "FmDemod").unwrap();

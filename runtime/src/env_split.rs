@@ -128,26 +128,44 @@ pub fn split_for_environment(
             }
             let tx_type = pick_ui_tx_type(doc, registry, &wire.src, ui_name)?;
             let bridge_id = format!("__ui_{ui_name}_{sid}");
-            // Unified event transport: when the producer is browser-side
-            // (this is the browser split), an `Events` `ui:` wire
-            // terminates in a drainable `EventsSink` instead of a
-            // `WsBridgeTxEvents` (which would ship over a WS the browser
-            // doesn't host). The runner drains it post-tick and
-            // loopbacks frames into the same `FrameClient` the stores
-            // subscribe to — so node-WS and browser-local decode look
-            // identical above the runner. The `__ui_<name>_<sid>` id
-            // carries the routing (runner parses name + stream_id);
-            // `sid` matches the node half's allocation deterministically.
-            if env == Environment::Browser && tx_type == "WsBridgeTxEvents" {
+            // Decoder event sinks don't ship over WS anymore: every
+            // `Events` `ui:` wire terminates in an `EventStore`
+            // (`Placement::Either`) that folds records into the
+            // server-side `DecoderStore` — node-side it writes the store
+            // directly, browser-side (browser-demod) it buffers for the
+            // runner to drain + POST. One store, mirrored to the browser
+            // over WS and read by MCP over REST. `kind` is the ui sink
+            // name (`aprs` / `adsb` / `ft8` / `signals` / …); the
+            // `__ui_<name>_<sid>` id keeps numbering deterministic across
+            // halves even though `EventStore` ignores the stream id.
+            if tx_type == "EventStore" {
                 insert_bridge(
                     &mut new_blocks,
                     doc,
                     bridge_id.clone(),
-                    "EventsSink",
+                    "EventStore",
                     env,
-                    json!({ "capacity": 8192 }),
+                    json!({ "kind": ui_name }),
                 )?;
                 new_wires.push(Wire::new(wire.src.clone(), format!("{bridge_id}.in")));
+                continue;
+            }
+            // `WsBridgeTx*` are NativeOnly node→browser transmitters: the
+            // browser runtime has no machinery to *run* one (it only wires
+            // `WsBridgeRx*` receivers and reads `ui:` sample streams off the
+            // WS directly). So a `ui:` sample sink whose producer is
+            // browser-placed (e.g. the injected narrow-FFT tap under
+            // `audio_split=browser`, where the narrowband chain lives
+            // browser-side) has no valid Tx — emitting one here put an
+            // un-instantiable `WsBridgeTxFftU8 { placement: browser }` in the
+            // browser half and aborted the whole graph load. Skip it: the
+            // slot is already consumed (numbering stays aligned with the node
+            // half), and browser-local rendering of such a stream is a
+            // separate, not-yet-wired path. The node half is unaffected
+            // (`env == Node` still emits the Tx for node-side producers, the
+            // normal wideband-FFT case). `EventStore` ui sinks are handled
+            // above and intentionally exempt — they terminate on either side.
+            if env == Environment::Browser {
                 continue;
             }
             let mut bridge_params = json!({ "stream_id": sid, "ui_name": ui_name });
@@ -345,10 +363,13 @@ fn producer_output_rate_hz(doc: &FlowgraphDoc, source_endpoint: &str) -> Option<
     rate_of_block(doc, block_id, 0)
 }
 
-/// Resolve the source port's type and map it to the matching WsBridgeTx
-/// variant. Supported today: IqF32 → `WsBridgeTx`, FftU8 → `WsBridgeTxFftU8`,
-/// Events → `WsBridgeTxEvents`. Other port types would need their own Tx
-/// block before a `ui:<name>` wire can carry them.
+/// Resolve the source port's type and map it to the block that terminates
+/// a `ui:<name>` wire. Sample ports get a `WsBridgeTx*` (IqF32 →
+/// `WsBridgeTx`, RealF32 → `WsBridgeTxF32`, FftU8 → `WsBridgeTxFftU8`);
+/// `Events` ports get an `EventStore` instead — decoder records fold into
+/// the server-side `DecoderStore`, they don't ship over the sample WS.
+/// Other port types would need their own terminator before a `ui:<name>`
+/// wire can carry them.
 fn pick_ui_tx_type(
     doc: &FlowgraphDoc,
     registry: &dyn SpecRegistry,
@@ -375,7 +396,7 @@ fn pick_ui_tx_type(
         PortType::IqF32 => Ok("WsBridgeTx"),
         PortType::RealF32 => Ok("WsBridgeTxF32"),
         PortType::FftU8 => Ok("WsBridgeTxFftU8"),
-        PortType::Events => Ok("WsBridgeTxEvents"),
+        PortType::Events => Ok("EventStore"),
         other => Err(SplitError::UnsupportedUiPortType {
             ui_name: ui_name.to_string(),
             endpoint: source.to_string(),
@@ -650,6 +671,17 @@ mod tests {
         params: NO_PARAMS,
         ai_notes: "",
     };
+    // Either-placement FftU8 producer — lets a test pin a `ui:` sample
+    // producer browser-side (the injected narrow-FFT tap under
+    // `audio_split=browser`).
+    const FFT_EITHER_SRC: BlockSpec = BlockSpec {
+        type_name: "FftEitherSrc",
+        placement: Placement::Either,
+        inputs: NO_PORTS,
+        outputs: FFT_OUT,
+        params: NO_PARAMS,
+        ai_notes: "",
+    };
     const REAL_OUT: &[PortSpec] = &[PortSpec {
         name: "out",
         port_type: PortType::RealF32,
@@ -717,6 +749,7 @@ mod tests {
             ("WsBridgeTx", &WS_TX),
             ("WsBridgeRx", &WS_RX),
             ("FftHwSrc", &FFT_HW_SRC),
+            ("FftEitherSrc", &FFT_EITHER_SRC),
             ("RealHwSrc", &REAL_HW_SRC),
             ("WasmRealSink", &WASM_REAL_SINK),
             ("BitsHwSrc", &BITS_HW_SRC),
@@ -1141,7 +1174,9 @@ mod tests {
     }
 
     #[test]
-    fn ui_sink_on_events_source_synthesizes_events_tx() {
+    fn ui_sink_on_events_source_synthesizes_event_store() {
+        // Decoder event sinks terminate in an `EventStore` (kind = ui
+        // name) that feeds the server DecoderStore — not a WS bridge.
         let doc = doc_from(
             r#"{
                 "name": "ui-events",
@@ -1153,18 +1188,25 @@ mod tests {
             }"#,
         );
         let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
-        let tx_id = format!("__ui_events_{CROSS_ENV_STREAM_BASE}");
-        let tx = node.blocks.get(&tx_id).expect("ui-side bridge inserted");
-        assert_eq!(tx.type_name, "WsBridgeTxEvents");
+        let id = format!("__ui_events_{CROSS_ENV_STREAM_BASE}");
+        let es = node.blocks.get(&id).expect("ui-side EventStore inserted");
+        assert_eq!(es.type_name, "EventStore");
+        assert_eq!(
+            es.params
+                .as_ref()
+                .and_then(|p| p.get("kind"))
+                .and_then(|v| v.as_str()),
+            Some("events"),
+            "kind set from the ui sink name"
+        );
     }
 
     #[test]
-    fn ui_sink_on_browser_events_source_synthesizes_drainable_events_sink() {
-        // Unified transport: when the events producer is browser-side,
-        // the browser split terminates `ui:<name>` in a drainable
-        // `EventsSink` (id `__ui_<name>_<sid>`, sid matching the node
-        // half) — NOT a WsBridgeTxEvents (no WS to ship over) — so the
-        // runner can drain + loopback it.
+    fn ui_sink_on_browser_events_source_synthesizes_event_store_browser_side() {
+        // Browser-demod: the events producer is browser-side, so the
+        // browser split terminates `ui:<name>` in an `EventStore`
+        // (Placement::Either) that buffers for the runner to POST. The
+        // node half drops it (producer is browser).
         let doc = doc_from(
             r#"{
                 "name": "ui-events-browser",
@@ -1180,12 +1222,46 @@ mod tests {
         let sink = browser
             .blocks
             .get(&id)
-            .expect("browser ui EventsSink inserted");
-        assert_eq!(sink.type_name, "EventsSink");
-        // Node half must NOT also produce a Tx for this wire (producer
+            .expect("browser ui EventStore inserted");
+        assert_eq!(sink.type_name, "EventStore");
+        // Node half must NOT also produce a sink for this wire (producer
         // is browser-side; node drops it).
         let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
         assert!(!node.blocks.contains_key(&id));
+    }
+
+    #[test]
+    fn ui_sample_sink_with_browser_producer_emits_no_tx_on_browser_half() {
+        // `audio_split=browser` puts the injected narrow-FFT tap browser-
+        // side. Its `ui:fft_narrow` producer is then browser-placed. A
+        // `WsBridgeTx*` is NativeOnly and can't run in the browser, so the
+        // browser half must NOT synthesize one (doing so aborted the whole
+        // graph load). The node half drops the wire (producer != node).
+        let doc = doc_from(
+            r#"{
+                "name": "browser-ui-fft",
+                "environments": ["node", "browser"],
+                "blocks": {
+                    "fft": {"type": "FftEitherSrc", "placement": "browser"}
+                },
+                "wires": [["fft.out", "ui:fft_narrow"]]
+            }"#,
+        );
+        let browser = split_for_environment(&doc, Environment::Browser, &stub()).unwrap();
+        assert!(
+            browser
+                .blocks
+                .values()
+                .all(|b| b.type_name != "WsBridgeTxFftU8"),
+            "no node-only Tx may land on the browser half: {:?}",
+            browser.blocks
+        );
+        // Node half: producer is browser, so the ui wire is dropped — no Tx.
+        let node = split_for_environment(&doc, Environment::Node, &stub()).unwrap();
+        assert!(node
+            .blocks
+            .values()
+            .all(|b| b.type_name != "WsBridgeTxFftU8"));
     }
 
     #[test]

@@ -4,7 +4,7 @@
   "category": "FM/AM broadcast",
   "label": "FM broadcast (stereo)",
   "description": "Wideband FM broadcast, 87.9\u2013107.9 MHz, with pilot-locked stereo decoding (mono fallback).",
-  "ai_notes": "Wideband FM broadcast, pilot-decoded stereo. Falls back to mono when the 19 kHz pilot is below `lock_threshold`; the events port carries stereo-lock status. If asked \"why is this mono?\" check pilot amplitude before retuning.",
+  "ai_notes": "Wideband FM broadcast, pilot-decoded stereo. Falls back to mono when the 19 kHz pilot is below `lock_threshold`; the events port carries stereo-lock status. If asked \"why is this mono?\" check pilot amplitude before retuning. Wideband FFT carries a SignalList tap: call the `signals` verb for the strongest carriers across the ~2.4 MHz span (ranked by power, on the 'Strongest Signals' panel), then `tune` a row's freq_hz to listen. The tuned centre itself is DC-notched out of that list.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/FM_Broadcast_Radio",
   "sample_path": "samples/sigidwiki/WFM.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/Stereo_left_right_fmbroadcast.jpg",
@@ -89,6 +89,7 @@
     },
     "decim_l": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "browser",
       "params": {
         "output_rate_hz": 48000.0,
@@ -97,6 +98,7 @@
     },
     "decim_r": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "browser",
       "params": {
         "output_rate_hz": 48000.0,
@@ -105,6 +107,7 @@
     },
     "audio_nr": {
       "type": "AudioNrStereo",
+      "placement_role": "nr",
       "placement": "browser",
       "params": {
         "sample_rate_hz": 48000.0,

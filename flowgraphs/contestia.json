@@ -94,6 +94,7 @@
     },
     "audio_resamp": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "browser",
       "when": {
         "audio": true
@@ -105,6 +106,7 @@
     },
     "audio_nr": {
       "type": "AudioNrMono",
+      "placement_role": "nr",
       "placement": "browser",
       "when": {
         "audio": true

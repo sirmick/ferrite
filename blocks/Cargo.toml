@@ -65,6 +65,13 @@ ferrite-blocks-macros = { path = "../blocks-macros", version     = "0.9.0" }
 # wasm32-unknown-unknown. Same crate runtime/ already uses.
 web-time              = "1"
 ferrite-liquid-dsp    = { path = "native/liquid-dsp", version     = "0.9.0" }
+# Native whisper.cpp STT engine + the portable VAD/cleanup/transcript
+# core (resample, segment, ham post-process, rolling prompt). Non-
+# optional: `VoiceTranscribe` is always registered and uses the portable
+# core unconditionally. Native links the cmake-built engine; wasm32
+# compiles the pure-Rust core and stubs the FFI (the browser runs whisper
+# via its own Emscripten module), so it stays wasm-clean.
+ferrite-whisper       = { path = "native/whisper",     version     = "0.9.0" }
 ferrite-multimon-ng   = { path = "native/multimon-ng", version     = "0.9.0", optional = true }
 ferrite-dump1090      = { path = "native/dump1090",    version     = "0.9.0", optional = true }
 ferrite-rtl-ais       = { path = "native/rtl-ais",     version     = "0.9.0", optional = true }
@@ -88,6 +95,14 @@ js-sys                = { version = "0.3", optional = true }
 soapysdr              = { version = "0.5", optional = true }
 tracing               = "0.1"
 wasm-bindgen          = { version = "0.2", optional = true }
+
+# Native-only: the `SherpaTranscribe` block's WebSocket client to the
+# sherpa-onnx sidecar. Pure-Rust, sync (driven on the block's worker
+# thread); no TLS rustls/native-tls pulled in (the sidecar is loopback
+# ws://). Scoped off wasm32 so the browser bundle never sees it — the
+# block is `Placement::NativeOnly` and stubs out on wasm anyway.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tungstenite           = { version = "0.24", default-features = false, features = ["handshake"] }
 
 # See note in runtime/Cargo.toml — wasm-pack's prebuilt wasm-opt binaries
 # only target x86_64 / aarch64; disable for cross-host portability.

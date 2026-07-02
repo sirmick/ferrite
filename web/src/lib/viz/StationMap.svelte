@@ -57,6 +57,15 @@
      *  default. Different modes want very different framings (FT8
      *  global vs ADS-B/APRS local). */
     storageKey?: string;
+    /** Initial camera framing used when no per-`storageKey` camera has
+     *  been persisted yet. Local modes (ADS-B/APRS) default to CONUS;
+     *  global modes (FT8/WSPR) pass a world view. */
+    defaultView?: { center: [number, number]; zoom: number };
+    /** Initial state of the "auto-fit" toggle the first time this view
+     *  is shown. Persisted per `storageKey` once the operator flips it.
+     *  Local maps default on; global maps (FT8) default off so a few
+     *  nearby contacts don't yank the world view in. */
+    autoFitDefault?: boolean;
   }
 
   let {
@@ -66,6 +75,9 @@
     selectedId = $bindable(null),
     onselect,
     storageKey = 'ferrite.map.camera',
+    // Geographic centre of the contiguous US, framed to show CONUS.
+    defaultView = { center: [-96, 39.5], zoom: 3.4 },
+    autoFitDefault = true,
   }: Props = $props();
 
   // Persisted camera (per `storageKey`). Read once for the initial
@@ -117,6 +129,28 @@
     } catch {
       /* storage full / disabled — non-fatal, camera just won't persist */
     }
+  }
+
+  // Auto-fit toggle (per `storageKey`). When on, the camera re-frames
+  // to the extents of every point on the map whenever the *set* of
+  // points changes. Persisted so the operator's choice survives a
+  // remount/reload, falling back to `autoFitDefault` on first use.
+  function loadAutoFit(): boolean {
+    if (typeof localStorage === 'undefined') return autoFitDefault;
+    const v = localStorage.getItem(`${storageKey}.autofit`);
+    return v === null ? autoFitDefault : v === '1';
+  }
+  let autoFit = $state(loadAutoFit());
+  function onToggleAutoFit(): void {
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(`${storageKey}.autofit`, autoFit ? '1' : '0');
+      } catch {
+        /* storage full / disabled — non-fatal */
+      }
+    }
+    // Flipping it on should immediately frame what's already on the map.
+    if (autoFit) fitToData();
   }
 
   let container: HTMLDivElement;
@@ -229,10 +263,13 @@
         id: 'trails',
         type: 'line',
         source: 'trails',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
-          'line-color': '#38bdf8',
-          'line-opacity': 0.35,
-          'line-width': 1,
+          // Bright amber, distinct from the cyan station markers and
+          // clearly visible against the dark basemap.
+          'line-color': '#fbbf24',
+          'line-opacity': 0.85,
+          'line-width': 1.6,
         },
       },
       {
@@ -377,6 +414,56 @@
     stateSelected = id;
   }
 
+  // Bounding box over everything drawn (stations + trail vertices +
+  // link endpoints), as [[minLon,minLat],[maxLon,maxLat]] = [sw, ne].
+  // null when there's nothing to frame.
+  function dataBounds(): [[number, number], [number, number]] | null {
+    let minLon = Infinity;
+    let minLat = Infinity;
+    let maxLon = -Infinity;
+    let maxLat = -Infinity;
+    const add = (lon: number, lat: number): void => {
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+      if (lon < minLon) minLon = lon;
+      if (lat < minLat) minLat = lat;
+      if (lon > maxLon) maxLon = lon;
+      if (lat > maxLat) maxLat = lat;
+    };
+    for (const s of stations) add(s.lon, s.lat);
+    for (const t of trails) for (const p of t.path) add(p[0], p[1]);
+    for (const l of links) {
+      add(l.from[0], l.from[1]);
+      add(l.to[0], l.to[1]);
+    }
+    if (minLon === Infinity) return null;
+    return [
+      [minLon, minLat],
+      [maxLon, maxLat],
+    ];
+  }
+
+  // Signature of the current point set — changes when an id appears or
+  // drops. Auto-fit keys on this so we re-frame on "new data points"
+  // rather than on every 1 Hz position nudge (which would jitter the
+  // camera while tracking moving aircraft).
+  function pointKey(): string {
+    return stations
+      .map((s) => s.id)
+      .sort()
+      .join(',');
+  }
+  let lastFitKey: string | null = null;
+
+  function fitToData(): void {
+    if (!ready || !map || !autoFit) return;
+    const b = dataBounds();
+    if (!b) return;
+    // maxZoom keeps a single point (or one cluster) from zooming to
+    // street level; padding leaves a margin so markers aren't clipped.
+    map.fitBounds(b, { padding: 48, maxZoom: 9, duration: 600 });
+    lastFitKey = pointKey();
+  }
+
   onMount(() => {
     let disposed = false;
     // Dynamic import keeps MapLibre (and its WebGL/`window` use) out
@@ -388,8 +475,8 @@
       map = new maplibregl.Map({
         container,
         style: STYLE,
-        center: cam?.center ?? [0, 25],
-        zoom: cam?.zoom ?? 1.2,
+        center: cam?.center ?? defaultView.center,
+        zoom: cam?.zoom ?? defaultView.zoom,
         bearing: cam?.bearing ?? 0,
         pitch: cam?.pitch ?? 0,
         attributionControl: false,
@@ -497,6 +584,9 @@
     // setData drops feature-state; re-assert the current selection.
     stateSelected = null;
     applySelection(selectedId ?? null);
+    // Re-frame to the extents when the set of points changes (a new
+    // station/aircraft appeared or one dropped) and auto-fit is on.
+    if (autoFit && pointKey() !== lastFitKey) fitToData();
   });
 
   // External selection changes (e.g. a table row click) reflect onto
@@ -506,7 +596,24 @@
   });
 </script>
 
-<div bind:this={container} class="h-full w-full" data-testid="station-map"></div>
+<div class="relative h-full w-full">
+  <div bind:this={container} class="h-full w-full" data-testid="station-map"></div>
+  <!-- Auto-fit toggle. Top-left so it clears the NavigationControl
+       (top-right). When on, the camera tracks the extents of all
+       points as new ones appear. -->
+  <label
+    class="absolute left-2 top-2 z-10 flex items-center gap-1 rounded border border-slate-700 bg-slate-900/85 px-2 py-1 text-xs text-slate-200 shadow select-none"
+    title="Auto-zoom the map to fit all points whenever new ones appear"
+  >
+    <input
+      type="checkbox"
+      bind:checked={autoFit}
+      onchange={onToggleAutoFit}
+      data-testid="map-autofit"
+    />
+    <span>auto-fit</span>
+  </label>
+</div>
 
 <style>
   /* MapLibre injects its own canvas; ensure it fills the panel. */

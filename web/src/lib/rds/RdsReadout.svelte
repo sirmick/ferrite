@@ -7,17 +7,9 @@
   import { pipeline } from '$lib/pipeline.svelte';
   import { rds, PTY_NAMES } from './store.svelte';
 
-  let streamId = $derived(pipeline.uiSinks.rds?.stream_id);
-  let client = $derived(pipeline.client);
-
-  $effect(() => {
-    if (client && streamId !== undefined) {
-      rds.attach(client, streamId);
-      return () => rds.detach();
-    }
-    rds.detach();
-    return () => {};
-  });
+  // RDS state comes from the always-connected decoder mirror (kind `rds`,
+  // Merge-folded). Show the readout when the preset has an RdsDemod.
+  let hasRds = $derived(pipeline.blocks.rds !== undefined);
 
   let ptyLabel = $derived(rds.pty === null ? null : (PTY_NAMES[rds.pty] ?? `PTY ${rds.pty}`));
   // PI is a 4-hex-digit code — render in upper-case for the display
@@ -25,7 +17,7 @@
   let piHex = $derived(rds.pi === null ? null : rds.pi.toString(16).toUpperCase().padStart(4, '0'));
 </script>
 
-{#if streamId !== undefined}
+{#if hasRds}
   <div class="flex flex-col gap-1 text-xs">
     <div class="flex items-baseline justify-between">
       <span class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">

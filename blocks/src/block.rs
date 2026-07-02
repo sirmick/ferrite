@@ -353,6 +353,14 @@ impl InputPort<'_> {
             None
         }
     }
+    #[must_use]
+    pub fn as_fft_u8(&self) -> Option<&[u8]> {
+        if let InBuf::FftU8(s) = &self.buf {
+            Some(s)
+        } else {
+            None
+        }
+    }
 }
 
 /// One output port's buffer slice plus its metadata for the duration of a
@@ -645,6 +653,39 @@ where
         Ok(T::default())
     } else {
         Ok(serde_json::from_value(value.clone())?)
+    }
+}
+
+/// Queue a JSON value as a newline-delimited record onto a decoder's
+/// `events` buffer. The `EventStore` sink splits on `\n`, so one record
+/// per line. Shared by the decoder blocks that feed `ui:<kind>` → the
+/// `DecoderStore`.
+pub fn push_event_json(out: &mut Vec<u8>, value: &serde_json::Value) {
+    if let Ok(mut bytes) = serde_json::to_vec(value) {
+        out.append(&mut bytes);
+        out.push(b'\n');
+    }
+}
+
+/// Drain a queued events buffer into the block's `events` output port,
+/// recording the byte count in `w.produced[0]`. Anything that doesn't fit
+/// this tick rides to the next. No-op when the queue is empty or the
+/// block has no `events` port wired this split.
+pub fn drain_events_port(io: &mut BlockIo<'_>, queue: &mut Vec<u8>, w: &mut Work) {
+    if queue.is_empty() {
+        return;
+    }
+    for port in io.outputs.iter_mut() {
+        if port.name == "events" {
+            if let OutBuf::Events(dst) = &mut port.buf {
+                let take = queue.len().min(dst.len());
+                if take > 0 {
+                    dst[..take].copy_from_slice(&queue[..take]);
+                    queue.drain(..take);
+                    w.produced[0] = take;
+                }
+            }
+        }
     }
 }
 

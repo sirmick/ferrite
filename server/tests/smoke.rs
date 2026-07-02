@@ -26,9 +26,17 @@ mod frame_bus;
 #[allow(dead_code)]
 mod bridge_sink;
 
+#[path = "../src/decoder_store.rs"]
+#[allow(dead_code)]
+mod decoder_store;
+
 #[path = "../src/preset_pipeline.rs"]
 #[allow(dead_code)]
 mod preset_pipeline;
+
+#[path = "../src/source_policy.rs"]
+#[allow(dead_code)]
+mod source_policy;
 
 #[path = "../src/app_state.rs"]
 #[allow(dead_code)]

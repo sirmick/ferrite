@@ -75,15 +75,28 @@ jobs:
           git fetch -q --depth 1 origin "$PIN"
           git checkout -q FETCH_HEAD
 
-      - name: Fetch whisper tiny model
-        # The golden e2e (whisperGoldenE2E.test.ts) transcribes through
-        # the built module against ggml-tiny.en-q5_1 (~30 MB — chosen
-        # small enough for the fast lane).
+      - name: Cache whisper tiny model
+        id: whisper-model
+        uses: actions/cache@v4
+        with:
+          path: web/static/models/ggml-tiny.en-q5_1.bin
+          key: whisper-tiny-en-q5_1-v1
+
+      - name: Fetch whisper tiny model (best-effort)
+        if: steps.whisper-model.outputs.cache-hit != 'true'
+        # The golden e2e (whisperGoldenE2E.test.ts) `skipIf`s when the model
+        # is absent, so a HuggingFace rate-limit (HF 429s unauthenticated
+        # downloads from shared CI IPs) must NOT fail the job — fetch
+        # best-effort and let the e2e skip this run. Once any fetch succeeds
+        # it's cached, so later runs gate the transcript for real. NB: models
+        # live under `ggerganov/whisper.cpp` — `ggml-org` (where the source
+        # moved) 401s on the model blobs.
         run: |
           mkdir -p web/static/models
-          curl -fL --retry 3 --retry-delay 5 \
+          curl -fL --retry 6 --retry-all-errors --retry-delay 10 --connect-timeout 30 --remove-on-error \
             -o web/static/models/ggml-tiny.en-q5_1.bin \
-            https://huggingface.co/ggml-org/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin \
+            || { echo "::warning::whisper model fetch failed (HF rate-limit); golden e2e will skip this run"; rm -f web/static/models/ggml-tiny.en-q5_1.bin; }
 
       - name: pnpm install
         run: pnpm install --frozen-lockfile

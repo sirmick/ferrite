@@ -5,24 +5,14 @@
   // `ui:aprs` sink. Selection is keyed by callsign, coupling the
   // table and the map both ways.
 
-  import { pipeline } from '$lib/pipeline.svelte';
   import { aprs, type AprsStation } from '$lib/aprs/store.svelte';
   import DecodeTable from '$lib/viz/DecodeTable.svelte';
   import StationMap from '$lib/viz/StationMap.svelte';
   import TextConsole from '$lib/viz/TextConsole.svelte';
   import Split from '$lib/layout/Split.svelte';
 
-  let streamId = $derived(pipeline.uiSinks.aprs?.stream_id);
-  let client = $derived(pipeline.client);
-
-  $effect(() => {
-    if (client && streamId !== undefined) {
-      aprs.attach(client, streamId);
-      return () => aprs.detach();
-    }
-    aprs.detach();
-    return () => {};
-  });
+  // APRS frames come from the always-connected decoder mirror (kind
+  // `aprs`) — no per-view WS attach.
 
   let selected = $state<string | null>(null);
   function onReset(): void {
@@ -72,6 +62,7 @@
         <div class="h-full min-h-0">
           <StationMap
             stations={aprs.mapStations}
+            trails={aprs.trails}
             selectedId={selected}
             onselect={(id) => (selected = id)}
             storageKey="ferrite.map.aprs"

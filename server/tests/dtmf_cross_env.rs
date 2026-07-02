@@ -40,6 +40,10 @@ mod frame_bus;
 #[allow(dead_code)]
 mod bridge_sink;
 
+#[path = "../src/decoder_store.rs"]
+#[allow(dead_code)]
+mod decoder_store;
+
 #[path = "../src/preset_pipeline.rs"]
 #[allow(dead_code)]
 mod preset_pipeline;
@@ -55,6 +59,10 @@ mod view_bridge;
 #[path = "../src/band_plan.rs"]
 #[allow(dead_code)]
 mod band_plan;
+
+#[path = "../src/source_policy.rs"]
+#[allow(dead_code)]
+mod source_policy;
 
 #[path = "../src/app_state.rs"]
 #[allow(dead_code)]
@@ -121,7 +129,7 @@ async fn dtmf_e2e_preset_round_trips_digits_across_cross_env_bridge() {
         &doc,
         frames,
         Duration::from_millis(5),
-        std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        std::sync::Arc::new(decoder_store::DecoderStore::new()),
     )
     .expect("node half spawns");
 

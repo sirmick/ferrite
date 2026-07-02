@@ -199,8 +199,11 @@ Auto-inserted by `split_for_environment` (see
 |---------------------|--------------|---------|-------------|
 | `WsBridgeTx`        | node → wire  | IqF32   | NativeOnly  |
 | `WsBridgeTxFftU8`   | node → wire  | FftU8   | NativeOnly  |
-| `WsBridgeTxEvents`  | node → wire  | Events  | NativeOnly  |
 | `WsBridgeRx`        | wire → browser| IqF32  | WasmOnly    |
+
+(`Events` `ui:` sinks don't bridge over the sample WS — `env_split`
+terminates them in an `EventStore` that folds records into the
+server-side store, mirrored to the browser over `/ws/state`.)
 
 All Tx blocks call `BridgeSink::push(Frame::…)` with a zero-stamped
 envelope; the server's `BroadcastSink`
@@ -282,7 +285,6 @@ to a sibling Emscripten module (see [01-architecture.md](01-architecture.md)).
 |---------------------|-----------------|--------|-------------|
 | `WsBridgeTx`        | node → browser  | IqF32  | NativeOnly  |
 | `WsBridgeTxFftU8`   | node → browser  | FftU8  | NativeOnly  |
-| `WsBridgeTxEvents`  | node → browser  | Events | NativeOnly  |
 | `WsBridgeRx`        | wire → browser  | IqF32  | WasmOnly    |
 
 All in [`blocks/src/ws_bridge.rs`](../blocks/src/ws_bridge.rs).

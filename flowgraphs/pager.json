@@ -60,6 +60,7 @@
     },
     "resamp": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "node",
       "params": {
         "output_rate_hz": 22050.0,
@@ -79,6 +80,7 @@
     },
     "audio_resamp": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "browser",
       "when": {
         "audio": true
@@ -90,6 +92,7 @@
     },
     "audio_nr": {
       "type": "AudioNrMono",
+      "placement_role": "nr",
       "placement": "browser",
       "when": {
         "audio": true
@@ -148,6 +151,10 @@
     [
       "resamp.out",
       "pager.in"
+    ],
+    [
+      "pager.events",
+      "ui:pager"
     ],
     [
       "audio_tee.out1",

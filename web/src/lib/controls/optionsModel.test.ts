@@ -95,10 +95,11 @@ describe('defaultsFor — SDRPlay', () => {
     expect(state.gains.map((g) => g.name)).toEqual(['IFGR', 'RFGR']);
   });
 
-  it('picks the IF filter from the driver ladder (largest ≤ Fs)', () => {
-    // The Rust-owned sdrplay ladder ends …1.536M, 5M. At the preset Fs
-    // of 2 Ms/s, 1.536 MHz is the largest entry ≤ Fs.
-    expect(state.bandwidth_hz).toBe(1_536_000);
+  it('leaves bandwidth implicit (daemon derives it) but offers ladder choices', () => {
+    // The UI no longer derives the IF filter — the daemon picks it from the
+    // rate at patch_source. defaultsFor leaves bandwidth_hz null; the
+    // advanced dropdown still lists the ladder so the operator can pin one.
+    expect(state.bandwidth_hz).toBeNull();
     expect(state.bandwidth_choices).toContain(5_000_000);
     expect(state.bandwidth_choices).toContain(1_536_000);
   });
@@ -185,10 +186,10 @@ describe('toSourceConfig', () => {
     ).toBeUndefined();
   });
 
-  it('forwards the ladder-derived bandwidth for SDRplay', () => {
-    // sdrplay has a ladder; defaultsFor picks 1.536 MHz at 2 Ms/s,
-    // toSourceConfig sends it on to the server.
+  it('omits bandwidth for SDRplay too (daemon derives it from the rate)', () => {
+    // defaultsFor leaves bandwidth implicit; toSourceConfig skips the field
+    // so the daemon's source policy fills it on patch_source.
     const cfg = toSourceConfig(SDRPLAY_CAPS, defaultsFor(SDRPLAY_CAPS)!);
-    expect(cfg.params.bandwidth_hz).toBe(1_536_000);
+    expect(cfg.params.bandwidth_hz).toBeUndefined();
   });
 });

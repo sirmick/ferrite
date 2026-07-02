@@ -27,7 +27,23 @@ jobs:
         # libc.a — needed for the `cargo check (wasm32)` step below.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsoapysdr-dev clang lld wasi-libc
+          sudo apt-get install -y libsoapysdr-dev clang lld wasi-libc cmake
+
+      - name: Vendor whisper.cpp (pinned — native wsp_* FFI link)
+        # ferrite-whisper's build.rs builds whisper.cpp via its own CMake to
+        # resolve the `wsp_*` C ABI. Without the vendored source it emits a
+        # stub, and once a block references the engine (node-side STT)
+        # `cargo test` fails to link (undefined `wsp_transcribe`/…). Pin
+        # matches scripts/bootstrap.sh — the local build's source of truth.
+        run: |
+          PIN=v1.8.6
+          DIR=blocks/native/whisper/vendor/whisper.cpp
+          mkdir -p "$DIR"
+          cd "$DIR"
+          git init -q
+          git remote add origin https://github.com/ggml-org/whisper.cpp
+          git fetch -q --depth 1 origin "$PIN"
+          git checkout -q FETCH_HEAD
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable

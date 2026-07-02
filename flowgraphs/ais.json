@@ -82,6 +82,7 @@
     },
     "resamp_a": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "node",
       "params": {
         "output_rate_hz": 48000.0,
@@ -90,6 +91,7 @@
     },
     "resamp_b": {
       "type": "RealF32Resamp",
+      "placement_role": "audio",
       "placement": "node",
       "params": {
         "output_rate_hz": 48000.0,
@@ -156,6 +158,10 @@
     [
       "logmag.out",
       "ui:fft"
+    ],
+    [
+      "ais.events",
+      "ui:ais"
     ]
   ]
 }

@@ -16,11 +16,31 @@
   import { applyControl } from '$lib/control/dispatch';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { transcript, type TranscriptSegment } from '$lib/transcribe/store.svelte';
+  import { decoders } from '$lib/decoders/store.svelte';
   import { DEFAULT_HAM_PROMPT } from '$lib/transcribe/hamPrompt';
   // Whisper model + prompt are now block params on `VoiceTranscribe`
   // (see `blocks/src/voice_transcribe.rs`); the SettingsPanel's
   // Decoder section is the canonical UI. This view focuses on output.
   import Split from '$lib/layout/Split.svelte';
+
+  // Server-side transcription (sherpa, node-whisper) flows through the
+  // unified decoder store: each segment is a record under kind
+  // `transcribe`, mirrored to every browser over `/ws/state`. Drive the
+  // transcript store from that mirror (deduped by the store's monotonic
+  // `seq`). Browser-placed whisper feeds the same `transcript` store via
+  // the Worker's `push`, so the panel renders both regardless of which
+  // side ran. Referencing `.recent.length` keeps this effect reactive to
+  // new records.
+  $effect(() => {
+    const recent = decoders.kind('transcribe').recent;
+    if (recent.length > 0) transcript.ingestRecords(recent);
+  });
+
+  // Raw / clean toggle for the per-segment log. Clean (ham-post-
+  // processed) by default; raw shows whisper's original output — only
+  // meaningful when an entry carries it (node path always does; the
+  // browser worker currently omits rawText).
+  let showRaw = $state(false);
 
   // whisper initial_prompt — the single biggest accuracy lever for ham
   // voice. Stored empty = "use the built-in dense corpus"; the textarea
@@ -165,6 +185,15 @@
     <span class="flex gap-2">
       <button
         type="button"
+        class="rounded border border-slate-700 px-2 py-0.5 text-[11px] font-normal normal-case tracking-normal hover:border-slate-500 hover:text-slate-100"
+        class:text-sky-400={showRaw}
+        class:text-slate-300={!showRaw}
+        onclick={() => (showRaw = !showRaw)}
+        title="Toggle raw whisper output vs ham-cleaned text (segments pane)"
+        >{showRaw ? 'Raw' : 'Clean'}</button
+      >
+      <button
+        type="button"
         class="rounded border border-slate-700 px-2 py-0.5 text-[11px] font-normal normal-case tracking-normal text-slate-300 hover:border-slate-500 hover:text-slate-100 disabled:opacity-40"
         onclick={copyAll}
         disabled={transcript.segments.length === 0}>Copy</button
@@ -296,7 +325,9 @@
                     <span class="ml-auto">{Math.round(seg.confidence * 100)}%</span>
                   </div>
                   <div>
-                    {#if seg.tokens.length > 0}
+                    {#if showRaw && seg.rawText}
+                      <span class="text-slate-400 italic">{seg.rawText}</span>
+                    {:else if seg.tokens.length > 0}
                       {#each seg.tokens as tk, i (i)}<span class={tokClass(tk.p)}>{tk.text}</span
                         >{/each}
                     {:else}

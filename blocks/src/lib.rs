@@ -25,12 +25,14 @@ pub mod audio_sink;
 pub mod auto_tune;
 pub mod block;
 pub mod channelizer;
+pub mod dc_block;
 pub mod decimator;
 pub mod digital_spot;
 pub mod dtmf_audio_source;
 pub mod dtmf_decoder;
 #[cfg(feature = "multimon")]
 pub mod eas;
+pub mod event_store;
 pub mod events_sink;
 pub mod fft;
 pub mod file_audio_sink;
@@ -62,6 +64,8 @@ pub mod render;
 pub mod rssi_probe;
 #[cfg(feature = "rtl_433")]
 pub mod rtl_433;
+pub mod sherpa_transcribe;
+pub mod signal_list;
 pub mod sine;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_retry;
@@ -76,6 +80,10 @@ pub mod tee_iq_f32;
 pub mod tee_real_f32;
 #[cfg(test)]
 pub(crate) mod test_support;
+/// Browser worker's handle to the shared Rust transcription core
+/// (wasm-bindgen). Only built for the wasm surface.
+#[cfg(feature = "wasm")]
+pub mod transcribe_wasm;
 pub mod voice_transcribe;
 pub mod wav;
 pub mod ws_bridge;
@@ -98,11 +106,13 @@ pub use block::{
     MAX_PORTS,
 };
 pub use channelizer::{Channelizer, ChannelizerParams};
+pub use dc_block::{DcBlock, DcBlockParams};
 pub use decimator::{Decimator, DecimatorParams};
 pub use dtmf_audio_source::{DtmfAudioSource, DtmfAudioSourceParams};
 pub use dtmf_decoder::{DtmfDecoder, DtmfDecoderParams};
 #[cfg(feature = "multimon")]
 pub use eas::{EasDemod, EasDemodParams};
+pub use event_store::{DecoderSink, EventStore, EventStoreParams};
 pub use events_sink::{EventsSink, EventsSinkParams};
 pub use fft::{FftBlock, FftBlockParams, FftWindow};
 pub use file_audio_sink::{FileAudioSink, FileAudioSinkParams};
@@ -137,6 +147,7 @@ pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hol
 pub use rssi_probe::{RssiProbe, RssiProbeParams};
 #[cfg(feature = "rtl_433")]
 pub use rtl_433::{Rtl433Demod, Rtl433DemodParams};
+pub use sherpa_transcribe::{SherpaTranscribe, SherpaTranscribeParams};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
 pub use soapy_source::{SoapyReadback, SoapySource, SoapySourceParams};
@@ -150,7 +161,7 @@ pub use tee_real_f32::TeeRealF32;
 pub use voice_transcribe::{VoiceTranscribe, VoiceTranscribeParams};
 pub use ws_bridge::{
     BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxF32, WsBridgeRxParams,
-    WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
+    WsBridgeTx, WsBridgeTxF32, WsBridgeTxFftU8,
 };
 #[cfg(feature = "wspr")]
 pub use wspr::{WsprDemod, WsprDemodParams};
@@ -193,6 +204,7 @@ mod tests {
             "FileIqSource",
             "LogMagU8",
             "Decimator",
+            "DcBlock",
             "RealF32Resamp",
             "Channelizer",
             "FmDemod",
@@ -209,13 +221,13 @@ mod tests {
             "DtmfAudioSource",
             "DtmfDecoder",
             "MorseAudioSource",
+            "EventStore",
             "EventsSink",
             "TeeIqF32",
             "TeeRealF32",
             "WsBridgeTx",
             "WsBridgeTxF32",
             "WsBridgeTxFftU8",
-            "WsBridgeTxEvents",
             "WsBridgeRx",
             "WsBridgeRxF32",
             "AudioSink",

@@ -5,23 +5,13 @@
   // `ui:adsb` sink. Selection is keyed by ICAO so the map triangle and
   // the table row stay coupled both ways.
 
-  import { pipeline } from '$lib/pipeline.svelte';
   import { adsb, type Aircraft } from '$lib/adsb/store.svelte';
   import DecodeTable from '$lib/viz/DecodeTable.svelte';
   import StationMap from '$lib/viz/StationMap.svelte';
   import Split from '$lib/layout/Split.svelte';
 
-  let streamId = $derived(pipeline.uiSinks.adsb?.stream_id);
-  let client = $derived(pipeline.client);
-
-  $effect(() => {
-    if (client && streamId !== undefined) {
-      adsb.attach(client, streamId);
-      return () => adsb.detach();
-    }
-    adsb.detach();
-    return () => {};
-  });
+  // Aircraft come from the always-connected decoder mirror (kind `adsb`)
+  // — no per-view WS attach.
 
   // Selection is the ICAO id — shared verbatim by table + map.
   let selected = $state<string | null>(null);
@@ -31,8 +21,25 @@
   }
 
   const columns = [
-    { key: 'flight' as const, label: 'Flight', format: (a: Aircraft) => a.flight || '—' },
-    { key: 'id' as const, label: 'ICAO' },
+    {
+      key: 'flight' as const,
+      label: 'Flight',
+      format: (a: Aircraft) => a.flight || '—',
+      // FlightAware tracks by flight ident (the ADS-B callsign, e.g.
+      // UAL123). Only link when we actually have one.
+      href: (a: Aircraft) =>
+        a.flight.trim()
+          ? `https://www.flightaware.com/live/flight/${encodeURIComponent(a.flight.trim())}`
+          : null,
+    },
+    {
+      key: 'id' as const,
+      label: 'ICAO',
+      // Look up the airframe (registration, type, photos) by its 24-bit
+      // ICAO hex address.
+      href: (a: Aircraft) =>
+        a.id ? `https://www.planespotters.net/hex/${encodeURIComponent(a.id.toUpperCase())}` : null,
+    },
     {
       key: 'alt' as const,
       label: 'Alt ft',

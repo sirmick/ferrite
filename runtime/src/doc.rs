@@ -72,11 +72,13 @@ pub struct BlockInstanceDecl {
     /// strips them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<std::collections::BTreeMap<String, serde_json::Value>>,
-    /// Optional semantic tag for [`apply_profile`](crate::apply_profile)
-    /// placement overrides. Today the only well-known role is
-    /// `"demod"` — tagging a block lets a profile's `demod_placement`
-    /// flip it between "node" and "browser" without rewriting the
-    /// preset JSON.
+    /// Optional semantic tag marking a block on the audio spine for
+    /// [`apply_profile`](crate::apply_profile)'s `audio_split` cut.
+    /// Well-known roles: `"demod"`, `"audio"` (audio-rate resample),
+    /// `"nr"` (noise reduction), `"transcribe"` (the STT tap). The split
+    /// moves every tagged block to the same side, keeping the
+    /// node↔browser boundary a single monotonic crossing — no preset
+    /// JSON edit needed to run the chain headless or fully in-browser.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_role: Option<String>,
 }
@@ -309,6 +311,8 @@ mod tests {
         // pair. Removes `chan_tee` and `demod_rds`; adds `audio_tee`.
         // +1 wire vs. B2: the `AudioShaper` (15 kHz LPF + DC block) now
         // sits on the audio branch — `audio_tee.out1 → shaper → decim`.
+        // (The `SignalList` watchlist tap is no longer authored here — it's
+        // synthesised at compose by `inject_signal_list_taps`.)
         assert_eq!(doc.wires.len(), 15);
         // Spot-check one block's params survived the round-trip. Demod
         // now runs at the 240 kHz channel rate, not the 48 kHz audio
@@ -330,7 +334,9 @@ mod tests {
             doc.blocks.get("audio").unwrap().placement,
             Some(Environment::Browser)
         );
-        // UI-terminal FFT wire is the sentinel form.
+        // UI-terminal FFT wire is the sentinel form. The raw preset wires
+        // `logmag.out → ui:fft` directly; the `SignalList` watchlist tap is
+        // spliced in at compose by `inject_signal_list_taps`, not authored.
         assert!(doc
             .wires
             .iter()

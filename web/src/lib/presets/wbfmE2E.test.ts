@@ -136,6 +136,10 @@ function installFetch(state: ServerState) {
     state.calls.push({ method, path, body });
 
     if (method === 'GET' && path === '/api/flowgraph') return okJson(state.flowgraph);
+    // The server's authoritative browser-half (composed + split). The
+    // pipeline store fetches it on init/refresh; this test doesn't assert
+    // on its content, so the preset doc is a stand-in valid FlowgraphDoc.
+    if (method === 'GET' && path === '/api/flowgraph/browser-half') return okJson(state.flowgraph);
     if (method === 'GET' && path === '/api/source') return okJson(state.source);
     if (method === 'GET' && path === '/api/pipeline/blocks') return okJson(pipelineBlocks(state));
     if (method === 'GET' && path === '/api/ui-sinks') return okJson(state.uiSinks);

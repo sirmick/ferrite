@@ -544,14 +544,19 @@ open — if no browser is subscribed to `/ws/ui-views` you'll get a
 
 ### Time-window or raw-bin: `ferrite-ctl capture fft` (Bash) + `fft_to_png.py`
 
-The streaming capture verbs aren't MCP-exposed (MCP is
-request/response; captures are time-windowed). Bash them when you
-need a **strip of time** (carrier come-and-go, burst-rate
-observation) or **raw bin data for peak detection**:
+Captures are MCP-native and **async**: `mcp__ferrite__start_capture_fft`
+(also `_iq`, `_audio`) returns a `job_id` immediately, then poll
+`mcp__ferrite__capture_status(job_id)` for `status=done` + the sidecar
+JSON (which carries the `output_path`). The `ferrite-ctl capture …` Bash
+form is an equivalent fallback that blocks until the job finishes. Reach
+for a capture when you need a **strip of time** (carrier come-and-go,
+burst-rate observation) or **raw bin data for peak detection**:
 
-1. `ferrite-ctl --note "..." capture fft --duration <s>` — writes a
-   `.bin` (raw u8 spectrum bytes) plus a `.json` sidecar with
-   `frame_size`, `sample_rate_hz`, `center_freq_hz`.
+1. `mcp__ferrite__start_capture_fft({duration_s: <s>, note: "..."})` →
+   poll `capture_status` → the job's `output_path` is a `.bin` (raw u8
+   spectrum bytes) with a `.json` sidecar (`frame_size`,
+   `sample_rate_hz`, `center_freq_hz`). (Or Bash
+   `ferrite-ctl --note "..." capture fft --duration <s>`.)
 2. `python3 {{FFT_TO_PNG}} <bin-path>` — renders a PNG strip you can
    read with the Read tool. **Always Read the `.png`, never the
    `.bin`.** The Read tool refuses binary files; passing the wrong

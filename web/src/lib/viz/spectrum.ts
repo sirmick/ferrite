@@ -56,6 +56,11 @@ export interface SpectrumMarkers {
   sdrCenterHz?: number;
   vfoHz?: number;
   vfoWidthHz?: number;
+  /** Absolute centre frequencies (Hz) of auto-detected signals from the
+   *  node-side `SignalList`. Each in-view peak is painted as a small
+   *  square sitting on the live trace tip — a visual cue that mirrors
+   *  the strongest-signal watchlist. Out-of-window peaks are skipped. */
+  peaksHz?: number[];
 }
 
 /** Display-only horizontal view window. Crops the rendered FFT to a
@@ -477,6 +482,88 @@ export class SpectrumRenderer {
       ctx.strokeStyle = this.color;
       ctx.lineWidth = Math.max(1, Math.floor(Math.min(window.devicePixelRatio || 1, 2)));
       this.strokeRow(this.row, plot);
+    }
+    // Peak crosses sit on top of the trace so they read as little flags
+    // pinned to the detected carriers, not hidden under the envelope.
+    this.drawPeaks(plot);
+    ctx.restore();
+  }
+
+  /** A small diagonal cross (✕) marking each in-view auto-detected peak,
+   *  centred *exactly* on the live trace tip at the peak's frequency (or
+   *  near the top of the plot when there's no live row yet). The two arms
+   *  intersect at a single pixel on the carrier, so it reads as a precise
+   *  flag pinned to the signal rather than a fat block hovering above it. */
+  private drawPeaks(plot: { x: number; y: number; w: number; h: number }): void {
+    const peaks = this.markers.peaksHz;
+    if (!peaks || peaks.length === 0) return;
+    const win = this.renderWindow();
+    if (!win) return;
+    const { ctx } = this;
+    const half = win.rateHz / 2;
+    const fMin = win.centerHz - half;
+    const fMax = win.centerHz + half;
+    if (!(fMax > fMin)) return;
+    const toX = (hz: number) => plot.x + ((hz - fMin) / (fMax - fMin)) * plot.w;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // Half-length of each cross arm — kept small so the glyph marks a
+    // point, not an area.
+    const r = Math.max(3, Math.round(3 * dpr));
+
+    // Map an in-view peak frequency to the y of the live trace tip there.
+    const lut = this.row && this.row.length > 0 ? this.byteToYLut(plot) : undefined;
+    const n = this.row?.length ?? 0;
+    const fullMin = this.axes ? this.axes.centerHz - this.axes.rateHz / 2 : fMin;
+    const fullSpan = this.axes ? this.axes.rateHz : fMax - fMin;
+
+    ctx.save();
+    // Orange — deliberately clashes with the cyan FFT trace so the peak
+    // flags read clearly against it.
+    ctx.strokeStyle = 'rgba(255, 122, 26, 0.95)';
+    ctx.lineWidth = Math.max(1, dpr);
+    ctx.lineCap = 'round';
+    for (const hz of peaks) {
+      if (hz < fMin || hz > fMax) continue;
+      let x = toX(hz);
+      let y = plot.y + r; // fallback: near the top of the plot
+      if (lut && n > 0 && fullSpan > 0) {
+        const nb = Math.round(((hz - fullMin) / fullSpan) * (n - 1));
+        if (nb >= 0 && nb < n) {
+          // Snap to the local trace maximum within ~one pixel so the cross
+          // sits on the drawn peak. Corrects the bin↔freq parity drift —
+          // the detector bins frequencies by /N (`bin_to_hz`) while the
+          // trace is drawn by /(n-1) (`strokeRow`) — which otherwise lands
+          // a marker a bin off, onto a trough, at the channel FFT's coarse
+          // resolution (negligible on the 16k-bin wide FFT).
+          const binsPerPx = Math.max(
+            1,
+            Math.round(((fMax - fMin) * n) / (Math.max(1, plot.w) * fullSpan)),
+          );
+          const hw = Math.max(1, binsPerPx);
+          let pbin = nb;
+          let peak = -1;
+          for (let k = nb - hw; k <= nb + hw; k++) {
+            if (k >= 0 && k < n && this.row![k]! > peak) {
+              peak = this.row![k]!;
+              pbin = k;
+            }
+          }
+          // Place the cross at the trace's own x + height for that bin
+          // (matches strokeRow's bin→x mapping).
+          x = toX(fullMin + (pbin / (n - 1)) * fullSpan);
+          y = lut[this.row![pbin]!]!;
+        }
+      }
+      // Centre the cross on the carrier tip, clamped so both arms stay
+      // inside the plot.
+      const cx = Math.round(x);
+      const cy = Math.round(Math.max(plot.y + r, Math.min(plot.y + plot.h - r, y)));
+      ctx.beginPath();
+      ctx.moveTo(cx - r, cy - r);
+      ctx.lineTo(cx + r, cy + r);
+      ctx.moveTo(cx - r, cy + r);
+      ctx.lineTo(cx + r, cy - r);
+      ctx.stroke();
     }
     ctx.restore();
   }

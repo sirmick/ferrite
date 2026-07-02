@@ -17,6 +17,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{get, post},
     Router,
 };
@@ -35,6 +36,7 @@ mod app_state;
 mod band_plan;
 mod block_schema;
 mod bridge_sink;
+mod decoder_store;
 mod device;
 mod device_cache;
 mod frame_bus;
@@ -42,6 +44,7 @@ mod log_stream;
 mod preset_pipeline;
 mod routes;
 mod soapy_log;
+mod source_policy;
 mod view_bridge;
 
 /// Ferrite SDR daemon.
@@ -388,6 +391,10 @@ async fn main() -> Result<()> {
             get(routes::get_flowgraph).patch(routes::patch_flowgraph),
         )
         .route(
+            "/api/flowgraph/browser-half",
+            get(routes::get_flowgraph_browser_half),
+        )
+        .route(
             "/api/source",
             get(routes::get_source).patch(routes::patch_source),
         )
@@ -395,12 +402,12 @@ async fn main() -> Result<()> {
             "/api/source/capabilities",
             get(routes::get_source_capabilities),
         )
-        .route("/api/source/readback", get(routes::get_source_readback))
+        .route("/api/state", get(routes::get_state))
+        .route("/api/state/:kind/reset", post(routes::reset_state_kind))
         .route("/api/tune", post(routes::post_tune))
         .route("/api/pipeline", get(routes::pipeline_status))
         .route("/api/pipeline/start", post(routes::pipeline_start))
         .route("/api/pipeline/stop", post(routes::pipeline_stop))
-        .route("/api/flowdiag", get(routes::get_flowdiag))
         .route("/api/pipeline/blocks", get(routes::list_pipeline_blocks))
         .route(
             "/api/pipeline/blocks/:id/params",
@@ -419,10 +426,19 @@ async fn main() -> Result<()> {
         )
         .route("/api/decoder/recent", get(routes::recent_decoder))
         .route("/api/debug/log", post(routes::browser_log))
-        .route("/api/screenshot", post(routes::save_screenshot))
+        .route(
+            "/api/screenshot",
+            // A screenshot PNG (even downscaled) easily exceeds axum's
+            // default 2 MB JSON body cap once base64-inflated, which 413s
+            // the POST before the handler runs (the screenshot silently
+            // never lands). Lift the cap on just this route.
+            post(routes::save_screenshot).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
+        .route("/ws/state", get(routes::ws_state))
         .route("/ws/chat", get(routes::ws_chat))
+        .route("/api/ai/chat-inject", post(routes::post_chat_inject))
         .route("/api/ui-views/:pane", get(routes::get_ui_view))
         .route("/api/view", get(routes::get_view_state))
         .route("/api/ui-view/set", post(routes::set_view_state))

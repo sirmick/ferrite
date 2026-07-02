@@ -1,8 +1,10 @@
 // Flow-diag store — consumes the `flowdiag` JSON snapshots the runner
-// (browser) and ferrited (node) emit once per second and keeps a
-// delta-per-block view for the Flow tab. One store instance holds both
-// sides; the UI shows them side-by-side so you can see where in the
-// chain sample rate changes or drops.
+// (browser) and ferrited (node) emit and keeps a delta-per-block view
+// for the Flow tab. One store instance holds both sides; the UI shows
+// them side-by-side so you can see where in the chain sample rate
+// changes or drops. The node side comes from the store mirror.
+
+import { decoders } from '$lib/decoders/store.svelte';
 
 // Mirrors `ferrite_runtime::DiagSnapshot` on the Rust side. The runtime
 // returns a serde-json string; we parse it on receipt and treat these
@@ -177,26 +179,19 @@ function snapshotMatchesPrev(snap: DiagSnapshot, prev: PrevSnap): boolean {
 
 export const flow = new FlowStore();
 
-// flowdiag no longer travels as a log line — the node side is served
-// by `GET /api/flowdiag` (polled here, app-wide) and the browser side
-// is fed straight from the runner via `flow.ingest('browser', …)`.
-// The poll must run regardless of which UI tab is open: `HealthDots`
-// (always visible in the toolbar) depends on `flow.node.lastUpdate`,
-// so gating the poll on `FlowPanel` visibility — as the first cut did
-// — turned two of the three status dots red whenever you left the
-// Flow tab. Browser-only guard so SSR / node-vitest doesn't try to
-// start a `fetch` interval at import time.
+// The node side now arrives via the store mirror (`flowdiag` kind, folded
+// by the server diag tick at 4 Hz and replicated over `/ws/state`) — no
+// dedicated poll. An effect ingests each new snapshot app-wide: the feed
+// must run regardless of which UI tab is open because `HealthDots`
+// (always visible in the toolbar) depends on `flow.node.lastUpdate`. The
+// browser side is still fed straight from the runner via
+// `flow.ingest('browser', …)`. Browser-only guard so SSR / node-vitest
+// doesn't start an effect at import time.
 if (typeof window !== 'undefined') {
-  const tick = async () => {
-    try {
-      const r = await fetch('/api/flowdiag');
-      if (!r.ok) return;
-      const snap = (await r.json()) as DiagSnapshot | null;
+  $effect.root(() => {
+    $effect(() => {
+      const snap = decoders.kind('flowdiag').current['current']?.data as DiagSnapshot | undefined;
       if (snap) flow.ingest('node', snap);
-    } catch {
-      /* network blip — the next tick will retry */
-    }
-  };
-  void tick();
-  setInterval(() => void tick(), 1000);
+    });
+  });
 }

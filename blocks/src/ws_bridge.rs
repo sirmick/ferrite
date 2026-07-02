@@ -48,9 +48,6 @@ use crate::{
     spsc_ring::SpscRing,
 };
 
-/// One `Frame::JsonEvent` per complete line — see `WsBridgeTxEvents`.
-const EVENTS_DELIMITER: u8 = b'\n';
-
 /// Transport contract shared by every `WsBridgeTx*` block. The runtime
 /// constructs one sink per preset (today that's the postcard encoder +
 /// broadcast channel in `ferrited::session`) and hands the same
@@ -161,10 +158,9 @@ fn stream_id_u16(stream_id: u32) -> u16 {
 // types are emitted by a macro so the registry/env_split type names
 // stay byte-identical to the previous hand-rolled blocks.
 //
-// `WsBridgeTxFftU8` and `WsBridgeTxEvents` stay separate further down:
-// their per-tick framing is fundamentally different (fixed-size FFT
-// windows, newline-delimited line reassembly) and forcing them through
-// the same trait shape would add abstraction without removing
+// `WsBridgeTxFftU8` stays separate further down: its per-tick framing
+// is fundamentally different (fixed-size FFT windows) and forcing it
+// through the same trait shape would add abstraction without removing
 // duplication.
 // ---------------------------------------------------------------------------
 
@@ -769,114 +765,11 @@ impl BlockFactory for WsBridgeTxFftU8 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tx (JsonEvent) — server-side egress for decoder `events` output. Accepts
-// newline-delimited JSON on an `Events` input port and emits one
-// `Frame::JsonEvent` per complete line, so each browser-side event is a
-// clean parseable JSON object with its own `seq`.
-// ---------------------------------------------------------------------------
-
-pub struct WsBridgeTxEvents {
-    params: WsBridgeParams,
-    sink: Option<Arc<dyn BridgeSink>>,
-    /// Bytes consumed so far but not yet terminated by `\n`. Events that
-    /// straddle `process()` call boundaries reassemble here.
-    partial: Vec<u8>,
-}
-
-impl WsBridgeTxEvents {
-    #[must_use]
-    pub const fn new(params: WsBridgeParams) -> Self {
-        Self {
-            params,
-            sink: None,
-            partial: Vec::new(),
-        }
-    }
-
-    #[must_use]
-    pub const fn stream_id(&self) -> u32 {
-        self.params.stream_id
-    }
-
-    /// Wire a transport sink — mirrors [`WsBridgeTx::attach_sink`]. The
-    /// runtime calls this once after construction and before `init`;
-    /// `process` pushes one `JsonEvent` per complete line.
-    pub fn attach_sink(&mut self, sink: Arc<dyn BridgeSink>) {
-        self.sink = Some(sink);
-    }
-}
-
-#[ferrite_blocks_macros::ferrite_block]
-impl Block for WsBridgeTxEvents {
-    fn spec() -> BlockSpec {
-        BlockSpec {
-            type_name: "WsBridgeTxEvents",
-            placement: Placement::NativeOnly,
-            inputs: &[PortSpec {
-                name: "in",
-                port_type: PortType::Events,
-            }],
-            outputs: &[],
-            params: &[STREAM_ID_PARAM],
-            ai_notes: "Server-side WS bridge for structured events (RSSI readings, decoder messages, lock-state frames). Forwards `events` ports to the browser.",
-        }
-    }
-
-    fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
-        self.partial.clear();
-        Ok(())
-    }
-
-    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
-        let mut w = Work::new();
-        let Some(port) = io.inputs.iter().find(|p| p.name == "in") else {
-            return Ok(w);
-        };
-        let InBuf::Events(bytes) = port.buf else {
-            return Ok(w);
-        };
-        let n = bytes.len();
-        for &b in bytes {
-            if b == EVENTS_DELIMITER {
-                let done = std::mem::take(&mut self.partial);
-                if !done.is_empty() {
-                    if let Some(sink) = &self.sink {
-                        sink.push(Frame::JsonEvent {
-                            stream_id: stream_id_u16(self.params.stream_id),
-                            seq: 0,
-                            timestamp_ns: 0,
-                            payload: done,
-                        });
-                    }
-                }
-            } else {
-                self.partial.push(b);
-            }
-        }
-        w.consumed[0] = n;
-        Ok(w)
-    }
-
-    fn stop(&mut self) -> Result<()> {
-        self.partial.clear();
-        Ok(())
-    }
-}
-
-impl BlockFactory for WsBridgeTxEvents {
-    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
-        let p: WsBridgeParams = crate::block::deserialize_params(params)?;
-        Ok(Box::new(WsBridgeTxEvents::new(p)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         BridgeSink, WsBridgeFftU8Params, WsBridgeParams, WsBridgeRx, WsBridgeRxF32,
-        WsBridgeRxParams, WsBridgeTx, WsBridgeTxEvents, WsBridgeTxF32, WsBridgeTxFftU8,
-        DEFAULT_RX_BUFFER_SAMPLES,
+        WsBridgeRxParams, WsBridgeTx, WsBridgeTxF32, WsBridgeTxFftU8, DEFAULT_RX_BUFFER_SAMPLES,
     };
     use crate::{
         block::{Block, BlockIo, InBuf, InitCtx, InputPort, OutBuf, OutputPort, PortMeta, Work},
@@ -1272,126 +1165,6 @@ mod tests {
         let w: Work = tx.process(&mut io).unwrap();
         assert_eq!(w.consumed[0], 0);
         assert!(sink.calls.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn events_tx_spec_is_native_only_events_in() {
-        let s = WsBridgeTxEvents::spec();
-        assert_eq!(s.type_name, "WsBridgeTxEvents");
-        assert!(matches!(s.placement, crate::block::Placement::NativeOnly));
-        assert_eq!(s.inputs.len(), 1);
-        assert!(matches!(
-            s.inputs[0].port_type,
-            crate::block::PortType::Events
-        ));
-        assert_eq!(s.outputs.len(), 0);
-    }
-
-    #[test]
-    fn events_tx_emits_one_json_event_per_complete_line() {
-        let sink = Arc::new(CapturingSink::default());
-        let mut tx = WsBridgeTxEvents::new(WsBridgeParams {
-            stream_id: 2000,
-            ..Default::default()
-        });
-        tx.attach_sink(sink.clone());
-
-        let input = b"{\"digit\":\"1\"}\n{\"digit\":\"2\"}\n".to_vec();
-        let mut inputs = [InputPort {
-            name: "in",
-            meta: PortMeta::default(),
-            buf: InBuf::Events(&input),
-        }];
-        let mut io = BlockIo {
-            inputs: &mut inputs,
-            outputs: &mut [],
-        };
-        let w: Work = tx.process(&mut io).unwrap();
-        assert_eq!(w.consumed[0], input.len());
-
-        let calls = sink.calls.lock().unwrap();
-        assert_eq!(calls.len(), 2);
-        for (i, expected) in [
-            b"{\"digit\":\"1\"}".as_slice(),
-            b"{\"digit\":\"2\"}".as_slice(),
-        ]
-        .iter()
-        .enumerate()
-        {
-            let Frame::JsonEvent {
-                stream_id, payload, ..
-            } = &calls[i]
-            else {
-                panic!("expected JsonEvent, got {:?}", calls[i]);
-            };
-            assert_eq!(*stream_id, 2000);
-            assert_eq!(payload.as_slice(), *expected);
-        }
-    }
-
-    #[test]
-    fn events_tx_reassembles_events_across_process_calls() {
-        let sink = Arc::new(CapturingSink::default());
-        let mut tx = WsBridgeTxEvents::new(WsBridgeParams {
-            stream_id: 7,
-            ..Default::default()
-        });
-        tx.attach_sink(sink.clone());
-
-        // First call: partial line, no frame emitted.
-        let part1 = b"{\"a\"".to_vec();
-        let mut inputs = [InputPort {
-            name: "in",
-            meta: PortMeta::default(),
-            buf: InBuf::Events(&part1),
-        }];
-        tx.process(&mut BlockIo {
-            inputs: &mut inputs,
-            outputs: &mut [],
-        })
-        .unwrap();
-        assert!(sink.calls.lock().unwrap().is_empty());
-
-        // Second call: completes the line.
-        let part2 = b":1}\n".to_vec();
-        let mut inputs = [InputPort {
-            name: "in",
-            meta: PortMeta::default(),
-            buf: InBuf::Events(&part2),
-        }];
-        tx.process(&mut BlockIo {
-            inputs: &mut inputs,
-            outputs: &mut [],
-        })
-        .unwrap();
-
-        let calls = sink.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let Frame::JsonEvent { payload, .. } = &calls[0] else {
-            panic!("expected JsonEvent");
-        };
-        assert_eq!(payload.as_slice(), b"{\"a\":1}");
-    }
-
-    #[test]
-    fn events_tx_without_sink_still_drains_upstream() {
-        let mut tx = WsBridgeTxEvents::new(WsBridgeParams {
-            stream_id: 1,
-            ..Default::default()
-        });
-        let input = b"{\"x\":1}\n".to_vec();
-        let mut inputs = [InputPort {
-            name: "in",
-            meta: PortMeta::default(),
-            buf: InBuf::Events(&input),
-        }];
-        let w: Work = tx
-            .process(&mut BlockIo {
-                inputs: &mut inputs,
-                outputs: &mut [],
-            })
-            .unwrap();
-        assert_eq!(w.consumed[0], input.len());
     }
 
     // -----------------------------------------------------------------

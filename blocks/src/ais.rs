@@ -36,8 +36,8 @@ use ferrite_rtl_ais::{RtlAis, AIS_INPUT_RATE_HZ};
 use serde::Deserialize;
 
 use crate::block::{
-    Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind, ParamSpec, Placement,
-    PortSpec, PortType, ReconfigureScope, Work,
+    drain_events_port, push_event_json, Block, BlockFactory, BlockIo, BlockSpec, InitCtx,
+    InputPort, ParamKind, ParamSpec, Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -62,6 +62,7 @@ pub struct AisDemod {
     dec: RtlAis,
     warned_off_rate: bool,
     input_rate_hz: f64,
+    events_out: Vec<u8>,
 }
 
 impl AisDemod {
@@ -76,6 +77,7 @@ impl AisDemod {
             dec: RtlAis::new(),
             warned_off_rate: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
+            events_out: Vec::new(),
         })
     }
 
@@ -112,7 +114,10 @@ impl Block for AisDemod {
                     port_type: PortType::RealF32,
                 },
             ],
-            outputs: &[],
+            outputs: &[PortSpec {
+                name: "events",
+                port_type: PortType::Events,
+            }],
             params: &[ParamSpec {
                 key: "sample_rate_hz",
                 label: "Input sample rate",
@@ -175,11 +180,13 @@ impl Block for AisDemod {
         self.dec.push_audio(&ch_a[..n], &ch_b[..n]);
         for line in self.dec.drain_lines() {
             tracing::info!(target: "decoder::ais", "{line}");
+            push_event_json(&mut self.events_out, &serde_json::json!({ "text": line }));
         }
 
         let mut w = Work::new();
         w.consumed[0] = n;
         w.consumed[1] = n;
+        drain_events_port(io, &mut self.events_out, &mut w);
         Ok(w)
     }
 }

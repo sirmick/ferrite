@@ -25,11 +25,14 @@
   // The narrow column is gated on (a) the runtime having injected a
   // `ui:fft_narrow` sink (only true when the active preset has a
   // Channelizer — `inject_narrow_fft.rs`) AND (b) the operator's
-  // `client.workspace.narrowVisible` toggle.
+  // `client.workspace.rightPane` selection being `channel` (the toolbar's
+  // Display → Right dropdown; `signals` swaps in the strongest-signal
+  // list, `off` collapses the column).
   import Spectrum from '$lib/viz/Spectrum.svelte';
   import Waterfall from '$lib/viz/Waterfall.svelte';
   import NarrowSpectrum from '$lib/viz/NarrowSpectrum.svelte';
   import NarrowWaterfall from '$lib/viz/NarrowWaterfall.svelte';
+  import SignalListView from '$lib/signals/SignalListView.svelte';
   import DisplayControls from '$lib/viz/DisplayControls.svelte';
   import Split from '$lib/layout/Split.svelte';
   import AppToolbar from '$lib/layout/AppToolbar.svelte';
@@ -47,9 +50,21 @@
 
   let { client }: Props = $props();
 
+  // Right (channel-detail) column. Driven by the toolbar's Display →
+  // Right dropdown (`client.workspace.rightPane`): `channel` shows the
+  // narrow FFT/waterfall (needs a Channelizer's `ui:fft_narrow`),
+  // `signals` shows the strongest-signal list (needs the SignalList
+  // block's `ui:signals`), `off` collapses the column. The column shows
+  // whenever the selected pane has its backing sink.
   let hasNarrowSink = $derived(pipeline.uiSinks.fft_narrow !== undefined);
-  let narrowVisible = $derived(clientControls.get('client.workspace.narrowVisible'));
-  let showNarrow = $derived(hasNarrowSink && narrowVisible);
+  // The signals watchlist now lives in the decoder store (kind `signals`),
+  // not a WS ui sink — its availability tracks the injected SignalList
+  // block, not a sink.
+  let hasSignalsSink = $derived(pipeline.blocks.signals !== undefined);
+  let rightPane = $derived(clientControls.get('client.workspace.rightPane'));
+  let showNarrow = $derived(hasNarrowSink && rightPane === 'channel');
+  let showSignals = $derived(hasSignalsSink && rightPane === 'signals');
+  let showRight = $derived(showNarrow || showSignals);
 
   // Advanced view replaces *only* the wide FFT/waterfall column when
   // toggled on (and the preset registers one). The Channel column is
@@ -106,13 +121,13 @@
   <RfQuickBar />
 
   <div class="flex min-h-0 flex-1">
-    {#if showNarrow}
+    {#if showRight}
       <Split direction="row" defaultFraction={0.65} storageKey="ferrite.split.workspace-columns">
         {#snippet a()}
           {@render (showAdvanced ? advancedColumn : wideColumn)()}
         {/snippet}
         {#snippet b()}
-          {@render narrowColumn()}
+          {@render (showSignals ? signalsColumn : narrowColumn)()}
         {/snippet}
       </Split>
     {:else}
@@ -155,6 +170,10 @@
     {@const Advanced = advancedView.component}
     <Advanced />
   {/if}
+{/snippet}
+
+{#snippet signalsColumn()}
+  <SignalListView />
 {/snippet}
 
 {#snippet narrowColumn()}

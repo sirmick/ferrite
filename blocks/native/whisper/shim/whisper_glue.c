@@ -56,6 +56,12 @@ int wsp_init(const unsigned char *model, int model_len,
 
 int wsp_vad_available(void) { return g_vad_ready; }
 
+// Free a buffer returned by wsp_transcribe. The browser path frees via
+// the Emscripten module's _free; native callers (ferrite-whisper crate)
+// call this so they never assume the glue and the caller share a libc
+// allocator. Same heap as the malloc in wsp_transcribe, so always safe.
+void wsp_free(char *p) { free(p); }
+
 // Accuracy-over-latency, exactly the operator's stated workflow: beam
 // search, temperature fallback, single-segment greedy off. `prompt`
 // biases vocabulary toward recently-heard ham callsigns / Q-codes.

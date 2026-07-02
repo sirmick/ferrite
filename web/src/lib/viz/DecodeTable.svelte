@@ -17,6 +17,11 @@
     sortable?: boolean;
     /** Cell renderer; defaults to String(value). */
     format?: (row: R) => string;
+    /** Optional external link for the cell. When it returns a URL the
+     *  cell text becomes an `<a target=_blank>`; clicking it opens the
+     *  link without toggling the row selection. Return null for no link
+     *  (e.g. an aircraft with no known flight number). */
+    href?: (row: R) => string | null;
   }
 
   interface Props {
@@ -121,10 +126,24 @@
             onclick={() => selectRow(row.id)}
           >
             {#each columns as col (col.key)}
+              {@const text = col.format ? col.format(row) : String(row[col.key] ?? '')}
+              {@const link = col.href?.(row) ?? null}
               <td
                 class="px-2 py-1 {col.numeric ? 'text-right font-mono tabular-nums' : 'font-mono'}"
               >
-                {col.format ? col.format(row) : String(row[col.key] ?? '')}
+                {#if link}
+                  <a
+                    href={link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="text-sky-400 underline decoration-dotted underline-offset-2 hover:text-sky-300"
+                    onclick={(e) => e.stopPropagation()}
+                  >
+                    {text}
+                  </a>
+                {:else}
+                  {text}
+                {/if}
               </td>
             {/each}
           </tr>

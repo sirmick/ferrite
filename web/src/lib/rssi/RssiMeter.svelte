@@ -1,26 +1,15 @@
 <script lang="ts">
   // RSSI meter — horizontal bar showing smoothed IQ signal strength.
-  // Subscribes to `pipeline.uiSinks.rssi` when present, and silently
-  // hides itself on presets that don't include an RssiProbe wired to
-  // `ui:rssi`.
+  // Reads from the always-connected decoder mirror (kind `rssi`) and
+  // silently hides itself on presets that don't advertise a `ui:rssi`
+  // sink (no RssiProbe wired).
 
   import { pipeline } from '$lib/pipeline.svelte';
   import { rssi } from './store.svelte';
 
-  let streamId = $derived(pipeline.uiSinks.rssi?.stream_id);
-  let client = $derived(pipeline.client);
-
-  // Keep the subscription in sync with whichever stream_id the server
-  // allocated for this preset. `attach` is idempotent on repeat calls
-  // and `detach` runs when the effect tears down on preset reload.
-  $effect(() => {
-    if (client && streamId !== undefined) {
-      rssi.attach(client, streamId);
-      return () => rssi.detach();
-    }
-    rssi.detach();
-    return () => {};
-  });
+  // Present only when the active preset has an RssiProbe → `ui:rssi`
+  // (advertised as an EventStore kind in the ui-sinks list).
+  let hasRssi = $derived(pipeline.uiSinks.rssi !== undefined);
 
   const MIN_DB = -90;
   const MAX_DB = 0;
@@ -39,7 +28,7 @@
   });
 </script>
 
-{#if streamId !== undefined}
+{#if hasRssi}
   <div class="flex flex-col gap-1 text-xs">
     <div class="flex items-baseline justify-between">
       <span class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">rssi</span>

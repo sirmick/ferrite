@@ -17,9 +17,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{anyhow, Result};
 use ferrite_blocks::{registry, SoapyReadback};
 use ferrite_runtime::{
-    apply_profile, compose_source, inject_narrow_fft_taps, inject_voice_transcribe,
-    split_for_environment, Environment, FlowgraphDoc, InventorySpecRegistry, Profile,
-    ReconfigurePlan, SourceConfig, SOURCE_ID,
+    apply_profile, compose_source, inject_dc_block_taps, inject_narrow_fft_taps,
+    inject_signal_list_taps, inject_voice_transcribe, split_for_environment, Environment,
+    FlowgraphDoc, InventorySpecRegistry, Profile, ReconfigurePlan, SourceConfig, SOURCE_ID,
 };
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -116,6 +116,10 @@ struct Inner {
     /// connected while stopped picks up frames the moment the pipeline
     /// spins back up.
     frames: FrameBus,
+    /// Server-authoritative decoder store — survives start/stop and
+    /// preset swaps (like `frames`); `EventStore` blocks attach to it
+    /// each load, REST/MCP read snapshots, WS mirrors stream its deltas.
+    decoder_store: Arc<crate::decoder_store::DecoderStore>,
     preset_doc: RwLock<FlowgraphDoc>,
     source_config: RwLock<SourceConfig>,
     /// Runtime profile (audio toggle, demod placement override) applied
@@ -130,12 +134,6 @@ struct Inner {
     /// `/api/devices` and `/api/source/capabilities`; pruned when a
     /// device disappears from `enumerate`.
     device_cache: DeviceCache,
-    /// Latest node-side flow-diagnostics snapshot, refreshed ~1 Hz by
-    /// the running pipeline's diag loop. Served verbatim by
-    /// `GET /api/flowdiag` — a dedicated channel so flowdiag is always
-    /// available regardless of `RUST_LOG` and never clutters the log
-    /// stream. `None` until the first snapshot (or while stopped).
-    latest_diag: Arc<RwLock<Option<ferrite_runtime::DiagSnapshot>>>,
 }
 
 #[derive(Clone)]
@@ -164,26 +162,19 @@ impl AppState {
         Self {
             inner: Arc::new(Inner {
                 frames,
+                decoder_store: Arc::new(crate::decoder_store::DecoderStore::new()),
                 preset_doc: RwLock::new(preset),
                 source_config: RwLock::new(source),
                 profile: RwLock::new(Profile::default()),
                 pipeline: Mutex::new(None),
                 tick_period,
                 device_cache: DeviceCache::new(),
-                latest_diag: Arc::new(RwLock::new(None)),
             }),
             logs: None,
             presets_dir: None,
             captures_dir: None,
             view_bridge: crate::view_bridge::ViewBridge::default(),
         }
-    }
-
-    /// Latest node-side [`ferrite_runtime::DiagSnapshot`], or `None`
-    /// when the pipeline is stopped / hasn't produced one yet. Backs
-    /// `GET /api/flowdiag`.
-    pub async fn flowdiag(&self) -> Option<ferrite_runtime::DiagSnapshot> {
-        self.inner.latest_diag.read().await.clone()
     }
 
     #[must_use]
@@ -228,6 +219,12 @@ impl AppState {
         self.inner.frames.subscribe(DEFAULT_SUBSCRIBER_CAPACITY)
     }
 
+    /// The shared decoder store (REST snapshot, WS-mirror feed, MCP).
+    #[must_use]
+    pub fn decoder_store(&self) -> Arc<crate::decoder_store::DecoderStore> {
+        Arc::clone(&self.inner.decoder_store)
+    }
+
     pub async fn status(&self) -> PipelineStatus {
         if self.inner.pipeline.lock().await.is_some() {
             PipelineStatus::Running
@@ -263,9 +260,18 @@ impl AppState {
     ) -> Result<FlowgraphDoc> {
         let mut composed =
             compose_source(preset, source).map_err(|e| anyhow!("compose preset+source: {e}"))?;
+        // Remove the zero-IF DC spike at the IQ stream (hardware sources
+        // only) BEFORE the FFT taps split, so the spike is gone from the
+        // wideband + narrow FFT and the watchlist consistently.
+        inject_dc_block_taps(&mut composed);
         inject_narrow_fft_taps(&mut composed);
+        // Strongest-signal watchlist on the wideband FFT — synthesised for
+        // every preset with a `ui:fft`, rather than hand-wired per preset.
+        inject_signal_list_taps(&mut composed);
         let profile = self.inner.profile.read().await;
-        apply_profile(&mut composed, &profile);
+        // Registry-aware so the Browser/Server placement cut keeps
+        // NativeOnly/WasmOnly blocks on the side they can actually run.
+        apply_profile(&mut composed, &profile, &InventorySpecRegistry);
         inject_voice_transcribe(&mut composed, &profile);
         Ok(composed)
     }
@@ -311,11 +317,30 @@ impl AppState {
             .map_err(|e| anyhow!("env_split: {e}"))?;
         let mut out = Vec::new();
         for decl in node_half.blocks.values() {
+            // Decoder event sinks are `EventStore` blocks now (feeding the
+            // DecoderStore, not a WS stream). Still advertise them — keyed
+            // by their `kind`, payload_type `decodes` — so the UI knows
+            // which decoder views/panels the active preset offers (it reads
+            // the data from the mirror, not a stream_id).
+            if decl.type_name == "EventStore" {
+                if let Some(kind) = decl
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("kind"))
+                    .and_then(|v| v.as_str())
+                {
+                    out.push(UiSink {
+                        name: kind.to_string(),
+                        stream_id: 0,
+                        payload_type: "decodes",
+                    });
+                }
+                continue;
+            }
             let payload_type = match decl.type_name.as_str() {
                 "WsBridgeTx" => "IqF32",
                 "WsBridgeTxF32" => "F32",
                 "WsBridgeTxFftU8" => "FftU8",
-                "WsBridgeTxEvents" => "JsonEvent",
                 _ => continue,
             };
             let params = decl.params.as_ref().and_then(|p| p.as_object());
@@ -336,6 +361,35 @@ impl AppState {
         Ok(out)
     }
 
+    /// The authoritative **browser-half** of the current composed
+    /// flowgraph: `compose_full(preset, source)` carved for
+    /// [`Environment::Browser`]. This is the doc the in-browser WASM
+    /// runtime should run *verbatim* — same `compose_full` + same
+    /// `split_for_environment` that produced the running node half, so
+    /// the two halves' auto-inserted `WsBridge` stream IDs are guaranteed
+    /// to line up (they're allocated positionally from one shared wire
+    /// list; see `env_split.rs`).
+    ///
+    /// Replaces the browser's former habit of independently re-deriving
+    /// its graph from the raw preset (`composeSource` + a partial mirror
+    /// of `inject_voice_transcribe`, with **no** `apply_profile`). That
+    /// mirror diverged from the node under any non-`Balanced` split — the
+    /// audio bridge landed on a different stream slot, so server-side
+    /// transcription got no browser audio. Sourcing the half from here
+    /// makes divergence structurally impossible.
+    ///
+    /// NativeOnly blocks (the `src`, node demod chain, `SherpaTranscribe`)
+    /// resolve node-side and are stripped, so the returned doc only
+    /// contains browser-runnable blocks plus the `WsBridgeRx*` receivers —
+    /// instantiable by the WASM registry, which omits the native types.
+    pub async fn browser_half(&self) -> Result<FlowgraphDoc> {
+        let preset = self.inner.preset_doc.read().await.clone();
+        let source = self.inner.source_config.read().await.clone();
+        let composed = self.compose_full(&preset, &source).await?;
+        split_for_environment(&composed, Environment::Browser, &InventorySpecRegistry)
+            .map_err(|e| anyhow!("env_split (browser half): {e}"))
+    }
+
     /// Query the live driver state for the `src` block. Returns `None`
     /// when the pipeline is stopped or the source is not a SoapySource.
     /// Used by `PATCH /api/source` to include the post-apply snapshot in
@@ -344,20 +398,6 @@ impl AppState {
         let pipeline = self.inner.pipeline.lock().await;
         if let Some(mount) = pipeline.as_ref() {
             mount.source_readback().await
-        } else {
-            None
-        }
-    }
-
-    /// 1 Hz-polled snapshot of the source driver's state, populated by
-    /// the pipeline's diag tick. Cheap (no runtime mutex hit) and stays
-    /// fresh while the pipeline runs — surfaces AGC-driven gain motion
-    /// to the UI/AI between explicit `PATCH /api/source` writes.
-    /// `None` when the pipeline is stopped or hasn't ticked once yet.
-    pub async fn cached_source_readback(&self) -> Option<SoapyReadback> {
-        let pipeline = self.inner.pipeline.lock().await;
-        if let Some(mount) = pipeline.as_ref() {
-            mount.cached_source_readback().await
         } else {
             None
         }
@@ -619,13 +659,23 @@ impl AppState {
     /// a full rebuild. This keeps the `PATCH /api/source` entry point
     /// behaviourally identical to `apply_block_params("src", delta)` —
     /// the frontend can send partial source-param edits through either.
-    pub async fn patch_source(&self, new_source: SourceConfig) -> Result<Option<ReconfigurePlan>> {
+    pub async fn patch_source(
+        &self,
+        mut new_source: SourceConfig,
+    ) -> Result<Option<ReconfigurePlan>> {
         // Compute the delta in its own scope so the read guard drops
         // before we try to take the pipeline mutex or the source_config
         // write — Rust extends temporary lifetimes across an `if let`
         // body, which would otherwise deadlock with the write below.
         let maybe_delta = {
-            let current = self.inner.source_config.read().await;
+            // Clone + drop the guard so the (async, cached) caps probe in
+            // apply_source_policy never holds the source_config read lock.
+            let current = self.inner.source_config.read().await.clone();
+            // Fill the daemon-owned derived settings — anti-alias bandwidth
+            // from the sample rate, SDRplay broadcast notches from the tuned
+            // span — BEFORE the delta is computed, so every path (UI mouse,
+            // /api/tune span-raise, ferrite-ctl, headless AI) gets them.
+            self.apply_source_policy(&current, &mut new_source).await;
             shallow_source_delta(&current, &new_source)
         };
         if let Some(delta) = maybe_delta {
@@ -652,6 +702,50 @@ impl AppState {
         Ok(plan)
     }
 
+    /// Fill the derived source settings the daemon owns: anti-alias
+    /// `bandwidth_hz` (largest device-advertised filter ≤ the sample rate)
+    /// and the SDRplay broadcast-notch `settings` (off inside the band
+    /// you're receiving, on outside). Applied at the [`patch_source`]
+    /// choke point so the UI, ferrite-ctl, and a headless AI all behave
+    /// identically — none of them has to set BW or notches by hand.
+    ///
+    /// Only fills what the caller left implicit: a value the caller
+    /// explicitly changed in *this* reconfigure (differs from `current`)
+    /// wins. Writing an unchanged value is a no-op that `shallow_source_delta`
+    /// suppresses, so a center-only retune stays a hot apply and the notch
+    /// only forces a rebuild when the tune crosses a broadcast-band edge.
+    ///
+    /// [`patch_source`]: AppState::patch_source
+    async fn apply_source_policy(&self, current: &SourceConfig, next: &mut SourceConfig) {
+        if next.type_name != "SoapySource" {
+            return; // software sources (Sine/File) have no caps to key off
+        }
+        let args = next
+            .params
+            .as_object()
+            .and_then(|p| p.get("args"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if args.is_empty() {
+            return;
+        }
+        // Cached after warm-up; a probe error/timeout must NOT block a
+        // tune — skip the policy and keep the caller's params.
+        let caps = match self.inner.device_cache.ensure_args(&args).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    "apply_source_policy: caps probe failed; skipping derived BW/notch"
+                );
+                return;
+            }
+        };
+        // Pure decision logic (exhaustively unit-tested in `source_policy`).
+        crate::source_policy::apply(current, next, &caps);
+    }
+
     /// Start the pipeline if it isn't already running. Idempotent:
     /// re-calling while running is a no-op and returns `Ok(())`.
     pub async fn start(&self) -> Result<()> {
@@ -666,7 +760,7 @@ impl AppState {
             &composed,
             self.inner.frames.clone(),
             self.inner.tick_period,
-            Arc::clone(&self.inner.latest_diag),
+            Arc::clone(&self.inner.decoder_store),
         )?;
         *guard = Some(mount);
         Ok(())
@@ -714,9 +808,11 @@ impl AppState {
         let Some(mount) = guard.take() else {
             return false;
         };
-        // Drop the stale snapshot so `GET /api/flowdiag` reports
-        // "stopped" (empty) rather than a frozen last frame.
-        *self.inner.latest_diag.write().await = None;
+        // Clear the live-state kinds so a stopped pipeline reports
+        // "stopped" (empty) rather than a frozen last frame. The diag
+        // tick that fed them is about to end with the task.
+        self.inner.decoder_store.reset_kind("flowdiag");
+        self.inner.decoder_store.reset_kind("readback");
         // Fold the runtime's live param edits back into preset_doc —
         // the single deliberate writer that replaces the per-edit
         // mirror-back removed from apply_block_params. Snapshot before
@@ -759,9 +855,18 @@ impl AppState {
     ///    target sits `offset_ratio × output_rate_hz` off centre — i.e.
     ///    the spike lands outside the demodulated channel.
     ///
-    /// `offset_ratio` is supplied by the caller from per-driver config
-    /// (HackRF: ~0.4 — see `web/src/lib/controls/sdr-presets/hackrf.json`;
-    /// most drivers: 0). When 0, the dodge collapses to "just retune".
+    /// `offset_ratio` is `None` for the common case — the daemon fills the
+    /// per-driver default from [`source_policy::tune_offset_ratio_for`]
+    /// (keyed on the bound `driver_key`: HackRF / SDRplay 0.7, others 0), so
+    /// every client dodges identically with no per-caller knowledge. A
+    /// `Some` value overrides it (capture pins `Some(0.0)` to land wideband
+    /// IQ on-centre). When the resolved ratio is 0 the dodge collapses to
+    /// "just retune" and a target can sit on DC (fine for DC-tracking
+    /// drivers). When > 0 the `dc_guard` below also forces a re-dodge if the
+    /// target lands on/near the current LO, so the carrier never stays
+    /// parked on the spike.
+    ///
+    /// [`source_policy::tune_offset_ratio_for`]: crate::source_policy::tune_offset_ratio_for
     ///
     /// Two reconfigures (source delta + channelizer live param) — the
     /// channelizer hot-applies, the source hot-applies via the
@@ -775,13 +880,19 @@ impl AppState {
         &self,
         freq_hz: f64,
         span_hz: Option<f64>,
-        offset_ratio: f64,
+        offset_ratio: Option<f64>,
+        keep_lo: bool,
     ) -> Result<Option<ReconfigurePlan>> {
         if !freq_hz.is_finite() {
             return Err(anyhow!("tune: freq_hz must be finite, got {freq_hz}"));
         }
         let preset = self.inner.preset_doc.read().await.clone();
         let source = self.inner.source_config.read().await.clone();
+        // Resolve the DC-spike dodge ratio: an explicit caller value wins
+        // (capture passes 0 to land IQ on-centre); otherwise fall back to
+        // the daemon-owned per-driver default so the UI, ferrite-ctl, and a
+        // headless AI all dodge identically without each knowing the table.
+        let offset_ratio = self.resolve_offset_ratio(offset_ratio, &source).await;
         let composed = self.compose_full(&preset, &source).await?;
 
         // First channelizer in the composed graph (preset convention:
@@ -801,37 +912,91 @@ impl AppState {
                 Some((id.clone(), rate))
             });
 
+        // The source's *known* current centre. `None` means it's never been
+        // written (fresh device-select / preset default) — crucially NOT the
+        // same as "happens to equal the target": defaulting an unknown centre
+        // to `freq_hz` made the dodge below think the source was already on
+        // target, go sticky, and skip the write — leaving the device parked
+        // at its block default (100 MHz) while the operator thinks it tuned.
         let cur_src_center = source
             .params
             .get("center_freq_hz")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(freq_hz);
+            .and_then(serde_json::Value::as_f64);
         let cur_rate = source
             .params
             .get("sample_rate_hz")
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
 
+        // In-span fast path (opt-in via `keep_lo`): when the target already
+        // falls inside the digitised span, retune the *channelizer only* —
+        // leave the LO and the whole graph untouched. This avoids the source
+        // restart a normal tune triggers (which recomposes the graph and
+        // reloads any node-side worker, e.g. whisper — a ~20-30 s blackout)
+        // and keeps a wideband survey's centre stable while you hop between
+        // stations. Falls through to the normal LO-moving path when the
+        // target is outside the usable span, or the LO/channelizer is unknown.
+        if keep_lo {
+            if let (Some(cur), Some((chan_id, chan_rate))) = (cur_src_center, &chan) {
+                // Keep the extracted channel fully inside the span (half the
+                // sample rate, less half the channel width as edge margin).
+                let usable_half = cur_rate / 2.0 - chan_rate / 2.0;
+                if cur_rate > 0.0 && usable_half > 0.0 && (freq_hz - cur).abs() <= usable_half {
+                    let shift = freq_hz - cur;
+                    let plan = self
+                        .apply_block_params(chan_id, serde_json::json!({ "freq_shift_hz": shift }))
+                        .await?;
+                    return Ok(plan);
+                }
+            }
+        }
+
         // Compute new src_center + chan.freq_shift_hz from the dodge math.
         let (new_src_center, new_freq_shift) = match &chan {
             Some((_, chan_rate)) => {
                 let keepout = 0.4 * chan_rate;
                 let dodge = offset_ratio * chan_rate;
-                if (freq_hz - cur_src_center).abs() <= keepout {
-                    // Sticky: keep source parked, just retune chan.
-                    (cur_src_center, freq_hz - cur_src_center)
+                // When a DC dodge is requested (offset_ratio > 0), the target
+                // must also sit at least this far *off* the current LO to
+                // "stick" — otherwise an in-span tune that lands on (or right
+                // beside) the LO would park the carrier on the DC spike/notch,
+                // exactly where a zero-IF radio can't hear it. Below the guard
+                // we re-snap so the dodge always actually moves it off DC.
+                // For DC-tracking drivers (offset_ratio == 0) the guard is 0 —
+                // they correct DC in hardware and may sit on centre.
+                let dc_guard = if offset_ratio > 0.0 {
+                    0.1 * chan_rate
                 } else {
-                    // Snap: source low of target by dodge_offset.
-                    (freq_hz - dodge, dodge)
+                    0.0
+                };
+                match cur_src_center {
+                    // Sticky: source already parked off-DC but inside the
+                    // channel keepout window — reuse the LO, just re-shift.
+                    Some(cur)
+                        if {
+                            let off = (freq_hz - cur).abs();
+                            off <= keepout && off >= dc_guard
+                        } =>
+                    {
+                        (cur, freq_hz - cur)
+                    }
+                    // Snap (also the first-tune / unknown-centre case, and the
+                    // on-DC case above): park the source low of target by the
+                    // dodge offset and let the channelizer recover the carrier.
+                    _ => (freq_hz - dodge, dodge),
                 }
             }
             None => (freq_hz, 0.0),
         };
 
         // Build source-side delta. 0.5 Hz floor on the centre delta so a
-        // round-trip readback noise doesn't trigger a reconfigure.
+        // round-trip readback noise doesn't trigger a reconfigure — but
+        // always write on the first tune (unknown centre), so an unset
+        // source centre actually gets established instead of silently
+        // staying at the block default.
         let mut src_delta = serde_json::Map::new();
-        if (new_src_center - cur_src_center).abs() > 0.5 {
+        let center_changed = cur_src_center.is_none_or(|cur| (new_src_center - cur).abs() > 0.5);
+        if center_changed {
             src_delta.insert("center_freq_hz".into(), serde_json::json!(new_src_center));
         }
         if let Some(span) = span_hz {
@@ -857,6 +1022,52 @@ impl AppState {
         }
         Ok(last_plan)
     }
+
+    /// Resolve the DC-spike dodge ratio for a tune. An explicit `caller`
+    /// value is authoritative (the override path — e.g. capture pins `0` to
+    /// keep wideband IQ centred on target). When absent, look up the
+    /// daemon-owned per-driver default keyed on the bound device's
+    /// driver key — the single home for per-SDR dodge behaviour, shared by
+    /// every client. Software sources (Sine/File) yield `0` (no dodge),
+    /// never an error: a tune must not be blocked by a policy lookup.
+    ///
+    /// The driver key is read straight from the `driver=` arg, NOT from a
+    /// device probe: SoapySDR's driver name (the `driver=` value) equals
+    /// the `getDriverKey` the probe would return, case-insensitively, and
+    /// the lookup table lowercases both. Probing here was the dodge's
+    /// silent failure mode — `ensure_args` *opens* the device on a cache
+    /// miss, but the running pipeline already holds it, so the probe failed
+    /// busy and collapsed the dodge to 0 (carrier left parked on the DC
+    /// spike) whenever the caps cache happened to be cold. Reading the arg
+    /// makes the dodge deterministic regardless of cache warmth or whether
+    /// the pipeline owns the device. The probe stays only as a fallback for
+    /// the rare args with no `driver=` (Soapy auto-selects the driver).
+    async fn resolve_offset_ratio(&self, caller: Option<f64>, source: &SourceConfig) -> f64 {
+        if let Some(r) = caller {
+            return r;
+        }
+        if source.type_name != "SoapySource" {
+            return 0.0;
+        }
+        let Some(args) = source
+            .params
+            .as_object()
+            .and_then(|p| p.get("args"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            return 0.0;
+        };
+        if let Some(driver) = driver_arg(args) {
+            return crate::source_policy::tune_offset_ratio_for(driver);
+        }
+        match self.inner.device_cache.ensure_args(args).await {
+            Ok(caps) => crate::source_policy::tune_offset_ratio_for(&caps.driver_key),
+            Err(e) => {
+                tracing::warn!(error = ?e, "resolve_offset_ratio: no driver= in args and caps probe failed; no dodge");
+                0.0
+            }
+        }
+    }
 }
 
 /// Merge a partial params delta into `cfg`, producing a new config.
@@ -877,6 +1088,18 @@ fn merge_into_params(
     }
     cfg.params = serde_json::Value::Object(merged);
     cfg
+}
+
+/// Extract the SoapySDR `driver=` value from an args string
+/// (`"driver=hackrf,serial=abc"` → `Some("hackrf")`). Returns `None`
+/// when no non-empty `driver=` part is present (Soapy then auto-selects,
+/// and only a probe can name the driver). Used by `resolve_offset_ratio`
+/// to look up the per-driver dodge ratio without opening the device.
+fn driver_arg(args: &str) -> Option<&str> {
+    args.split(',')
+        .filter_map(|p| p.trim().strip_prefix("driver="))
+        .map(str::trim)
+        .find(|v| !v.is_empty())
 }
 
 /// Overlay the live param values from a running runtime's `applied`
@@ -1190,6 +1413,18 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn driver_arg_extracts_soapy_driver() {
+        assert_eq!(driver_arg("driver=hackrf"), Some("hackrf"));
+        assert_eq!(driver_arg("driver=hackrf,serial=abc123"), Some("hackrf"));
+        assert_eq!(driver_arg("serial=abc123,driver=sdrplay"), Some("sdrplay"));
+        assert_eq!(driver_arg(" driver=rtlsdr "), Some("rtlsdr"));
+        // No driver= → None so the caller falls back to a probe.
+        assert_eq!(driver_arg("serial=abc123"), None);
+        assert_eq!(driver_arg(""), None);
+        assert_eq!(driver_arg("driver="), None);
+    }
+
     fn test_source() -> SourceConfig {
         SourceConfig {
             type_name: "SineSource".into(),
@@ -1369,18 +1604,34 @@ mod tests {
         .unwrap();
         let state = AppState::new(preset, test_source(), Duration::from_millis(5));
         let sinks = state.ui_sinks().await.unwrap();
-        assert_eq!(sinks.len(), 1);
-        assert_eq!(sinks[0].name, "fft");
-        assert_eq!(sinks[0].stream_id, 1000);
-        assert_eq!(sinks[0].payload_type, "FftU8");
+        // The FftU8 waterfall tap is still a WS UI sink.
+        let fft = sinks
+            .iter()
+            .find(|s| s.name == "fft")
+            .expect("ui:fft enumerated");
+        assert_eq!(fft.payload_type, "FftU8");
+        assert!(
+            fft.stream_id >= ferrite_runtime::CROSS_ENV_STREAM_BASE,
+            "fft tap gets a cross-env stream id"
+        );
+        // `inject_signal_list_taps` splices a SignalList onto ui:fft; its
+        // `ui:signals` events terminus is an `EventStore` now, advertised
+        // as a `decodes` kind (data read from the store mirror, not a WS
+        // stream) rather than a `JsonEvent` stream.
+        let signals = sinks
+            .iter()
+            .find(|s| s.name == "signals")
+            .expect("signals advertised as a decoder kind");
+        assert_eq!(signals.payload_type, "decodes");
     }
 
     #[tokio::test]
-    async fn ui_sinks_reports_json_event_payload_for_events_stream() {
-        // A decoder produces `Events`; a `ui:events` terminus must surface
-        // in the API as `payload_type: "JsonEvent"` so the browser knows
-        // to decode the payload as JSON instead of IQ or FFT bytes. The
-        // `src` placeholder is present but unused here — compose_source
+    async fn ui_sinks_omits_event_streams_now_routed_to_store() {
+        // A decoder produces `Events`; its `ui:events` terminus is now an
+        // `EventStore` feeding the server DecoderStore — NOT a WS UI sink.
+        // So it must NOT appear in the ui-sink enumeration (the browser
+        // reads decoder state from the store mirror, not a WS stream).
+        // The `src` placeholder is present but unused here — compose_source
         // requires it to exist; validate_doc tolerates isolated blocks.
         let preset: FlowgraphDoc = serde_json::from_value(json!({
             "name": "ev",
@@ -1401,9 +1652,15 @@ mod tests {
         .unwrap();
         let state = AppState::new(preset, test_source(), Duration::from_millis(5));
         let sinks = state.ui_sinks().await.unwrap();
-        assert_eq!(sinks.len(), 1);
-        assert_eq!(sinks[0].name, "events");
-        assert_eq!(sinks[0].payload_type, "JsonEvent");
+        // The `ui:events` terminus is an `EventStore` → advertised as a
+        // `decodes` kind (stream_id 0, data read from the store), not a
+        // `JsonEvent` WS stream.
+        let ev = sinks
+            .iter()
+            .find(|s| s.name == "events")
+            .expect("events advertised as a decoder kind");
+        assert_eq!(ev.payload_type, "decodes");
+        assert_eq!(ev.stream_id, 0);
     }
 
     #[tokio::test]

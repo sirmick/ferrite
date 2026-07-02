@@ -15,18 +15,14 @@ import type { FlowgraphDoc } from '$lib/flowgraph';
 import { ApiError, wsUrlFor } from '$lib/api/errors';
 import {
   fetchFlowgraph,
+  fetchBrowserHalf,
   patchFlowgraph,
   type ReconfigureResponse,
   type SoapyReadback,
 } from '$lib/api/flowgraph';
-import {
-  fetchSource,
-  fetchSourceReadback,
-  patchSource,
-  tune,
-  type SourceConfig,
-} from '$lib/api/source';
-import { tuneOffsetRatioFor } from '$lib/controls/optionsModel';
+import { fetchSource, patchSource, tune, type SourceConfig } from '$lib/api/source';
+import { untrack } from 'svelte';
+import { decoders } from '$lib/decoders/store.svelte';
 import {
   fetchPipelineStatus,
   startPipeline,
@@ -56,6 +52,14 @@ class PipelineStore {
   errorMessage = $state<string | null>(null);
 
   flowgraph = $state<FlowgraphDoc | null>(null);
+  /** The server's authoritative **browser-half** doc
+   *  (`GET /api/flowgraph/browser-half`) — what the in-browser runtime
+   *  runs verbatim. Re-fetched alongside every preset/source/profile
+   *  change (via `refreshComposed`) so it always matches the running
+   *  node half. The page-level `$effect` feeds this straight into
+   *  `browserRuntime.syncFlowgraph`; the browser no longer composes or
+   *  splits its own graph. `null` until the first fetch completes. */
+  browserHalf = $state<FlowgraphDoc | null>(null);
   source = $state<SourceConfig | null>(null);
   /** Node-advertised `ui:<name>` sinks (`/api/ui-sinks`), keyed by
    *  name. Populated on `init()` and re-fetched on preset/source
@@ -103,11 +107,11 @@ class PipelineStore {
    *  stable for the session (the presets dir isn't watched). */
   presets = $state<PresetEntry[]>([]);
 
-  /** Runtime profile applied before the env-split pass. Today: `audio`
-   *  gates the audio chain, `demod_placement` overrides where the
-   *  `placement_role: "demod"` block lives. Hydrated from server state
-   *  on `init()` (so a reload preserves the user's choice — server is
-   *  the source of truth, not localStorage). */
+  /** Runtime profile applied before the env-split pass: `audio` gates
+   *  the audio chain, `audio_split` slides the node↔browser cut along
+   *  the audio spine (browser | balanced | server). Hydrated from server
+   *  state on `init()` (so a reload preserves the user's choice — server
+   *  is the source of truth, not localStorage). */
   profile = $state<Profile>({ ...DEFAULT_PROFILE });
 
   /** Hardware/software capabilities of the currently-active source.
@@ -119,11 +123,13 @@ class PipelineStore {
    *  the store is alive — callers multiplex by stream id. */
   client = $state<FrameClient | undefined>(undefined);
 
-  /** Driver-readback poll handle; ticks 1 Hz while the store is alive.
-   *  Surfaces AGC-driven gain motion (and any other reactive driver
-   *  state) into `source.params` so the UI controls and the AI prompt
-   *  reflect what the radio is actually doing, not the last set-point. */
-  private readbackTimer: ReturnType<typeof setInterval> | undefined;
+  /** Teardown for the readback→source sync effect. The live driver
+   *  readback (AGC-driven gain motion, etc.) now arrives via the store
+   *  mirror (`readback` kind, folded by the server diag tick at 4 Hz)
+   *  instead of a dedicated poll; an effect merges each new readback into
+   *  `source.params` so the UI controls and the AI prompt reflect what
+   *  the radio is actually doing, not the last set-point. */
+  private readbackDispose: (() => void) | undefined;
 
   /**
    * Load the initial state from the server and open the WS client.
@@ -136,7 +142,7 @@ class PipelineStore {
     this.errorMessage = null;
     try {
       await initFrameDecoder();
-      const [fg, src, st, sinks, blocks, presets, caps, profile] = await Promise.all([
+      const [fg, src, st, sinks, blocks, presets, caps, profile, browserHalf] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
@@ -145,6 +151,7 @@ class PipelineStore {
         fetchPresets(),
         fetchSourceCapabilities(),
         fetchProfile(),
+        fetchBrowserHalf(),
       ]);
       this.flowgraph = fg;
       this.source = src;
@@ -154,10 +161,11 @@ class PipelineStore {
       this.presets = presets;
       this.sourceCaps = caps;
       this.profile = profile;
+      this.browserHalf = browserHalf;
       // Hydrate from URL params if present (`?audio=off` /
-      // `?demod=node|browser`); a one-shot apply on first load so a
-      // shared link lands the user in the right state without an
-      // extra round trip.
+      // `?split=browser|balanced|server`); a one-shot apply on first
+      // load so a shared link lands the user in the right state without
+      // an extra round trip.
       await this.applyProfileFromUrl();
       this.client = new FrameClient({
         url: wsUrlFor('/ws/preset'),
@@ -186,7 +194,7 @@ class PipelineStore {
         return center + (this.currentVfoOffset() ?? 0);
       };
       this.phase = 'ready';
-      this.startReadbackPoll();
+      this.startReadbackSync();
       logs.push('client', 'info', `pipeline init: status=${st}, source=${src.type}`);
     } catch (err) {
       this.phase = 'error';
@@ -195,47 +203,38 @@ class PipelineStore {
     }
   }
 
-  /** Start the 1 Hz `/api/source/readback` poll. Idempotent — a second
-   *  call leaves the existing timer alone. Stopped via
-   *  `stopReadbackPoll`; in practice the singleton store never tears
-   *  down, but tests can opt out of the timer. */
-  private startReadbackPoll(): void {
-    if (this.readbackTimer !== undefined) return;
-    this.readbackTimer = setInterval(() => {
-      void this.pollReadback();
-    }, 1000);
+  /** Merge live driver readback from the store mirror (`readback` kind,
+   *  Replace policy) into `source.params`. Idempotent — a second call
+   *  leaves the existing effect alone. Replaces the old 1 Hz
+   *  `/api/source/readback` poll: the server diag tick folds readback
+   *  into the store, the mirror replicates it over WS, and this effect
+   *  fires on each change. Stopped via `stopReadbackPoll`; in practice
+   *  the singleton store never tears down. */
+  private startReadbackSync(): void {
+    if (this.readbackDispose) return;
+    this.readbackDispose = $effect.root(() => {
+      $effect(() => {
+        // Track only the mirror's readback record; the merge below reads
+        // `this.source` under `untrack` so writing it can't self-trigger.
+        const rb = decoders.kind('readback').current['current']?.data as SoapyReadback | undefined;
+        if (!rb) return;
+        untrack(() => {
+          if (!this.source) return;
+          const next = applyReadback(this.source, rb);
+          // Only assign when something actually changed — keeps reactivity
+          // graphs (AI prompt rebuild, control rerender) from firing on a
+          // stable signal.
+          if (!sourceEquals(this.source, next)) this.source = next;
+        });
+      });
+    });
   }
 
-  /** Stop the readback poll. Used by tests to keep the global mock
-   *  fetch queue from receiving unexpected calls; production tears down
-   *  on tab close so the browser cancels timers itself. */
+  /** Tear down the readback sync effect. Production tears down on tab
+   *  close; kept for symmetry / test cleanup. */
   stopReadbackPoll(): void {
-    if (this.readbackTimer !== undefined) {
-      clearInterval(this.readbackTimer);
-      this.readbackTimer = undefined;
-    }
-  }
-
-  private async pollReadback(): Promise<void> {
-    // Don't ask while the pipeline isn't running — the endpoint would
-    // just return null and bursts of 4xx/5xx would noise up the network
-    // panel. The server's diag-tick stops populating the cache on stop
-    // too, so the stored value would be stale anyway.
-    if (this.status !== 'running' || !this.source) return;
-    try {
-      const rb = await fetchSourceReadback();
-      if (!rb || !this.source) return;
-      const next = applyReadback(this.source, rb);
-      // Only assign when something actually changed — keeps reactivity
-      // graphs (AI prompt rebuild, control rerender) from firing every
-      // tick on a stable signal.
-      if (!sourceEquals(this.source, next)) {
-        this.source = next;
-      }
-    } catch {
-      // Network blips happen; the next tick will retry. Silent on
-      // purpose — a 1 Hz error log would drown the LogPanel.
-    }
+    this.readbackDispose?.();
+    this.readbackDispose = undefined;
   }
 
   async start(): Promise<void> {
@@ -320,7 +319,12 @@ class PipelineStore {
   async patchSource(next: SourceConfig): Promise<ReconfigureResponse | null> {
     return this.withBusy(async () => {
       const resp = await patchSource(next);
-      this.source = applyReadback(next, resp.source_readback);
+      // Re-read the authoritative config the daemon stored: its source
+      // policy fills the derived bandwidth, clamps the rate to the driver
+      // ceiling, and seeds a device-open default, so the optimistic `next`
+      // we sent is incomplete. Overlay the live driver readback on top.
+      const server = await fetchSource();
+      this.source = applyReadback(server, resp.source_readback);
       await this.refreshComposed();
       this.sourceCaps = await fetchSourceCapabilities();
       return resp;
@@ -392,19 +396,16 @@ class PipelineStore {
   }
 
   /** Tuning intent — "listen at `freqHz`" (optionally span `spanHz`).
-   *  POSTs `/api/tune`, where the server applies the per-driver
-   *  DC-spike dodge and the keep-or-snap math against the active
-   *  channelizer. Every VFO origin (Nixie commit, ▲▼ buttons, Up/Down
-   *  keys, spectrum click — all funnel through `tuneVfoTo`) flows
-   *  here, so the dodge is uniform regardless of who asked. Looks up
-   *  `tune_offset_ratio` from the active driver's preset; 0 when the
-   *  source is software or the driver has no entry (= "just tune"). */
+   *  POSTs `/api/tune`, where the daemon applies the per-driver DC-spike
+   *  dodge (it owns the per-SDR ratio — we send no `offset_ratio`) and
+   *  the keep-or-snap math against the active channelizer. Every VFO
+   *  origin (Nixie commit, ▲▼ buttons, Up/Down keys, spectrum click —
+   *  all funnel through `tuneVfoTo`) flows here, so the dodge is uniform
+   *  regardless of who asked. */
   async tune(freqHz: number, spanHz?: number): Promise<ReconfigureResponse | null> {
     if (!Number.isFinite(freqHz)) return null;
-    const caps = this.sourceCaps;
-    const offsetRatio = caps?.kind === 'hardware' ? tuneOffsetRatioFor(caps.capabilities) : 0;
     return this.withBusy(async () => {
-      const resp = await tune({ freq_hz: freqHz, span_hz: spanHz, offset_ratio: offsetRatio });
+      const resp = await tune({ freq_hz: freqHz, span_hz: spanHz });
       // Reconcile the optimistic mirror with what actually landed —
       // /api/tune writes both src.center_freq_hz and chan.freq_shift_hz
       // server-side, so a fresh fetchSource + refreshComposed picks up
@@ -474,8 +475,8 @@ class PipelineStore {
     }, 'set profile');
   }
 
-  /** One-shot: read `?audio=off` / `?demod=node|browser` from the
-   *  current URL on first load and call [`setProfile`] when they
+  /** One-shot: read `?audio=off` / `?split=browser|balanced|server` from
+   *  the current URL on first load and call [`setProfile`] when they
    *  differ from the server's idea. Lets a shared link land the user
    *  in the right state without a manual second click. */
   private async applyProfileFromUrl(): Promise<void> {
@@ -487,10 +488,10 @@ class PipelineStore {
       next.audio = params.get('audio') !== 'off';
       touched = true;
     }
-    if (params.has('demod')) {
-      const v = params.get('demod');
-      if (v === 'node' || v === 'browser') {
-        next.demod_placement = v;
+    if (params.has('split')) {
+      const v = params.get('split');
+      if (v === 'browser' || v === 'balanced' || v === 'server') {
+        next.audio_split = v;
         touched = true;
       }
     }
@@ -507,10 +508,11 @@ class PipelineStore {
     } else {
       url.searchParams.set('audio', 'off');
     }
-    if (this.profile.demod_placement) {
-      url.searchParams.set('demod', this.profile.demod_placement);
+    // Only the non-default split rides the URL (keeps shared links clean).
+    if (this.profile.audio_split !== 'balanced') {
+      url.searchParams.set('split', this.profile.audio_split);
     } else {
-      url.searchParams.delete('demod');
+      url.searchParams.delete('split');
     }
     // SvelteKit owns the navigation history; its `replaceState`
     // wrapper updates the URL without invoking a route load. Calling
@@ -574,9 +576,14 @@ class PipelineStore {
    *  parallel. Called after every patch so local state stays coherent
    *  with what the server is actually running. */
   private async refreshComposed(): Promise<void> {
-    const [sinks, blocks] = await Promise.all([fetchUiSinks(), fetchPipelineBlocks()]);
+    const [sinks, blocks, browserHalf] = await Promise.all([
+      fetchUiSinks(),
+      fetchPipelineBlocks(),
+      fetchBrowserHalf(),
+    ]);
     this.nodeUiSinks = indexByName(sinks);
     this.nodeBlocks = indexById(blocks);
+    this.browserHalf = browserHalf;
   }
 
   /** Pull every server mirror (source + flowgraph + status + composed +
@@ -591,7 +598,7 @@ class PipelineStore {
   async refreshFromServer(): Promise<void> {
     if (this.phase !== 'ready') return;
     try {
-      const [fg, src, st, sinks, blocks, caps, profile] = await Promise.all([
+      const [fg, src, st, sinks, blocks, caps, profile, browserHalf] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
@@ -599,6 +606,7 @@ class PipelineStore {
         fetchPipelineBlocks(),
         fetchSourceCapabilities(),
         fetchProfile(),
+        fetchBrowserHalf(),
       ]);
       this.flowgraph = fg;
       this.source = src;
@@ -606,6 +614,7 @@ class PipelineStore {
       this.nodeUiSinks = indexByName(sinks);
       this.nodeBlocks = indexById(blocks);
       this.sourceCaps = caps;
+      this.browserHalf = browserHalf;
       // Profile too: a CLI-driven `transcribe on/off` flips this axis
       // without touching `setProfile`. Pulling it here keeps the
       // tri-state Audio control honest and lets the transcribe→voice-NR
@@ -678,7 +687,7 @@ function sourceEquals(a: SourceConfig, b: SourceConfig): boolean {
 }
 
 function profileEquals(a: Profile, b: Profile): boolean {
-  return a.audio === b.audio && a.demod_placement === b.demod_placement;
+  return a.audio === b.audio && a.transcribe === b.transcribe && a.audio_split === b.audio_split;
 }
 
 function indexByName(sinks: UiSink[]): Record<string, UiSink> {

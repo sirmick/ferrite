@@ -12,6 +12,7 @@
   import { bandplanUsa } from '$lib/presets/bandplan';
   import { waterfallStore } from './waterfallStore.svelte';
   import { registerView, unregisterView, dataUrlToBase64 } from './viewRegistry';
+  import { signals } from '$lib/signals/store.svelte';
 
   interface Props {
     client: FrameClient;
@@ -369,8 +370,13 @@
       sdrCenterHz: axes?.center_freq_hz,
       vfoHz: vfoBlock ? vfoAbsHz : undefined,
       vfoWidthHz: vfoBlock ? vfoWidthHz : undefined,
+      peaksHz: signals.signals.map((s) => s.freq_hz),
     });
   });
+
+  // The strongest-signal watchlist comes from the always-connected
+  // decoder mirror now (no per-consumer WS attach needed) — the peak
+  // squares just read `signals.signals`.
 
   // Frequency-allocation ribbon above the trace. Toggle is persisted in
   // the client control store; the data itself is a static build-time

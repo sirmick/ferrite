@@ -2,10 +2,11 @@
 //!
 //! `Ft8Demod` (FT8/FT4) and `WsprDemod` each emit one
 //! newline-terminated JSON object per decoded message on their
-//! `events` output port, transported by the same `PortType::Events`
-//! path RDS uses (`WsBridgeTxEvents` → `Frame::JsonEvent`) and
-//! consumed by the web `ui:ft8` store. Keeping the serializer here
-//! means the two producers cannot drift in field names or shape.
+//! `events` output port, folded into the server-side store via the
+//! `EventStore` sink (kind `ft8`) that `env_split` inserts for the
+//! `ui:ft8` wire, then mirrored to the web `ft8` store. Keeping the
+//! serializer here means the two producers cannot drift in field
+//! names or shape.
 //!
 //! Wire shape (optional fields are omitted entirely when absent, so
 //! the consumer treats missing == null):

@@ -1,0 +1,23 @@
+[package]
+name = "ferrite-sdr-tables"
+version = "0.9.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Per-driver SDR policy tables (IF-filter ladders, rate ceilings) shared by the daemon and ferrite-ctl — the single source of truth so the UI, CLI, and headless AI all behave identically."
+
+# Deliberately tiny: zero heavy deps so the lightweight `ferrite-ctl`
+# HTTP client and the `ferrited` daemon can both depend on it without
+# dragging in DSP / hardware crates.
+[dependencies]
+anyhow = "1"
+
+# Test-only: the rate-profile drift guard parses the web preset JSON to
+# assert the daemon's table and the UI's choices can't diverge.
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

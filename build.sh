@@ -5,6 +5,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Provision the vendored native deps git doesn't track (whisper.cpp source,
+# the local SoapySDR prefix) so a fresh clone / worktree builds OOTB.
+# Idempotent — a no-op once they're present. Skip with BOOTSTRAP_SKIP=1.
+if [ "${BOOTSTRAP_SKIP:-0}" != "1" ]; then
+  ./scripts/bootstrap.sh
+fi
+
 if [ -f soapysdr/env.sh ]; then
   # shellcheck disable=SC1091
   . soapysdr/env.sh
