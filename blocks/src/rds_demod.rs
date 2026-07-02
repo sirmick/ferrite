@@ -23,10 +23,14 @@
 //! ```text
 //! MPX @ Fs ──┬── BPF 18.5..19.5 kHz ── Nco PLL lock ── phase19
 //!            │                                             ├── ×3 → phase57
-//! MPX @ Fs ──┼── BPF 54..60 kHz ── × cos(phase57) ─┬── LPF 2.4 kHz ── I (data)
-//!            │                   ── × sin(phase57) ┴── LPF 2.4 kHz ── Q (lock)
-//!            └── delay match ──────────────────────────────────────────┘
+//! MPX @ Fs ──┴── BPF 54..60 kHz ── × cos(phase57) ─┬── LPF 2.4 kHz ── I (data)
+//!                                 ── × sin(phase57) ┴── LPF 2.4 kHz ── Q (lock)
 //! ```
+//!
+//! The pilot BPF and the RDS BPF share a tap count, so their group
+//! delays match and `rds_bpf(mpx)` is already time-aligned with the
+//! pilot the PLL locks to — no explicit delay line (adding one would
+//! double-count the group delay; it was only invisible at 240 kHz).
 //!
 //! I and Q are decimated by `DECIMATE_TO_BAUD_RATIO × symbol_rate`
 //! before bit sync so the symbol tracker sees a manageable sample
@@ -146,10 +150,6 @@ impl Fir {
         }
         acc
     }
-
-    fn group_delay(&self) -> usize {
-        (self.taps.len() - 1) / 2
-    }
 }
 
 pub struct RdsDemod {
@@ -168,14 +168,6 @@ pub struct RdsDemod {
     lpf_q: Fir,
     /// Pilot PLL — 19 kHz phase accumulator; ×3 gives 57 kHz.
     pilot_nco: Nco,
-
-    /// Delay line to align the RDS-band signal with the PLL-derived
-    /// reference. Pilot BPF introduces group delay the PLL sees but
-    /// the RDS mixer needs the *sample-time* version of the RDS
-    /// subcarrier too.
-    delay_line: Vec<f32>,
-    delay_write: usize,
-    delay_len: usize,
 
     /// Lock detection — smoothed Q-channel power. RDS data shows up
     /// on I when the PLL is locked; Q dips to near-zero noise. We
@@ -228,10 +220,6 @@ impl RdsDemod {
         pilot_nco.set_frequency(core::f32::consts::TAU * RDS_PILOT_HZ / fs);
         pilot_nco.pll_set_bandwidth(PLL_BANDWIDTH_NORM);
 
-        // Align RDS-band samples with pilot-derived reference; both
-        // filters have the same tap count so their group delays match.
-        let delay_len = pilot_bpf.group_delay();
-
         // Output rate ≈ DECIMATE_TO_BAUD_RATIO × baud. Round to the
         // nearest integer decimation factor to stay timing-consistent;
         // at 240 kHz this picks 25 (target 25.26) — close enough for
@@ -255,9 +243,6 @@ impl RdsDemod {
             lpf_i,
             lpf_q,
             pilot_nco,
-            delay_line: vec![0.0; delay_len],
-            delay_write: 0,
-            delay_len,
             q_power: 0.0,
             i_power: 0.0,
             alpha_lock,
@@ -325,11 +310,15 @@ impl RdsDemod {
         let cos3 = 4.0 * c * c * c - 3.0 * c;
         let sin3 = 3.0 * s - 4.0 * s * s * s;
 
-        // RDS path: delay-align with the pilot path, then BPF.
-        let delayed = self.delay_line[self.delay_write];
-        self.delay_line[self.delay_write] = mpx;
-        self.delay_write = (self.delay_write + 1) % self.delay_len.max(1);
-        let rds_band = self.rds_bpf.step(delayed);
+        // RDS path: BPF the raw MPX. No extra delay line — the RDS BPF
+        // and the pilot BPF have the same tap count (equal group delay),
+        // so `rds_bpf(mpx)` and the pilot the NCO locks to
+        // (`pilot_bpf(mpx)`) already correspond to the same input sample.
+        // An explicit delay here would double-count the group delay; it
+        // was invisible only at exactly 240 kHz, where 80 samples is 19.0
+        // whole 57 kHz cycles (0 phase error) — at 200/250 kHz it
+        // misaligned the coherent reference and broke the decode.
+        let rds_band = self.rds_bpf.step(mpx);
 
         // Coherent mix: multiply by the 57 kHz I and Q references.
         // Post-LPF, the I branch carries the biphase-modulated data,
@@ -476,18 +465,18 @@ impl Block for RdsDemod {
         let mut consumed = 0;
         let mut pending_data = Vec::with_capacity(data_cap.min(src.len()));
         for &x in src.iter() {
+            // Reserve room *before* pumping a sample that would complete
+            // a decimation group and emit a data soft-sample — mirror
+            // `decimator.rs`. Stopping up front (rather than pumping then
+            // backing out) means the pilot PLL, filters, decimator
+            // accumulator and bit-sync are never double-pumped or
+            // half-restored; the scheduler re-presents the unconsumed
+            // tail next tick.
+            if self.decim_phase + 1 >= self.decim && pending_data.len() >= data_cap {
+                break;
+            }
             consumed += 1;
             if let Some((i, _q)) = self.pump(x) {
-                if pending_data.len() >= data_cap {
-                    // Data port full — back out the consumption and
-                    // stash the sample so it re-emits on the next
-                    // pump. The decimator accumulator takes the
-                    // computed sample back in.
-                    consumed -= 1;
-                    self.decim_phase = self.decim;
-                    self.accum_i += i;
-                    break;
-                }
                 pending_data.push(i);
             }
         }
