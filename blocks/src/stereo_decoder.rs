@@ -25,7 +25,7 @@
 //! err         = Q                                  // small-angle ≈ atan2(Q, I)
 //! nco.pll_step(err)                                // adjust phase/freq
 //! nco.step()                                       // advance by nominal ω
-//! ref_38k     = cos(2 · nco.phase)                 // double for 38 kHz
+//! ref_38k     = -sin(2 · nco.phase)                // 38 kHz, in phase w/ subcarrier
 //! lmr_raw     = delayed_MPX · ref_38k · 2          // mix L−R down to baseband
 //! l_minus_r   = LPF_15k(lmr_raw)
 //! l_plus_r    = LPF_15k(delayed_MPX)
@@ -443,9 +443,16 @@ impl Block for StereoDecoder {
             self.pilot_nco.pll_step(mix_q);
             self.pilot_nco.step();
 
-            // 38 kHz reference = cos(2 · θ) = 2·cos²(θ) − 1. Uses the
-            // NCO's post-step phase; one cos call, no trig doubling.
-            let ref_38k = 2.0 * c * c - 1.0;
+            // 38 kHz reference = −sin(2·θ) = −2·sin(θ)·cos(θ). The PLL
+            // (mix_q = −pilot·s) nulls at cos(θ−ψ)=0, so at lock it holds
+            // the NCO in quadrature to the pilot phase ψ (θ = ψ ∓ π/2).
+            // On BOTH branches −sin(2θ) = +sin(2ψ) — in phase with the
+            // broadcast DSB-SC subcarrier (FCC/ITU: pilot sin(ψ),
+            // subcarrier sin(2ψ)). The old cos(2θ) landed 90° off; its
+            // coherent product with sin(2ψ) had zero DC, so L−R nulled
+            // and real stations decoded as mono with pilot_lock=true.
+            // (c, s) are read pre-step (line 440) — the correct instant.
+            let ref_38k = -2.0 * c * s;
 
             // Delay raw MPX to line up with the pilot BPF output (and
             // hence with the PLL reference). Same-length LPFs downstream
@@ -583,11 +590,28 @@ mod tests {
         }
     }
 
-    /// Synthesise a valid broadcast MPX: `(L+R) + (L−R)·cos(2π·38k·t) +
-    /// pilot·cos(2π·19k·t)`. Matches the standard BS412 composite; the
-    /// factor-of-2 the decoder applies post-LPF compensates for the ½
-    /// the mixer introduces.
+    /// Synthesise a valid broadcast MPX: `(L+R) + (L−R)·sin(2π·38k·t) +
+    /// pilot·sin(2π·19k·t)`. Pilot and subcarrier are `sin` per the
+    /// FCC/ITU convention (the 38 kHz subcarrier is the in-phase 2nd
+    /// harmonic of the 19 kHz pilot); the decoder's `−sin(2θ)` reference
+    /// locks in phase with this. The factor-of-2 the decoder applies
+    /// post-LPF compensates for the ½ the coherent mixer introduces.
     fn make_mpx(fs: f32, n: usize, left_hz: f32, right_hz: f32, pilot_amp: f32) -> Vec<f32> {
+        make_mpx_pilot(fs, n, left_hz, right_hz, pilot_amp, 1.0)
+    }
+
+    /// Like [`make_mpx`] but with an explicit pilot sign. Negating the
+    /// pilot flips its phase by π, so the PLL locks at the mirrored ±π/2
+    /// branch — tests use it to prove the `−sin(2θ)` reference lands in
+    /// phase with the (unchanged) subcarrier on either branch.
+    fn make_mpx_pilot(
+        fs: f32,
+        n: usize,
+        left_hz: f32,
+        right_hz: f32,
+        pilot_amp: f32,
+        pilot_sign: f32,
+    ) -> Vec<f32> {
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
             let t = i as f32 / fs;
@@ -595,8 +619,8 @@ mod tests {
             let r = (TAU * right_hz * t).cos();
             let sum = l + r;
             let diff = l - r;
-            let carrier = (TAU * 38_000.0 * t).cos();
-            let pilot = pilot_amp * (TAU * 19_000.0 * t).cos();
+            let carrier = (TAU * 38_000.0 * t).sin();
+            let pilot = pilot_sign * pilot_amp * (TAU * 19_000.0 * t).sin();
             out.push(sum + diff * carrier + pilot);
         }
         out
@@ -605,6 +629,78 @@ mod tests {
     fn rms(x: &[f32]) -> f32 {
         let sum: f32 = x.iter().map(|v| v * v).sum();
         (sum / x.len() as f32).sqrt()
+    }
+
+    /// Single-bin DFT magnitude at `target_hz` (Goertzel).
+    fn goertzel(samples: &[f32], target_hz: f32, fs: f32) -> f32 {
+        let len = samples.len() as f32;
+        let k = (len * target_hz / fs).round();
+        let omega = TAU * k / len;
+        let coeff = 2.0 * omega.cos();
+        let (mut q1, mut q2) = (0.0_f32, 0.0_f32);
+        for &s in samples {
+            let q0 = coeff * q1 - q2 + s;
+            q2 = q1;
+            q1 = q0;
+        }
+        (q1 * q1 + q2 * q2 - coeff * q1 * q2).max(0.0).sqrt()
+    }
+
+    #[test]
+    fn subcarrier_convention_pinned_separation_and_polarity() {
+        // Convention pin, independent of the fixture's exact phases:
+        // decode a real-standard MPX (sin pilot / sin subcarrier) with
+        // L = 1 kHz and R = 2 kHz, then measure per-tone energy in each
+        // output with Goertzel. Assert (a) > 30 dB channel separation
+        // and (b) the channels are NOT swapped (1 kHz dominates L, 2 kHz
+        // dominates R). Repeat with the pilot negated so the PLL locks at
+        // the mirrored ±π/2 branch — both must still hold, proving the
+        // −sin(2θ) reference is in phase with the subcarrier on either
+        // branch. Pre-fix (cos(2θ) reference) L−R nulls: both tones leak
+        // equally into both channels and separation collapses to ~0 dB.
+        let fs = 240_000.0_f32;
+        let n = 65_536;
+        let skip = 16_384; // past the lock + filter transient
+        for pilot_sign in [1.0_f32, -1.0] {
+            let mpx = make_mpx_pilot(fs, n, 1_000.0, 2_000.0, 0.1, pilot_sign);
+            let mut dec = StereoDecoder::new(StereoDecoderParams {
+                sample_rate_hz: fs,
+                lock_tau_ms: 10.0,
+                ..Default::default()
+            })
+            .unwrap();
+            let out = run(&mut dec, &mpx);
+            assert!(
+                dec.pilot_locked(),
+                "pilot_sign={pilot_sign}: expected pilot lock"
+            );
+            let l = &out.left[skip..];
+            let r = &out.right[skip..];
+            let l_1k = goertzel(l, 1_000.0, fs);
+            let l_2k = goertzel(l, 2_000.0, fs);
+            let r_1k = goertzel(r, 1_000.0, fs);
+            let r_2k = goertzel(r, 2_000.0, fs);
+            // (b) not swapped.
+            assert!(
+                l_1k > l_2k,
+                "pilot_sign={pilot_sign}: L must carry the 1 kHz tone (1k={l_1k} 2k={l_2k})"
+            );
+            assert!(
+                r_2k > r_1k,
+                "pilot_sign={pilot_sign}: R must carry the 2 kHz tone (2k={r_2k} 1k={r_1k})"
+            );
+            // (a) separation: the foreign tone is ≥ 30 dB down.
+            let sep_l_db = 20.0 * (l_1k / l_2k).log10();
+            let sep_r_db = 20.0 * (r_2k / r_1k).log10();
+            assert!(
+                sep_l_db > 30.0,
+                "pilot_sign={pilot_sign}: L separation only {sep_l_db:.1} dB"
+            );
+            assert!(
+                sep_r_db > 30.0,
+                "pilot_sign={pilot_sign}: R separation only {sep_r_db:.1} dB"
+            );
+        }
     }
 
     #[test]
