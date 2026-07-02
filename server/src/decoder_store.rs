@@ -29,8 +29,7 @@ pub enum Policy {
     /// Keyed table with TTL — latest record per entity (ADS-B/AIS/APRS).
     Upsert {
         key_field: &'static str,
-        /// Read by `expire` (wired into the diag-tick in P4).
-        #[allow(dead_code)]
+        /// Read by `expire` (wired into the diag-tick).
         ttl_ms: u64,
         /// Accumulate a capped `[lon,lat]` position track into each
         /// record's `data.track`, carried forward across position-less
@@ -116,8 +115,7 @@ pub enum DeltaOp {
     Add { record: Record },
     /// Set the keyed entity / single-current record (upsert / replace).
     Upsert { record: Record },
-    /// Drop a keyed entity (TTL expiry). Constructed by `expire` (P4).
-    #[allow(dead_code)]
+    /// Drop a keyed entity (TTL expiry). Constructed by `expire`.
     Expire { key: String },
     /// Clear the whole kind.
     Reset,
@@ -310,9 +308,8 @@ impl DecoderStore {
         });
     }
 
-    /// Drop stale keyed entities for TTL kinds. Wired into the diag-tick
-    /// in P4. Returns the number expired.
-    #[allow(dead_code)]
+    /// Drop stale keyed entities for TTL kinds. Wired into the diag-tick.
+    /// Returns the number expired.
     pub fn expire(&self, now: u64) -> usize {
         let mut g = self.inner.lock().unwrap();
         let mut expired: Vec<(String, String)> = Vec::new();

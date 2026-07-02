@@ -42,11 +42,6 @@ struct Cli {
     #[arg(long, default_value = DEFAULT_CONNECT, global = true)]
     connect: String,
 
-    /// Spawn an isolated ferrited and drive that — placeholder for
-    /// Phase 3; not implemented yet.
-    #[arg(long, global = true)]
-    headless: bool,
-
     /// Emit compact one-line JSON instead of the pretty-printed
     /// default. Output is JSON either way.
     #[arg(long, global = true)]
@@ -415,10 +410,6 @@ fn parse_si_opt(s: Option<&str>) -> Result<Option<f64>> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    if cli.headless {
-        eprintln!("ferrite-ctl: --headless not implemented yet (Phase 3 work — see plan)");
-        return ExitCode::from(2);
-    }
     let client = match build_client(cli.timeout) {
         Ok(c) => c,
         Err(e) => {
