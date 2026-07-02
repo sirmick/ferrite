@@ -282,9 +282,11 @@ fn wbfm_stereo_decode_through_audio_nr() {
     const R_TONE: f32 = 2_000.0;
     let n = 32_768_usize;
 
-    // Textbook MPX: sum + diff·cos(2ω_p·t) + pilot·cos(ω_p·t). Unit
-    // amplitude tones so the raw StereoDecoder output is in the ~1
-    // range — comfortably above the deemph IIR's rounding floor.
+    // Textbook MPX: sum + diff·sin(2ω_p·t) + pilot·sin(ω_p·t). Pilot and
+    // subcarrier are `sin` per the FCC/ITU convention (the subcarrier is
+    // the in-phase 2nd harmonic of the pilot), matching StereoDecoder's
+    // −sin(2θ) reference. Unit-amplitude audio tones so the raw decoder
+    // output is ~1 — comfortably above the deemph IIR's rounding floor.
     let mpx: Vec<f32> = (0..n)
         .map(|i| {
             let t = i as f32 / FS;
@@ -292,8 +294,8 @@ fn wbfm_stereo_decode_through_audio_nr() {
             let r = (TAU * R_TONE * t).cos();
             let sum = l + r;
             let diff = l - r;
-            let carrier = (TAU * SUBCARRIER_HZ * t).cos();
-            let pilot = 0.1 * (TAU * PILOT_HZ * t).cos();
+            let carrier = (TAU * SUBCARRIER_HZ * t).sin();
+            let pilot = 0.1 * (TAU * PILOT_HZ * t).sin();
             sum + diff * carrier + pilot
         })
         .collect();
