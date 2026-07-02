@@ -223,7 +223,7 @@ mod native {
             }
         };
         let hello = format!("{{\"sample_rate\":{}}}", src_rate_hz.round() as i64);
-        if let Err(e) = sock.send(Message::Text(hello.into())) {
+        if let Err(e) = sock.send(Message::Text(hello)) {
             tracing::warn!(target: "decoder::transcribe", error = %e, "sherpa sidecar handshake failed");
             return;
         }
@@ -248,7 +248,7 @@ mod native {
                 for &s in &scratch[..n] {
                     bytes.extend_from_slice(&s.to_le_bytes());
                 }
-                if let Err(e) = sock.write(Message::Binary(bytes.into())) {
+                if let Err(e) = sock.write(Message::Binary(bytes)) {
                     if !is_would_block(&e) {
                         tracing::warn!(target: "decoder::transcribe", error = %e, "sherpa sidecar send failed; stopping");
                         return;
