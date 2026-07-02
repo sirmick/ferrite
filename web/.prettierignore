@@ -9,6 +9,9 @@ src/lib/wasm/runtime
 src/lib/wasm/fldigi/fldigi.mjs
 # Same story for the generated whisper STT Emscripten module.
 src/lib/wasm/whisper/whisper.mjs
+# Generated sherpa-onnx ASR Emscripten module (blocks/native/sherpa/
+# emscripten/build.sh); the whole dir is machine-emitted.
+src/lib/wasm/sherpa
 # Vendored upstream band plan (Arrin-KN1E/SDR-Band-Plans, CC0) — keep
 # byte-for-byte so upstream re-syncs are a one-file copy with no
 # formatter drift.

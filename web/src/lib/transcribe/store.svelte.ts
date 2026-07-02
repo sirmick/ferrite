@@ -15,9 +15,6 @@
 // Kept deliberately dumb: no inference, no audio — just an append-only
 // ring of results plus per-engine status for the panel's header.
 
-import { PayloadType, type ParsedFrame } from '$lib/ws/frame';
-import type { FrameClient } from '$lib/ws/client';
-
 /** One recognised token with its model probability. The panel dims /
  *  underlines low-`p` tokens so the operator's eye does the
  *  disambiguation — the right UX for noisy SSB review. */
@@ -97,8 +94,9 @@ class TranscriptStore {
   lagMs = $state<number>(0);
 
   private nextId = 1;
-  private unsubscribe?: () => void;
-  private streamId?: number;
+  /** High-water mark over the decoder store's monotonic `seq`, so
+   *  `ingestRecords` pushes each server record exactly once. */
+  private lastSeq = 0;
 
   push(seg: Omit<TranscriptSegment, 'id' | 'rawText'> & { rawText?: string }): void {
     const withId: TranscriptSegment = { rawText: '', ...seg, id: this.nextId++ };
@@ -110,44 +108,28 @@ class TranscriptStore {
     this.segments = next;
   }
 
-  // ── Node-placed feed: subscribe to the block's `ui:transcribe`
-  //    JsonEvent stream. `TranscriptView` calls attach when the pipeline
-  //    advertises the sink + a FrameClient exists, detach on unmount.
+  // ── Node-placed (server) feed: the global decoder store.
+  //
+  // All server-side transcription (sherpa, node-whisper) lands in the
+  // unified `DecoderStore` under kind `transcribe`, mirrored to every
+  // browser over `/ws/state` (see `$lib/decoders/store`). This is the
+  // single source of truth; `TranscriptView` drives `ingestRecords` from
+  // that mirror. (Historically this store subscribed to a `ui:transcribe`
+  // WS *stream*, but the decoder-store refactor turned that sink into an
+  // `EventStore` → decoder store, so the stream no longer exists.)
 
-  attach(client: FrameClient, streamId: number): void {
-    if (this.streamId === streamId && this.unsubscribe) return;
-    this.unsubscribe?.();
-    this.streamId = streamId;
-    this.unsubscribe = client.subscribe(streamId, (frame) => this.ingestFrame(frame));
-    // A live node-side feed means transcription is running server-side;
-    // reflect that in the header (the browser worker never posts status
-    // on this path).
-    if (this.status === 'idle') this.setStatus('listening');
-  }
-
-  /** Stop receiving the node-side stream but KEEP accumulated segments
-   *  (toggling the advanced view off must not lose the band log). */
-  detach(): void {
-    this.unsubscribe?.();
-    this.unsubscribe = undefined;
-    this.streamId = undefined;
-  }
-
-  /** One `ui:transcribe` frame → zero or more entries. Wire format is
-   *  the camelCase `TranscriptEntry` the Rust `transcript.rs` serializes,
-   *  newline-delimited (the ft8/rds idiom). */
-  private ingestFrame(frame: ParsedFrame): void {
-    if (frame.header.payloadType !== PayloadType.JsonEvent) return;
-    const text = new TextDecoder().decode(frame.payload);
-    for (const line of text.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let obj: Record<string, unknown>;
-      try {
-        obj = JSON.parse(trimmed) as Record<string, unknown>;
-      } catch {
-        continue; // malformed line — drop, same as the RDS/FT8 stores
-      }
+  /** Feed the newest decoder-store `transcribe` records in. `recent` is
+   *  an append log carrying a monotonic `seq`; we push only entries past
+   *  our high-water mark so re-renders don't duplicate. Each record's
+   *  `data` is the same camelCase `TranscriptEntry` the Rust
+   *  `transcript.rs` serializes. Idempotent. */
+  ingestRecords(records: ReadonlyArray<{ seq: number; data: unknown }>): void {
+    let advanced = false;
+    for (const rec of records) {
+      if (rec.seq <= this.lastSeq) continue;
+      this.lastSeq = rec.seq;
+      advanced = true;
+      const obj = (rec.data ?? {}) as Record<string, unknown>;
       const clean = typeof obj.text === 'string' ? obj.text : '';
       if (!clean) continue;
       this.push({
@@ -157,7 +139,7 @@ class TranscriptStore {
         t1: typeof obj.t1 === 'number' ? obj.t1 : 0,
         text: clean,
         rawText: typeof obj.rawText === 'string' ? obj.rawText : '',
-        tokens: [], // node path carries no per-token probabilities
+        tokens: [], // server path carries no per-token probabilities (yet)
         confidence: typeof obj.confidence === 'number' ? obj.confidence : 0,
         noSpeechProb: typeof obj.noSpeechProb === 'number' ? obj.noSpeechProb : 0,
         cont: obj.cont === true,
@@ -165,6 +147,9 @@ class TranscriptStore {
         speakerTurn: obj.speakerTurn === true,
       });
     }
+    // A live server feed means transcription is running; reflect it in
+    // the header (the server path posts no separate status).
+    if (advanced && this.status === 'idle') this.setStatus('listening');
   }
 
   setStatus(status: EngineStatus, detail = ''): void {
@@ -193,6 +178,7 @@ class TranscriptStore {
 
   reset(): void {
     this.clear();
+    this.lastSeq = 0;
     this.status = 'idle';
     this.statusDetail = '';
     this.droppedSamples = 0;

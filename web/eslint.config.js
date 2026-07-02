@@ -57,6 +57,9 @@ export default ts.config(
       // Generated whisper.cpp Emscripten glue (minified, `@ts-nocheck`);
       // whisper.d.ts in the same dir is hand-written and stays linted.
       'src/lib/wasm/whisper/whisper.mjs',
+      // Generated sherpa-onnx ASR Emscripten glue (minified); the whole
+      // dir is machine-emitted by blocks/native/sherpa/emscripten/build.sh.
+      'src/lib/wasm/sherpa/',
     ],
   },
 );
