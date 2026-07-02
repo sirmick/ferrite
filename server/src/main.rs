@@ -391,6 +391,10 @@ async fn main() -> Result<()> {
             get(routes::get_flowgraph).patch(routes::patch_flowgraph),
         )
         .route(
+            "/api/flowgraph/browser-half",
+            get(routes::get_flowgraph_browser_half),
+        )
+        .route(
             "/api/source",
             get(routes::get_source).patch(routes::patch_source),
         )

@@ -64,6 +64,7 @@ pub mod render;
 pub mod rssi_probe;
 #[cfg(feature = "rtl_433")]
 pub mod rtl_433;
+pub mod sherpa_transcribe;
 pub mod signal_list;
 pub mod sine;
 #[cfg(feature = "soapysdr")]
@@ -146,6 +147,7 @@ pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hol
 pub use rssi_probe::{RssiProbe, RssiProbeParams};
 #[cfg(feature = "rtl_433")]
 pub use rtl_433::{Rtl433Demod, Rtl433DemodParams};
+pub use sherpa_transcribe::{SherpaTranscribe, SherpaTranscribeParams};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
 pub use soapy_source::{SoapyReadback, SoapySource, SoapySourceParams};

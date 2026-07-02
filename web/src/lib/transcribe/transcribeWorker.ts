@@ -22,12 +22,10 @@
 import initBlocksWasm, { WasmTranscriber } from '../wasm/blocks/ferrite_blocks';
 import { AudioRingReader } from '../audio/ringBuffer';
 import { DEFAULT_HAM_PROMPT } from './hamPrompt';
-import {
-  EngineUnavailableError,
-  MODELS,
-  WhisperEngine,
-  type WhisperModelDef,
-} from './whisperEngine';
+import { EngineUnavailableError, SherpaEngine } from './sherpaEngine';
+
+/** The single bundled light-tier model (baked into the sherpa .data). */
+const SHERPA_MODEL_LABEL = 'sherpa-onnx zipformer (en-20M, streaming)';
 
 type InMsg =
   | { type: 'init'; sab: SharedArrayBuffer; blockId: string }
@@ -97,10 +95,9 @@ const POLL_MS = 150;
 let wasmReady = false;
 let reader: AudioRingReader | undefined;
 let core: WasmTranscriber | undefined;
-let engine: WhisperEngine | undefined;
+let engine: SherpaEngine | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
 let srcRateHz = 0;
-let curModel: WhisperModelDef = MODELS[0];
 /** Operator prompt base, stashed until the core exists (the `prompt`
  *  message can arrive before `rate`). Empty = built-in ham corpus. */
 let promptBase = DEFAULT_HAM_PROMPT;
@@ -119,9 +116,9 @@ function status(s: string, detail = ''): void {
     type: 'status',
     status: s,
     detail,
-    model: curModel.label,
-    // VAD is always the Rust energy gate now (we segment before the
-    // whisper call); whisper.cpp's bundled Silero is never the gate.
+    model: SHERPA_MODEL_LABEL,
+    // VAD is the Rust energy gate (we segment into clips before the
+    // sherpa call); sherpa's own endpointer isn't the gate here.
     vad: 'energy',
   });
 }
@@ -180,7 +177,7 @@ function drainPending(): void {
       status('transcribing');
       const t0 = performance.now();
       try {
-        const res = engine.transcribe(pcm, core.rollingPrompt());
+        const res = engine.transcribe(pcm);
         post({
           type: 'stat',
           segS: pcm.length / 16_000,
@@ -235,19 +232,21 @@ async function init(sab: SharedArrayBuffer): Promise<void> {
   wasmReady = true;
   maybeCreateCore();
 
-  // The whisper.cpp inference engine (Emscripten). Heavy; may be absent.
-  status('loading-model', `${curModel.label} (~${curModel.approxMB} MB, one-time)`);
-  engine = new WhisperEngine();
+  // The sherpa-onnx inference engine (Emscripten). Model is baked into
+  // the .data, so this is a one-time module instantiation; may be absent
+  // if the wasm artifact wasn't built.
+  status('loading-model', `${SHERPA_MODEL_LABEL} (one-time load)`);
+  engine = new SherpaEngine();
   try {
-    await engine.load(curModel);
+    await engine.load();
     status('listening');
   } catch (e) {
     engine = undefined;
     if (e instanceof EngineUnavailableError) {
       status(
         'unavailable',
-        'whisper.cpp WASM not built. Audio is unaffected (passthrough). ' +
-          'Run pnpm wasm:build:whisper to enable transcription.',
+        'sherpa-onnx WASM not built. Audio is unaffected (passthrough). ' +
+          'Run pnpm wasm:build:sherpa to enable transcription.',
       );
     } else {
       status('error', String(e));
@@ -265,20 +264,11 @@ self.onmessage = (ev: MessageEvent<InMsg>) => {
       srcRateHz = msg.rateHz;
       maybeCreateCore();
       break;
-    case 'model': {
-      const m = MODELS.find((x) => x.id === msg.modelId);
-      if (m && m.id !== curModel.id) {
-        curModel = m;
-        if (engine) {
-          status('loading-model', `${m.label} (~${m.approxMB} MB)`);
-          engine
-            .load(m)
-            .then(() => status('listening'))
-            .catch((e) => status('error', String(e)));
-        }
-      }
+    case 'model':
+      // Single bundled model in the light tier — model selection is a
+      // whisper-era concept. Accept the message for protocol compat but
+      // there's nothing to switch to.
       break;
-    }
     case 'prompt':
       // Empty → fall back to the built-in ham corpus.
       promptBase = msg.text.trim() ? msg.text : DEFAULT_HAM_PROMPT;
@@ -289,6 +279,8 @@ self.onmessage = (ev: MessageEvent<InMsg>) => {
       timer = undefined;
       reader = undefined;
       core = undefined;
+      engine?.free();
+      engine = undefined;
       break;
   }
 };

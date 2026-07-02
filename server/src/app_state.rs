@@ -361,6 +361,35 @@ impl AppState {
         Ok(out)
     }
 
+    /// The authoritative **browser-half** of the current composed
+    /// flowgraph: `compose_full(preset, source)` carved for
+    /// [`Environment::Browser`]. This is the doc the in-browser WASM
+    /// runtime should run *verbatim* — same `compose_full` + same
+    /// `split_for_environment` that produced the running node half, so
+    /// the two halves' auto-inserted `WsBridge` stream IDs are guaranteed
+    /// to line up (they're allocated positionally from one shared wire
+    /// list; see `env_split.rs`).
+    ///
+    /// Replaces the browser's former habit of independently re-deriving
+    /// its graph from the raw preset (`composeSource` + a partial mirror
+    /// of `inject_voice_transcribe`, with **no** `apply_profile`). That
+    /// mirror diverged from the node under any non-`Balanced` split — the
+    /// audio bridge landed on a different stream slot, so server-side
+    /// transcription got no browser audio. Sourcing the half from here
+    /// makes divergence structurally impossible.
+    ///
+    /// NativeOnly blocks (the `src`, node demod chain, `SherpaTranscribe`)
+    /// resolve node-side and are stripped, so the returned doc only
+    /// contains browser-runnable blocks plus the `WsBridgeRx*` receivers —
+    /// instantiable by the WASM registry, which omits the native types.
+    pub async fn browser_half(&self) -> Result<FlowgraphDoc> {
+        let preset = self.inner.preset_doc.read().await.clone();
+        let source = self.inner.source_config.read().await.clone();
+        let composed = self.compose_full(&preset, &source).await?;
+        split_for_environment(&composed, Environment::Browser, &InventorySpecRegistry)
+            .map_err(|e| anyhow!("env_split (browser half): {e}"))
+    }
+
     /// Query the live driver state for the `src` block. Returns `None`
     /// when the pipeline is stopped or the source is not a SoapySource.
     /// Used by `PATCH /api/source` to include the post-apply snapshot in

@@ -79,7 +79,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    fn parse(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "on" => Self::On,
             "muted" => Self::Muted,

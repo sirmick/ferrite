@@ -13,31 +13,27 @@
   // build-time profile axis; all inference is in the Worker. This only
   // reads the reactive `transcript` store and the whisper prompt.
 
-  import { pipeline } from '$lib/pipeline.svelte';
   import { applyControl } from '$lib/control/dispatch';
   import { clientControls } from '$lib/control/clientStore.svelte';
   import { transcript, type TranscriptSegment } from '$lib/transcribe/store.svelte';
+  import { decoders } from '$lib/decoders/store.svelte';
   import { DEFAULT_HAM_PROMPT } from '$lib/transcribe/hamPrompt';
   // Whisper model + prompt are now block params on `VoiceTranscribe`
   // (see `blocks/src/voice_transcribe.rs`); the SettingsPanel's
   // Decoder section is the canonical UI. This view focuses on output.
   import Split from '$lib/layout/Split.svelte';
 
-  // Node-placed (headless) transcription delivers segments over the
-  // `ui:transcribe` JsonEvent sink instead of the in-browser Worker's
-  // postMessage. When the pipeline advertises that sink + a FrameClient
-  // exists, subscribe the store to it (same attach/detach lifecycle as
-  // the FT8/RDS views). Browser-placed transcription advertises no such
-  // sink, so this is a no-op there and the Worker feed is unaffected.
-  let streamId = $derived(pipeline.uiSinks.transcribe?.stream_id);
-  let client = $derived(pipeline.client);
+  // Server-side transcription (sherpa, node-whisper) flows through the
+  // unified decoder store: each segment is a record under kind
+  // `transcribe`, mirrored to every browser over `/ws/state`. Drive the
+  // transcript store from that mirror (deduped by the store's monotonic
+  // `seq`). Browser-placed whisper feeds the same `transcript` store via
+  // the Worker's `push`, so the panel renders both regardless of which
+  // side ran. Referencing `.recent.length` keeps this effect reactive to
+  // new records.
   $effect(() => {
-    if (client && streamId !== undefined) {
-      transcript.attach(client, streamId);
-      return () => transcript.detach();
-    }
-    transcript.detach();
-    return () => {};
+    const recent = decoders.kind('transcribe').recent;
+    if (recent.length > 0) transcript.ingestRecords(recent);
   });
 
   // Raw / clean toggle for the per-segment log. Clean (ham-post-

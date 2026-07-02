@@ -531,6 +531,7 @@ dependencies = [
  "soapysdr",
  "tracing",
  "tracing-subscriber",
+ "tungstenite",
  "wasm-bindgen",
  "web-time",
 ]
