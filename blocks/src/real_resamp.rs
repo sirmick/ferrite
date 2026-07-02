@@ -220,20 +220,28 @@ impl Block for RealF32Resamp {
         if src.is_empty() || dst.is_empty() {
             return Ok(Work::new());
         }
-        // Bound the input we feed liquid this call so the max-output
-        // upper bound fits `dst.len()` with room to spare. Derived
-        // from `max_output_for`'s formula: `out ≤ 1 + 2·r·nx + 8`, so
-        // `nx ≤ (dst.len() - 9) / (2·r)`. When ratio is tiny (big
-        // downsample) this leaves `nx` huge; we clamp to src.len().
+        // Bound the input we feed liquid this call so the max output
+        // provably fits `dst.len()`. `max_output_for(nx)` is
+        // `ceil(1 + 2·r·nx) + 8`, and `ceil` can add up to +1 over
+        // `1 + 2·r·nx`, so the true worst case is `2·r·nx + 10` — hence
+        // `nx ≤ (dst.len() - 10) / (2·r)`. (The earlier `- 9` dropped
+        // the ceil's carry, letting `max_out` reach `dst.len() + 1`;
+        // `execute` then produced more than `dst` could hold, the tail
+        // was silently discarded, yet the input was reported consumed —
+        // a timeline slip.) When the ratio is tiny (big downsample) this
+        // leaves `nx` huge; `min(src.len())` reins it in.
         let rate = inner.rate() as f64;
         let nx_cap = if rate > 0.0 {
-            let cap = ((dst.len().saturating_sub(9)) as f64 / (2.0 * rate)).floor() as usize;
-            cap.max(1)
+            ((dst.len().saturating_sub(10)) as f64 / (2.0 * rate)).floor() as usize
         } else {
-            1
+            0
         };
-        let nx = src.len().min(nx_cap).min(src.len());
+        let nx = src.len().min(nx_cap);
         if nx == 0 {
+            // `dst` can't hold even one input sample's worth of output
+            // this call. Consume nothing and wait for a drained `dst` on
+            // the next tick — forcing `nx = 1` here would overflow `dst`
+            // and drop the surplus while still consuming the input.
             return Ok(Work::new());
         }
         let max_out = inner.max_output_for(nx);
@@ -241,6 +249,13 @@ impl Block for RealF32Resamp {
             self.scratch.resize(max_out, 0.0);
         }
         let produced = inner.execute(&src[..nx], &mut self.scratch[..max_out]);
+        // `nx_cap` guarantees `max_out ≤ dst.len()`, so `produced` fits;
+        // the `min` is a defensive no-op that keeps the copy in bounds.
+        debug_assert!(
+            produced <= dst.len(),
+            "resamp produced {produced} > dst {}",
+            dst.len()
+        );
         let written = produced.min(dst.len());
         dst[..written].copy_from_slice(&self.scratch[..written]);
 
@@ -357,5 +372,192 @@ mod tests {
             "expected ~{expected}, got {produced_total}"
         );
         assert_eq!(consumed_total, n_in);
+    }
+
+    /// Drive the resampler over `input` to completion the way the
+    /// scheduler would — a fresh `dst` each call, looping until all input
+    /// is consumed. Returns `(consumed_total, output)`. Asserts no
+    /// timeline slip: every reported `produced` sample is collected.
+    fn pump(rate_in: f64, rate_out: f64, dst_len: usize, input: &[f32]) -> (usize, Vec<f32>) {
+        let mut r = init_at(rate_in, rate_out);
+        let mut consumed = 0usize;
+        let mut out_all = Vec::new();
+        let mut guard = 0;
+        while consumed < input.len() && guard < 100_000 {
+            guard += 1;
+            let mut out = vec![0.0_f32; dst_len];
+            let mut inputs = [InputPort {
+                name: "in",
+                meta: PortMeta::default(),
+                buf: InBuf::RealF32(&input[consumed..]),
+            }];
+            let mut outputs = [OutputPort {
+                name: "out",
+                meta: PortMeta::default(),
+                buf: OutBuf::RealF32(&mut out),
+            }];
+            let mut io = BlockIo {
+                inputs: &mut inputs,
+                outputs: &mut outputs,
+            };
+            let w = r.process(&mut io).unwrap();
+            if w.consumed[0] == 0 && w.produced[0] == 0 {
+                break;
+            }
+            consumed += w.consumed[0];
+            out_all.extend_from_slice(&out[..w.produced[0]]);
+        }
+        (consumed, out_all)
+    }
+
+    /// Single-bin DFT magnitude (Goertzel).
+    #[allow(clippy::cast_precision_loss)]
+    fn goertzel(x: &[f32], f_hz: f32, fs: f32) -> f32 {
+        let n = x.len() as f32;
+        let k = (n * f_hz / fs).round();
+        let w = core::f32::consts::TAU * k / n;
+        let coeff = 2.0 * w.cos();
+        let (mut q1, mut q2) = (0.0_f32, 0.0_f32);
+        for &s in x {
+            let q0 = coeff * q1 - q2 + s;
+            q2 = q1;
+            q1 = q0;
+        }
+        (q1 * q1 + q2 * q2 - coeff * q1 * q2).max(0.0).sqrt()
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn rate_sweep_count_and_sinad() {
+        // (in_rate, out_rate) covering the real SDR paths + a fractional
+        // audio resample. For each: an in-band 1 kHz tone must survive
+        // with good SINAD, the output count must match the ideal ratio,
+        // and all input must be consumed (no timeline slip).
+        let pairs = [
+            (2_048_000.0_f64, 48_000.0_f64),
+            (2_400_000.0, 62_500.0),
+            (250_000.0, 48_000.0),
+            (240_000.0, 48_000.0),
+            (48_000.0, 44_100.0),
+        ];
+        let f_tone = 1_000.0_f32;
+        for (rin, rout) in pairs {
+            let n_in = (rin as usize / 10).max(20_000); // ~100 ms
+            let input: Vec<f32> = (0..n_in)
+                .map(|i| (core::f32::consts::TAU * f_tone * i as f32 / rin as f32).sin() * 0.5)
+                .collect();
+            let (consumed, out) = pump(rin, rout, 8192, &input);
+            assert_eq!(consumed, n_in, "{rin}->{rout}: input not fully consumed");
+
+            let ideal = (n_in as f64 * rout / rin).round() as isize;
+            let got = out.len() as isize;
+            // Filter/startup delay shifts the count by only a handful of
+            // samples over a ~100 ms buffer; allow a tiny absolute slack.
+            assert!(
+                (got - ideal).abs() <= 4,
+                "{rin}->{rout}: output count {got}, ideal {ideal}"
+            );
+
+            // SINAD: in-band tone vs the worst nearby off-tone bin.
+            let skip = out.len() / 4; // past the filter transient
+            let body = &out[skip..];
+            let sig = goertzel(body, f_tone, rout as f32);
+            let noise = goertzel(body, f_tone + 300.0, rout as f32).max(goertzel(
+                body,
+                f_tone - 250.0,
+                rout as f32,
+            ));
+            let sinad_db = 20.0 * (sig / noise).log10();
+            assert!(
+                sinad_db > 40.0,
+                "{rin}->{rout}: in-band SINAD {sinad_db:.1} dB below 40"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn out_of_band_tone_is_rejected() {
+        // 250k -> 48k: a 40 kHz tone sits above the 24 kHz output Nyquist
+        // but below the 125 kHz input Nyquist — the anti-alias filter must
+        // knock it down by ≈ the stopband spec. Compare its output energy
+        // to an in-band 1 kHz tone driven through the same chain.
+        let (rin, rout) = (250_000.0_f64, 48_000.0_f64);
+        let n_in = 50_000;
+        let inband: Vec<f32> = (0..n_in)
+            .map(|i| (core::f32::consts::TAU * 1_000.0 * i as f32 / rin as f32).sin() * 0.5)
+            .collect();
+        let oob: Vec<f32> = (0..n_in)
+            .map(|i| (core::f32::consts::TAU * 40_000.0 * i as f32 / rin as f32).sin() * 0.5)
+            .collect();
+        let (_, out_in) = pump(rin, rout, 8192, &inband);
+        let (_, out_oob) = pump(rin, rout, 8192, &oob);
+        let rms = |x: &[f32]| -> f32 {
+            let s = x[x.len() / 4..].iter().map(|v| v * v).sum::<f32>();
+            (s / (x.len() - x.len() / 4) as f32).sqrt()
+        };
+        let rej_db = 20.0 * (rms(&out_in) / rms(&out_oob)).log10();
+        // stopband_db is 60 in init_at; allow 6 dB of margin.
+        assert!(
+            rej_db > 54.0,
+            "out-of-band 40 kHz rejection only {rej_db:.1} dB (want > 54)"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn starved_dst_does_not_slip_timeline() {
+        // Upsample 8k -> 48k (r = 6): one input sample yields ~6 output
+        // samples. Hand the block a `dst` too small to hold that (4 <
+        // max_output_for(1)). It must refuse — consume nothing — not
+        // consume the input and drop the overflow. The old `.max(1)`
+        // path forced nx=1 here, produced ~6, wrote only 4, and reported
+        // the input consumed: a silent timeline slip.
+        let mut r = init_at(8_000.0, 48_000.0);
+        let input = vec![0.5_f32; 100];
+        let mut out = vec![0.0_f32; 4];
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::RealF32(&input),
+        }];
+        let mut outputs = [OutputPort {
+            name: "out",
+            meta: PortMeta::default(),
+            buf: OutBuf::RealF32(&mut out),
+        }];
+        let mut io = BlockIo {
+            inputs: &mut inputs,
+            outputs: &mut outputs,
+        };
+        let w = r.process(&mut io).unwrap();
+        assert_eq!(
+            (w.consumed[0], w.produced[0]),
+            (0, 0),
+            "starved dst must not consume input it can't fully emit"
+        );
+
+        // With a roomy dst the same block processes everything, and the
+        // output is byte-identical whether fed in one big dst or in many
+        // small (but adequate) chunks — no samples lost to chunking.
+        let n_in = 20_000;
+        let tone: Vec<f32> = (0..n_in)
+            .map(|i| (core::f32::consts::TAU * 500.0 * i as f32 / 8_000.0).sin() * 0.5)
+            .collect();
+        let (c_small, out_small) = pump(8_000.0, 48_000.0, 64, &tone);
+        let (c_big, out_big) = pump(8_000.0, 48_000.0, 8192, &tone);
+        assert_eq!(
+            c_small, n_in,
+            "adequate small-dst run left input unconsumed"
+        );
+        assert_eq!(c_big, n_in);
+        assert_eq!(
+            out_small.len(),
+            out_big.len(),
+            "dst chunking changed the output length (timeline slip)"
+        );
+        for (i, (a, b)) in out_small.iter().zip(out_big.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "sample {i} differs: {a} vs {b}");
+        }
     }
 }

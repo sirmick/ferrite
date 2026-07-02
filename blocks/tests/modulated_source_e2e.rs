@@ -119,6 +119,14 @@ fn am_synthetic_roundtrip_is_high_fidelity() {
         s.rho,
         s.seg_snr_db
     );
+    // segSNR floor closes the flat-gain blind spot ρ misses (ρ is
+    // scale-invariant). Observed ≈5.8 dB; floor well below it.
+    assert!(
+        s.seg_snr_db > 3.0,
+        "AM synthetic segSNR={:.1} dB collapsed (ρ={:.4})",
+        s.seg_snr_db,
+        s.rho
+    );
 }
 
 #[test]
@@ -136,6 +144,13 @@ fn am_real_sample_roundtrip_survives_the_chain() {
         "AM real-sample ρ={:.4} below integration gate (segSNR {:.1} dB)",
         s.rho,
         s.seg_snr_db
+    );
+    // Observed ≈5.2 dB; floor catches a scale/flat-gain regression.
+    assert!(
+        s.seg_snr_db > 2.0,
+        "AM real segSNR={:.1} dB collapsed (ρ={:.4})",
+        s.seg_snr_db,
+        s.rho
     );
 }
 
@@ -158,6 +173,13 @@ fn nbfm_synthetic_roundtrip_is_high_fidelity() {
         s.rho,
         s.seg_snr_db
     );
+    // Observed ≈27 dB; floor ~6 dB below (round down).
+    assert!(
+        s.seg_snr_db > 20.0,
+        "NBFM synthetic segSNR={:.1} dB collapsed (ρ={:.4})",
+        s.seg_snr_db,
+        s.rho
+    );
 }
 
 #[test]
@@ -177,6 +199,13 @@ fn wbfm_real_sample_roundtrip_survives_the_chain() {
         "WBFM real-sample ρ={:.4} below integration gate (segSNR {:.1} dB)",
         s.rho,
         s.seg_snr_db
+    );
+    // Observed ≈9.2 dB; floor ~6 dB below (round down).
+    assert!(
+        s.seg_snr_db > 3.0,
+        "WBFM real segSNR={:.1} dB collapsed (ρ={:.4})",
+        s.seg_snr_db,
+        s.rho
     );
 }
 

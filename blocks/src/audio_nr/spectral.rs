@@ -172,7 +172,12 @@ impl SpectralStage {
     /// persists across calls so chunk size doesn't matter.
     pub fn run(&mut self, buf: &mut [f32]) {
         for sample in buf {
-            let x = *sample;
+            // Scrub non-finite input to 0 before it enters the STFT: a
+            // NaN would flow through the FFT into every bin's leaky-min
+            // noise tracker (`noise_mag2[k] += α·(mag²−…)` stays NaN,
+            // latching the whole floor) and back out through the ISTFT as
+            // NaN audio. Treating it as silence keeps both finite.
+            let x = if sample.is_finite() { *sample } else { 0.0 };
             // Buffer input.
             self.in_buf[self.in_filled] = x;
             self.in_filled += 1;
@@ -460,5 +465,33 @@ mod tests {
                 joined[i]
             );
         }
+    }
+
+    #[test]
+    fn non_finite_sample_does_not_latch_noise_floor() {
+        let fs = 48_000.0_f32;
+        let tone: Vec<f32> = (0..8192)
+            .map(|i| 0.3 * (TAU * 1_000.0 * i as f32 / fs).cos())
+            .collect();
+        let mut s = SpectralStage::new(SpectralMethod::Boll, 512, 1.5, 1.0, 0.05);
+        let _ = run_all(&mut s, &tone);
+        // A NaN would flow into every bin's leaky-min noise tracker and
+        // out through the ISTFT; +/-Inf likewise.
+        let mut glitch = tone[..2048].to_vec();
+        glitch[100] = f32::NAN;
+        glitch[200] = f32::INFINITY;
+        glitch[300] = f32::NEG_INFINITY;
+        let g_out = run_all(&mut s, &glitch);
+        assert!(g_out.iter().all(|v| v.is_finite()));
+        // Floor and output recover on clean input.
+        let after = run_all(&mut s, &tone);
+        assert!(
+            after.iter().all(|v| v.is_finite()),
+            "spectral NR noise floor latched non-finite after a NaN"
+        );
+        assert!(
+            rms(&after[4096..]) > 0.0,
+            "spectral output collapsed to silence after the glitch"
+        );
     }
 }

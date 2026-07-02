@@ -51,7 +51,11 @@ impl DeempStage {
         let one_minus_a = 1.0 - a;
         let mut y = self.prev;
         for x in buf {
-            y = a * *x + one_minus_a * y;
+            // Scrub non-finite input: the one-pole feeds `y` back into
+            // itself, so a single NaN would make every subsequent output
+            // NaN with no way to recover. Treat it as 0 for this sample.
+            let xi = if x.is_finite() { *x } else { 0.0 };
+            y = a * xi + one_minus_a * y;
             *x = y;
         }
         self.prev = y;
@@ -94,5 +98,32 @@ mod tests {
         let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
         let ratio = rms(&buf[512..]) / rms(&input[512..]);
         assert!(ratio < 0.15, "10× corner attenuation, got ratio {ratio}");
+    }
+
+    #[test]
+    fn non_finite_sample_does_not_latch() {
+        let mut s = DeempStage::new(75.0, 48_000.0);
+        // Warm up.
+        let mut warm: Vec<f32> = (0..1024).map(|i| (i as f32 * 0.01).sin()).collect();
+        s.run(&mut warm);
+        // Glitch buffer with NaN and +Inf.
+        let mut glitch = vec![0.5_f32; 32];
+        glitch[5] = f32::NAN;
+        glitch[15] = f32::INFINITY;
+        s.run(&mut glitch);
+        assert!(glitch.iter().all(|v| v.is_finite()));
+        // The one-pole must recover and settle toward the DC input 0.5
+        // rather than emitting NaN forever.
+        let mut after = vec![0.5_f32; 512];
+        s.run(&mut after);
+        assert!(
+            after.iter().all(|v| v.is_finite()),
+            "deemph one-pole latched non-finite after a NaN"
+        );
+        assert!(
+            (after[511] - 0.5).abs() < 0.05,
+            "deemph did not settle toward the DC input: {}",
+            after[511]
+        );
     }
 }

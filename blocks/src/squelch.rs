@@ -249,7 +249,12 @@ impl Block for Squelch {
         let n = src.len().min(dst.len());
         for i in 0..n {
             let z = src[i];
-            let inst_power = z.re * z.re + z.im * z.im;
+            // Scrub non-finite samples to 0 before they touch the power
+            // EMA — one NaN would poison `self.power` (NaN.max/EMA stays
+            // NaN forever), freezing the gate open or shut for good.
+            let re = if z.re.is_finite() { z.re } else { 0.0 };
+            let im = if z.im.is_finite() { z.im } else { 0.0 };
+            let inst_power = re * re + im * im;
             self.power += self.alpha_power * (inst_power - self.power);
 
             if self.open {
@@ -262,8 +267,8 @@ impl Block for Squelch {
 
             let target = if self.open { 1.0 } else { 0.0 };
             self.gain += self.alpha_fade * (target - self.gain);
-            dst[i].re = z.re * self.gain;
-            dst[i].im = z.im * self.gain;
+            dst[i].re = re * self.gain;
+            dst[i].im = im * self.gain;
         }
 
         let mut w = Work::new();
@@ -438,5 +443,43 @@ mod tests {
                 "mismatch at {i}"
             );
         }
+    }
+
+    #[test]
+    fn non_finite_sample_does_not_freeze_gate() {
+        let params = SquelchParams {
+            threshold_db: -60.0,
+            power_tau_ms: 5.0,
+            fade_tau_ms: 5.0,
+            ..Default::default()
+        };
+        let mut sq = Squelch::new(params).unwrap();
+        // Quiet: gate settles closed.
+        let quiet = vec![Complex::new(1e-4_f32, 0.0); 4096];
+        run(&mut sq, &quiet);
+        assert!(!sq.is_open());
+        // Inject NaN / Inf — would poison the power EMA (NaN stays NaN),
+        // freezing the gate in its current state forever.
+        let mut glitch = vec![Complex::new(1e-4_f32, 0.0); 64];
+        glitch[10] = Complex::new(f32::NAN, 0.0);
+        glitch[20] = Complex::new(0.0, f32::INFINITY);
+        let g = run(&mut sq, &glitch);
+        assert!(g.iter().all(|z| z.re.is_finite() && z.im.is_finite()));
+        // Loud: the gate must be able to open again.
+        let loud = vec![Complex::new(0.1_f32, 0.0); 4096];
+        let out = run(&mut sq, &loud);
+        assert!(
+            out.iter().all(|z| z.re.is_finite() && z.im.is_finite()),
+            "squelch emitted a non-finite sample"
+        );
+        assert!(
+            sq.is_open(),
+            "power EMA latched on a NaN — gate frozen shut, loud input never reopened it"
+        );
+        let tail_peak = peak(&out[2048..]);
+        assert!(
+            (tail_peak - 0.1).abs() < 0.01,
+            "gate reopened but output level wrong: {tail_peak}"
+        );
     }
 }

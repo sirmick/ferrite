@@ -95,6 +95,13 @@ impl BlankerStage {
     /// spikes doesn't drag the reference up and silence the blanker.
     pub fn run(&mut self, buf: &mut [f32]) {
         for x in buf {
+            // Scrub non-finite samples to 0 first: a NaN would poison the
+            // envelope EMA (`env += α·(mag−env)` stays NaN), and the
+            // threshold test `mag > env·ratio` goes false forever, so the
+            // blanker would silently stop blanking. Treat it as silence.
+            if !x.is_finite() {
+                *x = 0.0;
+            }
             let mag = x.abs();
             // Seed the envelope from the first real sample so the
             // threshold detector has a sensible reference immediately.
@@ -215,5 +222,34 @@ mod tests {
             nonzero > total / 2,
             "blanker still chopping past recovery window: {nonzero}/{total} samples non-zero",
         );
+    }
+
+    #[test]
+    fn non_finite_sample_does_not_latch() {
+        let fs = 48_000.0_f32;
+        let mut s = BlankerStage::new(20.0, 1.0, 48_000.0);
+        let tone = |n: usize| -> Vec<f32> {
+            (0..n)
+                .map(|i| 0.3 * (core::f32::consts::TAU * 1_000.0 * i as f32 / fs).sin())
+                .collect()
+        };
+        let mut warm = tone(2048);
+        s.run(&mut warm);
+        let mut glitch = tone(64);
+        glitch[10] = f32::NAN;
+        glitch[20] = f32::INFINITY;
+        s.run(&mut glitch);
+        assert!(glitch.iter().all(|v| v.is_finite()));
+        // After the glitch the envelope must recover so the tone passes
+        // through again — not a poisoned env that either NaNs the output
+        // or stops detecting impulses.
+        let mut after = tone(2048);
+        s.run(&mut after);
+        assert!(
+            after.iter().all(|v| v.is_finite()),
+            "blanker envelope latched non-finite after a NaN"
+        );
+        let energy: f32 = after[1024..].iter().map(|v| v * v).sum();
+        assert!(energy > 0.0, "blanker stuck silent after the glitch");
     }
 }
