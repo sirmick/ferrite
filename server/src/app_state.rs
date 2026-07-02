@@ -998,10 +998,21 @@ impl AppState {
     /// value is authoritative (the override path — e.g. capture pins `0` to
     /// keep wideband IQ centred on target). When absent, look up the
     /// daemon-owned per-driver default keyed on the bound device's
-    /// `driver_key` — the single home for per-SDR dodge behaviour, shared by
-    /// every client. Software sources (Sine/File) and a failed caps probe
-    /// yield `0` (no dodge), never an error: a tune must not be blocked by a
-    /// policy lookup.
+    /// driver key — the single home for per-SDR dodge behaviour, shared by
+    /// every client. Software sources (Sine/File) yield `0` (no dodge),
+    /// never an error: a tune must not be blocked by a policy lookup.
+    ///
+    /// The driver key is read straight from the `driver=` arg, NOT from a
+    /// device probe: SoapySDR's driver name (the `driver=` value) equals
+    /// the `getDriverKey` the probe would return, case-insensitively, and
+    /// the lookup table lowercases both. Probing here was the dodge's
+    /// silent failure mode — `ensure_args` *opens* the device on a cache
+    /// miss, but the running pipeline already holds it, so the probe failed
+    /// busy and collapsed the dodge to 0 (carrier left parked on the DC
+    /// spike) whenever the caps cache happened to be cold. Reading the arg
+    /// makes the dodge deterministic regardless of cache warmth or whether
+    /// the pipeline owns the device. The probe stays only as a fallback for
+    /// the rare args with no `driver=` (Soapy auto-selects the driver).
     async fn resolve_offset_ratio(&self, caller: Option<f64>, source: &SourceConfig) -> f64 {
         if let Some(r) = caller {
             return r;
@@ -1017,10 +1028,13 @@ impl AppState {
         else {
             return 0.0;
         };
+        if let Some(driver) = driver_arg(args) {
+            return crate::source_policy::tune_offset_ratio_for(driver);
+        }
         match self.inner.device_cache.ensure_args(args).await {
             Ok(caps) => crate::source_policy::tune_offset_ratio_for(&caps.driver_key),
             Err(e) => {
-                tracing::warn!(error = ?e, "resolve_offset_ratio: caps probe failed; no dodge");
+                tracing::warn!(error = ?e, "resolve_offset_ratio: no driver= in args and caps probe failed; no dodge");
                 0.0
             }
         }
@@ -1045,6 +1059,18 @@ fn merge_into_params(
     }
     cfg.params = serde_json::Value::Object(merged);
     cfg
+}
+
+/// Extract the SoapySDR `driver=` value from an args string
+/// (`"driver=hackrf,serial=abc"` → `Some("hackrf")`). Returns `None`
+/// when no non-empty `driver=` part is present (Soapy then auto-selects,
+/// and only a probe can name the driver). Used by `resolve_offset_ratio`
+/// to look up the per-driver dodge ratio without opening the device.
+fn driver_arg(args: &str) -> Option<&str> {
+    args.split(',')
+        .filter_map(|p| p.trim().strip_prefix("driver="))
+        .map(str::trim)
+        .find(|v| !v.is_empty())
 }
 
 /// Overlay the live param values from a running runtime's `applied`
@@ -1356,6 +1382,18 @@ mod tests {
             "wires": [["src.out", "sink.in"]]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn driver_arg_extracts_soapy_driver() {
+        assert_eq!(driver_arg("driver=hackrf"), Some("hackrf"));
+        assert_eq!(driver_arg("driver=hackrf,serial=abc123"), Some("hackrf"));
+        assert_eq!(driver_arg("serial=abc123,driver=sdrplay"), Some("sdrplay"));
+        assert_eq!(driver_arg(" driver=rtlsdr "), Some("rtlsdr"));
+        // No driver= → None so the caller falls back to a probe.
+        assert_eq!(driver_arg("serial=abc123"), None);
+        assert_eq!(driver_arg(""), None);
+        assert_eq!(driver_arg("driver="), None);
     }
 
     fn test_source() -> SourceConfig {
