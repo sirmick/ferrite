@@ -61,3 +61,7 @@ web-time       = "1"
 wasm-opt = false
 
 [dev-dependencies]
+# Test-only: register fault-injecting / instance-counting blocks into the
+# same inventory registry the real blocks use, to drive reconfigure
+# rollback + conflict-retry tests through the normal build path.
+inventory      = "0.3"

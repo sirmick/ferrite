@@ -633,6 +633,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "ferrite-blocks",
+ "inventory",
  "num-complex",
  "serde",
  "serde_json",

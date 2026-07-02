@@ -184,6 +184,30 @@ struct BlockEntry {
     carried_over: bool,
 }
 
+/// A no-op stand-in parked in an entry's `block` slot while its real
+/// block is temporarily moved out during a reconfigure (see
+/// [`Runtime::take_blocks_by_id`]). Keeping the entry in place — rather
+/// than removing it — leaves `self` a valid, topo-ordered runtime we can
+/// roll back to if `replacement.init()` fails. It never runs: the entry
+/// is either restored (rollback) or dropped wholesale (commit) before
+/// the next tick, so `process` reporting nothing is only a safety net.
+struct HuskBlock;
+
+impl Block for HuskBlock {
+    // `spec()` is a `Self: Sized` method, never dispatched through the
+    // `dyn Block` the husk lives behind — it exists only to satisfy the
+    // trait and is never called.
+    fn spec() -> BlockSpec {
+        unreachable!("HuskBlock is a transient reconfigure placeholder")
+    }
+    fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
+        Ok(())
+    }
+    fn process(&mut self, _io: &mut BlockIo<'_>) -> Result<ferrite_blocks::Work> {
+        Ok(ferrite_blocks::Work::default())
+    }
+}
+
 /// What backs one output port's buffer for a `process` call.
 enum OutputSlot {
     /// Port is wired to a downstream consumer; writes go into this
@@ -342,23 +366,33 @@ impl Runtime {
         Ok(out)
     }
 
-    /// Remove block instances by id from `self.entries`. Called by
-    /// [`Self::reconfigure`] *only after* the rest of the new runtime
-    /// has been speculatively constructed — at that point `self` is
-    /// about to be replaced anyway, so the swap_remove side-effect
-    /// (entries reordering) is fine.
-    fn drain_blocks_by_id(&mut self, ids: &std::collections::BTreeSet<String>) -> BlockMap {
+    /// Move block instances out by id, leaving a [`HuskBlock`] in each
+    /// vacated entry slot. Entries and their wiring stay put and in topo
+    /// order — only the `block` field is swapped — so `self` remains a
+    /// valid runtime. Called by [`Self::reconfigure`] to hand reusable
+    /// blocks to the replacement while keeping `self` restorable: on a
+    /// failed `replacement.init()` the real blocks are pulled back and
+    /// [`Self::restore_block`] drops them into their husk slots, so the
+    /// still-running old graph survives the failed swap intact. On a
+    /// successful swap the husk-bearing entries are dropped wholesale.
+    fn take_blocks_by_id(&mut self, ids: &std::collections::BTreeSet<String>) -> BlockMap {
         let mut out = BlockMap::new();
-        let mut i = 0;
-        while i < self.entries.len() {
-            if ids.contains(&self.entries[i].id) {
-                let entry = self.entries.swap_remove(i);
-                out.insert(entry.id, entry.block);
-            } else {
-                i += 1;
+        for entry in &mut self.entries {
+            if ids.contains(&entry.id) {
+                let real = core::mem::replace(&mut entry.block, Box::new(HuskBlock));
+                out.insert(entry.id.clone(), real);
             }
         }
         out
+    }
+
+    /// Put a block back into the entry slot it was taken from (replacing
+    /// the husk). No-op if the id is no longer present. Used only by the
+    /// [`Self::reconfigure`] rollback path.
+    fn restore_block(&mut self, id: &str, block: Box<dyn Block>) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.block = block;
+        }
     }
 
     /// Assemble a runtime from already-produced pieces. `blocks` is
@@ -1224,7 +1258,7 @@ impl Runtime {
         let (specs, schedule) = instantiate_flowgraph(&v, &InventorySpecRegistry, env)
             .map_err(|e| anyhow!("instantiate: {e}"))?;
 
-        let reusable = Self::reusable_ids(old_doc, new_doc);
+        let mut reusable = Self::reusable_ids(old_doc, new_doc);
 
         // Phase 1: build the brand-new blocks first. Some blocks own
         // exclusive hardware (notably SoapySource on HackRF, which
@@ -1251,13 +1285,23 @@ impl Runtime {
                 // hardware handles release before the retry asks the
                 // driver for fresh ones.
                 let empty = std::collections::BTreeSet::new();
-                Self::construct_blocks_excluding(new_doc, &empty)?
+                let rebuilt = Self::construct_blocks_excluding(new_doc, &empty)?;
+                // This retry reused nothing, so phase 2 must take nothing
+                // out of the (now-stopped) old graph and no block may be
+                // flagged `carried_over` below — otherwise `init()` skips
+                // the freshly built instances, leaving stopped husks of
+                // the old ones in the new runtime. Clearing `reusable` is
+                // the single switch that enforces both.
+                reusable.clear();
+                rebuilt
             }
             Err(err) => return Err(err),
         };
 
-        // Phase 2: drain reusable blocks from the old runtime and merge.
-        for (id, block) in self.drain_blocks_by_id(&reusable) {
+        // Phase 2: take reusable blocks out of the old runtime (leaving
+        // husks so `self` stays a valid, restorable runtime) and merge
+        // them into the replacement's block map.
+        for (id, block) in self.take_blocks_by_id(&reusable) {
             blocks.insert(id, block);
         }
 
@@ -1278,7 +1322,19 @@ impl Runtime {
         }
         replacement.applied_doc = Some(new_doc.clone());
         replacement.environment = Some(env);
-        replacement.init()?;
+        if let Err(e) = replacement.init() {
+            // Roll back: pull the reused blocks back out of the failed
+            // replacement and drop them into the husk slots left in
+            // `self` by `take_blocks_by_id`, so the still-running old
+            // graph is whole again and this reconfigure is a no-op. (On
+            // the exclusive-conflict retry `reusable` is empty and `self`
+            // was already stopped, so this loop does nothing there — the
+            // hardware was released and there is no old graph to restore.)
+            for (id, block) in replacement.take_blocks_by_id(&reusable) {
+                self.restore_block(&id, block);
+            }
+            return Err(e);
+        }
 
         if matches!(
             self.state,
@@ -2214,5 +2270,241 @@ mod tests {
     fn panic_message_falls_back_for_non_string_payloads() {
         let payload: Box<dyn std::any::Any + Send> = Box::new(42_u32);
         assert_eq!(panic_payload_message(&payload), "non-string panic payload");
+    }
+
+    // ── Reconfigure rollback + conflict retry (C2/C3) ──────────────────
+    //
+    // These drive the real reconfigure build path, so the fault-injecting
+    // block is registered into the same inventory registry the real blocks
+    // use. One configurable `RtTestBlock` covers every case; behaviour is
+    // selected per instance via JSON params. init()/drop() are tallied by
+    // `tag` (distinct per test) so the parallel test runner can't clash.
+
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    static INIT_CALLS: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+    static DROP_CALLS: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+    /// Armed once by the conflict test; the flagged block's *first*
+    /// construct returns an exclusive-resource-conflict error, then clears.
+    static CONFLICT_ARMED: AtomicBool = AtomicBool::new(false);
+
+    fn tally(map: &Mutex<BTreeMap<String, usize>>, tag: &str) {
+        *map.lock().unwrap().entry(tag.to_string()).or_insert(0) += 1;
+    }
+    fn count(map: &Mutex<BTreeMap<String, usize>>, tag: &str) -> usize {
+        map.lock().unwrap().get(tag).copied().unwrap_or(0)
+    }
+
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct RtTestCfg {
+        tag: String,
+        fail_init: bool,
+        conflict_once: bool,
+    }
+
+    /// A source (no inputs, one RealF32 out) whose construct/init
+    /// behaviour is param-driven, used only to exercise reconfigure
+    /// rollback + conflict retry. Produces a small constant stream so a
+    /// post-rollback `tick()` observably makes progress.
+    struct RtTestBlock {
+        tag: String,
+        fail_init: bool,
+    }
+
+    impl Drop for RtTestBlock {
+        fn drop(&mut self) {
+            tally(&DROP_CALLS, &self.tag);
+        }
+    }
+
+    impl Block for RtTestBlock {
+        fn spec() -> BlockSpec {
+            BlockSpec {
+                type_name: "RtTestBlock",
+                placement: ferrite_blocks::Placement::Either,
+                inputs: &[],
+                outputs: &[ferrite_blocks::PortSpec {
+                    name: "out",
+                    port_type: PortType::RealF32,
+                }],
+                params: &[],
+                ai_notes: "",
+            }
+        }
+        fn output_capacity_hints(&self) -> [usize; MAX_PORTS] {
+            let mut h = [0usize; MAX_PORTS];
+            h[0] = 256;
+            h
+        }
+        fn output_rate_hz(&self, _port: usize) -> Option<f64> {
+            Some(48_000.0)
+        }
+        fn init(&mut self, _ctx: &mut InitCtx<'_>) -> Result<()> {
+            tally(&INIT_CALLS, &self.tag);
+            if self.fail_init {
+                anyhow::bail!("RtTestBlock {:?}: init failure (injected)", self.tag);
+            }
+            Ok(())
+        }
+        fn process(&mut self, io: &mut BlockIo<'_>) -> Result<ferrite_blocks::Work> {
+            let Some(dst) = io
+                .outputs
+                .iter_mut()
+                .find(|p| p.name == "out")
+                .and_then(OutputPort::as_real_f32_mut)
+            else {
+                return Ok(ferrite_blocks::Work::default());
+            };
+            let n = dst.len().min(64);
+            for v in &mut dst[..n] {
+                *v = 1.0;
+            }
+            let mut w = ferrite_blocks::Work::default();
+            w.produced[0] = n;
+            Ok(w)
+        }
+    }
+
+    fn construct_rt_test(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let cfg: RtTestCfg = serde_json::from_value(params.clone()).unwrap_or_default();
+        if cfg.conflict_once && CONFLICT_ARMED.swap(false, Ordering::SeqCst) {
+            // Mimic SoapySource's "second rx_stream refused" — the exact
+            // signature `is_exclusive_resource_conflict` matches on.
+            anyhow::bail!("RX stream already opened");
+        }
+        Ok(Box::new(RtTestBlock {
+            tag: cfg.tag,
+            fail_init: cfg.fail_init,
+        }))
+    }
+
+    inventory::submit! {
+        ferrite_blocks::registry::BlockEntry {
+            spec_fn: <RtTestBlock as Block>::spec,
+            construct_fn: construct_rt_test,
+        }
+    }
+
+    #[test]
+    fn reconfigure_rolls_back_on_init_failure() {
+        // A NEW block fails init() *after* the reusable block has been
+        // taken out of the running graph. The runtime must put the taken
+        // block back and stay Running — not drop the live instance and
+        // limp on as a half-graph.
+        let original = r#"{
+            "name":"t","environments":["browser"],
+            "blocks":{"keep":{"type":"RtTestBlock","params":{"tag":"c2_keep"}}},
+            "wires":[]
+        }"#;
+        let mut rt = load(original, 16);
+        rt.init().unwrap();
+        rt.start().unwrap();
+        let drops_before = count(&DROP_CALLS, "c2_keep");
+
+        let new_doc: FlowgraphDoc = serde_json::from_str(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{
+                    "keep":{"type":"RtTestBlock","params":{"tag":"c2_keep"}},
+                    "fail":{"type":"RtTestBlock","params":{"tag":"c2_fail","fail_init":true}}
+                },
+                "wires":[]
+            }"#,
+        )
+        .unwrap();
+
+        let err = rt.reconfigure(&new_doc).unwrap_err();
+        // `{err:#}` walks the source chain — the outer context is
+        // `init block "fail"`, the injected cause is `init failure`.
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("init block \"fail\"") && msg.contains("init failure"),
+            "unexpected err: {msg}"
+        );
+
+        // Old graph survives intact.
+        assert_eq!(rt.state(), RuntimeState::Running);
+        assert_eq!(
+            count(&DROP_CALLS, "c2_keep"),
+            drops_before,
+            "the reused block instance must not be dropped on rollback"
+        );
+        assert!(
+            rt.block_mut("keep").is_some(),
+            "reused block must still be present after rollback"
+        );
+        assert_eq!(
+            rt.applied_doc().unwrap().blocks.len(),
+            1,
+            "rollback must preserve the old doc"
+        );
+        // And it still runs: a tick makes progress from the old graph.
+        rt.tick().unwrap();
+        let produced: usize = rt
+            .entries
+            .iter()
+            .find(|e| e.id == "keep")
+            .map(|e| e.produced.iter().sum())
+            .unwrap_or(0);
+        assert!(produced > 0, "old graph must still produce after rollback");
+    }
+
+    #[test]
+    fn reconfigure_conflict_retry_inits_all_and_no_carryover() {
+        // Force the exclusive-resource-conflict path (a NEW block whose
+        // first construct fails like SoapySource's second rx_stream). The
+        // retry rebuilds everything fresh, so *every* block in the new
+        // graph must have init() called and none may be flagged
+        // carried_over — otherwise a stale, stopped instance survives.
+        let original = r#"{
+            "name":"t","environments":["browser"],
+            "blocks":{"keep":{"type":"RtTestBlock","params":{"tag":"c3_keep"}}},
+            "wires":[]
+        }"#;
+        let mut rt = load(original, 16);
+        rt.init().unwrap();
+        rt.start().unwrap();
+
+        let inits_before = count(&INIT_CALLS, "c3_keep") + count(&INIT_CALLS, "c3_conf");
+        CONFLICT_ARMED.store(true, Ordering::SeqCst);
+
+        let new_doc: FlowgraphDoc = serde_json::from_str(
+            r#"{
+                "name":"t","environments":["browser"],
+                "blocks":{
+                    "keep":{"type":"RtTestBlock","params":{"tag":"c3_keep"}},
+                    "conf":{"type":"RtTestBlock","params":{"tag":"c3_conf","conflict_once":true}}
+                },
+                "wires":[]
+            }"#,
+        )
+        .unwrap();
+
+        rt.reconfigure(&new_doc).unwrap();
+
+        // The conflict token was consumed → the retry path actually ran.
+        assert!(
+            !CONFLICT_ARMED.load(Ordering::SeqCst),
+            "conflict retry path was not exercised"
+        );
+        // Both blocks freshly init'd on the retry. Before the fix `keep`
+        // is drained back over its fresh instance and flagged
+        // carried_over, so its init is skipped → delta of 1, not 2.
+        let inits_after = count(&INIT_CALLS, "c3_keep") + count(&INIT_CALLS, "c3_conf");
+        assert_eq!(
+            inits_after - inits_before,
+            2,
+            "conflict retry must init every block in the new graph fresh"
+        );
+        assert_eq!(
+            rt.entries.iter().filter(|e| e.carried_over).count(),
+            0,
+            "conflict retry reused nothing → no block may be carried_over"
+        );
+        assert_eq!(rt.state(), RuntimeState::Running);
+        rt.tick().unwrap();
     }
 }
