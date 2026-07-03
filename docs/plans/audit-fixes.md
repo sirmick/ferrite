@@ -31,8 +31,8 @@ and RdsDemod on 10M samples with an exact decimation count (no timeline slip).
 | 6.5 — sdr-tables consolidation | ✅ done | per-driver policy + driver-arg parser into `ferrite-sdr-tables` |
 | 6.2 — browser whisper removal | 🚧 blocked | needs sherpa e2e green in CI first (provisioning gap) |
 | 6.3 — capture orchestration server-side | ✅ done | `POST /api/capture/*` on ferrited; MCP verbs thinned (−595 lines); antenna-inherit + sidecar-naming fixes, each with a regression test verified to fail without it |
-| 6.6 — `AppError` enum | ⬜ todo | own worktree, with Mick |
-| 6.7 — Soapy stream trait seam | ⬜ todo | own worktree, with Mick (most expensive, last) |
+| 6.6 — `AppError` enum | ✅ done | typed `AppError` (status by variant) kills the `msg.contains` 409 + plain-text error bodies; FrameBus poison-recovery applied to DecoderStore + BroadcastSink; poison tests verified to fail without the fix |
+| 6.7 — Soapy stream trait seam | 🚧 in progress | own worktree, with Mick (most expensive, last) |
 
 The detailed phase write-ups below are retained as the record of what was
 built (and, for 6.2/6.3/6.6/6.7, the spec for the remaining work).
