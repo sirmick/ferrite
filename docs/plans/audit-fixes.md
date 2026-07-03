@@ -5,6 +5,38 @@ verified against source. This plan is written to be executed step by step by
 an implementing agent. Follow the phases **in order** — later phases assume
 the tree state produced by earlier ones.
 
+## Status — updated 2026-07-02 (on `main`, through `8aafce8`)
+
+Phases 0–5, 6.1, 6.4, 6.5 are **done, merged to `main`, and pushed**. Every
+fix carries a regression test verified to fail without it; each phase passed
+the full local CI matrix before push. The RX chain was additionally
+runtime-verified live (fresh binary, MCP-driven): real ADS-B decode into the
+decoder store, live reconfigure ×2 (Phase-2 path, no crash), a failed source
+patch rolling back cleanly (pipeline survived), Squelch on 1.09M real samples,
+and RdsDemod on 10M samples with an exact decimation count (no timeline slip).
+
+| Phase | Status | Notes |
+|---|---|---|
+| 0 — branch cleanup | ✅ done | sherpa-asr split into 2 commits + merged (+2 latent CI breaks fixed); stash triaged & preserved (one genuine unapplied change: `soapy_retry` fail-fast — **Mick's call** to resurrect); trivia sweep |
+| 1 — C1 stereo quadrature | ✅ done | live on-air defect; `-2·c·s` + fixed cos→sin fixtures + convention/mirror-polarity test |
+| 2 — C2/C3 reconfigure rollback | ✅ done | HuskBlock take/restore + clear-reusable-on-conflict; fault-block tests |
+| 3 — H1 NaN scrub | ✅ done | 6 audio blocks + per-block recovery tests |
+| 4.1 — assert seg_snr_db | ✅ done | |
+| 4.2 — replay smoke test | ✅ done | ADS-B IQ → DecoderStore (`server/tests/replay_smoke.rs`) |
+| 4.3 — RealF32Resamp sweep + nx_cap | ✅ done | starved-dst timeline-slip fix + rate sweep |
+| 5 — RDS H2 (delay) + H4 (backpressure) | ✅ done | decode now works at 200/240/250 kHz |
+| 5 — RDS H3 (symbol timing) | ⏸ deferred | larger; plan marks optional |
+| 6.1 — delete client-side graph derivation | ✅ done | browser-half authoritative; −228 lines |
+| 6.4 — extract `plan_tune()` | ✅ done | pure fn in `source_policy` + 9 dodge-math tests |
+| 6.5 — sdr-tables consolidation | ✅ done | per-driver policy + driver-arg parser into `ferrite-sdr-tables` |
+| 6.2 — browser whisper removal | 🚧 blocked | needs sherpa e2e green in CI first (provisioning gap) |
+| 6.3 — capture orchestration server-side | ⬜ todo | own worktree, with Mick |
+| 6.6 — `AppError` enum | ⬜ todo | own worktree, with Mick |
+| 6.7 — Soapy stream trait seam | ⬜ todo | own worktree, with Mick (most expensive, last) |
+
+The detailed phase write-ups below are retained as the record of what was
+built (and, for 6.2/6.3/6.6/6.7, the spec for the remaining work).
+
 ## Ground rules for the implementer
 
 - Work on `refactor/mcp-single-layer` (or a worktree branched from it under
