@@ -30,7 +30,7 @@ and RdsDemod on 10M samples with an exact decimation count (no timeline slip).
 | 6.4 — extract `plan_tune()` | ✅ done | pure fn in `source_policy` + 9 dodge-math tests |
 | 6.5 — sdr-tables consolidation | ✅ done | per-driver policy + driver-arg parser into `ferrite-sdr-tables` |
 | 6.2 — browser whisper removal | 🚧 blocked | needs sherpa e2e green in CI first (provisioning gap) |
-| 6.3 — capture orchestration server-side | ⬜ todo | own worktree, with Mick |
+| 6.3 — capture orchestration server-side | ✅ done | `POST /api/capture/*` on ferrited; MCP verbs thinned (−595 lines); antenna-inherit + sidecar-naming fixes, each with a regression test verified to fail without it |
 | 6.6 — `AppError` enum | ⬜ todo | own worktree, with Mick |
 | 6.7 — Soapy stream trait seam | ⬜ todo | own worktree, with Mick (most expensive, last) |
 
@@ -353,11 +353,30 @@ commit series. Scope details are in the audit report (see memory
    the 6.8 MB wasm artifact. Keep `blocks/native/whisper` (node-side STT
    uses it) but make it feature-gated in `blocks/Cargo.toml:74` like every
    other native decoder.
-3. **Capture orchestration server-side**: move the job registry + capture
-   state machines out of `tools/ferrite-ctl/src/mcp.rs:559-853,1478-1780`
-   behind `POST /api/capture/*` + job-status endpoints; MCP verbs become
-   thin ops. Kills the capture-antenna-inherit bug class and the
-   local-filesystem sidecar dependency.
+3. **Capture orchestration server-side** — ✅ **done** (`630d962`). The job
+   registry + both capture state machines moved into `server/src/capture.rs`
+   behind `POST /api/capture/{iq,fft,audio}` + `GET /api/capture/jobs[/:id]`;
+   the background tasks drive `AppState` directly (tune/start/patch/stop)
+   instead of looping HTTP from ferrite-ctl. The MCP verbs are now thin
+   POST/GET wrappers (`mcp.rs` −595 lines). Two behavioural fixes, each with
+   a regression test verified to fail without it:
+   - **antenna-inherit** (`capture_source_config`): the preset-swap capture
+     reuses the live `SourceConfig` (antenna/notch/args) and overrides only
+     the tuning knobs, instead of rebuilding from {freq,rate,bw,gain};
+   - **sidecar-naming**: recording blocks write `<path>.json`, but ferrite-ctl
+     read `<path>.<ext>.json`, so `capture_status.sidecar` was always null —
+     ferrited now reads its own sidecar with the block's naming.
+
+   Note (not a regression): the non-disruptive **live-tee** IQ/FFT path
+   couldn't be endpoint-tested with the SineSource harness — a
+   FileAudioSink-terminated graph with no real-time source pacing stalls
+   after its initial burst under *any* live-reconfigure (a plain
+   `freq_shift_hz` VFO change reproduces it), so the tee engages recording
+   after the graph has already backed up. Production sources drain
+   continuously, so this is a harness limitation, not a capture defect; the
+   endpoint smoke test drives the wideband `Source→FileIqSink` path (which
+   drains continuously) and the live tee stays covered by the channelizer's
+   own `live_record_path_writes_cf32_and_sidecar` block test.
 4. **`plan_tune()` extraction**: the ~230 lines of dodge/keepout/DC-guard
    math inline in `AppState::tune` (`server/src/app_state.rs:850-995`)
    become a pure function in `source_policy.rs` with unit tests.
