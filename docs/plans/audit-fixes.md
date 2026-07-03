@@ -32,7 +32,7 @@ and RdsDemod on 10M samples with an exact decimation count (no timeline slip).
 | 6.2 — browser whisper removal | 🚧 blocked | needs sherpa e2e green in CI first (provisioning gap) |
 | 6.3 — capture orchestration server-side | ✅ done | `POST /api/capture/*` on ferrited; MCP verbs thinned (−595 lines); antenna-inherit + sidecar-naming fixes, each with a regression test verified to fail without it |
 | 6.6 — `AppError` enum | ✅ done | typed `AppError` (status by variant) kills the `msg.contains` 409 + plain-text error bodies; FrameBus poison-recovery applied to DecoderStore + BroadcastSink; poison tests verified to fail without the fix |
-| 6.7 — Soapy stream trait seam | 🚧 in progress | own worktree, with Mick (most expensive, last) |
+| 6.7 — Soapy stream trait seam | ✅ done | `RxStreamLike` trait extracts read/time_ns/deactivate so the reader's overflow/hung/recovery state machine runs against a scripted fake; fixed the spurious-`hung`-on-full-ring leak (refresh liveness on any `Ok(n>0)`), regression-tested. H5 drop-oldest + H6 gap flag deferred as own-phase follow-ups |
 
 The detailed phase write-ups below are retained as the record of what was
 built (and, for 6.2/6.3/6.6/6.7, the spec for the remaining work).
@@ -388,13 +388,21 @@ commit series. Scope details are in the audit report (see memory
    `msg.contains("pipeline is running")` 409 at `routes.rs:623` and the
    plain-text error bodies at `:1232/:1337/:1438`); apply FrameBus's
    poison-recovery pattern to `DecoderStore` and `BroadcastSink`.
-7. **Soapy stream trait seam** (most expensive, last): extract
-   `open/read/retune/close` behind a trait in `soapy_source.rs` so the
-   overflow/hung/reopen state machine (`:1051-1128`) runs against a scripted
-   fake. While in there fix: `last_progress` must refresh on any `Ok(n)`
-   even when the ring is full (`:1087-1092`, spurious `hung` leak on a
-   healthy device), and consider drop-oldest ring policy (H5) + a gap flag
-   in `PortMeta` (H6) as follow-ups with their own tests.
+7. **Soapy stream trait seam** — ✅ **done**. Extracted the three ops the
+   reader loop drives (`read` / `time_ns` / `deactivate`) behind an
+   `RxStreamLike` trait, with a `SoapyRx` hardware adapter and a
+   `ScriptedRx` fake; `run_reader` is generic over the trait and takes
+   `hung_stall` as a parameter, so the overflow / hung / recovery /
+   backpressure state machine runs deterministically with no SDR (5 tests).
+   Fixed the flagged bug: liveness (`last_sample_at_ns`, the `hung` clear)
+   now refreshes on any `Ok(n>0)` **before** the ring write, so a
+   healthy-but-backpressured device (full ring) is no longer flagged `hung`
+   and leaked on Drop; regression test verified to fail without it.
+   `open/retune` were left on the concrete `SoapySource` (they aren't part
+   of the reader state machine the seam targets). **Deferred as own-phase
+   follow-ups** (the plan's "consider"): H5 drop-oldest ring policy (changes
+   backpressure semantics — needs live validation) and H6 a `PortMeta` gap
+   flag (cross-cutting through the runtime).
 
 ## Deferred / explicitly not planned
 
