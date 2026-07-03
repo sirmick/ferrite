@@ -89,10 +89,12 @@ struct ReaderCounters {
     samples_pushed: AtomicU64,
     /// Monotonic nanoseconds (from `CLOCK_MONOTONIC` via `Instant`,
     /// relative to an arbitrary epoch captured at block construction)
-    /// of the most recent successful `ring.write()`. Zero until the
-    /// first push. Stalled readers can be detected by comparing this
-    /// to `now()` — a gap > a few ticks' worth of samples is a sign
-    /// the driver hung (common with RTL-SDR on reset / USB glitches).
+    /// of the most recent driver **delivery** — any `Ok(n>0)` read,
+    /// even when a full ring dropped the samples (a backpressured
+    /// device is still alive). Zero until the first read. Stalled
+    /// readers are detected by comparing this to `now()` — a gap >
+    /// a few ticks' worth of samples is a sign the driver hung (common
+    /// with RTL-SDR on reset / USB glitches).
     last_sample_at_ns: AtomicU64,
     /// Set by the reader when the device stops delivering for
     /// [`HUNG_STALL`] (a wedged driver / unresponsive service). Read in
@@ -108,6 +110,57 @@ struct ReaderCounters {
 /// enough that a healthy active stream (which delivers continuously, even
 /// noise) never trips it; short enough to catch a wedge before teardown.
 const HUNG_STALL: Duration = Duration::from_secs(3);
+
+/// The slice of an Rx stream the reader loop ([`run_reader`]) actually
+/// drives: read a chunk, ask for its timestamp, tear down. Extracting it
+/// behind a trait lets the overflow / hung / recovery state machine run
+/// against a scripted fake in tests — the hardware path is [`SoapyRx`].
+trait RxStreamLike {
+    /// Read up to `buf.len()` samples into `buf`. `Ok(n)` = delivered
+    /// (`n` may be 0, a spurious wake), or a classified error.
+    fn read(&mut self, buf: &mut [Complex<f32>], timeout_us: i64) -> Result<usize, RxReadError>;
+    /// Driver timestamp of the most recent read, ns (0 = unavailable —
+    /// not every driver populates it; RTL-SDR notably does not).
+    fn time_ns(&mut self) -> i64;
+    /// Best-effort stream teardown; we're ending, so errors are dropped.
+    fn deactivate(&mut self);
+}
+
+/// A failed [`RxStreamLike::read`], collapsed to the three cases the
+/// reader treats differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RxReadError {
+    /// Nothing arrived within the timeout — normal idle.
+    Timeout,
+    /// The driver's internal buffer overran (we fell behind); the stream
+    /// stays usable, only sample continuity is lost.
+    Overflow,
+    /// A hard error — device gone / wedged. Ends the reader; the string
+    /// is the driver's message, surfaced in the log.
+    Fatal(String),
+}
+
+/// Hardware adapter: the real SoapySDR Rx stream behind [`RxStreamLike`].
+struct SoapyRx(RxStream<Complex<f32>>);
+
+impl RxStreamLike for SoapyRx {
+    fn read(&mut self, buf: &mut [Complex<f32>], timeout_us: i64) -> Result<usize, RxReadError> {
+        let mut buffers: [&mut [Complex<f32>]; 1] = [buf];
+        self.0
+            .read(&mut buffers, timeout_us)
+            .map_err(|err| match err.code {
+                ErrorCode::Timeout => RxReadError::Timeout,
+                ErrorCode::Overflow => RxReadError::Overflow,
+                _ => RxReadError::Fatal(format!("{err}")),
+            })
+    }
+    fn time_ns(&mut self) -> i64 {
+        self.0.time_ns()
+    }
+    fn deactivate(&mut self) {
+        let _ = self.0.deactivate(None);
+    }
+}
 
 /// Construction-time params. All fields are optional in the JSON preset;
 /// missing fields fall back to [`Default`].
@@ -932,12 +985,13 @@ impl Block for SoapySource {
             .name("soapy-rx".into())
             .spawn(move || {
                 run_reader(
-                    stream,
+                    SoapyRx(stream),
                     rate_hz,
                     &reader_ring,
                     &reader_counters,
                     &reader_stop,
                     reader_anchor,
+                    HUNG_STALL,
                 );
             })
             .context("spawn soapy reader thread")?;
@@ -1022,13 +1076,14 @@ impl BlockFactory for SoapySource {
     }
 }
 
-fn run_reader(
-    mut stream: RxStream<Complex<f32>>,
+fn run_reader<S: RxStreamLike>(
+    mut stream: S,
     rate_hz: f64,
     ring: &RingHandle,
     counters: &Arc<ReaderCounters>,
     stop: &Arc<AtomicBool>,
     start_instant: std::time::Instant,
+    hung_stall: Duration,
 ) {
     let mut staging: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); READER_CHUNK];
     // Timestamp bookkeeping: the expected next time_ns, updated after
@@ -1043,25 +1098,30 @@ fn run_reader(
     };
     let gap_tolerance_ns = (ns_per_sample * 2.0) as i64;
 
-    // Wall-clock of the last delivered samples. If the device stops
-    // delivering for `HUNG_STALL`, flag the driver hung so `Drop` skips the
-    // throwing `unmake()`; a recovery clears it again.
+    // Wall-clock of the last driver delivery. If the device stops
+    // delivering for `hung_stall`, flag the driver hung so `Drop` skips
+    // the throwing `unmake()`; a recovery clears it again.
     let mut last_progress = std::time::Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        let result = {
-            let dst: &mut [Complex<f32>] = &mut staging[..];
-            let mut buffers: [&mut [Complex<f32>]; 1] = [dst];
-            stream.read(&mut buffers, READ_TIMEOUT_US)
-        };
-        match result {
+        match stream.read(&mut staging[..], READ_TIMEOUT_US) {
             Ok(0) => {
-                if last_progress.elapsed() > HUNG_STALL {
+                if last_progress.elapsed() > hung_stall {
                     counters.hung.store(true, Ordering::Relaxed);
                 }
                 thread::sleep(Duration::from_millis(1));
             }
             Ok(n) => {
+                // The driver delivered — it is alive regardless of whether
+                // our ring had room for the samples. Refresh the liveness
+                // markers UP FRONT so a *full* ring (downstream
+                // backpressure) is never mistaken for a hung driver, which
+                // would spuriously leak the device handle on Drop.
+                let now_ns = start_instant.elapsed().as_nanos() as u64;
+                counters.last_sample_at_ns.store(now_ns, Ordering::Relaxed);
+                last_progress = std::time::Instant::now();
+                counters.hung.store(false, Ordering::Relaxed);
+
                 let t = stream.time_ns();
                 if t > 0 {
                     if expected_time_ns > 0 {
@@ -1077,54 +1137,47 @@ fn run_reader(
                     Ok(mut r) => r.write(&staging[..n]),
                     Err(_) => {
                         tracing::warn!("soapy ring mutex poisoned; ending reader");
-                        let _ = stream.deactivate(None);
+                        stream.deactivate();
                         return;
                     }
                 };
                 counters
                     .samples_pushed
                     .fetch_add(pushed as u64, Ordering::Relaxed);
-                if pushed > 0 {
-                    let now_ns = start_instant.elapsed().as_nanos() as u64;
-                    counters.last_sample_at_ns.store(now_ns, Ordering::Relaxed);
-                    // Delivering again — clear any prior stall flag.
-                    last_progress = std::time::Instant::now();
-                    counters.hung.store(false, Ordering::Relaxed);
-                }
                 if pushed < n {
                     counters
                         .ring_drops
                         .fetch_add((n - pushed) as u64, Ordering::Relaxed);
                 }
             }
-            Err(err) if err.code == ErrorCode::Timeout => {
+            Err(RxReadError::Timeout) => {
                 // Normal idle — try again. Brief sleep so the driver
                 // has a chance to fill its internal ring if the pipe
                 // was momentarily starved. But a *sustained* run of
                 // timeouts with no delivery is a wedged driver.
-                if last_progress.elapsed() > HUNG_STALL {
+                if last_progress.elapsed() > hung_stall {
                     counters.hung.store(true, Ordering::Relaxed);
                 }
                 thread::sleep(Duration::from_millis(1));
             }
-            Err(err) if err.code == ErrorCode::Overflow => {
+            Err(RxReadError::Overflow) => {
                 counters.overflow_drops.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!("soapy overflow");
                 // Invalidate the expected-time tracker — we can't
                 // compute a sane delta across the gap.
                 expected_time_ns = 0;
             }
-            Err(err) => {
+            Err(RxReadError::Fatal(msg)) => {
                 // A hard read error usually means the device is gone /
                 // wedged — flag it so Drop skips the throwing unmake().
-                tracing::warn!(?err, "soapy read error; ending reader");
+                tracing::warn!(%msg, "soapy read error; ending reader");
                 counters.hung.store(true, Ordering::Relaxed);
-                let _ = stream.deactivate(None);
+                stream.deactivate();
                 return;
             }
         }
     }
-    let _ = stream.deactivate(None);
+    stream.deactivate();
 }
 
 /// Open a SoapySDR device with a short retry loop for the
@@ -1460,5 +1513,209 @@ mod tests {
             "{} iteration(s) failed",
             iter_failures.len()
         );
+    }
+
+    // ── reader state machine, driven against a scripted fake ─────────────
+    //
+    // The trait seam ([`RxStreamLike`]) lets the overflow / hung / recovery
+    // logic in [`run_reader`] run with no hardware: `ScriptedRx` returns a
+    // pre-baked sequence of read results and counts how many reads happened
+    // so the driver thread can be observed deterministically.
+    use super::{run_reader, ReaderCounters, RingHandle, RxReadError, RxStreamLike};
+    use crate::spsc_ring::IqRing;
+    use num_complex::Complex;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+    use std::time::{Duration, Instant};
+
+    struct ScriptedRx {
+        script: std::collections::VecDeque<Result<usize, RxReadError>>,
+        tail: Result<usize, RxReadError>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl RxStreamLike for ScriptedRx {
+        fn read(
+            &mut self,
+            buf: &mut [Complex<f32>],
+            _timeout_us: i64,
+        ) -> Result<usize, RxReadError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            let res = self.script.pop_front().unwrap_or_else(|| self.tail.clone());
+            if let Ok(n) = res {
+                let n = n.min(buf.len());
+                for s in buf[..n].iter_mut() {
+                    *s = Complex::new(1.0, 0.0);
+                }
+                return Ok(n);
+            }
+            res
+        }
+        fn time_ns(&mut self) -> i64 {
+            0 // no driver timestamp — disables gap tracking, irrelevant here
+        }
+        fn deactivate(&mut self) {}
+    }
+
+    fn wait_until(mut pred: impl FnMut() -> bool, deadline: Duration) {
+        let start = Instant::now();
+        while !pred() {
+            assert!(start.elapsed() < deadline, "wait_until timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Spawn `run_reader` against a scripted fake. Returns the shared
+    /// counters, the read counter, the stop flag, and the join handle.
+    fn spawn_reader(
+        script: Vec<Result<usize, RxReadError>>,
+        tail: Result<usize, RxReadError>,
+        ring: RingHandle,
+        hung_stall: Duration,
+    ) -> (
+        Arc<ReaderCounters>,
+        Arc<AtomicUsize>,
+        Arc<AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let counters = Arc::new(ReaderCounters::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let fake = ScriptedRx {
+            script: script.into(),
+            tail,
+            reads: reads.clone(),
+        };
+        let (c, s) = (counters.clone(), stop.clone());
+        let jh = std::thread::spawn(move || {
+            run_reader(fake, 2_000_000.0, &ring, &c, &s, Instant::now(), hung_stall);
+        });
+        (counters, reads, stop, jh)
+    }
+
+    fn full_ring(cap: usize) -> RingHandle {
+        let ring = Arc::new(Mutex::new(IqRing::new(cap)));
+        let filled = ring
+            .lock()
+            .unwrap()
+            .write(&vec![Complex::new(0.0, 0.0); cap]);
+        assert_eq!(filled, cap, "test ring must start full");
+        ring
+    }
+
+    // The core regression: a delivering-but-backpressured device (full
+    // ring) must still refresh the liveness markers, so it is never
+    // mistaken for hung. Without the fix (refresh gated on `pushed > 0`),
+    // `last_sample_at_ns` stays 0 and `hung` stays set.
+    #[test]
+    fn full_ring_delivery_refreshes_liveness_and_counts_drops() {
+        let ring = full_ring(8);
+        let (counters, reads, stop, jh) = spawn_reader(
+            vec![Ok(4)],
+            Err(RxReadError::Timeout),
+            ring,
+            Duration::from_secs(10),
+        );
+        // Prior stall flag that a live delivery must clear.
+        counters.hung.store(true, Ordering::Relaxed);
+        wait_until(
+            || reads.load(Ordering::Relaxed) >= 2,
+            Duration::from_secs(2),
+        );
+        stop.store(true, Ordering::Relaxed);
+        jh.join().unwrap();
+
+        assert!(
+            counters.last_sample_at_ns.load(Ordering::Relaxed) > 0,
+            "a delivery must stamp last_sample_at_ns even when the ring is full"
+        );
+        assert!(
+            !counters.hung.load(Ordering::Relaxed),
+            "a delivering device must clear the hung flag"
+        );
+        assert_eq!(counters.samples_pushed.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.ring_drops.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn empty_ring_accepts_the_delivery() {
+        let ring: RingHandle = Arc::new(Mutex::new(IqRing::new(1024)));
+        let (counters, reads, stop, jh) = spawn_reader(
+            vec![Ok(100)],
+            Err(RxReadError::Timeout),
+            ring.clone(),
+            Duration::from_secs(10),
+        );
+        wait_until(
+            || reads.load(Ordering::Relaxed) >= 2,
+            Duration::from_secs(2),
+        );
+        stop.store(true, Ordering::Relaxed);
+        jh.join().unwrap();
+
+        assert_eq!(counters.samples_pushed.load(Ordering::Relaxed), 100);
+        assert_eq!(counters.ring_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(ring.lock().unwrap().available_read(), 100);
+    }
+
+    #[test]
+    fn overflow_is_counted_and_the_stream_survives() {
+        let ring: RingHandle = Arc::new(Mutex::new(IqRing::new(1024)));
+        let (counters, reads, stop, jh) = spawn_reader(
+            vec![Err(RxReadError::Overflow), Ok(10)],
+            Err(RxReadError::Timeout),
+            ring,
+            Duration::from_secs(10),
+        );
+        wait_until(
+            || reads.load(Ordering::Relaxed) >= 3,
+            Duration::from_secs(2),
+        );
+        stop.store(true, Ordering::Relaxed);
+        jh.join().unwrap();
+
+        assert_eq!(counters.overflow_drops.load(Ordering::Relaxed), 1);
+        // The read after the overflow still delivered — overflow doesn't
+        // end the stream.
+        assert_eq!(counters.samples_pushed.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn fatal_read_ends_the_reader_and_flags_hung() {
+        let ring: RingHandle = Arc::new(Mutex::new(IqRing::new(1024)));
+        let (counters, _reads, _stop, jh) = spawn_reader(
+            vec![Err(RxReadError::Fatal("device gone".into()))],
+            Err(RxReadError::Fatal("device gone".into())),
+            ring,
+            Duration::from_secs(10),
+        );
+        // Fatal ends run_reader on its own — join returns without `stop`.
+        jh.join().unwrap();
+        assert!(
+            counters.hung.load(Ordering::Relaxed),
+            "a fatal read must flag the driver hung (so Drop skips unmake)"
+        );
+    }
+
+    #[test]
+    fn sustained_stall_flags_hung() {
+        let ring: RingHandle = Arc::new(Mutex::new(IqRing::new(1024)));
+        // Never delivers; a short stall window flips `hung` quickly.
+        let (counters, _reads, stop, jh) = spawn_reader(
+            vec![],
+            Err(RxReadError::Timeout),
+            ring,
+            Duration::from_millis(20),
+        );
+        wait_until(
+            || counters.hung.load(Ordering::Relaxed),
+            Duration::from_secs(2),
+        );
+        stop.store(true, Ordering::Relaxed);
+        jh.join().unwrap();
+        assert!(counters.hung.load(Ordering::Relaxed));
+        assert_eq!(counters.samples_pushed.load(Ordering::Relaxed), 0);
     }
 }
