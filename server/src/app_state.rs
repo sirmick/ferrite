@@ -26,6 +26,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use crate::{
     block_schema::BlockSchemaDto,
     device_cache::DeviceCache,
+    error::AppError,
     frame_bus::{FrameBus, DEFAULT_SUBSCRIBER_CAPACITY},
     preset_pipeline::{spawn_preset, PresetMount},
 };
@@ -796,10 +797,13 @@ impl AppState {
     /// `systemctl restart sdrplay` is the correct hammer there. This
     /// path is most useful for pure-library drivers (HackRF, RTL-SDR,
     /// etc.) whose state lives inside ferrited.
-    pub async fn reload_devices(&self) -> Result<()> {
+    pub async fn reload_devices(&self) -> Result<(), AppError> {
         if self.inner.pipeline.lock().await.is_some() {
-            return Err(anyhow!(
-                "cannot reload SoapySDR drivers while the pipeline is running — stop it first"
+            // Typed conflict — the route maps it to 409 by variant, no
+            // message string-matching.
+            return Err(AppError::conflict(
+                "RELOAD_REFUSED_RUNNING",
+                "cannot reload SoapySDR drivers while the pipeline is running — stop it first",
             ));
         }
         self.inner.device_cache.clear().await;
@@ -807,7 +811,9 @@ impl AppState {
         // mutex; off-runtime keeps the axum worker free.
         tokio::task::spawn_blocking(crate::device::reload_modules)
             .await
-            .map_err(|e| anyhow!("SoapySDR module reload task panicked: {e}"))?;
+            .map_err(|e| {
+                AppError::internal("RELOAD_FAILED", format!("module reload task panicked: {e}"))
+            })?;
         tracing::info!("SoapySDR modules reloaded");
         Ok(())
     }
@@ -1452,6 +1458,22 @@ mod tests {
         assert_eq!(state.status().await, PipelineStatus::Running);
         assert!(state.stop().await);
         assert_eq!(state.status().await, PipelineStatus::Stopped);
+    }
+
+    // reload_devices refuses while the pipeline is running, and it does so
+    // with a TYPED conflict (mapped to 409 by variant) — no message
+    // string-matching in the route.
+    #[tokio::test]
+    async fn reload_devices_is_a_typed_conflict_while_running() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        state.start().await.unwrap();
+        let err = state.reload_devices().await.unwrap_err();
+        assert_eq!(err.status(), http::StatusCode::CONFLICT);
+        assert!(
+            matches!(&err, AppError::Conflict { code, .. } if *code == "RELOAD_REFUSED_RUNNING"),
+            "expected RELOAD_REFUSED_RUNNING conflict, got {err:?}"
+        );
+        state.stop().await;
     }
 
     #[tokio::test]

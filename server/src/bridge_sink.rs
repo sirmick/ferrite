@@ -52,7 +52,11 @@ impl BroadcastSink {
     }
 
     fn next_seq(&self, key: (Discriminant<Frame>, u16)) -> u32 {
-        let mut map = self.seqs.lock().expect("seq lock poisoned");
+        // Poison-recovery (mirrors FrameBus): a panic while holding this
+        // lock leaves no broken invariant — worst case a per-stream seq
+        // resumes from a stale value — so recover the guard rather than
+        // propagating the poison and wedging every subsequent frame.
+        let mut map = self.seqs.lock().unwrap_or_else(|e| e.into_inner());
         let slot = map.entry(key).or_insert(0);
         let out = *slot;
         *slot = slot.wrapping_add(1);
@@ -112,6 +116,39 @@ mod tests {
     use crate::frame_bus::FrameBus;
     use ferrite_blocks::{frame::Frame, ws_bridge::BridgeSink};
     use std::sync::Arc;
+
+    // Regression: poisoning the seq lock (a panic while it's held) must
+    // not wedge the sink — `next_seq` recovers the guard. Without the fix
+    // (`.expect("seq lock poisoned")`), the push below panics.
+    #[tokio::test]
+    async fn survives_a_poisoned_seq_lock() {
+        let bus = FrameBus::new();
+        let mut rx = bus.subscribe(8);
+        let sink = Arc::new(BroadcastSink::new(bus));
+        let s2 = Arc::clone(&sink);
+        let poisoned = std::thread::spawn(move || {
+            let _g = s2.seqs.lock().unwrap();
+            panic!("poison the seq lock");
+        })
+        .join();
+        assert!(poisoned.is_err(), "the helper thread must have panicked");
+
+        // A push after poisoning still emits a frame (non-empty payload —
+        // `push` drops empty ones by design).
+        let payload: Vec<u8> = [1.0_f32, 2.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        sink.push(Frame::IqF32 {
+            stream_id: 1000,
+            seq: 0,
+            timestamp_ns: 0,
+            sample_rate_hz: 0,
+            payload,
+        });
+        let bytes = rx.recv().await.unwrap();
+        assert!(Frame::from_postcard(&bytes).is_ok());
+    }
 
     #[tokio::test]
     async fn iq_push_encodes_as_iq_f32_frame() {

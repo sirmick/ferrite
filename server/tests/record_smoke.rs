@@ -52,6 +52,10 @@ mod source_policy;
 #[allow(dead_code)]
 mod capture;
 
+#[path = "../src/error.rs"]
+#[allow(dead_code)]
+mod error;
+
 #[path = "../src/app_state.rs"]
 #[allow(dead_code)]
 mod app_state;
