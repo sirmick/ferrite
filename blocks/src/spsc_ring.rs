@@ -86,6 +86,43 @@ impl<T: Copy + Default> SpscRing<T> {
         to_write
     }
 
+    /// Write **all** of `samples`, evicting the oldest unread elements
+    /// when the ring is full, and return the number of old elements
+    /// dropped (0 when everything fit). Unlike [`write`](Self::write) —
+    /// which keeps a contiguous older window and drops the *newest*
+    /// overflow — this keeps the ring *current* with the producer: the
+    /// newest `min(samples.len(), capacity)` elements are always present
+    /// afterwards.
+    ///
+    /// Use it for a live source that must not lag under backpressure (the
+    /// SoapySDR reader); the caller should flag the resulting discontinuity
+    /// so downstream consumers can resync. `write` stays the right choice
+    /// where continuity matters more than freshness (audio playout).
+    pub fn write_overwrite(&mut self, samples: &[T]) -> usize {
+        let n = samples.len();
+        if n == 0 {
+            return 0;
+        }
+        let old_avail = self.available_read();
+        // How many of (old unread + new) can't fit — the eviction count.
+        let dropped = (old_avail + n).saturating_sub(self.capacity);
+        if dropped == 0 {
+            debug_assert_eq!(self.write(samples), n);
+            return 0;
+        }
+        if n >= self.capacity {
+            // The batch alone overfills — keep only its last `capacity`.
+            self.reset();
+            debug_assert_eq!(self.write(&samples[n - self.capacity..]), self.capacity);
+        } else {
+            // Evict just enough oldest elements to fit all `n` new ones.
+            let evict = n - self.available_write();
+            self.tail = self.tail.wrapping_add(evict as u32);
+            debug_assert_eq!(self.write(samples), n);
+        }
+        dropped
+    }
+
     /// Read up to `out.len()` elements into `out`; returns the actual
     /// count copied. Consumer side of the SPSC contract.
     pub fn read(&mut self, out: &mut [T]) -> usize {
@@ -219,6 +256,63 @@ mod tests {
         let got = r.read(&mut out);
         assert_eq!(got, 4);
         assert_eq!(out, [3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn overwrite_no_eviction_when_room() {
+        let mut r: SpscRing<f32> = SpscRing::new(8);
+        assert_eq!(r.write_overwrite(&[1.0, 2.0, 3.0, 4.0]), 0);
+        assert_eq!(r.available_read(), 4);
+        let mut out = [0.0; 4];
+        assert_eq!(r.read(&mut out), 4);
+        assert_eq!(out, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn overwrite_evicts_oldest_when_full() {
+        let mut r: SpscRing<f32> = SpscRing::new(4);
+        assert_eq!(r.write(&[1.0, 2.0, 3.0, 4.0]), 4); // full
+        assert_eq!(r.write_overwrite(&[5.0, 6.0]), 2, "two oldest evicted");
+        let mut out = [0.0; 4];
+        assert_eq!(r.read(&mut out), 4);
+        // Newest four survive, in order — 1,2 dropped.
+        assert_eq!(out, [3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn overwrite_partial_overflow_evicts_only_the_shortfall() {
+        let mut r: SpscRing<f32> = SpscRing::new(4);
+        r.write(&[1.0, 2.0]); // avail 2, free 2
+                              // 3 new into 2 free → evict exactly 1 oldest.
+        assert_eq!(r.write_overwrite(&[3.0, 4.0, 5.0]), 1);
+        let mut out = [0.0; 4];
+        assert_eq!(r.read(&mut out), 4);
+        assert_eq!(out, [2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn overwrite_batch_larger_than_capacity_keeps_newest_window() {
+        let mut r: SpscRing<f32> = SpscRing::new(4);
+        r.write(&[9.0]); // one stale sample present
+                         // 6 new, cap 4: old_avail(1)+6-4 = 3 dropped; keep the last 4 of the batch.
+        assert_eq!(r.write_overwrite(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 3);
+        assert_eq!(r.available_read(), 4);
+        let mut out = [0.0; 4];
+        assert_eq!(r.read(&mut out), 4);
+        assert_eq!(out, [3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn overwrite_survives_wrap_around() {
+        let mut r: SpscRing<f32> = SpscRing::new(4);
+        r.write(&[1.0, 2.0, 3.0]);
+        let mut tmp = [0.0; 2];
+        r.read(&mut tmp); // tail=2, head=3 → avail 1, free 3
+                          // 4 new into 3 free → evict 1 oldest (the '3'), wrap the write.
+        assert_eq!(r.write_overwrite(&[4.0, 5.0, 6.0, 7.0]), 1);
+        let mut out = [0.0; 4];
+        assert_eq!(r.read(&mut out), 4);
+        assert_eq!(out, [4.0, 5.0, 6.0, 7.0]);
     }
 
     #[test]
