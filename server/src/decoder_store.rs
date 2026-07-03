@@ -169,10 +169,21 @@ impl DecoderStore {
         self.tx.subscribe()
     }
 
+    /// Lock the inner state, recovering from a poisoned mutex (mirrors
+    /// `FrameBus` / `BroadcastSink`). A panic while holding this lock —
+    /// e.g. a decoder block unwinding mid-`apply` — leaves no broken
+    /// invariant: a snapshot is a clone and a fold is idempotent per
+    /// policy. Recovering the guard keeps the store (and every decode +
+    /// REST read after it) alive instead of propagating the poison and
+    /// wedging the whole daemon.
+    fn guard(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Full snapshot — the REST/MCP read path.
     #[must_use]
     pub fn snapshot(&self) -> StoreSnapshot {
-        let g = self.inner.lock().unwrap();
+        let g = self.guard();
         StoreSnapshot {
             seq: g.seq,
             kinds: g.kinds.clone(),
@@ -185,13 +196,13 @@ impl DecoderStore {
     #[must_use]
     #[allow(dead_code)]
     pub fn snapshot_kind(&self, kind: &str) -> Option<KindState> {
-        self.inner.lock().unwrap().kinds.get(kind).cloned()
+        self.guard().kinds.get(kind).cloned()
     }
 
     /// Fold one record into `kind` per its policy; broadcasts the delta.
     pub fn apply(&self, kind: &str, data: Value) {
         let policy = policy_for(kind);
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.guard();
         g.seq += 1;
         let seq = g.seq;
         let entry = g.kinds.entry(kind.to_string()).or_default();
@@ -293,7 +304,7 @@ impl DecoderStore {
 
     /// Clear a kind (fresh decode session / explicit reset).
     pub fn reset_kind(&self, kind: &str) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.guard();
         g.seq += 1;
         let seq = g.seq;
         if let Some(k) = g.kinds.get_mut(kind) {
@@ -311,7 +322,7 @@ impl DecoderStore {
     /// Drop stale keyed entities for TTL kinds. Wired into the diag-tick.
     /// Returns the number expired.
     pub fn expire(&self, now: u64) -> usize {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.guard();
         let mut expired: Vec<(String, String)> = Vec::new();
         for (kind, state) in &mut g.kinds {
             let Policy::Upsert { ttl_ms, .. } = policy_for(kind) else {
@@ -407,6 +418,31 @@ fn extract_key(data: &Value, key_field: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression: a panic while holding the inner lock poisons the mutex;
+    // the store must recover (via `guard()`) rather than propagating the
+    // poison and panicking on every subsequent decode + read. Without the
+    // fix (`.lock().unwrap()`), the `apply` below panics.
+    #[test]
+    fn survives_a_poisoned_lock() {
+        use std::sync::Arc;
+        let store = Arc::new(DecoderStore::new());
+        let s2 = Arc::clone(&store);
+        let poisoned = std::thread::spawn(move || {
+            let _g = s2.inner.lock().unwrap();
+            panic!("poison the decoder-store lock");
+        })
+        .join();
+        assert!(poisoned.is_err(), "the helper thread must have panicked");
+
+        // Post-poison the store still folds + reads.
+        store.apply("ft8", serde_json::json!({ "call": "CQ" }));
+        let k = store
+            .snapshot_kind("ft8")
+            .expect("kind present after poison recovery");
+        assert_eq!(k.recent.len(), 1);
+        assert_eq!(store.snapshot().seq, 1);
+    }
 
     #[test]
     fn append_kind_logs_and_caps() {

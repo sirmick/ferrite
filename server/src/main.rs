@@ -40,6 +40,7 @@ mod capture;
 mod decoder_store;
 mod device;
 mod device_cache;
+mod error;
 mod frame_bus;
 mod log_stream;
 mod preset_pipeline;

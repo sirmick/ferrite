@@ -24,6 +24,7 @@ use tokio_tungstenite::tungstenite::protocol::Message as TungMessage;
 use crate::app_state::{
     AppState, CaptureEntry, PipelineBlock, PipelineStatus, PresetEntry, UiSink,
 };
+use crate::error::AppError;
 
 #[derive(Serialize)]
 pub struct Hello {
@@ -38,37 +39,6 @@ pub async fn hello() -> Json<Hello> {
         version: env!("CARGO_PKG_VERSION"),
         status: "ok",
     })
-}
-
-#[derive(Serialize)]
-pub struct ApiError {
-    pub error: ApiErrorBody,
-}
-
-#[derive(Serialize)]
-pub struct ApiErrorBody {
-    pub code: &'static str,
-    pub message: String,
-}
-
-fn bad_request(code: &'static str, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
-    api_error(StatusCode::BAD_REQUEST, code, message)
-}
-
-fn api_error(
-    status: StatusCode,
-    code: &'static str,
-    message: impl Into<String>,
-) -> (StatusCode, Json<ApiError>) {
-    (
-        status,
-        Json(ApiError {
-            error: ApiErrorBody {
-                code,
-                message: message.into(),
-            },
-        }),
-    )
 }
 
 /// Streams every `tracing` log line as a text WS message.
@@ -515,9 +485,9 @@ pub struct RecentResponse {
 pub async fn recent_decoder(
     State(state): State<AppState>,
     Query(q): Query<RecentQuery>,
-) -> Result<Json<RecentResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<RecentResponse>, AppError> {
     let logs = state.logs().ok_or_else(|| {
-        bad_request(
+        AppError::bad_request(
             "LOGS_DISABLED",
             "log broadcast not configured on this server",
         )
@@ -582,13 +552,18 @@ pub enum DeviceEntry {
 /// devices no longer enumerated are pruned.
 pub async fn list_devices(
     State(state): State<AppState>,
-) -> Result<Json<Vec<DeviceEntry>>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<Vec<DeviceEntry>>, AppError> {
     let devices = tokio::task::spawn_blocking(|| {
         crate::device::list_devices_with_timeout(crate::device::DEFAULT_PROBE_TIMEOUT)
     })
     .await
-    .map_err(|e| internal(format!("device enumerate task panicked: {e}")))?
-    .map_err(|e| internal(format!("{e:#}")))?;
+    .map_err(|e| {
+        AppError::internal(
+            "DEVICE_PROBE_FAILED",
+            format!("device enumerate task panicked: {e}"),
+        )
+    })?
+    .map_err(|e| AppError::internal("DEVICE_PROBE_FAILED", format!("{e:#}")))?;
 
     let cache = state.device_cache();
     let mut present = std::collections::HashSet::with_capacity(devices.len());
@@ -613,39 +588,13 @@ pub async fn list_devices(
 /// would dangle past unload); stop the pipeline first.
 pub async fn reload_devices(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<serde_json::Value>, AppError> {
     tracing::info!("POST /api/devices/reload");
-    if let Err(err) = state.reload_devices().await {
-        let msg = format!("{err:#}");
-        // The only structural refusal is "pipeline is running" — surface
-        // it as 409 so the UI can distinguish "wrong state" from a true
-        // server fault. Anything else is a 500.
-        if msg.contains("pipeline is running") {
-            return Err(api_error(
-                StatusCode::CONFLICT,
-                "RELOAD_REFUSED_RUNNING",
-                msg,
-            ));
-        }
-        return Err(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "RELOAD_FAILED",
-            msg,
-        ));
-    }
+    // The 409-vs-500 distinction is typed now: `reload_devices` returns
+    // `AppError::Conflict` while the pipeline is running, so there is no
+    // message string-matching here.
+    state.reload_devices().await?;
     Ok(Json(serde_json::json!({ "status": "ok" })))
-}
-
-fn internal(message: String) -> (StatusCode, Json<ApiError>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError {
-            error: ApiErrorBody {
-                code: "DEVICE_PROBE_FAILED",
-                message,
-            },
-        }),
-    )
 }
 
 /// One entry in the `changes` array returned by a reconfigure. Mirrors
@@ -722,12 +671,12 @@ pub async fn get_flowgraph(State(state): State<AppState>) -> Json<FlowgraphDoc> 
 /// node half by construction (no client-side re-derivation).
 pub async fn get_flowgraph_browser_half(
     State(state): State<AppState>,
-) -> Result<Json<FlowgraphDoc>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<FlowgraphDoc>, AppError> {
     state
         .browser_half()
         .await
         .map(Json)
-        .map_err(|e| bad_request("COMPOSE_FAILED", format!("{e:#}")))
+        .map_err(|e| AppError::bad_request("COMPOSE_FAILED", format!("{e:#}")))
 }
 
 /// `PATCH /api/flowgraph` — store a new preset. Reconfigures the
@@ -736,11 +685,11 @@ pub async fn get_flowgraph_browser_half(
 pub async fn patch_flowgraph(
     State(state): State<AppState>,
     Json(new_doc): Json<FlowgraphDoc>,
-) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ReconfigureResponse>, AppError> {
     let plan = state
         .patch_flowgraph(new_doc)
         .await
-        .map_err(|e| bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
     Ok(Json(reconfigure_response(plan)))
 }
 
@@ -756,12 +705,12 @@ pub async fn get_source(State(state): State<AppState>) -> Json<SourceConfig> {
 pub async fn patch_source(
     State(state): State<AppState>,
     Json(new_source): Json<SourceConfig>,
-) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ReconfigureResponse>, AppError> {
     tracing::info!(type_name = %new_source.type_name, params = ?new_source.params, "PATCH /api/source");
     let plan = state
         .patch_source(new_source)
         .await
-        .map_err(|e| bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
     let mut resp = reconfigure_response(plan);
     resp.source_readback = state.source_readback().await;
     Ok(Json(resp))
@@ -783,12 +732,12 @@ pub async fn pipeline_status(State(state): State<AppState>) -> Json<PipelineStat
 /// runtime. Idempotent: already-running returns 200.
 pub async fn pipeline_start(
     State(state): State<AppState>,
-) -> Result<Json<PipelineStatusResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<PipelineStatusResponse>, AppError> {
     tracing::info!("POST /api/pipeline/start");
     state
         .start()
         .await
-        .map_err(|e| bad_request("PIPELINE_START_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::bad_request("PIPELINE_START_FAILED", format!("{e:#}")))?;
     Ok(Json(PipelineStatusResponse {
         status: PipelineStatus::Running,
     }))
@@ -797,14 +746,12 @@ pub async fn pipeline_start(
 /// `GET /api/ui-sinks` — enumerate every `ui:<name>` sink in the
 /// composed preset and the `stream_id` env_split allocates for it. The
 /// client uses this to subscribe to the right frame streams.
-pub async fn list_ui_sinks(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<UiSink>>, (StatusCode, Json<ApiError>)> {
+pub async fn list_ui_sinks(State(state): State<AppState>) -> Result<Json<Vec<UiSink>>, AppError> {
     state
         .ui_sinks()
         .await
         .map(Json)
-        .map_err(|e| bad_request("UI_SINKS_FAILED", format!("{e:#}")))
+        .map_err(|e| AppError::bad_request("UI_SINKS_FAILED", format!("{e:#}")))
 }
 
 /// `POST /api/pipeline/stop` — tear the runtime down. Returns the
@@ -875,7 +822,7 @@ pub struct TuneRequest {
 pub async fn post_tune(
     State(state): State<AppState>,
     Json(req): Json<TuneRequest>,
-) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ReconfigureResponse>, AppError> {
     tracing::info!(
         freq_hz = req.freq_hz,
         span_hz = ?req.span_hz,
@@ -886,7 +833,7 @@ pub async fn post_tune(
     let plan = state
         .tune(req.freq_hz, req.span_hz, req.offset_ratio, req.keep_lo)
         .await
-        .map_err(|e| bad_request("TUNE_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::bad_request("TUNE_FAILED", format!("{e:#}")))?;
     let mut resp = reconfigure_response(plan);
     resp.source_readback = state.source_readback().await;
     Ok(Json(resp))
@@ -898,12 +845,12 @@ pub async fn post_tune(
 /// `docs/09-decisions.md`.
 pub async fn list_pipeline_blocks(
     State(state): State<AppState>,
-) -> Result<Json<Vec<PipelineBlock>>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<Vec<PipelineBlock>>, AppError> {
     state
         .list_blocks()
         .await
         .map(Json)
-        .map_err(|e| bad_request("LIST_PIPELINE_BLOCKS_FAILED", format!("{e:#}")))
+        .map_err(|e| AppError::bad_request("LIST_PIPELINE_BLOCKS_FAILED", format!("{e:#}")))
 }
 
 /// `POST /api/pipeline/blocks/{id}/params` — apply a params delta to
@@ -917,13 +864,13 @@ pub async fn patch_pipeline_block(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(delta): Json<serde_json::Value>,
-) -> Result<Json<ReconfigureResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ReconfigureResponse>, AppError> {
     let is_src = id == ferrite_runtime::SOURCE_ID;
     tracing::info!(block_id = %id, delta = ?delta, "POST /api/pipeline/blocks/.../params");
     let plan = state
         .apply_block_params(&id, delta)
         .await
-        .map_err(|e| bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
     let mut resp = reconfigure_response(plan);
     // Source goes through `patch_source` internally; mirror the
     // `/api/source` handler so a single-key `src` write still gets the
@@ -962,7 +909,7 @@ pub enum SourceCapabilitiesResponse {
 
 pub async fn get_source_capabilities(
     State(state): State<AppState>,
-) -> Result<Json<SourceCapabilitiesResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<SourceCapabilitiesResponse>, AppError> {
     let source = state.get_source().await;
     let type_name = source.type_name.clone();
     if type_name != "SoapySource" {
@@ -991,12 +938,12 @@ pub async fn get_source_capabilities(
 /// load. Returns an empty list when no presets dir is configured.
 pub async fn list_presets(
     State(state): State<AppState>,
-) -> Result<Json<Vec<PresetEntry>>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<Vec<PresetEntry>>, AppError> {
     state
         .list_presets()
         .await
         .map(Json)
-        .map_err(|e| bad_request("LIST_PRESETS_FAILED", format!("{e:#}")))
+        .map_err(|e| AppError::bad_request("LIST_PRESETS_FAILED", format!("{e:#}")))
 }
 
 /// Query for `GET /api/band-plan/at?hz=NNN` — single Hz value the
@@ -1014,9 +961,9 @@ pub struct BandAtQuery {
 /// `ferrited` at compile time.
 pub async fn band_at(
     Query(q): Query<BandAtQuery>,
-) -> Result<Json<Vec<crate::band_plan::BandEntry>>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<Vec<crate::band_plan::BandEntry>>, AppError> {
     if !q.hz.is_finite() || q.hz < 0.0 {
-        return Err(bad_request(
+        return Err(AppError::bad_request(
             "BAND_AT_BAD_FREQ",
             format!("hz must be a finite non-negative number, got {}", q.hz),
         ));
@@ -1034,12 +981,12 @@ pub async fn band_at(
 pub async fn get_preset(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<serde_json::Value>, AppError> {
     state
         .read_preset_doc(&name)
         .await
         .map(Json)
-        .map_err(|e| api_error(StatusCode::NOT_FOUND, "PRESET_NOT_FOUND", format!("{e:#}")))
+        .map_err(|e| AppError::not_found("PRESET_NOT_FOUND", format!("{e:#}")))
 }
 
 /// `GET /api/captures` — enumerate replayable IQ/audio fixtures under
@@ -1047,12 +994,12 @@ pub async fn get_preset(
 /// source tab can list them instead of asking for a server path.
 pub async fn list_captures(
     State(state): State<AppState>,
-) -> Result<Json<Vec<CaptureEntry>>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<Vec<CaptureEntry>>, AppError> {
     state
         .list_captures()
         .await
         .map(Json)
-        .map_err(|e| bad_request("LIST_CAPTURES_FAILED", format!("{e:#}")))
+        .map_err(|e| AppError::bad_request("LIST_CAPTURES_FAILED", format!("{e:#}")))
 }
 
 #[derive(serde::Deserialize)]
@@ -1080,7 +1027,7 @@ pub struct LoadPresetResponse {
 pub async fn load_preset(
     State(state): State<AppState>,
     Json(req): Json<LoadPresetRequest>,
-) -> Result<Json<LoadPresetResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<LoadPresetResponse>, AppError> {
     let started = std::time::Instant::now();
     tracing::info!(name = %req.name, "POST /api/preset");
     if let Some(profile) = req.profile {
@@ -1089,7 +1036,7 @@ pub async fn load_preset(
     let (doc, plan) = state
         .load_preset_by_name(&req.name)
         .await
-        .map_err(|e| bad_request("LOAD_PRESET_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::bad_request("LOAD_PRESET_FAILED", format!("{e:#}")))?;
     let dt_ms = started.elapsed().as_millis();
     let scope = plan.as_ref().map_or("no-pipeline", |p| match p.overall {
         ferrite_blocks::ReconfigureScope::SelfBlock => "self-block",
@@ -1122,12 +1069,10 @@ pub async fn load_preset(
 // recording runs in a background task and its status is polled via
 // `GET /api/capture/jobs[/:id]`.
 
-fn capture_err(e: crate::capture::CaptureError) -> (StatusCode, Json<ApiError>) {
+fn capture_err(e: crate::capture::CaptureError) -> AppError {
     match e {
-        crate::capture::CaptureError::Invalid(m) => bad_request("CAPTURE_REJECTED", m),
-        crate::capture::CaptureError::Internal(m) => {
-            api_error(StatusCode::INTERNAL_SERVER_ERROR, "CAPTURE_FAILED", m)
-        }
+        crate::capture::CaptureError::Invalid(m) => AppError::bad_request("CAPTURE_REJECTED", m),
+        crate::capture::CaptureError::Internal(m) => AppError::internal("CAPTURE_FAILED", m),
     }
 }
 
@@ -1137,7 +1082,7 @@ fn capture_err(e: crate::capture::CaptureError) -> (StatusCode, Json<ApiError>) 
 pub async fn post_capture_iq(
     State(state): State<AppState>,
     Json(req): Json<crate::capture::CaptureIqReq>,
-) -> Result<Json<crate::capture::CaptureJob>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<crate::capture::CaptureJob>, AppError> {
     tracing::info!("POST /api/capture/iq");
     state
         .start_capture_iq(req)
@@ -1151,7 +1096,7 @@ pub async fn post_capture_iq(
 pub async fn post_capture_fft(
     State(state): State<AppState>,
     Json(req): Json<crate::capture::CaptureIqReq>,
-) -> Result<Json<crate::capture::CaptureJob>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<crate::capture::CaptureJob>, AppError> {
     tracing::info!("POST /api/capture/fft");
     state
         .start_capture_fft(req)
@@ -1165,7 +1110,7 @@ pub async fn post_capture_fft(
 pub async fn post_capture_audio(
     State(state): State<AppState>,
     Json(req): Json<crate::capture::CaptureAudioReq>,
-) -> Result<Json<crate::capture::CaptureJob>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<crate::capture::CaptureJob>, AppError> {
     tracing::info!("POST /api/capture/audio");
     state
         .start_capture_audio(req)
@@ -1186,10 +1131,9 @@ pub async fn get_capture_jobs(
 pub async fn get_capture_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<crate::capture::CaptureJob>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<crate::capture::CaptureJob>, AppError> {
     state.capture_job(&id).await.map(Json).ok_or_else(|| {
-        api_error(
-            StatusCode::NOT_FOUND,
+        AppError::not_found(
             "CAPTURE_JOB_NOT_FOUND",
             format!("no capture job with id {id:?}"),
         )
@@ -1210,7 +1154,7 @@ pub async fn get_profile(State(state): State<AppState>) -> Json<Profile> {
 pub async fn patch_profile(
     State(state): State<AppState>,
     Json(profile): Json<Profile>,
-) -> Result<Json<Profile>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<Profile>, AppError> {
     // Transactional swap: stash the previous profile, apply the new
     // one, then re-compose. If the compose fails (a malformed preset
     // could still yield an unsupported browser→node wire), roll the
@@ -1222,7 +1166,10 @@ pub async fn patch_profile(
     let current = state.get_flowgraph().await;
     if let Err(e) = state.patch_flowgraph(current).await {
         state.set_profile(prev).await;
-        return Err(bad_request("PROFILE_APPLY_FAILED", format!("{e:#}")));
+        return Err(AppError::bad_request(
+            "PROFILE_APPLY_FAILED",
+            format!("{e:#}"),
+        ));
     }
     Ok(Json(profile))
 }
@@ -1326,18 +1273,21 @@ pub async fn save_screenshot(Json(req): Json<ScreenshotReq>) -> impl IntoRespons
         .map_or(req.png_b64.as_str(), |(_, b)| b);
     let bytes = match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
         Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("bad png_b64: {e}")).into_response(),
+        Err(e) => {
+            return AppError::bad_request("BAD_PNG_B64", format!("bad png_b64: {e}"))
+                .into_response()
+        }
     };
     let dir = std::env::var_os("FERRITE_SCREENSHOTS_DIR").map_or_else(
         || std::path::PathBuf::from("/tmp/ferrite-views"),
         Into::into,
     );
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+        return AppError::internal(
+            "SCREENSHOT_DIR_FAILED",
             format!("mkdir {}: {e}", dir.display()),
         )
-            .into_response();
+        .into_response();
     }
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1356,11 +1306,11 @@ pub async fn save_screenshot(Json(req): Json<ScreenshotReq>) -> impl IntoRespons
     };
     let path = dir.join(name);
     if let Err(e) = tokio::fs::write(&path, &bytes).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+        return AppError::internal(
+            "SCREENSHOT_WRITE_FAILED",
             format!("write {}: {e}", path.display()),
         )
-            .into_response();
+        .into_response();
     }
     let path_str = path.display().to_string();
     // Log it so the embedded AI / `ferrite-ctl tail` learns the path
@@ -1429,11 +1379,11 @@ pub async fn get_ui_view(
     Path(pane): Path<String>,
 ) -> impl IntoResponse {
     if !KNOWN_PANES.contains(&pane.as_str()) {
-        return (
-            StatusCode::BAD_REQUEST,
+        return AppError::bad_request(
+            "UNKNOWN_PANE",
             format!("unknown pane {pane:?}; expected one of {KNOWN_PANES:?}"),
         )
-            .into_response();
+        .into_response();
     }
     match state.view_bridge().request(&pane).await {
         Ok(bytes) => (
@@ -1446,10 +1396,10 @@ pub async fn get_ui_view(
         )
             .into_response(),
         Err(e @ crate::view_bridge::ViewError::NoViewer) => {
-            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+            AppError::unavailable("NO_VIEWER", e.to_string()).into_response()
         }
         Err(e @ crate::view_bridge::ViewError::Timeout) => {
-            (StatusCode::GATEWAY_TIMEOUT, e.to_string()).into_response()
+            AppError::timeout("VIEW_SNAPSHOT_TIMEOUT", e.to_string()).into_response()
         }
     }
 }
@@ -1532,7 +1482,7 @@ pub async fn set_view_state(
     tracing::info!(?patch, "POST /api/ui-view/set");
     match state.view_bridge().push_state(patch).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response(),
-        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+        Err(e) => AppError::unavailable("NO_VIEWER", e.to_string()).into_response(),
     }
 }
 
@@ -1546,11 +1496,11 @@ pub async fn set_view_state(
 pub async fn get_view_state(State(state): State<AppState>) -> impl IntoResponse {
     match state.view_bridge().state().await {
         Some(s) => (StatusCode::OK, Json(s)).into_response(),
-        None => (
-            StatusCode::SERVICE_UNAVAILABLE,
+        None => AppError::unavailable(
+            "NO_VIEWER",
             crate::view_bridge::ViewError::NoViewer.to_string(),
         )
-            .into_response(),
+        .into_response(),
     }
 }
 
