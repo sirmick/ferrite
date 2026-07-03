@@ -240,6 +240,95 @@ pub fn tune_offset_ratio_for(driver_key: &str) -> f64 {
     }
 }
 
+/// The device-side writes a tune resolves to. `AppState::tune` turns each
+/// present field into a `patch_source` (LO/rate) or `apply_block_params`
+/// (channelizer shift) call. All `None` = nothing to do.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TunePlan {
+    /// New source LO centre (Hz), or `None` to leave the LO where it is.
+    /// Suppressed by a 0.5 Hz floor so readback jitter doesn't churn the
+    /// graph — but always `Some` on the first tune (unknown centre).
+    pub src_center_hz: Option<f64>,
+    /// New source sample rate (Hz) when widening the span; `None` to keep
+    /// the current rate.
+    pub src_rate_hz: Option<f64>,
+    /// Channelizer `freq_shift_hz` to apply; `None` when the graph has no
+    /// channelizer (the LO alone carries the tune).
+    pub chan_shift_hz: Option<f64>,
+}
+
+/// Pure DC-spike dodge / keep-out / DC-guard math behind [`AppState::tune`].
+///
+/// Given the target `freq_hz`, the per-driver `offset_ratio` (0 = no
+/// dodge), the current source LO centre (`cur_src_center`, `None` = never
+/// written) and rate (`cur_rate`), and the first channelizer's output rate
+/// (`chan_rate`, `None` = no channelizer), decide what to write.
+///
+/// - **In-span fast path** (`keep_lo`): if the target already falls inside
+///   the digitised span (half the rate, less half the channel width), move
+///   the *channelizer only* and leave the LO + graph untouched — no source
+///   restart. Ignores `span_hz`.
+/// - **Sticky**: LO already parked such that the target sits within the
+///   channel keep-out (`0.4·chan_rate`) and at least the DC-guard off it
+///   (`0.1·chan_rate` when dodging, else 0) — reuse the LO, just re-shift.
+/// - **Snap** (first tune / unknown centre / on-DC): park the LO low of
+///   target by `offset_ratio·chan_rate` and let the channelizer recover
+///   the carrier off the DC spike.
+///
+/// [`AppState::tune`]: crate::app_state::AppState::tune
+#[must_use]
+pub fn plan_tune(
+    freq_hz: f64,
+    span_hz: Option<f64>,
+    offset_ratio: f64,
+    keep_lo: bool,
+    cur_src_center: Option<f64>,
+    cur_rate: f64,
+    chan_rate: Option<f64>,
+) -> TunePlan {
+    // In-span fast path: retune the channelizer, leave the LO + rate alone.
+    if keep_lo {
+        if let (Some(cur), Some(cr)) = (cur_src_center, chan_rate) {
+            let usable_half = cur_rate / 2.0 - cr / 2.0;
+            if cur_rate > 0.0 && usable_half > 0.0 && (freq_hz - cur).abs() <= usable_half {
+                return TunePlan {
+                    src_center_hz: None,
+                    src_rate_hz: None,
+                    chan_shift_hz: Some(freq_hz - cur),
+                };
+            }
+        }
+    }
+
+    // Normal LO-moving path: dodge/keep-out/DC-guard.
+    let (new_src_center, new_freq_shift) = match chan_rate {
+        Some(cr) => {
+            let keepout = 0.4 * cr;
+            let dodge = offset_ratio * cr;
+            let dc_guard = if offset_ratio > 0.0 { 0.1 * cr } else { 0.0 };
+            match cur_src_center {
+                Some(cur)
+                    if {
+                        let off = (freq_hz - cur).abs();
+                        off <= keepout && off >= dc_guard
+                    } =>
+                {
+                    (cur, freq_hz - cur)
+                }
+                _ => (freq_hz - dodge, dodge),
+            }
+        }
+        None => (freq_hz, 0.0),
+    };
+
+    let center_changed = cur_src_center.is_none_or(|cur| (new_src_center - cur).abs() > 0.5);
+    TunePlan {
+        src_center_hz: center_changed.then_some(new_src_center),
+        src_rate_hz: span_hz.filter(|s| *s > cur_rate),
+        chan_shift_hz: chan_rate.map(|_| new_freq_shift),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +344,106 @@ mod tests {
         assert_eq!(tune_offset_ratio_for("rtlsdr"), 0.0);
         assert_eq!(tune_offset_ratio_for("airspy"), 0.0);
         assert_eq!(tune_offset_ratio_for(""), 0.0);
+    }
+
+    // ── plan_tune ──────────────────────────────────────────────────────
+    // chan_rate = 48 kHz, dodge ratio 0.7 (hackrf/sdrplay) → dodge = 33.6k,
+    // keepout = 19.2k, dc_guard = 4.8k.
+    const CR: f64 = 48_000.0;
+
+    #[test]
+    fn snap_on_first_tune_parks_lo_low_of_target_by_the_dodge() {
+        // Unknown centre (fresh device) → always snap + always write.
+        let p = plan_tune(100.0e6, None, 0.7, false, None, 2.4e6, Some(CR));
+        let dodge = 0.7 * CR;
+        assert_eq!(p.src_center_hz, Some(100.0e6 - dodge));
+        assert_eq!(p.chan_shift_hz, Some(dodge));
+        assert_eq!(p.src_rate_hz, None);
+    }
+
+    #[test]
+    fn sticky_reuses_lo_when_target_inside_keepout_and_off_dc() {
+        // LO parked at 100M-33.6k (the snap point); a new target 10 kHz up
+        // sits within keepout (19.2k) and past the DC guard (4.8k) → reuse.
+        let lo = 100.0e6 - 0.7 * CR;
+        let target = lo + 10_000.0;
+        let p = plan_tune(target, None, 0.7, false, Some(lo), 2.4e6, Some(CR));
+        assert_eq!(p.src_center_hz, None, "LO must not move");
+        assert_eq!(p.chan_shift_hz, Some(target - lo));
+    }
+
+    #[test]
+    fn on_dc_target_re_snaps_instead_of_parking_on_the_spike() {
+        // Target within 2 kHz of the LO — below the 4.8k DC guard. Sticky
+        // would park it on the DC spike; must re-snap off it instead.
+        let lo = 100.0e6;
+        let target = lo + 2_000.0;
+        let p = plan_tune(target, None, 0.7, false, Some(lo), 2.4e6, Some(CR));
+        let dodge = 0.7 * CR;
+        assert_eq!(p.src_center_hz, Some(target - dodge), "must re-snap off DC");
+        assert_eq!(p.chan_shift_hz, Some(dodge));
+    }
+
+    #[test]
+    fn dc_tracking_driver_may_sit_on_centre() {
+        // offset_ratio 0 → dodge 0, dc_guard 0. Target exactly on the LO is
+        // allowed (off=0 ≥ guard=0, ≤ keepout) → sticky, zero shift.
+        let lo = 100.0e6;
+        let p = plan_tune(lo, None, 0.0, false, Some(lo), 2.4e6, Some(CR));
+        assert_eq!(p.src_center_hz, None);
+        assert_eq!(p.chan_shift_hz, Some(0.0));
+    }
+
+    #[test]
+    fn in_span_fast_path_moves_channelizer_only() {
+        // keep_lo + target inside the usable half-span (1.2M - 24k) → LO and
+        // rate untouched, channelizer takes the whole shift.
+        let lo = 100.0e6;
+        let target = lo + 500_000.0;
+        let p = plan_tune(target, Some(4.0e6), 0.7, true, Some(lo), 2.4e6, Some(CR));
+        assert_eq!(p.src_center_hz, None, "fast path leaves the LO put");
+        assert_eq!(p.src_rate_hz, None, "fast path ignores span widening");
+        assert_eq!(p.chan_shift_hz, Some(target - lo));
+    }
+
+    #[test]
+    fn out_of_span_keep_lo_falls_through_to_normal_snap() {
+        // keep_lo but target beyond the usable half-span → normal LO move.
+        let lo = 100.0e6;
+        let target = lo + 2_000_000.0; // > 1.2M - 24k
+        let p = plan_tune(target, None, 0.7, true, Some(lo), 2.4e6, Some(CR));
+        assert_eq!(p.src_center_hz, Some(target - 0.7 * CR), "LO must snap");
+    }
+
+    #[test]
+    fn no_channelizer_writes_lo_directly() {
+        let p = plan_tune(100.0e6, None, 0.7, false, None, 2.4e6, None);
+        assert_eq!(
+            p.src_center_hz,
+            Some(100.0e6),
+            "LO carries the tune, no dodge"
+        );
+        assert_eq!(p.chan_shift_hz, None);
+    }
+
+    #[test]
+    fn span_widens_rate_only_when_larger() {
+        // span > cur_rate → set rate.
+        let p = plan_tune(100.0e6, Some(4.0e6), 0.7, false, None, 2.4e6, Some(CR));
+        assert_eq!(p.src_rate_hz, Some(4.0e6));
+        // span ≤ cur_rate → leave rate.
+        let p = plan_tune(100.0e6, Some(1.0e6), 0.7, false, None, 2.4e6, Some(CR));
+        assert_eq!(p.src_rate_hz, None);
+    }
+
+    #[test]
+    fn sub_half_hz_lo_move_is_suppressed() {
+        // A recomputed LO within 0.5 Hz of the current one must not churn
+        // the graph — but only sticky can produce that (snap moves by dodge).
+        let lo = 100.0e6;
+        // Target on the LO with a DC-tracking driver → sticky, LO unchanged.
+        let p = plan_tune(lo, None, 0.0, false, Some(lo), 2.4e6, Some(CR));
+        assert_eq!(p.src_center_hz, None);
     }
 
     fn rung(hz: f64) -> RangeSpec {
