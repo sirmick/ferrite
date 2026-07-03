@@ -84,10 +84,10 @@ pub fn inject_dc_block_taps(doc: &mut FlowgraphDoc) {
         .and_then(|b| b.params.as_ref())
         .and_then(|p| p.get("args"))
         .and_then(serde_json::Value::as_str)
-        .map(driver_from_args)
+        .map(ferrite_sdr_tables::driver_key)
         .unwrap_or_default();
-    let params =
-        (!dc_block_default_enabled(&driver)).then(|| serde_json::json!({ "enabled": false }));
+    let params = (!ferrite_sdr_tables::dc_block_default_enabled(&driver))
+        .then(|| serde_json::json!({ "enabled": false }));
 
     // Re-point every consumer of src.out to dcblock.out, then feed the
     // blocker from src.out.
@@ -114,30 +114,9 @@ pub fn inject_dc_block_taps(doc: &mut FlowgraphDoc) {
     );
 }
 
-/// SoapySDR driver short name from a Soapy args string — the `driver=<name>`
-/// value of a kv form (`driver=sdrplay,serial=…`) or a bare `"sdrplay"`.
-/// Lowercased; empty when neither shape parses.
-fn driver_from_args(args: &str) -> String {
-    let a = args.trim();
-    a.split(',')
-        .find_map(|kv| kv.trim().strip_prefix("driver="))
-        .unwrap_or(if a.contains('=') { "" } else { a })
-        .trim()
-        .to_ascii_lowercase()
-}
-
-/// Whether the auto-injected software complex-IQ DC blocker should default
-/// **enabled** for this driver. Zero-IF radios (RTL-SDR, HackRF, …) leak the
-/// LO straight to the ADC as a bright line at the tuned centre, so the
-/// blocker is on. SDRplay is not zero-IF (real tuner) and its hardware
-/// DC-offset tracker handles any residual, so the software blocker — which
-/// would otherwise risk nulling a real carrier parked at centre — defaults
-/// **off** there. The operator can toggle it live either way. Keyed on the
-/// lowercased Soapy driver short name, mirroring the per-driver style of
-/// `server::source_policy` (notch) and `tune_offset_ratio_for` (dodge).
-fn dc_block_default_enabled(driver: &str) -> bool {
-    !matches!(driver, "sdrplay")
-}
+// The Soapy driver-arg parser (`driver_key`) and the per-driver DC-blocker
+// default (`dc_block_default_enabled`) now live in `ferrite-sdr-tables` —
+// the single source of truth shared with the daemon's `source_policy`.
 
 #[cfg(test)]
 mod tests {
@@ -195,19 +174,9 @@ mod tests {
             .any(|w| w.src == "src.out" && w.dst == "tee.in"));
     }
 
-    #[test]
-    fn driver_from_args_and_dc_default() {
-        // kv form, bare form, and the empty/absent case.
-        assert_eq!(driver_from_args("driver=sdrplay,serial=0001"), "sdrplay");
-        assert_eq!(driver_from_args("driver=HackRF"), "hackrf");
-        assert_eq!(driver_from_args("rtlsdr"), "rtlsdr");
-        assert_eq!(driver_from_args(""), "");
-        // SDRplay defaults off; zero-IF (and unknown/absent) default on.
-        assert!(!dc_block_default_enabled("sdrplay"));
-        assert!(dc_block_default_enabled("hackrf"));
-        assert!(dc_block_default_enabled("rtlsdr"));
-        assert!(dc_block_default_enabled(""));
-    }
+    // `driver_key` / `dc_block_default_enabled` unit-tested in
+    // `ferrite-sdr-tables`; the injection tests below cover the end-to-end
+    // per-driver behaviour (sdrplay → disabled, zero-IF → enabled).
 
     #[test]
     fn defaults_enabled_for_zero_if_hardware() {

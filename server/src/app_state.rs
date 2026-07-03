@@ -1006,11 +1006,11 @@ impl AppState {
         else {
             return 0.0;
         };
-        if let Some(driver) = driver_arg(args) {
-            return crate::source_policy::tune_offset_ratio_for(driver);
+        if let Some(driver) = ferrite_sdr_tables::driver_arg(args) {
+            return ferrite_sdr_tables::tune_offset_ratio_for(driver);
         }
         match self.inner.device_cache.ensure_args(args).await {
-            Ok(caps) => crate::source_policy::tune_offset_ratio_for(&caps.driver_key),
+            Ok(caps) => ferrite_sdr_tables::tune_offset_ratio_for(&caps.driver_key),
             Err(e) => {
                 tracing::warn!(error = ?e, "resolve_offset_ratio: no driver= in args and caps probe failed; no dodge");
                 0.0
@@ -1037,18 +1037,6 @@ fn merge_into_params(
     }
     cfg.params = serde_json::Value::Object(merged);
     cfg
-}
-
-/// Extract the SoapySDR `driver=` value from an args string
-/// (`"driver=hackrf,serial=abc"` → `Some("hackrf")`). Returns `None`
-/// when no non-empty `driver=` part is present (Soapy then auto-selects,
-/// and only a probe can name the driver). Used by `resolve_offset_ratio`
-/// to look up the per-driver dodge ratio without opening the device.
-fn driver_arg(args: &str) -> Option<&str> {
-    args.split(',')
-        .filter_map(|p| p.trim().strip_prefix("driver="))
-        .map(str::trim)
-        .find(|v| !v.is_empty())
 }
 
 /// Overlay the live param values from a running runtime's `applied`
@@ -1362,17 +1350,7 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn driver_arg_extracts_soapy_driver() {
-        assert_eq!(driver_arg("driver=hackrf"), Some("hackrf"));
-        assert_eq!(driver_arg("driver=hackrf,serial=abc123"), Some("hackrf"));
-        assert_eq!(driver_arg("serial=abc123,driver=sdrplay"), Some("sdrplay"));
-        assert_eq!(driver_arg(" driver=rtlsdr "), Some("rtlsdr"));
-        // No driver= → None so the caller falls back to a probe.
-        assert_eq!(driver_arg("serial=abc123"), None);
-        assert_eq!(driver_arg(""), None);
-        assert_eq!(driver_arg("driver="), None);
-    }
+    // `driver_arg` moved to `ferrite-sdr-tables` and is tested there.
 
     fn test_source() -> SourceConfig {
         SourceConfig {

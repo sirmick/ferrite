@@ -112,7 +112,7 @@ pub fn apply(current: &SourceConfig, next: &mut SourceConfig, caps: &DeviceCapab
                 .get("sample_rate_hz")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0);
-            let desired = sdrplay_notch_settings(center, rate);
+            let desired = ferrite_sdr_tables::sdrplay_notch_settings(center, rate);
             let settings = params
                 .entry("settings")
                 .or_insert_with(|| Value::Object(serde_json::Map::new()));
@@ -167,78 +167,10 @@ pub fn bandwidth_from_caps(caps: &DeviceCapabilities, rate_hz: f64) -> Option<f6
     best
 }
 
-/// SDRplay hardware broadcast-notch passbands (Hz). The RF notch covers
-/// the AM **and** FM broadcast bands (two disjoint ranges); the DAB notch
-/// covers Band III. Fixed in hardware, locale-independent — deliberately
-/// not derived from the (US-only, name-fuzzy) band plan. Mirrors the rules
-/// shipped in `web/src/lib/controls/sdr-presets/sdrplay.json`.
-const AM_BCAST_HZ: (f64, f64) = (540_000.0, 1_700_000.0);
-const FM_BCAST_HZ: (f64, f64) = (88_000_000.0, 108_000_000.0);
-const DAB_BAND3_HZ: (f64, f64) = (170_000_000.0, 240_000_000.0);
-
-/// Half-open overlap test between the covered span and a notch band.
-/// `[span_lo, span_hi)` vs `[band_lo, band_hi)`.
-fn overlaps(span_lo: f64, span_hi: f64, band: (f64, f64)) -> bool {
-    span_lo < band.1 && span_hi > band.0
-}
-
-/// Desired SDRplay notch settings for a tune, as `(writeSetting key,
-/// "true"/"false")` pairs. A notch is turned **off** (`"false"`) when the
-/// covered span `center ± rate/2` overlaps the band it would attenuate —
-/// so we can actually receive inside it — and left **on** (`"true"`)
-/// otherwise, where the notch only helps reject broadcast overload.
-///
-/// Decided on the covered span, not just the centre, so a wide capture
-/// that spills into a broadcast band still disables the notch. Values are
-/// strings to match the driver `settings` map / SoapySDR bool convention.
-#[must_use]
-pub fn sdrplay_notch_settings(center_hz: f64, rate_hz: f64) -> [(&'static str, &'static str); 2] {
-    // A non-finite/zero rate degenerates to a point at the centre.
-    let half = if rate_hz.is_finite() && rate_hz > 0.0 {
-        rate_hz / 2.0
-    } else {
-        0.0
-    };
-    let lo = center_hz - half;
-    let hi = center_hz + half;
-
-    let in_rf = overlaps(lo, hi, AM_BCAST_HZ) || overlaps(lo, hi, FM_BCAST_HZ);
-    let in_dab = overlaps(lo, hi, DAB_BAND3_HZ);
-
-    // value_in_band = "false" (notch off), value_out_of_band = "true".
-    [
-        ("rfnotch_ctrl", if in_rf { "false" } else { "true" }),
-        ("dabnotch_ctrl", if in_dab { "false" } else { "true" }),
-    ]
-}
-
-/// Per-driver DC-spike dodge ratio — the fraction of the channelizer's
-/// output rate by which [`AppState::tune`] parks the source LO off the
-/// listen target, so the zero-IF LO/DC spike falls *outside* the
-/// demodulated channel and the channelizer recovers the carrier. This is
-/// the daemon-owned default applied whenever the caller doesn't pass an
-/// explicit `offset_ratio`, so the UI, ferrite-ctl, and a headless AI all
-/// dodge identically off one table — the per-SDR behaviour lives here, not
-/// in each client.
-///
-/// `0.7` clears a full-width channel (the spike at the LO sits a channel
-/// half-width-plus outside the passband). `0` means "no dodge": DC-tracking
-/// or low-IF drivers that don't produce an in-band spike, or correct it in
-/// hardware. Keyed case-insensitively on the device-reported `driver_key`.
-///
-/// [`AppState::tune`]: crate::app_state::AppState::tune
-#[must_use]
-pub fn tune_offset_ratio_for(driver_key: &str) -> f64 {
-    match driver_key.to_ascii_lowercase().as_str() {
-        // No hardware DC correction — the dodge is the only fix.
-        "hackrf" => 0.7,
-        // Zero-IF above ~30 MHz; the dodge complements `dc_offset_correction`
-        // so a carrier never sits on the tracker's residual spike.
-        "sdrplay" => 0.7,
-        // RTL-SDR, Airspy, … : DC-tracking / low-IF, no dodge needed.
-        _ => 0.0,
-    }
-}
+// Per-driver policy tables (dodge ratio, DC-block default, SDRplay notch
+// bands) + the Soapy driver-arg parser now live in `ferrite-sdr-tables` —
+// the single source of truth shared by the daemon, ferrite-ctl, and the
+// runtime's `inject_dc_block`. Callers reach them via `ferrite_sdr_tables::`.
 
 /// The device-side writes a tune resolves to. `AppState::tune` turns each
 /// present field into a `patch_source` (LO/rate) or `apply_block_params`
@@ -334,17 +266,8 @@ mod tests {
     use super::*;
     use crate::device::{DeviceCapabilities, DeviceInfo, RangeSpec, RxChannelCapabilities};
 
-    #[test]
-    fn tune_offset_ratio_is_per_driver_and_case_insensitive() {
-        assert_eq!(tune_offset_ratio_for("hackrf"), 0.7);
-        assert_eq!(tune_offset_ratio_for("HackRF"), 0.7);
-        assert_eq!(tune_offset_ratio_for("sdrplay"), 0.7);
-        assert_eq!(tune_offset_ratio_for("SDRplay"), 0.7);
-        // DC-tracking / unknown drivers don't dodge.
-        assert_eq!(tune_offset_ratio_for("rtlsdr"), 0.0);
-        assert_eq!(tune_offset_ratio_for("airspy"), 0.0);
-        assert_eq!(tune_offset_ratio_for(""), 0.0);
-    }
+    // Per-driver dodge / notch tables moved to `ferrite-sdr-tables` and are
+    // tested there; `plan_tune` below takes the resolved ratio as a param.
 
     // ── plan_tune ──────────────────────────────────────────────────────
     // chan_rate = 48 kHz, dodge ratio 0.7 (hackrf/sdrplay) → dodge = 33.6k,
@@ -533,51 +456,9 @@ mod tests {
         assert_eq!(bandwidth_from_caps(&caps, 1_000_000.0), None);
     }
 
-    #[test]
-    fn notch_off_inside_am() {
-        // 1.0 MHz any rate -> inside AM -> rfnotch off, dab on.
-        let s = sdrplay_notch_settings(1_000_000.0, 2_400_000.0);
-        assert_eq!(s[0], ("rfnotch_ctrl", "false"));
-        assert_eq!(s[1], ("dabnotch_ctrl", "true"));
-    }
-
-    #[test]
-    fn notch_off_inside_fm() {
-        let s = sdrplay_notch_settings(98_000_000.0, 2_000_000.0);
-        assert_eq!(s[0], ("rfnotch_ctrl", "false"));
-        assert_eq!(s[1], ("dabnotch_ctrl", "true"));
-    }
-
-    #[test]
-    fn notch_off_inside_dab() {
-        let s = sdrplay_notch_settings(200_000_000.0, 8_000_000.0);
-        assert_eq!(s[0], ("rfnotch_ctrl", "true"));
-        assert_eq!(s[1], ("dabnotch_ctrl", "false"));
-    }
-
-    #[test]
-    fn notch_all_on_in_clear_band() {
-        // 145 MHz (2 m), 2 MHz span — clear of every broadcast notch.
-        let s = sdrplay_notch_settings(145_000_000.0, 2_000_000.0);
-        assert_eq!(s[0], ("rfnotch_ctrl", "true"));
-        assert_eq!(s[1], ("dabnotch_ctrl", "true"));
-    }
-
-    #[test]
-    fn notch_span_spill_into_fm_disables_rf() {
-        // Centre 86 MHz (below FM start 88) but 8 MHz span reaches 90 MHz
-        // -> spills into FM -> rfnotch off.
-        let s = sdrplay_notch_settings(86_000_000.0, 8_000_000.0);
-        assert_eq!(s[0], ("rfnotch_ctrl", "false"));
-    }
-
-    #[test]
-    fn notch_exact_upper_edge_is_outside() {
-        // Centre exactly at FM upper edge 108 MHz, negligible span ->
-        // half-open: 108 is NOT inside [88,108) -> notch stays on.
-        let s = sdrplay_notch_settings(108_000_000.0, 0.0);
-        assert_eq!(s[0], ("rfnotch_ctrl", "true"));
-    }
+    // SDRplay notch-band tests moved to `ferrite-sdr-tables` with the
+    // `sdrplay_notch_settings` implementation; the `apply()` integration
+    // below still exercises the notch path end-to-end.
 
     // --- apply(): the full server decision logic, hardware-free ---
 
