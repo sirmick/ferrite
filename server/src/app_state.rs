@@ -928,81 +928,30 @@ impl AppState {
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
 
-        // In-span fast path (opt-in via `keep_lo`): when the target already
-        // falls inside the digitised span, retune the *channelizer only* —
-        // leave the LO and the whole graph untouched. This avoids the source
-        // restart a normal tune triggers (which recomposes the graph and
-        // reloads any node-side worker, e.g. whisper — a ~20-30 s blackout)
-        // and keeps a wideband survey's centre stable while you hop between
-        // stations. Falls through to the normal LO-moving path when the
-        // target is outside the usable span, or the LO/channelizer is unknown.
-        if keep_lo {
-            if let (Some(cur), Some((chan_id, chan_rate))) = (cur_src_center, &chan) {
-                // Keep the extracted channel fully inside the span (half the
-                // sample rate, less half the channel width as edge margin).
-                let usable_half = cur_rate / 2.0 - chan_rate / 2.0;
-                if cur_rate > 0.0 && usable_half > 0.0 && (freq_hz - cur).abs() <= usable_half {
-                    let shift = freq_hz - cur;
-                    let plan = self
-                        .apply_block_params(chan_id, serde_json::json!({ "freq_shift_hz": shift }))
-                        .await?;
-                    return Ok(plan);
-                }
-            }
-        }
+        // All the dodge / keep-out / DC-guard / in-span-fast-path math is a
+        // pure function of the current source state — see
+        // `source_policy::plan_tune` (unit-tested there). It decides what to
+        // write; the I/O (patch_source / apply_block_params) stays here. The
+        // fast path (LO untouched, channelizer-only) avoids the source
+        // restart a normal tune triggers (graph recompose + node-worker
+        // reload, e.g. whisper — a ~20-30 s blackout).
+        let plan = crate::source_policy::plan_tune(
+            freq_hz,
+            span_hz,
+            offset_ratio,
+            keep_lo,
+            cur_src_center,
+            cur_rate,
+            chan.as_ref().map(|(_, rate)| *rate),
+        );
 
-        // Compute new src_center + chan.freq_shift_hz from the dodge math.
-        let (new_src_center, new_freq_shift) = match &chan {
-            Some((_, chan_rate)) => {
-                let keepout = 0.4 * chan_rate;
-                let dodge = offset_ratio * chan_rate;
-                // When a DC dodge is requested (offset_ratio > 0), the target
-                // must also sit at least this far *off* the current LO to
-                // "stick" — otherwise an in-span tune that lands on (or right
-                // beside) the LO would park the carrier on the DC spike/notch,
-                // exactly where a zero-IF radio can't hear it. Below the guard
-                // we re-snap so the dodge always actually moves it off DC.
-                // For DC-tracking drivers (offset_ratio == 0) the guard is 0 —
-                // they correct DC in hardware and may sit on centre.
-                let dc_guard = if offset_ratio > 0.0 {
-                    0.1 * chan_rate
-                } else {
-                    0.0
-                };
-                match cur_src_center {
-                    // Sticky: source already parked off-DC but inside the
-                    // channel keepout window — reuse the LO, just re-shift.
-                    Some(cur)
-                        if {
-                            let off = (freq_hz - cur).abs();
-                            off <= keepout && off >= dc_guard
-                        } =>
-                    {
-                        (cur, freq_hz - cur)
-                    }
-                    // Snap (also the first-tune / unknown-centre case, and the
-                    // on-DC case above): park the source low of target by the
-                    // dodge offset and let the channelizer recover the carrier.
-                    _ => (freq_hz - dodge, dodge),
-                }
-            }
-            None => (freq_hz, 0.0),
-        };
-
-        // Build source-side delta. 0.5 Hz floor on the centre delta so a
-        // round-trip readback noise doesn't trigger a reconfigure — but
-        // always write on the first tune (unknown centre), so an unset
-        // source centre actually gets established instead of silently
-        // staying at the block default.
+        // Build the source-side delta from the plan (centre + rate).
         let mut src_delta = serde_json::Map::new();
-        let center_changed = cur_src_center.is_none_or(|cur| (new_src_center - cur).abs() > 0.5);
-        if center_changed {
-            src_delta.insert("center_freq_hz".into(), serde_json::json!(new_src_center));
+        if let Some(center) = plan.src_center_hz {
+            src_delta.insert("center_freq_hz".into(), serde_json::json!(center));
         }
-        if let Some(span) = span_hz {
-            if span > cur_rate {
-                src_delta.insert("sample_rate_hz".into(), serde_json::json!(span));
-            }
+        if let Some(rate) = plan.src_rate_hz {
+            src_delta.insert("sample_rate_hz".into(), serde_json::json!(rate));
         }
 
         let mut last_plan: Option<ReconfigurePlan> = None;
@@ -1014,9 +963,9 @@ impl AppState {
         // Channelizer hot-retune. apply_block_params routes non-`src` ids
         // through PresetMount::live_reconfigure_block, which the
         // Channelizer's `apply_live_params` honours for freq_shift_hz.
-        if let Some((chan_id, _)) = chan {
-            let chan_delta = serde_json::json!({ "freq_shift_hz": new_freq_shift });
-            if let Some(plan) = self.apply_block_params(&chan_id, chan_delta).await? {
+        if let (Some(shift), Some((chan_id, _))) = (plan.chan_shift_hz, &chan) {
+            let chan_delta = serde_json::json!({ "freq_shift_hz": shift });
+            if let Some(plan) = self.apply_block_params(chan_id, chan_delta).await? {
                 last_plan = Some(plan);
             }
         }
