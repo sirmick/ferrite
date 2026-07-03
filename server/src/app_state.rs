@@ -134,6 +134,10 @@ struct Inner {
     /// `/api/devices` and `/api/source/capabilities`; pruned when a
     /// device disappears from `enumerate`.
     device_cache: DeviceCache,
+    /// Async-capture job registry (`POST /api/capture/*`). Survives
+    /// start/stop like `frames`; the capture state machines live in
+    /// [`crate::capture`] and drive this AppState directly.
+    captures: Arc<crate::capture::CaptureRegistry>,
 }
 
 #[derive(Clone)]
@@ -169,6 +173,7 @@ impl AppState {
                 pipeline: Mutex::new(None),
                 tick_period,
                 device_cache: DeviceCache::new(),
+                captures: Arc::new(crate::capture::CaptureRegistry::new()),
             }),
             logs: None,
             presets_dir: None,
@@ -223,6 +228,14 @@ impl AppState {
     #[must_use]
     pub fn decoder_store(&self) -> Arc<crate::decoder_store::DecoderStore> {
         Arc::clone(&self.inner.decoder_store)
+    }
+
+    /// The shared capture-job registry. The capture state machines in
+    /// [`crate::capture`] reach it through this accessor (they can't see
+    /// `inner` from a sibling module).
+    #[must_use]
+    pub fn captures(&self) -> Arc<crate::capture::CaptureRegistry> {
+        Arc::clone(&self.inner.captures)
     }
 
     pub async fn status(&self) -> PipelineStatus {
