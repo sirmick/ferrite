@@ -32,7 +32,7 @@ and RdsDemod on 10M samples with an exact decimation count (no timeline slip).
 | 6.2 — browser whisper removal | 🚧 blocked | needs sherpa e2e green in CI first (provisioning gap) |
 | 6.3 — capture orchestration server-side | ✅ done | `POST /api/capture/*` on ferrited; MCP verbs thinned (−595 lines); antenna-inherit + sidecar-naming fixes, each with a regression test verified to fail without it |
 | 6.6 — `AppError` enum | ✅ done | typed `AppError` (status by variant) kills the `msg.contains` 409 + plain-text error bodies; FrameBus poison-recovery applied to DecoderStore + BroadcastSink; poison tests verified to fail without the fix |
-| 6.7 — Soapy stream trait seam | ✅ done | `RxStreamLike` trait extracts read/time_ns/deactivate so the reader's overflow/hung/recovery state machine runs against a scripted fake; fixed the spurious-`hung`-on-full-ring leak (refresh liveness on any `Ok(n>0)`), regression-tested. H5 drop-oldest + H6 gap flag deferred as own-phase follow-ups |
+| 6.7 — Soapy stream trait seam | ✅ done | `RxStreamLike` trait → reader state machine tested against a scripted fake; fixed spurious-`hung`-on-full-ring leak. **H5 drop-oldest ring done** (`write_overwrite`); **H6 gap counter done**, per-tick `PortMeta` gap-flag propagation deferred (runtime has no per-tick block→downstream meta channel) |
 
 The detailed phase write-ups below are retained as the record of what was
 built (and, for 6.2/6.3/6.6/6.7, the spec for the remaining work).
@@ -399,10 +399,23 @@ commit series. Scope details are in the audit report (see memory
    healthy-but-backpressured device (full ring) is no longer flagged `hung`
    and leaked on Drop; regression test verified to fail without it.
    `open/retune` were left on the concrete `SoapySource` (they aren't part
-   of the reader state machine the seam targets). **Deferred as own-phase
-   follow-ups** (the plan's "consider"): H5 drop-oldest ring policy (changes
-   backpressure semantics — needs live validation) and H6 a `PortMeta` gap
-   flag (cross-cutting through the runtime).
+   of the reader state machine the seam targets).
+
+   **H5 (drop-oldest ring) — ✅ done.** New `SpscRing::write_overwrite`
+   evicts the oldest queued samples so the SoapySDR reader's ring stays
+   current with the device under backpressure (bounded latency) instead of
+   draining a growing lag; `write` (drop-newest) stays for audio playout.
+   `ring_drops` now measures the evicted backlog; ring tests + a reader
+   regression (verified to fail against drop-newest).
+
+   **H6 (gap signal) — observability shipped, propagation deferred.** A
+   `ring_gaps` event counter + accessor records each discontinuity
+   (surfaced alongside overflow/timestamp counters). The full per-tick gap
+   *flag in `PortMeta`* reaching downstream consumers is left as its own
+   phase: the runtime has **no per-tick block→downstream metadata channel**
+   today (per-tick `PortMeta` is always `default()`), so it needs a new data
+   path + a consumer that resyncs on it + live validation — out of
+   proportion to a "round out".
 
 ## Deferred / explicitly not planned
 
