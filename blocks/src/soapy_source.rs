@@ -13,12 +13,16 @@
 //! with no dupes and no drops.
 //!
 //! When the scheduler does fall behind for long enough to fill the ring
-//! (GC, IO stall, whatever), the reader drops incoming samples and
-//! bumps [`SoapySource::ring_drops`] — explicit, countable, not silent.
+//! (GC, IO stall, whatever), the reader keeps the ring **current with the
+//! device** — it evicts the oldest queued samples (drop-oldest) so
+//! `process()` always sees the freshest IQ with bounded latency, rather
+//! than draining a growing backlog. The eviction is explicit and
+//! countable: [`SoapySource::ring_drops`] totals the skipped samples and
+//! [`SoapySource::ring_gaps`] counts the discontinuity events.
 //! Driver-reported overflows land in [`SoapySource::overflow_drops`]
 //! and timestamp discontinuities (gaps between `stream.time_ns()`
 //! readings and the expected delta from `sample_rate_hz`) in
-//! [`SoapySource::timestamp_gaps`]. A capture that observes all three
+//! [`SoapySource::timestamp_gaps`]. A capture that observes all these
 //! counters at zero is provably lossless.
 //!
 //! ## Lifetime
@@ -85,6 +89,11 @@ const READ_TIMEOUT_US: i64 = 100_000;
 struct ReaderCounters {
     overflow_drops: AtomicU64,
     ring_drops: AtomicU64,
+    /// Count of ring-overflow **events** — each time the reader had to
+    /// evict older samples to stay current (drop-oldest). `ring_drops`
+    /// is the total *samples* skipped across all events; this is how many
+    /// distinct discontinuities the downstream stream carries.
+    ring_gaps: AtomicU64,
     timestamp_gaps: AtomicU64,
     samples_pushed: AtomicU64,
     /// Monotonic nanoseconds (from `CLOCK_MONOTONIC` via `Instant`,
@@ -673,12 +682,22 @@ impl SoapySource {
         self.counters.overflow_drops.load(Ordering::Relaxed)
     }
 
-    /// Samples dropped because our in-process ring was full — the
-    /// reader produced them but `process()` was too slow to consume.
-    /// Nonzero means the pipeline fell behind its real-time clock.
+    /// Samples skipped because our in-process ring was full — with the
+    /// drop-oldest policy the reader evicts this many stale samples to
+    /// stay current with the device. Nonzero means the pipeline fell
+    /// behind its real-time clock; the downstream IQ stream has a
+    /// corresponding discontinuity (see [`Self::ring_gaps`]).
     #[must_use]
     pub fn ring_drops(&self) -> u64 {
         self.counters.ring_drops.load(Ordering::Relaxed)
+    }
+
+    /// Number of distinct ring-overflow events (drop-oldest evictions),
+    /// as opposed to [`Self::ring_drops`] which is the total samples
+    /// skipped. One gap per `process()`-starved burst.
+    #[must_use]
+    pub fn ring_gaps(&self) -> u64 {
+        self.counters.ring_gaps.load(Ordering::Relaxed)
     }
 
     /// Count of reader reads whose timestamp drifted from the expected
@@ -1133,8 +1152,13 @@ fn run_reader<S: RxStreamLike>(
                     expected_time_ns = t + (n as f64 * ns_per_sample) as i64;
                 }
 
-                let pushed = match ring.lock() {
-                    Ok(mut r) => r.write(&staging[..n]),
+                // Drop-oldest: keep the ring current with the device. A
+                // backed-up ring evicts its stale backlog so `process()`
+                // always sees the freshest IQ (bounded latency) rather
+                // than draining a growing lag; the eviction is counted as
+                // a discontinuity so it's visible in flowdiag.
+                let dropped = match ring.lock() {
+                    Ok(mut r) => r.write_overwrite(&staging[..n]),
                     Err(_) => {
                         tracing::warn!("soapy ring mutex poisoned; ending reader");
                         stream.deactivate();
@@ -1143,11 +1167,12 @@ fn run_reader<S: RxStreamLike>(
                 };
                 counters
                     .samples_pushed
-                    .fetch_add(pushed as u64, Ordering::Relaxed);
-                if pushed < n {
+                    .fetch_add(n as u64, Ordering::Relaxed);
+                if dropped > 0 {
                     counters
                         .ring_drops
-                        .fetch_add((n - pushed) as u64, Ordering::Relaxed);
+                        .fetch_add(dropped as u64, Ordering::Relaxed);
+                    counters.ring_gaps.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Err(RxReadError::Timeout) => {
@@ -1482,11 +1507,12 @@ mod tests {
             let pushed = src.samples_pushed();
             let underruns = src.underrun_samples();
             let ring_drops = src.ring_drops();
+            let ring_gaps = src.ring_gaps();
             let overflow = src.overflow_drops();
             let gaps = src.timestamp_gaps();
             eprintln!(
                 "  pushed={pushed} underruns={underruns} ring_drops={ring_drops} \
-                 overflow={overflow} ts_gaps={gaps}"
+                 ring_gaps={ring_gaps} overflow={overflow} ts_gaps={gaps}"
             );
             if pushed == 0 {
                 iter_failures.push((i, "no samples pushed".to_string()));
@@ -1605,17 +1631,18 @@ mod tests {
         ring
     }
 
-    // The core regression: a delivering-but-backpressured device (full
-    // ring) must still refresh the liveness markers, so it is never
-    // mistaken for hung. Without the fix (refresh gated on `pushed > 0`),
-    // `last_sample_at_ns` stays 0 and `hung` stays set.
+    // A delivering-but-backpressured device (full ring) must (a) refresh
+    // its liveness markers so it is never mistaken for hung, and (b) under
+    // drop-oldest, accept the fresh samples while evicting the stale
+    // backlog — counted as `ring_drops` + one `ring_gap`. Using `write`
+    // (drop-newest) would push 0 and record no gap, failing this.
     #[test]
-    fn full_ring_delivery_refreshes_liveness_and_counts_drops() {
+    fn full_ring_delivery_drops_oldest_and_refreshes_liveness() {
         let ring = full_ring(8);
         let (counters, reads, stop, jh) = spawn_reader(
             vec![Ok(4)],
             Err(RxReadError::Timeout),
-            ring,
+            ring.clone(),
             Duration::from_secs(10),
         );
         // Prior stall flag that a live delivery must clear.
@@ -1635,8 +1662,12 @@ mod tests {
             !counters.hung.load(Ordering::Relaxed),
             "a delivering device must clear the hung flag"
         );
-        assert_eq!(counters.samples_pushed.load(Ordering::Relaxed), 0);
+        // Drop-oldest: all 4 fresh samples accepted, 4 stale evicted, one gap.
+        assert_eq!(counters.samples_pushed.load(Ordering::Relaxed), 4);
         assert_eq!(counters.ring_drops.load(Ordering::Relaxed), 4);
+        assert_eq!(counters.ring_gaps.load(Ordering::Relaxed), 1);
+        // Ring stays full, now carrying the freshest window.
+        assert_eq!(ring.lock().unwrap().available_read(), 8);
     }
 
     #[test]
