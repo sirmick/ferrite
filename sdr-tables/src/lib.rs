@@ -217,6 +217,114 @@ pub fn write_web_ladders() -> Result<()> {
     Ok(())
 }
 
+// ── Soapy driver-arg parsing ────────────────────────────────────────────
+//
+// The single home for turning a SoapySDR args string into a driver key,
+// shared by the daemon (`source_policy`, `AppState::tune`) and the runtime
+// (`inject_dc_block`) so every per-driver table below is keyed the same way.
+
+/// The SoapySDR `driver=` value from a kv args string
+/// (`"driver=hackrf,serial=abc"` → `Some("hackrf")`). `None` when no
+/// non-empty `driver=` part is present (Soapy then auto-selects, and only a
+/// device probe can name the driver). Not lowercased — every table here is
+/// case-insensitive; use [`driver_key`] when you need the normalized name.
+#[must_use]
+pub fn driver_arg(args: &str) -> Option<&str> {
+    args.split(',')
+        .filter_map(|p| p.trim().strip_prefix("driver="))
+        .map(str::trim)
+        .find(|v| !v.is_empty())
+}
+
+/// Normalized (lowercased) driver short name from a Soapy args string —
+/// the `driver=<name>` value of a kv form, or a bare `"sdrplay"` when the
+/// string has no `=`. Empty when neither shape yields a name. This is the
+/// key every per-driver table below matches on.
+#[must_use]
+pub fn driver_key(args: &str) -> String {
+    let a = args.trim();
+    driver_arg(a)
+        .unwrap_or(if a.contains('=') { "" } else { a })
+        .to_ascii_lowercase()
+}
+
+// ── Per-driver policy tables ────────────────────────────────────────────
+
+/// Per-driver DC-spike dodge ratio — the fraction of the channelizer's
+/// output rate by which `AppState::tune` parks the source LO off the listen
+/// target, so the zero-IF LO/DC spike falls *outside* the demodulated
+/// channel and the channelizer recovers the carrier. The daemon-owned
+/// default applied whenever the caller passes no explicit `offset_ratio`,
+/// so the UI, ferrite-ctl, and a headless AI all dodge identically.
+///
+/// `0.7` clears a full-width channel (the spike at the LO sits a channel
+/// half-width-plus outside the passband). `0` = "no dodge": DC-tracking or
+/// low-IF drivers that don't produce an in-band spike, or correct it in
+/// hardware. Keyed case-insensitively.
+#[must_use]
+pub fn tune_offset_ratio_for(driver_key: &str) -> f64 {
+    match driver_key.to_ascii_lowercase().as_str() {
+        // No hardware DC correction — the dodge is the only fix.
+        "hackrf" => 0.7,
+        // Zero-IF above ~30 MHz; the dodge complements `dc_offset_correction`
+        // so a carrier never sits on the tracker's residual spike.
+        "sdrplay" => 0.7,
+        // RTL-SDR, Airspy, … : DC-tracking / low-IF, no dodge needed.
+        _ => 0.0,
+    }
+}
+
+/// Whether the auto-injected software complex-IQ DC blocker should default
+/// **enabled** for this driver. Zero-IF radios (RTL-SDR, HackRF, …) leak the
+/// LO straight to the ADC as a bright line at the tuned centre, so the
+/// blocker is on. SDRplay is not zero-IF (real tuner) and its hardware
+/// DC-offset tracker handles any residual, so the software blocker — which
+/// would otherwise risk nulling a real carrier parked at centre — defaults
+/// **off** there. Keyed on the lowercased Soapy driver short name.
+#[must_use]
+pub fn dc_block_default_enabled(driver_key: &str) -> bool {
+    !matches!(driver_key, "sdrplay")
+}
+
+/// SDRplay hardware broadcast-notch passbands (Hz). The RF notch covers the
+/// AM **and** FM broadcast bands (two disjoint ranges); the DAB notch covers
+/// Band III. Fixed in hardware, locale-independent. Mirrors the rules in
+/// `web/src/lib/controls/sdr-presets/sdrplay.json`.
+const AM_BCAST_HZ: (f64, f64) = (540_000.0, 1_700_000.0);
+const FM_BCAST_HZ: (f64, f64) = (88_000_000.0, 108_000_000.0);
+const DAB_BAND3_HZ: (f64, f64) = (170_000_000.0, 240_000_000.0);
+
+/// Half-open overlap test: `[span_lo, span_hi)` vs `[band_lo, band_hi)`.
+fn overlaps(span_lo: f64, span_hi: f64, band: (f64, f64)) -> bool {
+    span_lo < band.1 && span_hi > band.0
+}
+
+/// Desired SDRplay notch settings for a tune, as `(writeSetting key,
+/// "true"/"false")` pairs. A notch is turned **off** (`"false"`) when the
+/// covered span `center ± rate/2` overlaps the band it would attenuate — so
+/// we can receive inside it — and left **on** (`"true"`) otherwise, where it
+/// only helps reject broadcast overload. Decided on the covered span, not
+/// just the centre. Values are strings to match the SoapySDR bool
+/// convention.
+#[must_use]
+pub fn sdrplay_notch_settings(center_hz: f64, rate_hz: f64) -> [(&'static str, &'static str); 2] {
+    let half = if rate_hz.is_finite() && rate_hz > 0.0 {
+        rate_hz / 2.0
+    } else {
+        0.0
+    };
+    let lo = center_hz - half;
+    let hi = center_hz + half;
+
+    let in_rf = overlaps(lo, hi, AM_BCAST_HZ) || overlaps(lo, hi, FM_BCAST_HZ);
+    let in_dab = overlaps(lo, hi, DAB_BAND3_HZ);
+
+    [
+        ("rfnotch_ctrl", if in_rf { "false" } else { "true" }),
+        ("dabnotch_ctrl", if in_dab { "false" } else { "true" }),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +424,91 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 9, "expected ≥9 presets checked, got {checked}");
+    }
+
+    // ── driver-arg parsing + per-driver policy ─────────────────────────
+
+    #[test]
+    fn driver_arg_extracts_soapy_driver() {
+        assert_eq!(driver_arg("driver=hackrf"), Some("hackrf"));
+        assert_eq!(driver_arg("driver=hackrf,serial=abc123"), Some("hackrf"));
+        assert_eq!(driver_arg("serial=abc123,driver=sdrplay"), Some("sdrplay"));
+        assert_eq!(driver_arg(" driver=rtlsdr "), Some("rtlsdr"));
+        assert_eq!(driver_arg("serial=abc123"), None);
+        assert_eq!(driver_arg(""), None);
+        assert_eq!(driver_arg("driver="), None);
+    }
+
+    #[test]
+    fn driver_key_normalizes_kv_and_bare_forms() {
+        assert_eq!(driver_key("driver=SDRplay,serial=x"), "sdrplay");
+        assert_eq!(driver_key("SDRplay"), "sdrplay"); // bare form
+        assert_eq!(driver_key("driver="), ""); // empty driver=
+        assert_eq!(driver_key("serial=x"), ""); // kv but no driver=
+        assert_eq!(driver_key(""), "");
+    }
+
+    #[test]
+    fn tune_offset_ratio_is_per_driver_and_case_insensitive() {
+        assert_eq!(tune_offset_ratio_for("hackrf"), 0.7);
+        assert_eq!(tune_offset_ratio_for("HackRF"), 0.7);
+        assert_eq!(tune_offset_ratio_for("sdrplay"), 0.7);
+        assert_eq!(tune_offset_ratio_for("SDRplay"), 0.7);
+        assert_eq!(tune_offset_ratio_for("rtlsdr"), 0.0);
+        assert_eq!(tune_offset_ratio_for("airspy"), 0.0);
+        assert_eq!(tune_offset_ratio_for(""), 0.0);
+    }
+
+    #[test]
+    fn dc_block_defaults_off_only_for_sdrplay() {
+        assert!(dc_block_default_enabled("rtlsdr"));
+        assert!(dc_block_default_enabled("hackrf"));
+        assert!(!dc_block_default_enabled("sdrplay"));
+    }
+
+    #[test]
+    fn notch_off_inside_am() {
+        // 810 kHz AM, 2 MS/s span reaches into the AM band → RF notch off.
+        let s = sdrplay_notch_settings(810_000.0, 2_000_000.0);
+        assert_eq!(s[0], ("rfnotch_ctrl", "false"));
+        assert_eq!(s[1], ("dabnotch_ctrl", "true"));
+    }
+
+    #[test]
+    fn notch_off_inside_fm() {
+        let s = sdrplay_notch_settings(98_500_000.0, 2_400_000.0);
+        assert_eq!(s[0], ("rfnotch_ctrl", "false"));
+    }
+
+    #[test]
+    fn notch_off_inside_dab() {
+        let s = sdrplay_notch_settings(200_000_000.0, 2_400_000.0);
+        assert_eq!(s[1], ("dabnotch_ctrl", "false"));
+    }
+
+    #[test]
+    fn notch_all_on_in_clear_band() {
+        // 462 MHz (GMRS) — clear of every broadcast band → both notches on.
+        let s = sdrplay_notch_settings(462_000_000.0, 2_400_000.0);
+        assert_eq!(s[0], ("rfnotch_ctrl", "true"));
+        assert_eq!(s[1], ("dabnotch_ctrl", "true"));
+    }
+
+    #[test]
+    fn notch_span_spill_into_fm_disables_rf() {
+        // Centre just below the FM band, but a wide span spills in.
+        let s = sdrplay_notch_settings(87_000_000.0, 4_000_000.0);
+        assert_eq!(s[0], ("rfnotch_ctrl", "false"), "wide span spills into FM");
+    }
+
+    #[test]
+    fn notch_exact_upper_edge_is_outside() {
+        // Half-open: a span ending exactly at the band's lower edge is out.
+        let s = sdrplay_notch_settings(108_000_000.0, 0.0);
+        assert_eq!(
+            s[0],
+            ("rfnotch_ctrl", "true"),
+            "exact upper edge is outside"
+        );
     }
 }
