@@ -1114,6 +1114,88 @@ pub async fn load_preset(
     }))
 }
 
+// ─── capture orchestration ──────────────────────────────────────────────
+//
+// ferrited owns the capture job registry + state machines (see
+// `crate::capture`); ferrite-ctl's MCP verbs are thin wrappers over
+// these. A `POST` registers a job and returns it immediately; the
+// recording runs in a background task and its status is polled via
+// `GET /api/capture/jobs[/:id]`.
+
+fn capture_err(e: crate::capture::CaptureError) -> (StatusCode, Json<ApiError>) {
+    match e {
+        crate::capture::CaptureError::Invalid(m) => bad_request("CAPTURE_REJECTED", m),
+        crate::capture::CaptureError::Internal(m) => {
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "CAPTURE_FAILED", m)
+        }
+    }
+}
+
+/// `POST /api/capture/iq` — start an async IQ capture. Non-wideband tees
+/// the live post-channelizer stream; `wideband=true` swaps in `capture_fm`
+/// for a full-rate slice (needs `freq_hz`). Returns the `Running` job.
+pub async fn post_capture_iq(
+    State(state): State<AppState>,
+    Json(req): Json<crate::capture::CaptureIqReq>,
+) -> Result<Json<crate::capture::CaptureJob>, (StatusCode, Json<ApiError>)> {
+    tracing::info!("POST /api/capture/iq");
+    state
+        .start_capture_iq(req)
+        .await
+        .map(Json)
+        .map_err(capture_err)
+}
+
+/// `POST /api/capture/fft` — start an async FFT-byte-stream capture (the
+/// non-disruptive `logmag` tee). Returns the `Running` job.
+pub async fn post_capture_fft(
+    State(state): State<AppState>,
+    Json(req): Json<crate::capture::CaptureIqReq>,
+) -> Result<Json<crate::capture::CaptureJob>, (StatusCode, Json<ApiError>)> {
+    tracing::info!("POST /api/capture/fft");
+    state
+        .start_capture_fft(req)
+        .await
+        .map(Json)
+        .map_err(capture_err)
+}
+
+/// `POST /api/capture/audio` — start an async demod-audio capture (a
+/// preset swap to a `*-record` preset; disruptive). Returns the job.
+pub async fn post_capture_audio(
+    State(state): State<AppState>,
+    Json(req): Json<crate::capture::CaptureAudioReq>,
+) -> Result<Json<crate::capture::CaptureJob>, (StatusCode, Json<ApiError>)> {
+    tracing::info!("POST /api/capture/audio");
+    state
+        .start_capture_audio(req)
+        .await
+        .map(Json)
+        .map_err(capture_err)
+}
+
+/// `GET /api/capture/jobs` — every capture job this process has tracked,
+/// newest first (LRU-capped).
+pub async fn get_capture_jobs(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::capture::CaptureJob>> {
+    Json(state.capture_jobs().await)
+}
+
+/// `GET /api/capture/jobs/:id` — one capture job by id; 404 when unknown.
+pub async fn get_capture_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::capture::CaptureJob>, (StatusCode, Json<ApiError>)> {
+    state.capture_job(&id).await.map(Json).ok_or_else(|| {
+        api_error(
+            StatusCode::NOT_FOUND,
+            "CAPTURE_JOB_NOT_FOUND",
+            format!("no capture job with id {id:?}"),
+        )
+    })
+}
+
 /// `GET /api/profile` — snapshot the active runtime [`Profile`]. Lets
 /// the UI hydrate its chip row from server state without guessing.
 pub async fn get_profile(State(state): State<AppState>) -> Json<Profile> {
