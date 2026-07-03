@@ -36,6 +36,7 @@ mod app_state;
 mod band_plan;
 mod block_schema;
 mod bridge_sink;
+mod capture;
 mod decoder_store;
 mod device;
 mod device_cache;
@@ -419,6 +420,11 @@ async fn main() -> Result<()> {
         .route("/api/presets/:name", get(routes::get_preset))
         .route("/api/band-plan/at", get(routes::band_at))
         .route("/api/captures", get(routes::list_captures))
+        .route("/api/capture/iq", post(routes::post_capture_iq))
+        .route("/api/capture/fft", post(routes::post_capture_fft))
+        .route("/api/capture/audio", post(routes::post_capture_audio))
+        .route("/api/capture/jobs", get(routes::get_capture_jobs))
+        .route("/api/capture/jobs/:id", get(routes::get_capture_job))
         .route("/api/preset", post(routes::load_preset))
         .route(
             "/api/profile",

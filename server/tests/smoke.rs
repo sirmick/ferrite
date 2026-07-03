@@ -38,6 +38,10 @@ mod preset_pipeline;
 #[allow(dead_code)]
 mod source_policy;
 
+#[path = "../src/capture.rs"]
+#[allow(dead_code)]
+mod capture;
+
 #[path = "../src/app_state.rs"]
 #[allow(dead_code)]
 mod app_state;
