@@ -601,12 +601,23 @@ impl AppState {
             ));
         }
         let path = dir.join(format!("{name}.json"));
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| anyhow!("read {}: {e}", path.display()))?;
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|e| anyhow!("parse {}: {e}", path.display()))?;
-        Ok(value)
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|e| anyhow!("parse {}: {e}", path.display()))
+            }
+            // No file by that name: it may be a variant slug (`${base}-${id}`,
+            // the form `/api/presets` lists and `/api/preset` loads). Resolve
+            // it the same way the loader does and hand back the patched doc,
+            // so detail → load agree on what a slug means.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let slug = name.to_string();
+                let doc = tokio::task::spawn_blocking(move || resolve_preset_doc(&dir, &slug))
+                    .await
+                    .map_err(|e| anyhow!("preset resolve task panicked: {e}"))??;
+                serde_json::to_value(doc).map_err(|e| anyhow!("serialize preset {name:?}: {e}"))
+            }
+            Err(e) => Err(anyhow!("read {}: {e}", path.display())),
+        }
     }
 
     /// Enumerate replayable captures under [`Self::captures_dir`].
@@ -1215,11 +1226,26 @@ fn scan_presets(dir: &std::path::Path) -> Result<Vec<PresetEntry>> {
             FlowgraphDoc::from_json(&b)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:#}")))
         }) {
-            Ok(doc) => out.push(PresetEntry {
+            Ok(doc) if doc.variants.is_empty() => out.push(PresetEntry {
                 name: stem.to_string(),
                 label: doc.label,
                 description: doc.description,
             }),
+            // A base with variants is not loadable bare (hard cut, D-V4),
+            // so listing the stem would hand `load_preset` a name it
+            // rejects. List each variant under its loadable `${stem}-${id}`
+            // slug instead — the list→load round-trip (MCP's primary use)
+            // must hold for every entry.
+            Ok(doc) => {
+                let base = doc.label.clone().unwrap_or_else(|| stem.to_string());
+                for v in &doc.variants {
+                    out.push(PresetEntry {
+                        name: format!("{stem}-{}", v.id),
+                        label: Some(format!("{base} — {}", v.label.as_deref().unwrap_or(&v.id))),
+                        description: doc.description.clone(),
+                    });
+                }
+            }
             Err(err) => tracing::warn!(path = %path.display(), ?err, "skipping bad preset"),
         }
     }
@@ -1896,6 +1922,95 @@ mod tests {
         let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
         let err = state.load_preset_by_name("wbfm").await.unwrap_err();
         assert!(format!("{err:#}").contains("not configured"));
+    }
+
+    /// `GET /api/presets` must only list names `POST /api/preset` accepts:
+    /// a base with variants is listed as its `${stem}-${id}` slugs, never
+    /// bare. (Pre-fix the 8 shipped variant families — ft8, rtty, olivia,
+    /// … — were listed bare, and the AI's list→load round-trip 4xx'd on
+    /// every one of them.)
+    #[test]
+    fn scan_presets_lists_loadable_variant_slugs_not_bare_base() {
+        let dir = tempdir().unwrap();
+        let write = |name: &str, json: serde_json::Value| {
+            std::fs::write(
+                dir.path().join(format!("{name}.json")),
+                serde_json::to_vec(&json).unwrap(),
+            )
+            .unwrap();
+        };
+        write(
+            "wbfm",
+            json!({ "name": "wbfm", "label": "WBFM", "environments": ["node"],
+                    "blocks": { "a": { "type": "X" } }, "wires": [] }),
+        );
+        write(
+            "olivia",
+            json!({
+                "name": "olivia", "label": "Olivia", "description": "MFSK",
+                "environments": ["node"],
+                "blocks": { "demod": { "type": "OliviaDemod",
+                                       "params": { "variant": "olivia-8-500" } } },
+                "wires": [],
+                "variants": [
+                    { "id": "8-500", "label": "8/500", "default": true, "patch": {} },
+                    { "id": "16-500", "patch": { "demod": { "variant": "olivia-16-500" } } }
+                ]
+            }),
+        );
+
+        let entries = scan_presets(dir.path()).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["olivia-16-500", "olivia-8-500", "wbfm"]);
+        // Every listed name resolves through the loader's own path.
+        for n in &names {
+            resolve_preset_doc(dir.path(), n).unwrap_or_else(|e| panic!("{n}: {e:#}"));
+        }
+        let by_name = |n: &str| entries.iter().find(|e| e.name == n).unwrap();
+        assert_eq!(
+            by_name("olivia-8-500").label.as_deref(),
+            Some("Olivia — 8/500")
+        );
+        assert_eq!(
+            by_name("olivia-16-500").label.as_deref(),
+            Some("Olivia — 16-500")
+        );
+        assert_eq!(
+            by_name("olivia-16-500").description.as_deref(),
+            Some("MFSK")
+        );
+        assert_eq!(by_name("wbfm").label.as_deref(), Some("WBFM"));
+    }
+
+    /// `GET /api/presets/:name` (MCP `preset_detail`) accepts the same
+    /// variant slugs the listing emits and returns the *patched* doc.
+    #[tokio::test]
+    async fn read_preset_doc_resolves_variant_slugs() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("olivia.json"),
+            serde_json::to_vec(&json!({
+                "name": "olivia", "environments": ["node"],
+                "blocks": { "demod": { "type": "OliviaDemod",
+                                       "params": { "variant": "olivia-8-500" } } },
+                "wires": [],
+                "variants": [
+                    { "id": "8-500", "default": true, "patch": {} },
+                    { "id": "16-500", "patch": { "demod": { "variant": "olivia-16-500" } } }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5))
+            .with_presets_dir(dir.path().to_path_buf());
+
+        let v = state.read_preset_doc("olivia-16-500").await.unwrap();
+        assert_eq!(v["blocks"]["demod"]["params"]["variant"], "olivia-16-500");
+        // The base file itself is still readable raw (shows the family).
+        let base = state.read_preset_doc("olivia").await.unwrap();
+        assert_eq!(base["variants"].as_array().map(Vec::len), Some(2));
+        assert!(state.read_preset_doc("olivia-9999").await.is_err());
     }
 
     #[test]
