@@ -372,6 +372,30 @@ pub struct OutputPort<'a> {
 }
 
 impl OutputPort<'_> {
+    /// Writable item count on this port for the current call, whatever
+    /// the element type. Pass-through blocks read it *before* touching
+    /// their input so they can clamp `n` to what they can actually
+    /// emit (consume only what you produce — the backpressure rule).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match &self.buf {
+            OutBuf::IqF32(s) => s.len(),
+            OutBuf::IqS16(s) => s.len(),
+            OutBuf::RealF32(s) => s.len(),
+            OutBuf::RealI16(s) => s.len(),
+            OutBuf::FftF32(s) => s.len(),
+            OutBuf::FftU8(s) => s.len(),
+            OutBuf::Bits(s) => s.len(),
+            OutBuf::Frames(s) => s.len(),
+            OutBuf::Events(s) => s.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn as_iq_f32_mut(&mut self) -> Option<&mut [Complex<f32>]> {
         if let OutBuf::IqF32(s) = &mut self.buf {
             Some(&mut **s)

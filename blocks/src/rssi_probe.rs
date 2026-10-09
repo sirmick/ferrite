@@ -194,9 +194,18 @@ impl Block for RssiProbe {
             return Ok(Work::new());
         };
 
+        // Consume only what the pass-through can emit this tick (short
+        // `out` ring → tail stays queued upstream, nothing dropped).
+        let cap = io
+            .outputs
+            .iter()
+            .find(|p| p.name == "out")
+            .map_or(src.len(), OutputPort::len);
+        let n = src.len().min(cap);
+        let src = &src[..n];
+
         // Smooth power + schedule emissions in a single pass so the
         // emitted RSSI lines up with the samples they summarise.
-        let n = src.len();
         for &z in src {
             let inst = z.re * z.re + z.im * z.im;
             self.power += self.alpha * (inst - self.power);
@@ -217,9 +226,8 @@ impl Block for RssiProbe {
             match port.name {
                 "out" => {
                     if let Some(dst) = OutputPort::as_iq_f32_mut(port) {
-                        let k = dst.len().min(src.len());
-                        dst[..k].copy_from_slice(&src[..k]);
-                        produced_iq = k;
+                        dst[..n].copy_from_slice(src);
+                        produced_iq = n;
                     }
                 }
                 "events" => {
@@ -291,6 +299,47 @@ mod tests {
         let ev_len = w.produced[1];
         let events = out_events[..ev_len].to_vec();
         (out_iq, events)
+    }
+
+    /// Backpressure: a short `out` ring clamps consumption so no IQ is
+    /// dropped — the un-emitted tail stays queued upstream. Pre-fix the
+    /// probe consumed all 1000 but passed through only 100.
+    #[test]
+    fn short_out_ring_consumes_only_what_it_emits() {
+        let mut probe = RssiProbe::new(RssiProbeParams {
+            sample_rate_hz: 48_000.0,
+            ..Default::default()
+        })
+        .unwrap();
+        let input: Vec<Complex<f32>> = (0..1000).map(|i| Complex::new(i as f32, 0.0)).collect();
+        let mut out_iq = vec![Complex::new(0.0, 0.0); 100];
+        let mut out_events = vec![0u8; 256];
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::IqF32(&input),
+        }];
+        let mut outputs = [
+            OutputPort {
+                name: "out",
+                meta: PortMeta::default(),
+                buf: OutBuf::IqF32(&mut out_iq),
+            },
+            OutputPort {
+                name: "events",
+                meta: PortMeta::default(),
+                buf: OutBuf::Events(&mut out_events),
+            },
+        ];
+        let w = probe
+            .process(&mut BlockIo {
+                inputs: &mut inputs,
+                outputs: &mut outputs,
+            })
+            .unwrap();
+        assert_eq!(w.consumed[0], 100);
+        assert_eq!(w.produced[0], 100);
+        assert_eq!(out_iq[99].re, 99.0, "pass-through is the consumed prefix");
     }
 
     #[test]
