@@ -164,6 +164,25 @@ impl CaptureRegistry {
         }
     }
 
+    /// After a store restore, continue job ids past the highest restored
+    /// `cap-N` so a new job never overwrites a persisted one's record.
+    pub fn reseed_from_store(&self) {
+        let Some(store) = &self.store else { return };
+        let max = store
+            .snapshot()
+            .kinds
+            .get("jobs")
+            .map(|k| {
+                k.current
+                    .keys()
+                    .filter_map(|id| id.strip_prefix("cap-")?.parse::<u64>().ok())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        self.next_job.fetch_max(max + 1, Ordering::SeqCst);
+    }
+
     async fn upsert(&self, job: CaptureJob) {
         let record = serde_json::to_value(&job).unwrap_or(Value::Null);
         {

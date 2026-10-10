@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ferrite_blocks::DecoderSink;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -74,7 +74,9 @@ fn policy_for(kind: &str) -> Policy {
         // half + source at the current epoch), `status` (pipeline run
         // state) and `params/<block>` (last live param set per block) are
         // the coherence kinds: whole-document, retained, no reducer.
-        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" => Policy::Replace,
+        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" | "health" => {
+            Policy::Replace
+        }
         k if k.starts_with("params/") => Policy::Replace,
         // Capture / survey / scan jobs — keyed by id, never expire (the
         // registry caps its own list), no track.
@@ -97,8 +99,21 @@ fn policy_for(kind: &str) -> Policy {
     }
 }
 
+/// Kinds that describe the running process — the composed graph, run
+/// state, driver readback, live meters, per-block params, health. A new
+/// process rebuilds them, so they are never persisted or restored (a
+/// restored `graph` would point the browser at a topology that no
+/// longer exists).
+#[must_use]
+pub fn is_live_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" | "health"
+    ) || kind.starts_with("params/")
+}
+
 /// One decoder record. `data` is the emitting block's JSON verbatim.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub seq: u64,
     /// Graph epoch current when this record was folded. A consumer that
@@ -112,14 +127,14 @@ pub struct Record {
 
 /// Per-kind state. `recent` for append logs; `current` for keyed tables /
 /// replace. Both serialize so the browser mirror is a 1:1 copy.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KindState {
     pub recent: VecDeque<Record>,
     pub current: BTreeMap<String, Record>,
 }
 
 /// Whole-store snapshot for the REST/MCP read path.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreSnapshot {
     pub seq: u64,
     pub epoch: u64,
@@ -242,6 +257,61 @@ impl DecoderStore {
             epoch: self.epoch(),
             kinds: g.kinds.clone(),
         }
+    }
+
+    /// Snapshot of only the kinds that outlive the process — what the
+    /// persister writes to disk. Live kinds ([`is_live_kind`]) describe
+    /// *this* process's graph and radio and are rebuilt on boot.
+    #[must_use]
+    pub fn persistable_snapshot(&self) -> StoreSnapshot {
+        let g = self.guard();
+        StoreSnapshot {
+            seq: g.seq,
+            epoch: self.epoch(),
+            kinds: g
+                .kinds
+                .iter()
+                .filter(|(k, _)| !is_live_kind(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        }
+    }
+
+    /// Seed the store from a snapshot a previous process persisted. Call
+    /// once at boot, before anything publishes: no deltas are broadcast
+    /// (the event plane republishes retained state from the store when
+    /// it starts). Live kinds in `snap` are ignored. `seq` and `epoch`
+    /// continue from the saved values so a mirror's seq watermark and the
+    /// ingest epoch check stay monotonic across the restart. Jobs that
+    /// were still `running` when the old process died are marked
+    /// `interrupted` — nothing will ever finish them. Returns the number
+    /// of kinds restored.
+    pub fn restore(&self, snap: StoreSnapshot) -> usize {
+        let mut g = self.guard();
+        g.seq = g.seq.max(snap.seq);
+        self.epoch.fetch_max(snap.epoch, Ordering::Relaxed);
+        let mut n = 0;
+        for (kind, mut state) in snap.kinds {
+            if is_live_kind(&kind) {
+                continue;
+            }
+            if kind == "jobs" {
+                for rec in state.current.values_mut().chain(state.recent.iter_mut()) {
+                    if rec.data.get("status").and_then(Value::as_str) == Some("running") {
+                        if let Some(obj) = rec.data.as_object_mut() {
+                            obj.insert("status".into(), Value::from("interrupted"));
+                            obj.insert(
+                                "error".into(),
+                                Value::from("daemon restarted before the job finished"),
+                            );
+                        }
+                    }
+                }
+            }
+            g.kinds.insert(kind, state);
+            n += 1;
+        }
+        n
     }
 
     /// One kind's state. The HTTP read path is the whole-store

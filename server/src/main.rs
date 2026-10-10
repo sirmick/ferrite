@@ -48,6 +48,7 @@ mod preset_pipeline;
 mod routes;
 mod soapy_log;
 mod source_policy;
+mod store_persist;
 mod view_bridge;
 
 /// Ferrite SDR daemon.
@@ -72,6 +73,13 @@ struct Args {
     /// Run without the embedded MQTT broker (no `/mqtt`, no topics).
     #[arg(long, env = "FERRITE_NO_MQTT")]
     no_mqtt: bool,
+
+    /// Directory the state store (decodes, transcripts, AI transcript,
+    /// activity, jobs) is persisted to and restored from, so a daemon
+    /// restart doesn't wipe history. Unset = in-memory only (the default,
+    /// so test harnesses never inherit records).
+    #[arg(long, env = "FERRITE_STATE_DIR", value_name = "PATH")]
+    state_dir: Option<PathBuf>,
 
     /// Flowgraph preset JSON. Required for the server/headless modes;
     /// not used by `--list-devices` or `--probe-device`. The `src` block
@@ -388,6 +396,16 @@ async fn main() -> Result<()> {
         "device cache warm-up complete"
     );
 
+    // Restore persisted history before anything publishes, so the event
+    // plane's boot-time retained republish and the first `/api/state`
+    // snapshot both include it. Live kinds (graph/status/…) are rebuilt
+    // just below, never restored.
+    if let Some(dir) = &args.state_dir {
+        store_persist::restore_from(&state.decoder_store(), dir);
+        state.captures().reseed_from_store();
+        store_persist::spawn_saver(state.decoder_store(), store_persist::store_path(dir));
+    }
+
     // Seed the coherence records before the first client connects: a
     // browser that subscribes must find a retained `graph` record even
     // when nothing has mutated yet (`start()` re-publishes anyway).
@@ -495,6 +513,7 @@ async fn main() -> Result<()> {
         .route("/api/ui-view/set", post(routes::set_view_state))
         .route("/ws/ui-views", get(routes::ws_ui_views))
         .with_state(state.clone());
+    let state_for_save = state.clone();
 
     if static_root.is_dir() {
         let index = static_root.join("index.html");
@@ -525,8 +544,54 @@ async fn main() -> Result<()> {
     // ferrited with `--bind 127.0.0.1:0` and need to discover the
     // ephemeral port without parsing tracing output.
     println!("ferrited listening addr={local}");
+    // On SIGINT/SIGTERM: flush the store, stop the pipeline (bounded —
+    // a dead remote radio must not hang the exit), then leave. Axum's
+    // graceful drain would wait forever on long-lived WebSockets.
+    let state_dir = args.state_dir.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        if let Some(dir) = &state_dir {
+            match store_persist::save(
+                &state_for_save.decoder_store(),
+                &store_persist::store_path(dir),
+            ) {
+                Ok(()) => tracing::info!(path = %dir.display(), "state store saved on shutdown"),
+                Err(e) => tracing::warn!(error = %e, "state store save on shutdown failed"),
+            }
+        }
+        if tokio::time::timeout(Duration::from_secs(2), state_for_save.stop())
+            .await
+            .is_err()
+        {
+            tracing::warn!("pipeline stop timed out during shutdown");
+        }
+        std::process::exit(0);
+    });
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Resolves on SIGINT or SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {}
+        () = term => {}
+    }
+    tracing::info!("shutdown signal received");
 }
 
 /// Surface CLI / AI activity as `activity` records. ferrite-ctl (and an
