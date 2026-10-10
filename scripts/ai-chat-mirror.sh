@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Mirror this Claude Code session's conversation into Ferrite's browser
-# AI panel, via `ferrite-ctl chat-post` -> POST /api/ai/chat-inject ->
-# the /ws/chat fan-out. Invoked by the hooks wired up in
+# Mirror this Claude Code session's conversation into Ferrite's AI panel:
+# `ferrite-ctl chat-post` publishes onto the AI session bus
+# (ferrite/ingest/ai -> the `ai` store kind), which every panel renders,
+# grouped by this session's id. Invoked by the hooks wired up in
 # .claude/settings.json; reads the hook event JSON on stdin.
 #
 #   ai-chat-mirror.sh user    # UserPromptSubmit: {prompt}
@@ -24,9 +25,11 @@ EVENT="${1:-}"
 command -v jq >/dev/null 2>&1 || exit 0
 [ -x "$CTL" ] || exit 0
 
-post() { "$CTL" --connect "$CONNECT" chat-post "$@" >/dev/null 2>&1 || true; }
-
 payload="$(cat)"
+
+# Group this Claude Code session's turns on the panel by its session id.
+session="$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)"
+post() { "$CTL" --connect "$CONNECT" chat-post "$@" ${session:+--session "$session"} >/dev/null 2>&1 || true; }
 
 case "$EVENT" in
   user)

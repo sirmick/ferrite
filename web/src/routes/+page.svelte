@@ -10,7 +10,7 @@
   import { pipeline } from '$lib/pipeline.svelte';
   import { logs, patchConsole } from '$lib/logs/store.svelte';
   import { connectServerLogs } from '$lib/logs/client';
-  import { connectDecoders, decoders } from '$lib/decoders/store.svelte';
+  import { connectDecoders } from '$lib/decoders/store.svelte';
   import { connectEventBus } from '$lib/events/connect';
   import { connectAi } from '$lib/ai/client';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
@@ -101,7 +101,7 @@
 
   // Transcribe ⇒ voice-NR, in one place. Engaging transcription (UI
   // tri-state Off|On|Transcribe, or `ferrite-ctl transcribe on` —
-  // surfaced here once refreshFromServer pulls the profile) should
+  // surfaced here once the `graph` record carries the profile) should
   // default the noise-reduction chain to the `voice` preset, exactly
   // as clicking the Transcribe chip used to do inline. Edge-triggered
   // on the off→true transition only, so the operator can still pick a
@@ -111,21 +111,6 @@
     const on = pipeline.profile.transcribe;
     if (on && !prevTranscribe) void applyControl('client.audio.nrPreset', 'voice');
     prevTranscribe = on;
-  });
-
-  // Out-of-band state sync. `ferrite-ctl` (and the AI sidecar driving
-  // it) mutates ferrited via REST without going through `pipeline`'s
-  // setters, so the source/status/blocks mirror would otherwise stay
-  // stale until the user clicked something. The activity middleware
-  // folds one `activity` record per CLI-driven mutation; tail that kind
-  // and refresh the mirror — single trigger. (The browser half itself
-  // already follows the `graph` record and needs no refresh.)
-  let lastActivitySeq = $state(0);
-  $effect(() => {
-    const latest = decoders.kind('activity').recent.at(-1);
-    if (!latest || latest.seq <= lastActivitySeq) return;
-    lastActivitySeq = latest.seq;
-    void pipeline.refreshFromServer();
   });
 </script>
 

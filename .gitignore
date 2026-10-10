@@ -94,3 +94,4 @@ blocks/native/sherpa/vendor/sherpa-onnx/build-wasm-simd-asr/
 # transcripts (<session_id>.jsonl, the conversation-state authority) +
 # the readable per-turn log. Same convention as /screenshots/.
 /.ferrite-ai-state/
+/.ferrite-state/

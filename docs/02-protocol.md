@@ -366,11 +366,13 @@ message:
 
 ```
 ferrite/state/<kind>          every delta of the kind (QoS 0).
-                              Replace kinds (graph, status, readback, rssi,
-                              signals, flowdiag, params/<block>): the latest
-                              record, retained — a new subscriber gets it at once.
-ferrite/state/<kind>/<key>    keyed kinds (adsb, aprs, jobs): the entity,
-                              retained; an empty retained payload = expired.
+                              Replace kinds (graph, blocks, status, health,
+                              readback, rssi, signals, flowdiag,
+                              params/<block>): the latest record, retained —
+                              a new subscriber gets it at once.
+ferrite/state/<kind>/<key>    keyed kinds (adsb, aprs, ais, jobs, ai_live):
+                              the entity, retained; an empty retained
+                              payload = expired.
 ferrite/state/log/<target>    tracing lines, `::` → `/` (decoder::pocsag is
                               ferrite/state/log/decoder/pocsag) as
                               {target, level, message, at_ms}.
@@ -389,6 +391,13 @@ is built from:
  "record":{"seq":4821,"epoch":7,"at_ms":1791650000000,"key":"a1b2c3","data":{…}}}
 ```
 
+Decoder records also carry `ctx: {listen_hz, lo_hz, chan_shift_hz,
+preset}` — where the radio was listening when the decode was folded —
+so an RF frequency needs no join on `graph`. Pager, EAS and AIS records
+carry parsed fields next to the raw `text` (address/capcode + message;
+SAME originator/event/locations; MMSI, position, name, callsign — `ais`
+is keyed by `mmsi` and position + static reports merge).
+
 `op` is `add` (append kinds), `upsert`, `expire` (`key` instead of
 `record`) or `reset`. `seq` is the store-wide cursor; dedup **per kind**
 (the server coalesces replace-kind bursts to ≤10 Hz, so a coalesced
@@ -399,6 +408,58 @@ a sample) belongs to. The `graph` record carries the composed doc, the
 browser half and its hash: a browser reloads its half when the hash
 changes and moves its frame gate when the epoch changes, with no REST
 round trip.
+
+The `graph` record also carries the UI's view — `flowgraph` (the preset
+with live params), `profile`, `ui_sinks`, `source_caps` — and `blocks`
+carries the composed block list; with `status` and `params/<block>`
+that is everything a tab needs to follow a mutation made anywhere (CLI,
+MCP, another tab) without a REST round trip.
+
+**`health`** (Replace, ~1 Hz and right after every tune / source patch /
+start) answers "am I getting what I asked for?": `ok` + `issues` (plain
+words), `radio` (`state` idle/ok/lost/recovering, `attempts`,
+`last_error`, `recoveries`, `remote`, reader `stream` counters),
+`tuning` (`lo_requested_hz`, `lo_actual_hz`, `chan_shift_hz`,
+`listen_hz`), `rate` (`declared_hz` by the preset, `configured_hz`,
+`actual_hz`), and `warnings` — WARN/ERROR lines from decoders, the flow
+diagnostics and the driver since the current graph loaded (rate
+mismatches, snapped rates, stalls).
+
+**Radio supervisor.** A `SoapySource` whose reader died, or that hasn't
+delivered for 5 s, is a lost radio; while the operator still wants the
+pipeline running, ferrited cycles it (stop — which releases a SoapyRemote
+handle — back off 1/2/4/8/10 s, start) until samples flow, with each step
+on `activity`. A start/tune/source/preset request that fails because a
+remote radio host isn't answering returns `503 RADIO_UNREACHABLE` (and a
+failed start keeps the run intent, so the pipeline comes up when the host
+does). `POST /api/devices/reload` refuses (`409 RELOAD_UNSAFE`) while a
+leaked hung handle or an abandoned probe thread could be left pointing at
+unloaded driver code.
+
+**AI session bus.** Every AI conversation — the ferrite-ai sidecar's,
+and a Claude Code session mirrored by its hooks (`ferrite-ctl
+chat-post`) — is the `ai` append kind, published through
+`ferrite/ingest/ai`:
+
+```
+{type:"user"|"text"|"tool_use"|"tool_result"|"turn_end"|"reset",
+ session, source, mode?, model?, t, text?, tool_id?, name?, input?,
+ is_error?, images?, status?, error?, reason?}
+```
+
+`ai_live` (keyed by `session`) carries the reply forming in real time.
+The browser's AI panel renders all sessions from these records; `/ws/chat`
+is only the control channel (prompt, stop, reset). Only the newest few
+`ai` records keep inline tool-result images.
+
+**Persistence.** With `--state-dir` / `FERRITE_STATE_DIR` (run.sh:
+`.ferrite-state/`), every non-live kind — decodes, `ai`, `activity`,
+`jobs`, keyed tables — is saved (`store.json`, atomically, ≤5 s after a
+change and on SIGINT/SIGTERM) and restored at boot with `seq` and `epoch`
+continuing. Live kinds (graph, blocks, status, health, readback,
+flowdiag, signals, rssi, params/*, ai_live) are rebuilt, never restored.
+Decoder history is no longer wiped when a preset starts; clear a kind
+with `POST /api/state/:kind/reset`.
 
 Append kinds are stream-only; history is the snapshot: subscribe first,
 `GET /api/state`, then apply anything with a higher seq. The browser
@@ -483,13 +544,12 @@ request structs; the descriptions below are what `tools/list` returns.
 | `start` | `POST /api/pipeline/start` | Start the pipeline. |
 | `stop` | `POST /api/pipeline/stop` | Stop the pipeline. |
 | `transcribe` | `PATCH /api/profile` | Toggle the speech-to-text tap (sherpa-onnx: in-browser WASM under `balanced`, the node sidecar under `server`). |
-| `recent_decodes` | `GET /api/decoder/recent` | Recent decoder-log entries; filterable by category. |
-| `decodes` | `GET /api/state` | Structured decoder state: one kind (`{recent, current}`) or the whole store. |
-| `await_events` | MQTT `ferrite/state/<kind>/#` | Block until the next `max` records of a kind arrive (or `timeout_s`); `since_seq` skips known records, `include_retained` returns the current value first. The subscription form of `decodes` — no polling. CLI: `ferrite-ctl await <kind> [--follow]`. |
+| `decodes` | `GET /api/state` | Structured store state: one kind (`{recent, current}`) or the whole store — decodes, `jobs`, `activity`, `ai`, `health`. |
+| `await_events` | MQTT `ferrite/state/<kind>/#` | Block until the next `max` records of a kind arrive (or `timeout_s`); `since_seq` skips known records, `include_retained` returns the current value first, `filter` keeps only records whose data matches (scalar = equal, array = any-of). The subscription form of `decodes` — no polling. CLI: `ferrite-ctl await <kind> [--follow] [--where field=v1,v2]`. |
 | `start_capture_iq` | `chan` tee / `src` tee | Async IQ capture — live tee of the channelized slice (default) or, with `wideband`, of the raw full-span stream off the SDR. Neither swaps presets. Returns a `job_id`. |
 | `start_capture_fft` | `logmag` tee | Async FFT-byte-stream capture (live tee). Returns a `job_id`. |
 | `start_capture_audio` | `WsBridgeTxF32` tee | Async 48 kHz WAV of what the operator hears (live tee of the node→browser audio bridge; `freq_hz` optional). Returns a `job_id`. |
-| `capture_status` | (in-memory job registry) | Poll one capture job by id, or list all. `running` / `done` (+ sidecar) / `failed`. |
+| `chat_post` | MQTT `ferrite/ingest/ai` | Publish a headless driver's turn (user / assistant / tool) onto the AI session bus, grouped by `session`. |
 | `view_snapshot` | `GET /api/ui-views/{pane}` | PNG of a live FFT/waterfall canvas. |
 | `view_state` | `GET /api/view` | Browser-authored UI chrome state. |
 | `set_view_state` | `POST /api/ui-view/set` | Push a chrome-state patch (Main pane, channel-detail visibility) to the browser. |
@@ -497,9 +557,12 @@ request structs; the descriptions below are what `tools/list` returns.
 Mutating tools accept an optional `note` (the "why") that the daemon
 surfaces under `ai::activity` for the UI's transcript panel.
 
-The streaming `tail` verb from the CLI is *not* an MCP tool — captures
-are async (`start_capture_*` + poll `capture_status`); for a live decoder
-follow, poll `recent_decodes`.
+Captures are async: `start_capture_*` returns a `job_id`; wait with
+`await_events(kind="jobs/<job_id>", include_retained=true,
+filter={"status":["done","failed","interrupted"]})` — the job record
+carries `output_path` and the sidecar. `status` includes `health`. The
+CLI's `tail <target>` follows `ferrite/state/log/<target>` live
+(`decoder recent` is the one-shot log recall for humans).
 
 ### Claude Desktop / Claude Code config
 

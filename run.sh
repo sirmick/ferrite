@@ -100,9 +100,17 @@ FERRITE_AI_STATE_DIR="${FERRITE_AI_STATE_DIR:-$(pwd)/.ferrite-ai-state}"
 mkdir -p "$FERRITE_AI_STATE_DIR"
 echo "[run] ai state → $FERRITE_AI_STATE_DIR  (conversation transcripts)"
 
-# ferrited on 0.0.0.0:10001, logs prefixed via process substitution
+# Persist ferrited's state store (decodes, transcripts, AI transcript,
+# activity, capture jobs) so a daemon restart keeps the history. Live
+# kinds (graph/status/readback/…) are always rebuilt, never restored.
+FERRITE_STATE_DIR="${FERRITE_STATE_DIR:-$(pwd)/.ferrite-state}"
+mkdir -p "$FERRITE_STATE_DIR"
+echo "[run] store    → $FERRITE_STATE_DIR  (persisted state store)"
+
+# ferrited, logs prefixed via process substitution
 RUST_LOG="${RUST_LOG:-info}" \
   FERRITE_SCREENSHOTS_DIR="$FERRITE_SCREENSHOTS_DIR" \
+  FERRITE_STATE_DIR="$FERRITE_STATE_DIR" \
   FERRITE_SHERPA_ASR_URL="ws://127.0.0.1:${FERRITE_SHERPA_PORT}" \
   ./target/release/ferrited \
     --bind 0.0.0.0:${FERRITED_PORT} \

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ferrite_blocks::DecoderSink;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -37,6 +37,11 @@ pub enum Policy {
         /// frames. Powers the ADS-B/APRS map trails without the frontend
         /// re-deriving them from the shared `recent` log. Reads `lat`/`lon`.
         track: bool,
+        /// Shallow-merge each record into the entity's previous data
+        /// instead of replacing it — for decoders whose message types
+        /// carry different halves of an entity (AIS: position reports vs
+        /// static name/callsign).
+        merge: bool,
     },
     /// Single current record holding the whole payload (RSSI/signals).
     Replace,
@@ -49,6 +54,14 @@ pub enum Policy {
 /// Default cap for append logs.
 const LOG_CAP: usize = 512;
 
+/// Cap for the `ai` session log (one agent turn is several records).
+const AI_LOG_CAP: usize = 1500;
+
+/// Only this many of the newest `ai` records keep inline tool-result
+/// images (base64 data URLs); older ones are stripped to an `images`
+/// count so the log, the snapshot and the persisted store stay small.
+const AI_IMAGE_KEEP: usize = 6;
+
 /// Per-kind fold policy. Block owns the schema; this owns the folding.
 fn policy_for(kind: &str) -> Policy {
     match kind {
@@ -57,12 +70,23 @@ fn policy_for(kind: &str) -> Policy {
             key_field: "icao",
             ttl_ms: 60_000,
             track: true,
+            merge: false,
+        },
+        // AIS vessels keyed by MMSI; position (types 1-3/18) and static
+        // (5/24) reports merge into one vessel record. 10 min TTL —
+        // class B ships report every few minutes.
+        "ais" => Policy::Upsert {
+            key_field: "mmsi",
+            ttl_ms: 600_000,
+            track: true,
+            merge: true,
         },
         // APRS stations persist for the session (no TTL expiry).
         "aprs" => Policy::Upsert {
             key_field: "call",
             ttl_ms: 0,
             track: true,
+            merge: false,
         },
         // RDS emits partial groups → accumulate into one record.
         "rds" => Policy::Merge,
@@ -74,7 +98,9 @@ fn policy_for(kind: &str) -> Policy {
         // half + source at the current epoch), `status` (pipeline run
         // state) and `params/<block>` (last live param set per block) are
         // the coherence kinds: whole-document, retained, no reducer.
-        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" => Policy::Replace,
+        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" | "health" | "blocks" => {
+            Policy::Replace
+        }
         k if k.starts_with("params/") => Policy::Replace,
         // Capture / survey / scan jobs — keyed by id, never expire (the
         // registry caps its own list), no track.
@@ -82,23 +108,66 @@ fn policy_for(kind: &str) -> Policy {
             key_field: "job_id",
             ttl_ms: 0,
             track: false,
+            merge: false,
         },
-        // AI transcript — append log of conversation turns (one record per
-        // user/assistant turn), folded by ferrited's `/ws/chat` proxy +
-        // `chat-inject` path. Read by MCP via `decodes ai`.
-        "ai" => Policy::Append { cap: LOG_CAP },
+        // AI session bus — every conversation, whichever client drives
+        // it (the ferrite-ai sidecar, a Claude Code session's hooks):
+        // one record per user prompt / finished text block / tool use /
+        // tool result / turn end / reset, tagged with `session` and
+        // `source`, published through `ferrite/ingest/ai`. Every AI
+        // panel renders from it; MCP reads it via `decodes ai`. Larger
+        // cap than a decode log: one agent turn is several records.
+        "ai" => Policy::Append { cap: AI_LOG_CAP },
+        // In-flight assistant text per session (partial block, ≤4 Hz) so
+        // a panel can show the reply forming. Keyed by session; the
+        // finished block lands in `ai`.
+        "ai_live" => Policy::Upsert {
+            key_field: "session",
+            ttl_ms: 600_000,
+            track: false,
+            merge: false,
+        },
         // One record per mutating CLI / agent request (the activity
         // middleware) — the AI panel's transcript and `ferrite/state/activity`.
         "activity" => Policy::Append { cap: LOG_CAP },
         // Everything else is an append log — ft8, wspr, pager, eas, dtmf,
-        // cw, ais, rtl_433, transcribe, fldigi, …. (ais/rtl_433 can become
-        // keyed tables once they emit a parsed mmsi / device id.)
+        // cw, rtl_433, transcribe, fldigi, …. (rtl_433 can become a keyed
+        // table once it emits a stable device id.)
         _ => Policy::Append { cap: LOG_CAP },
     }
 }
 
+/// Kinds that describe the running process — the composed graph, run
+/// state, driver readback, live meters, per-block params, health. A new
+/// process rebuilds them, so they are never persisted or restored (a
+/// restored `graph` would point the browser at a topology that no
+/// longer exists).
+#[must_use]
+pub fn is_live_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "rssi"
+            | "signals"
+            | "readback"
+            | "flowdiag"
+            | "graph"
+            | "status"
+            | "health"
+            | "blocks"
+            | "ai_live"
+    ) || kind.starts_with("params/")
+}
+
+/// Kinds that carry decodes heard off the air (and so get an RF
+/// [`Record::ctx`]): everything except the live kinds and the
+/// bookkeeping logs (activity, AI transcript, jobs).
+#[must_use]
+pub fn is_decode_kind(kind: &str) -> bool {
+    !is_live_kind(kind) && !matches!(kind, "activity" | "ai" | "jobs") && !kind.starts_with("ai/")
+}
+
 /// One decoder record. `data` is the emitting block's JSON verbatim.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub seq: u64,
     /// Graph epoch current when this record was folded. A consumer that
@@ -108,18 +177,23 @@ pub struct Record {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     pub data: Value,
+    /// Where the radio was listening when this decode was folded
+    /// (`{listen_hz, lo_hz, preset}`), stamped on decoder kinds only — so
+    /// a decode carries its RF frequency without a join on `graph`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<Value>,
 }
 
 /// Per-kind state. `recent` for append logs; `current` for keyed tables /
 /// replace. Both serialize so the browser mirror is a 1:1 copy.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KindState {
     pub recent: VecDeque<Record>,
     pub current: BTreeMap<String, Record>,
 }
 
 /// Whole-store snapshot for the REST/MCP read path.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreSnapshot {
     pub seq: u64,
     pub epoch: u64,
@@ -166,6 +240,9 @@ pub struct DecoderStore {
     /// and bumped by `AppState` once per topology rebuild. Every record
     /// and every frame carries the value current at fold/emit time.
     epoch: Arc<AtomicU64>,
+    /// RF context stamped onto decoder records ([`Record::ctx`]); kept
+    /// current by the daemon (supervisor tick + every tune).
+    ctx: Mutex<Option<Value>>,
 }
 
 impl Default for DecoderStore {
@@ -196,7 +273,13 @@ impl DecoderStore {
             }),
             tx,
             epoch: Arc::new(AtomicU64::new(0)),
+            ctx: Mutex::new(None),
         }
+    }
+
+    /// Set the RF context stamped onto subsequent decoder records.
+    pub fn set_ctx(&self, ctx: Option<Value>) {
+        *self.ctx.lock().unwrap_or_else(|e| e.into_inner()) = ctx;
     }
 
     /// Subscribe to the live delta stream (the WS mirror feed).
@@ -244,6 +327,61 @@ impl DecoderStore {
         }
     }
 
+    /// Snapshot of only the kinds that outlive the process — what the
+    /// persister writes to disk. Live kinds ([`is_live_kind`]) describe
+    /// *this* process's graph and radio and are rebuilt on boot.
+    #[must_use]
+    pub fn persistable_snapshot(&self) -> StoreSnapshot {
+        let g = self.guard();
+        StoreSnapshot {
+            seq: g.seq,
+            epoch: self.epoch(),
+            kinds: g
+                .kinds
+                .iter()
+                .filter(|(k, _)| !is_live_kind(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        }
+    }
+
+    /// Seed the store from a snapshot a previous process persisted. Call
+    /// once at boot, before anything publishes: no deltas are broadcast
+    /// (the event plane republishes retained state from the store when
+    /// it starts). Live kinds in `snap` are ignored. `seq` and `epoch`
+    /// continue from the saved values so a mirror's seq watermark and the
+    /// ingest epoch check stay monotonic across the restart. Jobs that
+    /// were still `running` when the old process died are marked
+    /// `interrupted` — nothing will ever finish them. Returns the number
+    /// of kinds restored.
+    pub fn restore(&self, snap: StoreSnapshot) -> usize {
+        let mut g = self.guard();
+        g.seq = g.seq.max(snap.seq);
+        self.epoch.fetch_max(snap.epoch, Ordering::Relaxed);
+        let mut n = 0;
+        for (kind, mut state) in snap.kinds {
+            if is_live_kind(&kind) {
+                continue;
+            }
+            if kind == "jobs" {
+                for rec in state.current.values_mut().chain(state.recent.iter_mut()) {
+                    if rec.data.get("status").and_then(Value::as_str) == Some("running") {
+                        if let Some(obj) = rec.data.as_object_mut() {
+                            obj.insert("status".into(), Value::from("interrupted"));
+                            obj.insert(
+                                "error".into(),
+                                Value::from("daemon restarted before the job finished"),
+                            );
+                        }
+                    }
+                }
+            }
+            g.kinds.insert(kind, state);
+            n += 1;
+        }
+        n
+    }
+
     /// One kind's state. The HTTP read path is the whole-store
     /// `GET /api/state` (MCP slices the kind it wants), so this has no
     /// in-crate caller outside tests — kept as a public accessor.
@@ -257,6 +395,11 @@ impl DecoderStore {
     pub fn apply(&self, kind: &str, data: Value) {
         let policy = policy_for(kind);
         let epoch = self.epoch();
+        let ctx = if is_decode_kind(kind) {
+            self.ctx.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        } else {
+            None
+        };
         let mut g = self.guard();
         g.seq += 1;
         let seq = g.seq;
@@ -270,18 +413,36 @@ impl DecoderStore {
                     at_ms: now_ms(),
                     key: None,
                     data,
+                    ctx: ctx.clone(),
                 };
                 entry.recent.push_back(record.clone());
                 while entry.recent.len() > cap {
                     entry.recent.pop_front();
                 }
+                if kind == "ai" {
+                    strip_old_images(&mut entry.recent);
+                }
                 DeltaOp::Add { record }
             }
             Policy::Upsert {
-                key_field, track, ..
+                key_field,
+                track,
+                merge,
+                ..
             } => {
                 let key = extract_key(&data, key_field);
                 let mut data = data;
+                if merge {
+                    if let Some(Value::Object(prev)) = entry.current.get(&key).map(|r| &r.data) {
+                        let mut merged = prev.clone();
+                        if let Some(new) = data.as_object() {
+                            for (k, v) in new {
+                                merged.insert(k.clone(), v.clone());
+                            }
+                        }
+                        data = Value::Object(merged);
+                    }
+                }
                 if track {
                     // Carry the prior track forward and append this fix.
                     let prev = entry
@@ -301,6 +462,7 @@ impl DecoderStore {
                     at_ms: now_ms(),
                     key: Some(key.clone()),
                     data,
+                    ctx: ctx.clone(),
                 };
                 entry.current.insert(key, record.clone());
                 // Tables also keep a capped frame log in `recent`, so
@@ -319,6 +481,7 @@ impl DecoderStore {
                     at_ms: now_ms(),
                     key: None,
                     data,
+                    ctx: ctx.clone(),
                 };
                 entry.current.clear();
                 entry
@@ -345,6 +508,7 @@ impl DecoderStore {
                     at_ms: now_ms(),
                     key: None,
                     data: merged,
+                    ctx: ctx.clone(),
                 };
                 entry
                     .current
@@ -431,6 +595,26 @@ impl DecoderSink for DecoderStore {
     }
 }
 
+/// Keep inline `images` only on the newest [`AI_IMAGE_KEEP`] records
+/// that have them; replace older ones with their count.
+fn strip_old_images(log: &mut VecDeque<Record>) {
+    let mut seen = 0usize;
+    for rec in log.iter_mut().rev() {
+        let Some(obj) = rec.data.as_object_mut() else {
+            continue;
+        };
+        let Some(Value::Array(imgs)) = obj.get("images") else {
+            continue;
+        };
+        seen += 1;
+        if seen > AI_IMAGE_KEEP {
+            let n = imgs.len();
+            obj.remove("images");
+            obj.insert("images_stripped".into(), Value::from(n));
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -506,6 +690,62 @@ mod tests {
             .expect("kind present after poison recovery");
         assert_eq!(k.recent.len(), 1);
         assert_eq!(store.snapshot().seq, 1);
+    }
+
+    #[test]
+    fn ais_vessels_merge_position_and_static_reports() {
+        let s = DecoderStore::new();
+        s.apply(
+            "ais",
+            serde_json::json!({"mmsi": 366053209, "lat": 37.8, "lon": -122.3}),
+        );
+        s.apply(
+            "ais",
+            serde_json::json!({"mmsi": 366053209, "name": "MT.MITCHELL"}),
+        );
+        let k = s.snapshot_kind("ais").unwrap();
+        let v = &k.current["366053209"].data;
+        assert_eq!(v["name"], "MT.MITCHELL");
+        assert_eq!(v["lat"], 37.8, "a static report keeps the last position");
+        assert!(v["track"].is_array());
+    }
+
+    #[test]
+    fn decode_records_carry_the_rf_context_bookkeeping_does_not() {
+        let s = DecoderStore::new();
+        s.set_ctx(Some(
+            serde_json::json!({"listen_hz": 14_074_000.0, "preset": "ft8"}),
+        ));
+        s.apply("ft8", serde_json::json!({"de": "K6ABC"}));
+        s.apply("activity", serde_json::json!({"summary": "tune"}));
+        s.apply("graph", serde_json::json!({}));
+        let snap = s.snapshot();
+        assert_eq!(
+            snap.kinds["ft8"].recent[0].ctx.as_ref().unwrap()["listen_hz"],
+            14_074_000.0
+        );
+        assert!(snap.kinds["activity"].recent[0].ctx.is_none());
+        assert!(snap.kinds["graph"].current["current"].ctx.is_none());
+    }
+
+    #[test]
+    fn ai_log_keeps_images_only_on_the_newest_records() {
+        let s = DecoderStore::new();
+        for i in 0..(AI_IMAGE_KEEP + 3) {
+            s.apply(
+                "ai",
+                serde_json::json!({"type": "tool_result", "n": i, "images": ["data:image/png;base64,AA"]}),
+            );
+        }
+        let k = s.snapshot_kind("ai").unwrap();
+        let with: Vec<_> = k
+            .recent
+            .iter()
+            .filter(|r| r.data.get("images").is_some())
+            .collect();
+        assert_eq!(with.len(), AI_IMAGE_KEEP);
+        assert_eq!(k.recent[0].data["images_stripped"], 1);
+        assert!(k.recent.back().unwrap().data.get("images").is_some());
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub mod block;
 pub mod channelizer;
 pub mod dc_block;
 pub mod decimator;
+pub mod decode_parse;
 pub mod digital_spot;
 pub mod dtmf_audio_source;
 pub mod dtmf_decoder;
@@ -152,7 +153,7 @@ pub use rtl_433::{Rtl433Demod, Rtl433DemodParams};
 pub use sherpa_transcribe::{SherpaTranscribe, SherpaTranscribeParams};
 pub use sine::{SineSource, SineSourceParams};
 #[cfg(feature = "soapysdr")]
-pub use soapy_source::{SoapyReadback, SoapySource, SoapySourceParams};
+pub use soapy_source::{SoapyReadback, SoapySource, SoapySourceParams, SourceHealth};
 pub use spsc_ring::{AudioRing, IqRing, SpscRing};
 pub use squelch::{Squelch, SquelchParams};
 pub use ssb_demod::{Sideband, SsbDemod, SsbDemodParams};

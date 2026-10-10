@@ -120,8 +120,8 @@ impl PresetMount {
     }
 
     /// Block instances were replaced: new graph epoch, then re-attach
-    /// the shared sinks (which resets decoder kinds — correct for a new
-    /// topology, and the reset records carry the new epoch).
+    /// the shared sinks to the fresh instances (decoder history is kept
+    /// unless a sink opts into `reset_on_init`).
     fn on_rebuilt(&self, rt: &mut Runtime, node_half: &FlowgraphDoc) -> Result<()> {
         self.decoder_store.bump_epoch();
         attach_bridge_sinks(rt, node_half, &self.bridge_sink, &self.decoder_store)
@@ -148,6 +148,22 @@ impl PresetMount {
         let mut rt = self.runtime.lock().await;
         rt.block_typed::<SoapySource>(SOURCE_ID)
             .map(|b| b.readback())
+    }
+
+    /// Radio liveness of the `src` block (`None` for software sources).
+    /// Lock-free reads of the reader's counters — never touches the
+    /// driver, so it is safe against a dead remote.
+    pub async fn source_health(&self) -> Option<ferrite_blocks::SourceHealth> {
+        let mut rt = self.runtime.lock().await;
+        rt.block_typed::<SoapySource>(SOURCE_ID).map(|b| b.health())
+    }
+
+    /// The first channelizer's live VFO shift (Hz), if the graph has one.
+    pub async fn chan_shift_hz(&self) -> Option<f64> {
+        let mut rt = self.runtime.lock().await;
+        let id = rt.first_id_typed::<Channelizer>()?;
+        rt.block_typed::<Channelizer>(&id)
+            .map(|c| c.freq_shift_hz())
     }
 }
 

@@ -18,8 +18,11 @@
 //!
 //! The block owns the record *schema* (it forwards each event's JSON
 //! verbatim); the store owns the *fold policy* (append / upsert / replace)
-//! keyed by `kind`. `reset_on_init` clears the kind when a fresh sink is
-//! attached (preset load / graph rebuild) so stale state never lingers.
+//! keyed by `kind`. History survives preset loads, rebuilds and (with a
+//! persisted store) daemon restarts — every record carries the graph
+//! epoch it was folded under, so a consumer can tell runs apart. Opt into
+//! a wipe-on-load with `reset_on_init`; operators clear a kind explicitly
+//! via `POST /api/state/:kind/reset` (the UI's clear buttons).
 
 use std::sync::Arc;
 
@@ -43,24 +46,16 @@ pub trait DecoderSink: Send + Sync {
 }
 
 /// Construction-time params.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct EventStoreParams {
     /// Store kind this sink feeds (e.g. `adsb`, `aprs`, `ft8`, `signals`).
     /// Normally set by env_split from the `ui:<kind>` sink name.
     pub kind: String,
     /// Clear the kind when a sink is (re)attached — i.e. on preset load /
-    /// graph rebuild — so a new decode session starts clean. Default true.
+    /// graph rebuild. Default false: decode history is the point (agents
+    /// read it, the store persists it), and records carry their epoch.
     pub reset_on_init: bool,
-}
-
-impl Default for EventStoreParams {
-    fn default() -> Self {
-        Self {
-            kind: String::new(),
-            reset_on_init: true,
-        }
-    }
 }
 
 pub struct EventStore {
@@ -84,10 +79,8 @@ impl EventStore {
         }
     }
 
-    /// Wire the server-side store sink. Resets the kind first (when
-    /// `reset_on_init`) so a freshly loaded/rebuilt graph starts clean —
-    /// this is the natural "fresh decode session" point, since the runtime
-    /// attaches sinks right after load.
+    /// Wire the server-side store sink. Resets the kind first only when
+    /// `reset_on_init` is set (off by default — history is kept).
     pub fn attach_store(&mut self, sink: Arc<dyn DecoderSink>) {
         if self.params.reset_on_init {
             sink.reset(&self.params.kind);
@@ -140,9 +133,9 @@ impl Block for EventStore {
                 ParamSpec {
                     key: "reset_on_init",
                     label: "Reset on load",
-                    kind: ParamKind::Toggle { default: true },
+                    kind: ParamKind::Toggle { default: false },
                     reconfig_scope: ReconfigureScope::SourceRestart,
-                    ai_notes: "Clear this kind in the store when the graph (re)loads, so a new decode session starts clean.",
+                    ai_notes: "Clear this kind in the store when the graph (re)loads. Off by default: decode history survives preset loads and daemon restarts (records carry their epoch); clear a kind explicitly with POST /api/state/:kind/reset.",
                 },
             ],
             ai_notes: "Terminal sink for decoder `events` ports — feeds the server-side store (WS-replicated to the browser over /ws/state, REST snapshot at /api/state for MCP). Placement::Either: node writes the store directly; browser buffers for the host to POST.",

@@ -22,10 +22,10 @@ use serde_json::{Map, Value};
 mod mcp;
 
 use mcp::{
-    AwaitArgs, BandAtArgs, BlockParamsArgs, CaptureStatusArgs, ChatPostArgs, FerriteServer, Http,
-    LoadPresetArgs, PresetDetailArgs, RecentDecodesArgs, ReplayCaptureArgs, SelectDeviceArgs,
-    SetViewStateArgs, SignalsArgs, StartCaptureArgs, StartCaptureAudioArgs, TranscribeArgs,
-    TuneArgs, ViewSnapshotArgs,
+    AwaitArgs, BandAtArgs, BlockParamsArgs, ChatPostArgs, FerriteServer, Http, LoadPresetArgs,
+    PresetDetailArgs, RecentDecodesArgs, ReplayCaptureArgs, SelectDeviceArgs, SetViewStateArgs,
+    SignalsArgs, StartCaptureArgs, StartCaptureAudioArgs, TranscribeArgs, TuneArgs,
+    ViewSnapshotArgs,
 };
 
 const DEFAULT_CONNECT: &str = "http://127.0.0.1:10001";
@@ -123,8 +123,8 @@ enum Cmd {
     Start,
     /// Stop the pipeline.
     Stop,
-    /// Toggle speech-to-text (VoiceTranscribe tap). Read results with
-    /// `decoder recent --category decoder::transcribe`.
+    /// Toggle speech-to-text (VoiceTranscribe tap). Follow the transcript
+    /// with `await transcribe -f`.
     Transcribe {
         /// `on` to enable transcription, `off` to disable.
         #[arg(value_parser = ["on", "off"])]
@@ -213,18 +213,19 @@ enum Cmd {
         /// Stream records until SIGINT (one JSON line each).
         #[arg(long, short = 'f')]
         follow: bool,
+        /// Only records whose data field matches: `--where status=done`;
+        /// a comma list is any-of (`--where status=done,failed`). Values
+        /// that parse as JSON numbers/bools compare as such. Repeatable.
+        #[arg(long = "where", value_name = "FIELD=VALUE")]
+        where_: Vec<String>,
     },
-    /// Tail the decoder log buffer until SIGINT.
+    /// Tail log lines live (event-plane subscription) until SIGINT.
     Tail {
-        /// Tracing-target prefix to filter on (e.g. `decoder::pocsag`,
-        /// `decoder` for everything decoder-side).
+        /// Tracing-target prefix to follow (e.g. `decoder::pocsag`,
+        /// `decoder` for everything decoder-side, `driver`, `radio`).
         #[arg(default_value = "decoder")]
         category: String,
-        /// Poll interval in seconds.
-        #[arg(long, default_value_t = 1.0)]
-        interval: f64,
-        /// Pull entries from this many seconds in the past on the
-        /// first poll.
+        /// First print this many seconds of history from the log ring.
         #[arg(long, default_value_t = 0.0)]
         lookback: f64,
     },
@@ -252,7 +253,8 @@ enum Cmd {
     },
     /// Mirror a conversation turn into the operator's browser AI panel
     /// (so a headless driver's prompts / replies / tool calls show in
-    /// the UI alongside the in-browser assistant). Needs a UI tab open.
+    /// every AI panel alongside the in-browser assistant, via the `ai`
+    /// session bus — no tab needed).
     ChatPost {
         /// `user` (a prompt), `assistant` (a reply, auto-closed), or
         /// `tool` (a tool-call card in the open assistant turn).
@@ -270,6 +272,12 @@ enum Cmd {
         /// `tool` role: the tool result text, if any.
         #[arg(long)]
         tool_result: Option<String>,
+        /// The driving session's id (groups its turns on the panel).
+        #[arg(long)]
+        session: Option<String>,
+        /// Who is talking (label on the panel). Default `claude-code`.
+        #[arg(long)]
+        source: Option<String>,
     },
     /// Dev codegen: regenerate the if-filter-ladders artifact from the
     /// Rust source of truth. Purely local — no running ferrited.
@@ -642,9 +650,11 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             since_seq,
             retained,
             follow,
+            where_,
         } => {
+            let filter = parse_where(&where_)?;
             if follow {
-                return follow_records(&kind, since_seq, retained, server, json).await;
+                return follow_records(&kind, since_seq, retained, &filter, server, json).await;
             }
             let v = server
                 .await_op(AwaitArgs {
@@ -653,16 +663,13 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                     timeout_s: Some(wait_s),
                     since_seq,
                     include_retained: Some(retained),
+                    filter: Some(filter),
                 })
                 .await
                 .map_err(op_err)?;
             emit(&v, json)
         }
-        Cmd::Tail {
-            category,
-            interval,
-            lookback,
-        } => tail(&category, interval, lookback, server, json).await,
+        Cmd::Tail { category, lookback } => tail(&category, lookback, server, json).await,
         Cmd::Decoder(DecoderCmd::Recent {
             category,
             lookback,
@@ -714,6 +721,8 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             tool_name,
             tool_input,
             tool_result,
+            session,
+            source,
         } => {
             let v = server
                 .chat_post_op(ChatPostArgs {
@@ -722,6 +731,8 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                     tool_name,
                     tool_input,
                     tool_result,
+                    session,
+                    source,
                 })
                 .await
                 .map_err(op_err)?;
@@ -732,8 +743,8 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
     }
 }
 
-/// Kick an async capture op, then block (polling `capture_status`)
-/// until the job leaves `running`, and print the final job record.
+/// Kick an async capture op, then wait on the job's record on the event
+/// plane until it leaves `running`, and print the final job record.
 async fn capture(cmd: CaptureCmd, server: &FerriteServer, json: bool) -> Result<()> {
     let (job, duration) = match cmd {
         CaptureCmd::Iq {
@@ -814,25 +825,66 @@ async fn capture(cmd: CaptureCmd, server: &FerriteServer, json: bool) -> Result<
     if !json {
         eprintln!("ferrite-ctl: capturing for ~{duration:.1}s (job {job_id})…");
     }
-    // Poll until done/failed, with a safety ceiling past the duration.
-    let deadline = Duration::from_secs_f64(duration + 15.0);
-    let started = std::time::Instant::now();
-    loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let st = server
-            .capture_status_op(CaptureStatusArgs {
-                job_id: Some(job_id.clone()),
-            })
-            .await
-            .map_err(op_err)?;
-        let running = st.get("status").and_then(Value::as_str) == Some("running");
-        if !running {
-            return emit(&st, json);
-        }
-        if started.elapsed() > deadline {
-            return emit(&st, json);
+    // Wait on the job's own record (`ferrite/state/jobs/<id>`) until it
+    // leaves `running` — a subscription, not a poll — with a safety
+    // ceiling past the duration. The retained record covers a job that
+    // finished before we subscribed.
+    let mut filter = serde_json::Map::new();
+    filter.insert(
+        "status".into(),
+        serde_json::json!(["done", "failed", "interrupted"]),
+    );
+    let v = server
+        .await_op(AwaitArgs {
+            kind: format!("jobs/{job_id}"),
+            max: Some(1),
+            timeout_s: Some(duration + 15.0),
+            since_seq: None,
+            include_retained: Some(true),
+            filter: Some(filter),
+        })
+        .await
+        .map_err(op_err)?;
+    match v.pointer("/records/0/record/record/data") {
+        Some(job) => emit(job, json),
+        None => {
+            // Timed out: report the job's current record from the store.
+            let snap = server
+                .decodes_op(mcp::DecodesArgs {
+                    kind: Some("jobs".into()),
+                })
+                .await
+                .map_err(op_err)?;
+            let current = snap
+                .pointer(&format!("/current/{job_id}/data"))
+                .cloned()
+                .unwrap_or(v);
+            emit(&current, json)
         }
     }
+}
+
+/// `--where field=value[,value…]` → an `await_events` filter object.
+fn parse_where(items: &[String]) -> Result<serde_json::Map<String, Value>> {
+    let mut out = serde_json::Map::new();
+    for item in items {
+        let (k, v) = item
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--where wants FIELD=VALUE, got {item:?}"))?;
+        let parse = |s: &str| serde_json::from_str::<Value>(s).unwrap_or_else(|_| Value::from(s));
+        let vals: Vec<Value> = v.split(',').map(parse).collect();
+        let val = if vals.len() == 1 {
+            vals.into_iter().next().unwrap_or(Value::Null)
+        } else {
+            Value::Array(vals)
+        };
+        out.insert(k.trim().to_string(), val);
+    }
+    Ok(out)
+}
+
+fn ferrite_ctl_record_matches(value: &Value, filter: &serde_json::Map<String, Value>) -> bool {
+    mcp::record_matches(value, filter)
 }
 
 /// `await --follow`: one subscription, one JSON line per record, until
@@ -841,6 +893,7 @@ async fn follow_records(
     kind: &str,
     since_seq: Option<u64>,
     retained: bool,
+    filter: &serde_json::Map<String, Value>,
     server: &FerriteServer,
     json: bool,
 ) -> Result<()> {
@@ -849,6 +902,9 @@ async fn follow_records(
         .http()
         .subscribe_records(kind, Duration::from_secs(u64::MAX / 4), |rec| {
             if (rec.retain && !retained) || rec.seq.is_some_and(|s| s <= since) {
+                return true;
+            }
+            if !ferrite_ctl_record_matches(&rec.value, filter) {
                 return true;
             }
             let line = if json {
@@ -865,52 +921,40 @@ async fn follow_records(
     }
 }
 
-/// Tail the decoder buffer: poll `recent_decodes` each interval, print
-/// entries newer than the last seen `at_ms`, until SIGINT.
-async fn tail(
-    category: &str,
-    interval: f64,
-    lookback: f64,
-    server: &FerriteServer,
-    json: bool,
-) -> Result<()> {
-    let dur = Duration::from_secs_f64(interval.max(0.05));
-    // First poll seeds the watermark; only emit history if lookback>0.
-    let mut seen_at: u64 = 0;
-    let mut first = true;
-
-    let interrupt = tokio::signal::ctrl_c();
-    let mut interrupt = std::pin::pin!(interrupt);
-    loop {
-        let lb = if first {
-            lookback.max(0.0)
-        } else {
-            interval * 2.0 + 1.0
-        };
+/// Tail log lines for a tracing-target prefix until SIGINT: optional
+/// history from the daemon's log ring (`--lookback`), then a live
+/// subscription to `ferrite/state/log/<target>` on the event plane.
+async fn tail(category: &str, lookback: f64, server: &FerriteServer, json: bool) -> Result<()> {
+    if lookback > 0.0 {
         let v = server
             .recent_decodes_op(RecentDecodesArgs {
                 category: Some(category.to_string()),
                 since_ms: None,
-                lookback_secs: Some(lb),
+                lookback_secs: Some(lookback),
                 limit: None,
             })
             .await
             .map_err(op_err)?;
-        if let Some(arr) = v.get("entries").and_then(Value::as_array) {
-            for e in arr {
-                let at = e.get("at_ms").and_then(Value::as_u64).unwrap_or(0);
-                let emit_it = if first { lookback > 0.0 } else { at > seen_at };
-                if emit_it {
-                    print_entry(e, json);
-                }
-                seen_at = seen_at.max(at);
-            }
+        for e in v
+            .get("entries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            print_entry(e, json);
         }
-        first = false;
-        tokio::select! {
-            _ = &mut interrupt => return Ok(()),
-            () = tokio::time::sleep(dur) => {}
-        }
+    }
+    let topic = format!("log/{}", category.replace("::", "/"));
+    let stream =
+        server
+            .http()
+            .subscribe_records(&topic, Duration::from_secs(u64::MAX / 4), |rec| {
+                print_entry(&rec.value, json);
+                true
+            });
+    tokio::select! {
+        r = stream => { r.map_err(op_err)?; Ok(()) }
+        _ = tokio::signal::ctrl_c() => Ok(()),
     }
 }
 

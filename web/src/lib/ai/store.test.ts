@@ -1,21 +1,34 @@
-// Contract tests for the conversation-state single-authority fold.
-// The sidecar is the authority; this store is a pure view whose
-// localStorage is a first-paint cache the authoritative snapshot
-// overwrites. These pin: (1) a `conversation_snapshot` *replaces* a
-// stale cached transcript and adopts the session id, reconstructing
-// turns through the existing reducer (incl. `ferrite_ai_user_turn`);
-// (2) a `session_reset` clears coherently with one honest banner.
+// Contract tests for the AI panel as a view of the session bus.
+//
+// The conversation is the server's `ai` store kind (records published
+// by the ferrite-ai sidecar and by headless drivers' hooks); `turns` is
+// derived from those records by `buildTurns`. These pin the fold
+// (grouping by session, tool cards, turn end, resets, the live partial,
+// the optimistic pending prompt) and the control channel (every reset
+// entry point tells the sidecar; banners aren't doubled).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { AiStore } from './store.svelte';
+import {
+  AiStore,
+  buildTurns,
+  type AiRecord,
+  type AssistantTurn,
+  type UserTurn,
+} from './store.svelte';
 
-const LS_TURNS = 'ferrite-ai.turns';
-const LS_SESSION = 'ferrite-ai.session_id';
+let seq = 0;
+function rec(data: Record<string, unknown>, at = 1000 + seq): AiRecord {
+  seq += 1;
+  return { seq, at_ms: at, data };
+}
 
-/** Attach a fake OPEN socket so the unified reset path takes its
- *  online branch (sends a `reset_session` control instead of the
- *  offline local-banner fallback). */
+beforeEach(() => {
+  seq = 0;
+  localStorage.clear();
+});
+
+/** Attach a fake OPEN socket so reset paths take their online branch. */
 function attachFakeSocket(store: AiStore): { sent: string[] } {
   const sent: string[] = [];
   (store as unknown as { ws: unknown }).ws = {
@@ -25,96 +38,135 @@ function attachFakeSocket(store: AiStore): { sent: string[] } {
   return { sent };
 }
 
-beforeEach(() => {
-  localStorage.clear();
+describe('buildTurns — the session-bus fold', () => {
+  it('folds one turn: prompt, text, tool use + result, turn end', () => {
+    const s = { session: 'A', source: 'ferrite-ai' };
+    const turns = buildTurns(
+      [
+        rec({ ...s, type: 'user', text: 'what is on 40m?' }),
+        rec({ ...s, type: 'text', text: 'Checking.' }),
+        rec({ ...s, type: 'tool_use', tool_id: 't1', name: 'tune', input: '{"freq_hz":7074000}' }),
+        rec({ ...s, type: 'tool_result', tool_id: 't1', text: 'ok', is_error: false }),
+        rec({ ...s, type: 'text', text: 'FT8 is busy.' }),
+        rec({ ...s, type: 'turn_end', status: 'done' }),
+      ],
+      {},
+      [],
+      null,
+    );
+    expect(turns).toHaveLength(2);
+    const [u, a] = turns as [UserTurn, AssistantTurn];
+    expect(u.text).toBe('what is on 40m?');
+    expect(a.status).toBe('complete');
+    expect(a.chunks.map((c) => c.kind)).toEqual(['text', 'tool', 'text']);
+    const tool = a.chunks[1] as { result?: string; name: string };
+    expect(tool.name).toBe('tune');
+    expect(tool.result).toBe('ok');
+  });
+
+  it('keeps interleaved sessions apart and labels their source', () => {
+    const turns = buildTurns(
+      [
+        rec({ session: 'A', source: 'ferrite-ai', type: 'user', text: 'panel q' }),
+        rec({ session: 'B', source: 'claude-code', type: 'user', text: 'headless q' }),
+        rec({ session: 'A', source: 'ferrite-ai', type: 'text', text: 'panel a' }),
+        rec({ session: 'B', source: 'claude-code', type: 'text', text: 'headless a' }),
+        rec({ session: 'B', source: 'claude-code', type: 'turn_end', status: 'done' }),
+      ],
+      {},
+      [],
+      null,
+      2000,
+    );
+    const assistants = turns.filter((t) => t.role === 'assistant') as AssistantTurn[];
+    const bySession = Object.fromEntries(assistants.map((a) => [a.session, a]));
+    expect((bySession['A'].chunks[0] as { text: string }).text).toBe('panel a');
+    expect(bySession['A'].status).toBe('streaming');
+    expect((bySession['B'].chunks[0] as { text: string }).text).toBe('headless a');
+    expect(bySession['B'].status).toBe('complete');
+    expect(bySession['B'].source).toBe('claude-code');
+  });
+
+  it('shows the live partial on the open turn only', () => {
+    const turns = buildTurns(
+      [rec({ session: 'A', type: 'user', text: 'q' })],
+      { A: { data: { session: 'A', text: 'The band is op' } } },
+      [],
+      null,
+    );
+    const a = turns[1] as AssistantTurn;
+    expect(a.status).toBe('streaming');
+    expect(a.chunks).toEqual([{ kind: 'text', text: 'The band is op' }]);
+  });
+
+  it('errors and stops close the turn honestly', () => {
+    const turns = buildTurns(
+      [
+        rec({ session: 'A', type: 'user', text: 'q1' }),
+        rec({ session: 'A', type: 'turn_end', status: 'error', error: 'boom' }),
+        rec({ session: 'A', type: 'user', text: 'q2' }),
+        rec({ session: 'A', type: 'turn_end', status: 'stopped' }),
+      ],
+      {},
+      [],
+      null,
+    );
+    const [, e, , s] = turns as AssistantTurn[];
+    expect(e.status).toBe('error');
+    expect(e.errorMessage).toBe('boom');
+    expect(s.status).toBe('complete');
+    expect(s.chunks.at(-1)).toEqual({ kind: 'meta', label: '── stopped' });
+  });
+
+  it('a reset record is a banner; history before it stays', () => {
+    const turns = buildTurns(
+      [
+        rec({ session: 'A', type: 'user', text: 'q' }),
+        rec({ session: 'A', type: 'turn_end', status: 'done' }),
+        rec({ session: 'A', type: 'reset', reason: 'mode → decoder' }),
+      ],
+      {},
+      [],
+      null,
+    );
+    expect(turns).toHaveLength(3);
+    const banner = turns[2] as AssistantTurn;
+    expect(banner.chunks[0]).toMatchObject({ kind: 'meta' });
+    expect((banner.chunks[0] as { label: string }).label).toContain('mode → decoder');
+  });
+
+  it('the optimistic prompt shows until its user record lands', () => {
+    const pending = { text: 'hello', t: 5000 };
+    const before = buildTurns([], {}, [], pending);
+    expect(before.map((t) => t.role)).toEqual(['user', 'assistant']);
+    expect((before[1] as AssistantTurn).status).toBe('streaming');
+    const after = buildTurns(
+      [rec({ session: 'A', type: 'user', text: 'hello' }, 5100)],
+      {},
+      [],
+      pending,
+    );
+    expect(after.filter((t) => t.role === 'user')).toHaveLength(1);
+  });
+
+  it('a stripped image count is surfaced on the result', () => {
+    const turns = buildTurns(
+      [
+        rec({ session: 'A', type: 'user', text: 'q' }),
+        rec({ session: 'A', type: 'tool_use', tool_id: 't', name: 'Read', input: '' }),
+        rec({ session: 'A', type: 'tool_result', tool_id: 't', text: '', images_stripped: 1 }),
+      ],
+      {},
+      [],
+      null,
+    );
+    const tool = (turns[1] as AssistantTurn).chunks[0] as { result?: string };
+    expect(tool.result).toContain('1 image(s)');
+  });
 });
 
-describe('conversation-state single authority', () => {
-  it('snapshot replaces the stale localStorage cache and adopts the session id', () => {
-    // First-paint cache: a stale prior transcript + session id.
-    localStorage.setItem(
-      LS_TURNS,
-      JSON.stringify([{ id: 1, role: 'user', text: 'STALE cached question', t: 1 }]),
-    );
-    localStorage.setItem(LS_SESSION, 'old-session');
-
-    const store = new AiStore();
-    expect(store.turns).toHaveLength(1);
-    expect((store.turns[0] as { text: string }).text).toBe('STALE cached question');
-
-    // Authoritative replay from the sidecar — same reducer, replace.
-    store.ingestEvent({
-      type: 'conversation_snapshot',
-      session_id: 'sess-A',
-      events: [
-        { type: 'ferrite_ai_user_turn', text: 'real question', t: 111 },
-        {
-          type: 'stream_event',
-          event: {
-            type: 'content_block_delta',
-            delta: { type: 'text_delta', text: 'real answer' },
-          },
-        },
-        { type: 'ferrite_ai_done', mode: 'explorer' },
-      ],
-    });
-
-    expect(store.turns).toHaveLength(2);
-    const [u, a] = store.turns;
-    expect(u.role).toBe('user');
-    expect((u as { text: string }).text).toBe('real question');
-    expect(a.role).toBe('assistant');
-    const asst = a as { status: string; chunks: Array<{ kind: string; text?: string }> };
-    expect(asst.status).toBe('complete');
-    expect(asst.chunks).toEqual([{ kind: 'text', text: 'real answer' }]);
-    expect(store.sessionId).toBe('sess-A');
-  });
-
-  it('session_reset preserves visible history, drops the binding, appends one banner', () => {
-    const store = new AiStore();
-    // A real prior conversation the user can still see.
-    store.ingestEvent({ type: 'ferrite_ai_user_turn', text: 'q', t: 1 });
-    const before = store.turns.length;
-    expect(before).toBeGreaterThan(0);
-    store.sessionId = 'doomed';
-
-    store.ingestEvent({ type: 'session_reset', reason: 'clear' });
-
-    // History is the user's record — it must NOT be wiped (that looked
-    // like the panel vanished). Binding dropped + one honest banner.
-    expect(store.sessionId).toBeNull();
-    expect(store.turns).toHaveLength(before + 1);
-    const banner = store.turns[store.turns.length - 1] as {
-      role: string;
-      chunks: Array<{ kind: string; label?: string }>;
-    };
-    expect(banner.role).toBe('assistant');
-    expect(banner.chunks).toHaveLength(1);
-    expect(banner.chunks[0].kind).toBe('meta');
-    expect(banner.chunks[0].label).toContain('reasoning context reset');
-    expect(banner.chunks[0].label).toContain('history preserved');
-    expect(banner.chunks[0].label).toContain('clear');
-
-    // Reconnect storms must not stack banners.
-    store.ingestEvent({ type: 'session_reset', reason: 'clear' });
-    expect(store.turns).toHaveLength(before + 1);
-  });
-
-  it('an empty snapshot just clears (no prior turns survive)', () => {
-    localStorage.setItem(LS_TURNS, JSON.stringify([{ id: 1, role: 'user', text: 'stale', t: 1 }]));
-    const store = new AiStore();
-    expect(store.turns).toHaveLength(1);
-
-    store.ingestEvent({ type: 'conversation_snapshot', session_id: 'sess-B', events: [] });
-
-    expect(store.turns).toHaveLength(0);
-    expect(store.sessionId).toBe('sess-B');
-  });
-
+describe('control channel', () => {
   it('/reset, Clear, setMode all drop the sidecar binding (unified path)', () => {
-    // Online: every reset entry point must send the authoritative
-    // `reset_session` control — nulling only the browser id would
-    // leave the sidecar resuming the old context (the bug).
     const store = new AiStore();
     const { sent } = attachFakeSocket(store);
     store.sessionId = 'live';
@@ -127,31 +179,40 @@ describe('conversation-state single authority', () => {
       .map((m) => JSON.parse(m))
       .filter((m) => m.type === 'reset_session')
       .map((m) => m.reason as string);
-    expect(reasons).toHaveLength(3);
-    expect(reasons[0]).toBe('reset');
-    expect(reasons[1]).toBe('clear');
-    expect(reasons[2]).toContain('decoder');
+    expect(reasons).toEqual(['reset', 'clear', expect.stringContaining('decoder')]);
     expect(store.sessionId).toBeNull();
   });
 
-  it('/reset offline keeps history, drops binding, appends one banner', () => {
-    // No socket → local fallback. The visible transcript is the
-    // user's record; it must survive (this is the regression that
-    // made the panel look gone).
+  it('a reset the sidecar published adds no local banner; an unresumable session does (once)', () => {
     const store = new AiStore();
-    store.ingestEvent({ type: 'ferrite_ai_user_turn', text: 'q', t: 1 });
-    const before = store.turns.length;
     store.sessionId = 'doomed';
-
-    store.resetSession({ reason: 'reset' });
-
+    store.ingestEvent({ type: 'session_reset', reason: 'reset', on_bus: true });
     expect(store.sessionId).toBeNull();
-    expect(store.turns).toHaveLength(before + 1);
-    const banner = store.turns[store.turns.length - 1] as {
-      chunks: Array<{ kind: string; label?: string }>;
-    };
-    expect(banner.chunks[0].kind).toBe('meta');
-    expect(banner.chunks[0].label).toContain('reasoning context reset');
-    expect(banner.chunks[0].label).toContain('reset');
+    expect(store.turns).toHaveLength(0);
+
+    store.ingestEvent({ type: 'session_reset', reason: 'no transcript on disk' });
+    store.ingestEvent({ type: 'session_reset', reason: 'no transcript on disk' });
+    expect(store.turns).toHaveLength(1);
+    expect(((store.turns[0] as AssistantTurn).chunks[0] as { label: string }).label).toContain(
+      'no transcript on disk',
+    );
+  });
+
+  it('offline /reset keeps history and notes the reset locally', () => {
+    const store = new AiStore();
+    store.sessionId = 'doomed';
+    store.resetSession({ reason: 'reset' });
+    expect(store.sessionId).toBeNull();
+    expect(store.turns).toHaveLength(1);
+    expect(((store.turns[0] as AssistantTurn).chunks[0] as { label: string }).label).toContain(
+      'history preserved',
+    );
+  });
+
+  it('system/init binds the session for resume and persists it', () => {
+    const store = new AiStore();
+    store.ingestEvent({ type: 'system', subtype: 'init', session_id: 'sess-9' });
+    expect(store.sessionId).toBe('sess-9');
+    expect(localStorage.getItem('ferrite-ai.session_id')).toBe('sess-9');
   });
 });

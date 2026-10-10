@@ -149,7 +149,21 @@ struct Inner {
     /// start/stop like `frames`; the capture state machines live in
     /// [`crate::capture`] and drive this AppState directly.
     captures: Arc<crate::capture::CaptureRegistry>,
+    /// The operator *wants* the pipeline running: set by `start`, cleared
+    /// by an explicit `stop`. The radio supervisor only recovers while
+    /// this holds, and an operator stop mid-recovery ends the recovery.
+    run_intent: std::sync::atomic::AtomicBool,
+    /// Radio liveness as the supervisor last judged it (the `health`
+    /// record's `radio` section).
+    radio: std::sync::Mutex<supervisor::RadioState>,
+    /// Wakes the supervisor to re-publish `health` right away after a
+    /// tune / source patch / start, so `status()` straight after a
+    /// mutation isn't up to a tick stale.
+    health_kick: tokio::sync::Notify,
 }
+
+#[path = "app_state_supervisor.rs"]
+mod supervisor;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -193,6 +207,9 @@ impl AppState {
                 tick_period,
                 device_cache: DeviceCache::new(),
                 captures,
+                run_intent: std::sync::atomic::AtomicBool::new(false),
+                radio: std::sync::Mutex::new(supervisor::RadioState::default()),
+                health_kick: tokio::sync::Notify::new(),
             }),
             logs: None,
             presets_dir: None,
@@ -582,6 +599,8 @@ impl AppState {
                     // new graph record.
                     self.publish_graph().await;
                 }
+                // A VFO move changes where decodes are heard.
+                self.refresh_rf_ctx().await;
                 return Ok(Some(plan));
             }
         }
@@ -813,6 +832,7 @@ impl AppState {
                 // also lands as `params/src` so param-only consumers see it.
                 self.publish_params(SOURCE_ID, &delta_for_record);
                 self.publish_graph().await;
+                self.refresh_rf_ctx().await;
                 return Ok(Some(plan));
             }
         }
@@ -828,6 +848,7 @@ impl AppState {
         *self.inner.source_config.write().await = new_source;
         drop(pipeline);
         self.publish_graph().await;
+        self.refresh_rf_ctx().await;
         Ok(plan)
     }
 
@@ -889,6 +910,29 @@ impl AppState {
     /// Start the pipeline if it isn't already running. Idempotent:
     /// re-calling while running is a no-op and returns `Ok(())`.
     pub async fn start(&self) -> Result<()> {
+        self.inner
+            .run_intent
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let res = self.start_inner().await;
+        if let Err(e) = &res {
+            // An unreachable remote radio keeps the intent: the radio
+            // supervisor brings the pipeline up once the host answers
+            // (what `RADIO_UNREACHABLE` promises). Any other failure is a
+            // real "not running" — clear it so nothing retries a bad
+            // config forever.
+            if !ferrite_blocks::soapy_retry::is_remote_transport_error(&format!("{e:#}")) {
+                self.inner
+                    .run_intent
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        res
+    }
+
+    /// `start` without touching the operator's run intent — the radio
+    /// supervisor's restart, which must not resurrect an intent an
+    /// operator stop just cleared.
+    async fn start_inner(&self) -> Result<()> {
         let mut guard = self.inner.pipeline.lock().await;
         if guard.is_some() {
             return Ok(());
@@ -906,6 +950,7 @@ impl AppState {
         drop(guard);
         self.publish_graph().await;
         self.publish_status("running");
+        self.refresh_rf_ctx().await;
         Ok(())
     }
 
@@ -941,6 +986,15 @@ impl AppState {
             serde_json::to_string(d).unwrap_or_default().hash(&mut h);
             format!("{:016x}", h.finish())
         });
+        // The UI's pipeline view, so any tab (and any agent) follows a
+        // mutation made anywhere — CLI, MCP, another tab — from records
+        // alone: the preset doc with live params overlaid, the profile,
+        // the ui sinks, and the source's capabilities (cache only — this
+        // must never probe a radio).
+        let flowgraph = self.get_flowgraph().await;
+        let profile = self.get_profile().await;
+        let ui_sinks = self.ui_sinks().await.ok();
+        let source_caps = self.cached_source_caps(&source).await;
         self.inner.decoder_store.apply(
             "graph",
             serde_json::json!({
@@ -950,8 +1004,43 @@ impl AppState {
                 "browser_half": browser_half,
                 "browser_half_hash": hash,
                 "source": source,
+                "flowgraph": flowgraph,
+                "profile": profile,
+                "ui_sinks": ui_sinks,
+                "source_caps": source_caps,
             }),
         );
+        // Every block with its spec + current params (the controls the
+        // UI renders). Its own kind: ~35 KB, and live param edits reach
+        // consumers as `params/<block>` deltas instead of a re-publish.
+        match self.list_blocks().await {
+            Ok(blocks) => self.inner.decoder_store.apply(
+                "blocks",
+                serde_json::json!({ "epoch": self.epoch(), "blocks": blocks }),
+            ),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "publish_graph: list_blocks failed")
+            }
+        }
+    }
+
+    /// What `GET /api/source/capabilities` would answer, from the device
+    /// cache only. `None` when a hardware source isn't cached yet.
+    async fn cached_source_caps(&self, source: &SourceConfig) -> Option<serde_json::Value> {
+        if source.type_name != "SoapySource" {
+            return Some(serde_json::json!({ "kind": "software", "type_name": source.type_name }));
+        }
+        let args = source
+            .params
+            .get("args")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let caps = self.inner.device_cache.peek_args(args).await?;
+        Some(serde_json::json!({
+            "kind": "hardware",
+            "type_name": source.type_name,
+            "capabilities": caps,
+        }))
     }
 
     /// Fold the `status` record (`running` / `stopped`).
@@ -999,6 +1088,30 @@ impl AppState {
                 "cannot reload SoapySDR drivers while the pipeline is running — stop it first",
             ));
         }
+        // A leaked (hung, unmakeable) handle or a probe thread still
+        // inside a driver would be left pointing at unmapped code once
+        // the modules unload — that is a crash, not a recovery.
+        let leaked = ferrite_blocks::soapy_retry::leaked_handles();
+        if leaked > 0 {
+            return Err(AppError::conflict(
+                "RELOAD_UNSAFE",
+                format!(
+                    "cannot reload SoapySDR drivers: {leaked} hung device handle(s) are still \
+                     loaded (unmaking them would abort the daemon) — restart the SDR service \
+                     and then ferrited instead"
+                ),
+            ));
+        }
+        let probes = crate::device::probes_in_flight();
+        if probes > 0 {
+            return Err(AppError::conflict(
+                "RELOAD_UNSAFE",
+                format!(
+                    "cannot reload SoapySDR drivers: {probes} device probe(s) are still running \
+                     inside a driver — wait for them to finish or restart ferrited"
+                ),
+            ));
+        }
         self.inner.device_cache.clear().await;
         // dlclose/dlopen are blocking and contend on the C runtime's
         // mutex; off-runtime keeps the axum worker free.
@@ -1016,6 +1129,16 @@ impl AppState {
     /// to join before returning so the caller knows the source device
     /// has been released.
     pub async fn stop(&self) -> bool {
+        self.inner
+            .run_intent
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.stop_with_status("stopped").await
+    }
+
+    /// Tear the pipeline down, publishing `status` as given — `stopped`
+    /// for an operator stop, `recovering` when the radio supervisor
+    /// cycles a dead radio (the operator's run intent is untouched).
+    async fn stop_with_status(&self, status: &str) -> bool {
         let mut guard = self.inner.pipeline.lock().await;
         let Some(mount) = guard.take() else {
             return false;
@@ -1044,10 +1167,13 @@ impl AppState {
             overlay_live_params(&mut doc, &applied);
         }
         // Stop is a topology change too: frames of the old mount must
-        // never be mistaken for a later start's.
+        // never be mistaken for a later start's. Bump under the guard (so
+        // a racing start bumps after us), publish after releasing it —
+        // the graph record reads the pipeline (live-param overlay).
         self.inner.decoder_store.bump_epoch();
+        drop(guard);
         self.publish_graph().await;
-        self.publish_status("stopped");
+        self.publish_status(status);
         true
     }
 

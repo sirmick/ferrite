@@ -3,7 +3,7 @@
 //! ferrited owns the capture job registry and the two capture state
 //! machines. `POST /api/capture/{iq,fft,audio}` register a job, return
 //! it immediately, and spawn a background task that drives the running
-//! pipeline; `GET /api/capture/jobs[/:id]` polls status. ferrite-ctl's
+//! pipeline; every status change is a `jobs` store record. ferrite-ctl's
 //! MCP verbs are thin wrappers over these endpoints.
 //!
 //! This placement is deliberate. The orchestration used to live in
@@ -164,6 +164,25 @@ impl CaptureRegistry {
         }
     }
 
+    /// After a store restore, continue job ids past the highest restored
+    /// `cap-N` so a new job never overwrites a persisted one's record.
+    pub fn reseed_from_store(&self) {
+        let Some(store) = &self.store else { return };
+        let max = store
+            .snapshot()
+            .kinds
+            .get("jobs")
+            .map(|k| {
+                k.current
+                    .keys()
+                    .filter_map(|id| id.strip_prefix("cap-")?.parse::<u64>().ok())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        self.next_job.fetch_max(max + 1, Ordering::SeqCst);
+    }
+
     async fn upsert(&self, job: CaptureJob) {
         let record = serde_json::to_value(&job).unwrap_or(Value::Null);
         {
@@ -237,11 +256,6 @@ impl CaptureRegistry {
             }
             self.upsert(j).await;
         }
-    }
-
-    /// Every known job, newest first (already in insert order).
-    pub async fn snapshot(&self) -> Vec<CaptureJob> {
-        self.jobs.read().await.clone()
     }
 
     /// One job by id.
@@ -564,12 +578,9 @@ async fn run_preset_capture(
 // ─── orchestration entry points (called by routes) ──────────────────────
 
 impl AppState {
-    /// Every known capture job, newest first.
-    pub async fn capture_jobs(&self) -> Vec<CaptureJob> {
-        self.captures().snapshot().await
-    }
-
-    /// One capture job by id.
+    /// One capture job by id (harness accessor — clients read the
+    /// `jobs` kind from the store / event plane).
+    #[allow(dead_code)]
     pub async fn capture_job(&self, job_id: &str) -> Option<CaptureJob> {
         self.captures().get(job_id).await
     }

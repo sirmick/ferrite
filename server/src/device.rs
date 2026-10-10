@@ -59,18 +59,35 @@ pub fn reload_modules() {
 /// stale device handle) and there's no way to cancel the in-flight call
 /// — we leak the thread so the foreground stays responsive. Fine for
 /// CLI use; the process exits right after.
+/// Probe threads currently executing inside a driver — including ones
+/// [`with_probe_timeout`] gave up waiting for. A module reload while any
+/// are in flight would unmap code under their feet.
+static PROBES_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many probe threads are still inside a driver.
+#[must_use]
+pub fn probes_in_flight() -> usize {
+    PROBES_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn with_probe_timeout<F, T>(label: &str, timeout: Duration, op: F) -> Result<T>
 where
     F: FnOnce() -> Result<T> + Send + 'static,
     T: Send + 'static,
 {
     let (tx, rx) = mpsc::sync_channel::<Result<T>>(1);
-    thread::Builder::new()
+    PROBES_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let spawned = thread::Builder::new()
         .name(format!("ferrite-probe[{label}]"))
         .spawn(move || {
-            let _ = tx.send(op());
-        })
-        .context("spawn probe thread")?;
+            let res = op();
+            PROBES_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = tx.send(res);
+        });
+    if let Err(e) = spawned {
+        PROBES_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return Err(e).context("spawn probe thread");
+    }
     match rx.recv_timeout(timeout) {
         Ok(res) => res,
         Err(mpsc::RecvTimeoutError::Timeout) => bail!(
