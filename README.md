@@ -62,7 +62,7 @@ One app, in the browser, out of the box:
   Claude Code CLI, the bundled sidecar) can drive a running `ferrited`
   with no shell-exec, no glue. Tools: `status`, `list_devices` /
   `list_presets`, `select_device` / `load_preset`, `tune` (dodge-aware),
-  `start` / `stop`, `set_block_param`, `recent_decodes`, `view_snapshot`
+  `start` / `stop`, `set_block_param`, `decodes` / `await_events`, `view_snapshot`
   / `view_state`, `transcribe`, `reload_drivers`. See
   [docs/02-protocol.md](docs/02-protocol.md) for the wire surface +
   example Claude Desktop config.

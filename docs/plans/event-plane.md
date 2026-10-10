@@ -190,9 +190,42 @@ agent or `mosquitto_sub` takes. `decodes` already is `state(kind)`; the
 retirements (`recent_decodes`, `capture_status`) and `tail`-over-MQTT for
 log targets are left until the AI prompts stop referencing them.
 
-### Phase 5 — resilience, survey, scan (separate plan).
+**Status (2026-10-10, follow-up): retirements shipped.** `recent_decodes`
+and `capture_status` MCP tools and `GET /api/capture/jobs[/:id]` are gone;
+`await_events` dedups by store seq (keyed kinds no longer arrive twice)
+and takes a `filter`; the CLI `capture` waits on `jobs/<id>` and `tail`
+follows `ferrite/state/log/<target>`. `refreshFromServer` is retired: the
+`graph` record carries the UI view (flowgraph, profile, ui_sinks,
+source_caps), `blocks` is a kind, and the tab applies `status` +
+`params/<block>` (verified in headless Chromium). The sidecar half of
+Phase 3 shipped as the **AI session bus**: the sidecar and `chat-post`
+publish `ai` records (+ `ai_live`), the panel renders from the bus, the
+chat-inject hub is deleted. Kept: `GET /api/decoder/recent` (CLI log
+recall).
+
+### Phase 5 — resilience, survey, scan.
+
+**Resilience shipped (2026-10-10).** Radio supervisor in
+`server/src/app_state_supervisor.rs`: lost radio (reader ended / >5 s
+stall / never delivered) → stop/back-off/start until samples flow while
+the operator wants it running; remote handles are released (not
+leaked) so SoapySDR's factory table can't hand back a dead object;
+`RADIO_UNREACHABLE` (503) on remote transport failures; `device reload`
+refuses while a leaked handle or abandoned probe exists. The `health`
+kind reports radio state, requested-vs-actual LO / rate, listen
+frequency and decoder/driver warnings. Pager/EAS/AIS records are
+structured and every decode carries `ctx.listen_hz`. Verified live
+against bigear (service restart, 45 s outage, stop mid-outage, start
+while down). **Survey / scan: not started.**
 
 ### Phase 6 — persist the store across daemon restarts.
+
+**Shipped (2026-10-10).** `--state-dir` / `FERRITE_STATE_DIR` (run.sh →
+`.ferrite-state/`); non-live kinds saved atomically ≤5 s after a change
+and on SIGINT/SIGTERM, restored at boot with seq/epoch continuing; jobs
+left running come back `interrupted`; capture ids continue past restored
+ones. `EventStore.reset_on_init` now defaults off, so decoder history
+survives preset loads too.
 
 ## Non-goals
 - MQTT as a control plane. Commands stay REST, transactional, under
