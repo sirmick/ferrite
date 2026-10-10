@@ -22,7 +22,8 @@ the operator without per-call narration.
 ```
 mcp__ferrite__load_preset(name="packet")
 mcp__ferrite__tune(freq_hz=144_390_000)
-mcp__ferrite__recent_decodes(category="decoder", lookback_secs=30)
+mcp__ferrite__await_events(kind="aprs", max=3, timeout_s=60)
+mcp__ferrite__decodes(kind="aprs")
 mcp__ferrite__status()
 ```
 
@@ -67,9 +68,13 @@ that, surface that as the cause and pick the closest valid value.
    is fine for unknown signal levels.
 4. `await_events(kind="<mode kind>", max=3, timeout_s=45)` to wait for
    the first decodes (kinds: `pager`, `adsb`, `aprs`, `ft8`, `wspr`,
-   `ais`, `transcribe`, …); `decodes(kind=…)` for what has accumulated.
-   `recent_decodes(category="decoder", lookback_secs=30)` is the raw
-   log-text fallback.
+   `ais`, `eas`, `cw`, `fldigi`, `rtl_433`, `rds`, `transcribe`, …);
+   `decodes(kind=…)` for what has accumulated (`{recent, current}`;
+   each record's `data` holds the parsed fields, `ctx` where the radio
+   was listening). Narrow with `filter`, e.g.
+   `await_events(kind="pager", filter={"format": "alpha"})`.
+   Timed out? Check `status().health.warnings` (e.g. a decoder's
+   "input rate doesn't match") before blaming the band.
 5. Report what's coming through — first few decoded events.
 6. Stay running unless the user redirects.
 
@@ -89,7 +94,8 @@ that, surface that as the cause and pick the closest valid value.
    VFO is mis-tuned.
 4. If `view_snapshot` shows nothing but you suspect a bursty /
    intermittent signal: `mcp__ferrite__start_capture_fft({duration_s: 3})`,
-   poll `capture_status(job_id)` for the `.bin`, then Bash
+   `await_events(kind="jobs/<job_id>", include_retained=true, filter={"status": ["done","failed","interrupted"]})`
+   for the `.bin` (`output_path`), then Bash
    `python3 {{FFT_TO_PNG}} <bin>` + read the PNG — the time strip
    catches transmitters quiet in any single frame.
 5. Check the **front-end config**: wrong antenna (RSPdx has A/B/C —
@@ -211,18 +217,19 @@ Use a *listen* preset that has an audio chain (e.g. `nbfm` for NWR,
 `usb`/`lsb` for SSB, `wbam` for AM) — not a headless `*-record`
 preset (those have no AudioSink, so nothing to tap).
 
-Read the transcription back like any other decoder — it's filed under
-its own category:
+Read the transcription back like any other decoder — it's its own
+kind:
 
 ```
-mcp__ferrite__recent_decodes(category="decoder::transcribe")
+mcp__ferrite__await_events(kind="transcribe", max=3, timeout_s=60)
+mcp__ferrite__decodes(kind="transcribe")
 ```
 
-Lines tagged `[transcribe] seg=… rtf=… queue=…` are throughput
-instrumentation (rtf>1 or rising queue ⇒ whisper falling behind);
-`[transcribe] DROP …` means an utterance was shed (a missing section);
-`[transcribe] <freq> <text>` is the recognised speech. Lead your
-report with the `<text>` lines.
+Each record's `data` carries the recognised speech; `ctx.listen_hz`
+says which frequency it came from. Lead your report with the text.
+For throughput trouble (whisper falling behind, utterances shed),
+watch the live log topic `await_events(kind="log/decoder/transcribe")`
+or check `status().health.warnings`.
 
 Narrowband voice (NWR/SSB) still needs the DC-spike offset — pass
 `offset_ratio` to `mcp__ferrite__tune` so the server-side dodge

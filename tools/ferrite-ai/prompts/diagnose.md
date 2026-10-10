@@ -25,10 +25,10 @@ source's freq + rate; it's the single best fact-find before guessing.
 
 Read-only:
 ```
-mcp__ferrite__status()                                                # pipeline / source / preset / ui_sinks
+mcp__ferrite__status()                                                # pipeline / source / preset / ui_sinks / health
 mcp__ferrite__list_devices()                                          # what SDRs are visible
-mcp__ferrite__recent_decodes(category="decoder", lookback_secs=30)    # recent decodes
-mcp__ferrite__recent_decodes(category="driver",  lookback_secs=60)    # driver warnings
+mcp__ferrite__decodes(kind="<mode kind>")                             # recent decodes (structured)
+mcp__ferrite__await_events(kind="log/driver", max=5, timeout_s=30)    # live driver lines (no history)
 mcp__ferrite__list_presets()                                          # what's loadable
 mcp__ferrite__view_state()                                            # what the operator is looking at
 ```
@@ -38,8 +38,10 @@ Light writes — only when probing:
 mcp__ferrite__view_snapshot(pane="wide-spectrum")
 mcp__ferrite__view_snapshot(pane="channel-waterfall")
 # For time-strip captures (intermittent bursts) — async jobs:
-#   mcp__ferrite__start_capture_fft(duration_s=1) → capture_status(job_id)
-#   mcp__ferrite__start_capture_iq(duration_s=1)  → capture_status(job_id)
+#   mcp__ferrite__start_capture_fft(duration_s=1) → job_id
+#   mcp__ferrite__start_capture_iq(duration_s=1)  → job_id
+#   mcp__ferrite__await_events(kind="jobs/<job_id>", include_retained=true,
+#       filter={"status": ["done","failed","interrupted"]})   # → output_path, error, sidecar
 #   then Bash `python3 {{FFT_TO_PNG}} <bin>` and Read the PNG
 ```
 
@@ -63,10 +65,17 @@ reply first** so the user knows you're about to change their session.
   `/api/source/capabilities`, `/api/pipeline/blocks`.
 - Sigidwiki references in the preset metadata to understand what the
   signal should look like.
-- Recent log entries —
-  `mcp__ferrite__recent_decodes(category="decoder", lookback_secs=60)`
-  pulls a minute of recent activity including warnings; swap
-  `category="driver"` for SDR-side log lines.
+- `status().health` — `ok` + `issues` (plain-English list of what
+  isn't as requested); `radio` (state idle/ok/lost/recovering,
+  attempts, last_error); `tuning` (LO requested vs actual, chan shift,
+  listen); `rate` (declared / configured / actual); `warnings` =
+  WARN/ERROR lines from decoders, flowdiag and the driver since the
+  graph loaded (e.g. `ft8_demod: input rate doesn't match`). Start
+  here before reading logs.
+- Decodes — `mcp__ferrite__decodes(kind=…)` for what's landed (each
+  record's `ctx` says where the radio was listening);
+  `await_events(kind="log/decoder/<name>")` or `kind="log/driver"` to
+  watch live log lines (live only, no history).
 
 ## Common gotchas to check first
 
@@ -76,6 +85,11 @@ reply first** so the user knows you're about to change their session.
   `{{FERRITE_HOME}}/scripts/reset-sdr.sh` or
   `{{FERRITE_HOME}}/scripts/reset-bus.sh` (xHCI rebind); user runs
   these, not you.
+- **Remote radio lost** — `health.radio.state` = `lost` / `recovering`,
+  or a REST error `RADIO_UNREACHABLE`: the radio host isn't answering
+  and the daemon is auto-reconnecting. Wait with
+  `await_events(kind="health", include_retained=true, filter={"ok": true}, timeout_s=120)`
+  rather than reloading drivers.
 - Pipeline stopped vs running — many "no decodes" reports turn out
   to be "pipeline isn't running."
 - Preset env mismatch — a node-only preset on a browser-only

@@ -50,7 +50,7 @@ user looking at the same picture. Reach for it first.
 - Project root: `{{FERRITE_HOME}}`
 - FFT-to-PNG renderer: `{{FFT_TO_PNG}}` — turns a `mcp__ferrite__start_capture_fft` `.bin` (+ its `.json` sidecar) into a readable PNG strip. Absolute MHz on the x-axis, time on y, brightness ∝ power. Always Read the PNG, never the raw `.bin`.
 - Peak / carrier detector: `{{FFT_PEAKS}}` — reads the same `.bin` + sidecar, finds bins above `mean + σ × stddev`, prints sorted absolute-frequency peaks in MHz + dBFS. `--json` for scan loops. Default σ=3; raise to 4–5 in crowded bands, drop to 2 when hunting weak signals.
-- FT8 world-map plotter: `{{FT8_WORLDMAP}}` — pass `--grids "..."` from a recent `mcp__ferrite__recent_decodes` with `category="decoder::ft8"`; outputs a PNG with NASA Blue Marble basemap + great-circle distance/bearing back to the RX grid. Always pass `--rx-grid <your-grid>` and `-o /tmp/<name>.png`; the stdout summary lists distances so you don't have to compute them.
+- FT8 world-map plotter: `{{FT8_WORLDMAP}}` — pass `--grids "..."` built from `mcp__ferrite__decodes(kind="ft8")` → `recent[*].data.grid` (skip records without a grid); outputs a PNG with NASA Blue Marble basemap + great-circle distance/bearing back to the RX grid. Always pass `--rx-grid <your-grid>` and `-o /tmp/<name>.png`; the stdout summary lists distances so you don't have to compute them.
 - Catalog (presets): `{{FERRITE_HOME}}/flowgraphs/` — one JSON per preset; each carries an `ai_notes` field describing when to pick it.
 - Catalog (samples + reference waterfalls): `{{FERRITE_HOME}}/samples/sigidwiki/` — reference images for visual matching, IQ-bearing WAVs marked with `_IQ_` in the filename.
 - Catalog index: `{{FERRITE_HOME}}/samples/sigidwiki/SOURCES.md`
@@ -66,14 +66,14 @@ Common moves:
 
 | Tool | Arguments | What it does |
 |---|---|---|
-| `mcp__ferrite__status` | — | Pipeline + source + active preset + ui_sinks. Cheap; call first. |
+| `mcp__ferrite__status` | — | Pipeline + source + active preset + ui_sinks + `health`. Cheap; call first. |
+| `status().health` | (field of `status`) | `ok` + `issues` (plain-English list of what isn't as requested); `radio` (`state` idle/ok/lost/recovering, attempts, last_error, stream counters); `tuning` (lo requested/actual, chan_shift, listen); `rate` (declared/configured/actual); `warnings` (WARN/ERROR lines from decoders, flowdiag and the driver since the graph loaded). Check `health.ok` before blaming the band. |
 | `mcp__ferrite__list_presets` | — | Available flowgraph presets (name + label + description). |
 | `mcp__ferrite__load_preset` | `{ name }` | Load preset (preserves centre freq across swap). |
 | `mcp__ferrite__tune` | `{ freq_hz, span_hz?, offset_ratio? }` | Tune the listen freq. **Server applies the per-driver DC dodge** so the spike doesn't land in the demodulated channel — pass `offset_ratio` from the driver notes (HackRF: 0.7; SDRplay / RTL-SDR / Airspy: 0). `span_hz` raises the source rate if larger than current. |
 | `mcp__ferrite__view_snapshot` | `{ pane }` | PNG of one of `wide-spectrum`, `wide-waterfall`, `channel-spectrum`, `channel-waterfall` — the exact frame the operator is looking at, band-plan / VFO / contrast / pause / zoom baked in. ≈ 1 ms. Always reach for this before `capture_*`. |
-| `mcp__ferrite__recent_decodes` | `{ category?, lookback_secs?, limit? }` | Decoder-log tail. `category` is a tracing-target prefix (`decoder`, `decoder::ft8`, `decoder::pocsag`, `decoder::ais`, `decoder::transcribe`, `driver`, `driver::ssi`, …). |
-| `mcp__ferrite__decodes` | `{ kind? }` | Structured decoder state from the server store: `adsb` / `aprs` / `ais` (keyed tables), `ft8` / `wspr` / `pager` / `transcribe` (append logs), `signals` / `rds` / `rssi` (latest). Prefer over scraping log text. |
-| `mcp__ferrite__await_events` | `{ kind, max?, timeout_s?, since_seq?, include_retained? }` | **Your ears.** Block until the next `max` records of a kind land (default 1, `timeout_s` 30) — no polling loop. `kind` is a store kind (`pager`, `adsb`, `transcribe`, `activity`, `jobs`, `graph`, …) or a log subtree (`log/decoder`, `log/driver`). A timeout is not an error (`timed_out: true`). After a `tune`/`load_preset`, `await_events(kind="pager", max=5, timeout_s=60)` is the right way to "listen for a bit". |
+| `mcp__ferrite__decodes` | `{ kind }` | Structured decoder state from the server store → `{recent:[…], current:{…}}`. Records are `{seq, epoch, at_ms, key?, data, ctx?}`; `ctx` = where the radio was listening (`listen_hz`, `lo_hz`, `chan_shift_hz`, `preset`). Kinds: `ft8` / `wspr` (`data.de`, `dx`, `grid`, `snr`, `dt`, `freq` audio offset, `msg`), `pager` (parsed protocol, address/capcode, function, format, message + raw `text`), `eas` (originator, event, locations, purge_minutes, sender), `ais` (keyed by mmsi in `current`: lat/lon, sog_kn, cog_deg, name, callsign, destination…), `adsb`, `aprs`, `cw`, `fldigi`, `rtl_433`, `rds`, `transcribe`, `signals`, plus `jobs` / `activity` / `health`. |
+| `mcp__ferrite__await_events` | `{ kind, max?, timeout_s?, since_seq?, include_retained?, filter? }` | **Your ears.** Block until the next `max` records of a kind land (default 1, `timeout_s` 30, max 300) — no polling loop. `kind` is a store kind (`pager`, `ft8`, `adsb`, `transcribe`, `activity`, `health`, `jobs/<job_id>`, …) or a live log topic (`log/driver`, `log/decoder/pocsag` — `::` becomes `/`; live only, no history). `filter` is matched against `record.data` (scalar = equal, array = any-of). A timeout is not an error (`timed_out: true`). After a `tune`/`load_preset`, `await_events(kind="pager", max=5, timeout_s=60)` is the right way to "listen for a bit". |
 | `mcp__ferrite__set_block_param` | `{ block, params }` | PATCH one block's params delta. `block` is `src` (source), `chan` (channelizer VFO offset), `audio_nr` (NR stages), etc. `params` is a JSON object. |
 | `mcp__ferrite__start` / `mcp__ferrite__stop` | — | Pipeline lifecycle. Prefer leaving running. |
 | `mcp__ferrite__list_devices` / `mcp__ferrite__select_device` | — / `{ args }` | SDR enumerate + bind. |
@@ -87,8 +87,10 @@ the operator is looking at right now. ≈ 1 ms round-trip, no temp
 files beyond the PNG itself.
 
 Captures are MCP-native: `mcp__ferrite__start_capture_fft` /
-`_iq` / `_audio` start an async job, `mcp__ferrite__capture_status`
-polls it. Only the Python renderers (`{{FFT_TO_PNG}}`, `{{FFT_PEAKS}}`)
+`_iq` / `_audio` start an async job; wait for it with
+`await_events(kind="jobs/<job_id>", include_retained=true, filter={"status": ["done","failed","interrupted"]})`
+— the job record carries `output_path`, `status`, `error` and the
+`sidecar`. Only the Python renderers (`{{FFT_TO_PNG}}`, `{{FFT_PEAKS}}`)
 still ride `Bash`. Fall back from `view_snapshot` to a capture only
 when you need a *time strip* (burst observation), *raw bin data*
 (numerical peak analysis via `{{FFT_PEAKS}}`), or *offline replay* (a
@@ -127,7 +129,7 @@ If the pipeline is already stopped and you need it running, use
 
 **ALWAYS call `mcp__ferrite__status` before anything else.** Don't
 guess what's bound; the status reply is the cheapest call in the
-entire surface and tells you four things you need before any other
+entire surface and tells you five things you need before any other
 tool will do anything useful:
 
 1. **`source.type`** — is the radio bound to a real SDR
@@ -145,8 +147,11 @@ tool will do anything useful:
    decoding" reports are "pipeline is stopped." If stopped, call
    `mcp__ferrite__start` (a `start_capture_*` job auto-starts it too).
 3. **`preset`** — which flowgraph is loaded. Decoder-mode questions
-   (`recent_decodes(category="decoder::ft8")`) only return data when
-   the matching preset is loaded; check before tail-polling.
+   (`decodes(kind="ft8")`, `await_events(kind="ft8")`) only produce
+   new data when the matching preset is loaded; check before waiting.
+5. **`health`** — `health.ok` false means something isn't as
+   requested; `health.issues` says what in plain English (radio lost,
+   rate mismatch, decoder warnings). Read it before blaming the band.
 4. **`ui_sinks`** — which UI sinks the preset exposes
    (`fft`, `fft_narrow`, …). Tells you whether `view_snapshot` will
    work for which pane.
@@ -181,7 +186,8 @@ For mode *output* (decode lines, transcript text), `decodes` (the
 current state) and `await_events` (wait for the next ones) are the
 direct paths that don't depend on which pane is up — use them to see
 decodes yourself even when you've left the operator on the FFT.
-`recent_decodes` is the raw log-text fallback.
+Each record's `ctx` tells you where the radio was listening when it
+landed, so decodes from before a retune are easy to tell apart.
 
 ## Sample-rate strategy — wide first, then zoom
 
@@ -260,7 +266,8 @@ right *before* concluding "nothing here" or before doing finer work:
    gain in the sensible band right now."
 3. For numerical confirmation (or weak-signal hunting where the eye
    isn't reliable), `mcp__ferrite__start_capture_fft({duration_s: 2})`,
-   poll `capture_status(job_id)` for the `.bin`, then Bash
+   `await_events(kind="jobs/<job_id>", include_retained=true, filter={"status": ["done","failed","interrupted"]})`
+   for the `.bin` (`output_path`), then Bash
    `python3 {{FFT_PEAKS}} <bin>`.
 4. Look at the **peak byte values** in the capture, or the
    `threshold_byte` and strongest peak strengths from fft_peaks.
@@ -387,18 +394,29 @@ pick a manual gain that doesn't ADC-clip.
 
 Not every failure shows up in the HTTP response body. SDR drivers
 emit warnings whose root cause isn't in the JSON the tool reply
-carries. ferrited captures Soapy's log output as `tracing` events
-under target `driver`, so `recent_decodes` works for driver warnings
-too — just point it at the `driver` category:
+carries. ferrited collects WARN/ERROR lines from decoders, flowdiag
+and the driver (Soapy's log output) since the current graph loaded
+into `status().health.warnings` — `[{target, message, count,
+last_at_ms}]` — and summarises anything off in `health.issues`:
 
 ```
-mcp__ferrite__recent_decodes(category="driver", lookback_secs=30)
+mcp__ferrite__status()          # read health.ok / health.issues / health.warnings
 ```
 
-That returns everything the driver logged in the last 30 seconds.
-Streaming-status indicators (single-char "U" / "O" underflow /
-overflow strings) land under `driver::ssi`; `--category driver`
-covers both.
+e.g. `ft8_demod: input rate doesn't match` shows up there. To watch
+driver lines live (no history) use
+`await_events(kind="log/driver", max=5, timeout_s=30)`; streaming-
+status indicators (single-char "U" / "O" underflow / overflow
+strings) come from `driver::ssi` (topic `log/driver/ssi`), and
+`health.radio` carries the stream counters.
+
+**Radio lost.** The daemon auto-recovers a lost remote radio
+(SoapyRemote): `health.radio.state` goes `lost` → `recovering`, and
+activity lines read "radio lost … reconnecting" / "radio recovered
+after N attempts". A REST error `RADIO_UNREACHABLE` means the radio
+host isn't answering and the daemon is retrying. Wait it out —
+`await_events(kind="health", include_retained=true, filter={"ok": true}, timeout_s=120)`
+— don't `reload_drivers`.
 
 The list of warning messages specific to the active driver lives in
 the **driver-specific operator notes** appended below. Cross-driver
@@ -408,8 +426,8 @@ patterns:
   Steady underflows: the SDR isn't keeping up with the requested
   sample rate. Steady overflows: ferrited's pipeline can't drain
   fast enough. Spot-check, not a per-tune blocker.
-- A gain / tune call that returned 200 OK but a driver warning shows
-  up under `driver` for the same timestamp — your write *didn't*
+- A gain / tune call that returned 200 OK but a `driver` entry shows
+  up in `health.warnings` with a matching `last_at_ms` — your write *didn't*
   land the way you wanted. Match the warning against the driver
   notes' list before retrying blind.
 
@@ -551,16 +569,17 @@ open — if no browser is subscribed to `/ws/ui-views` you'll get a
 ### Time-window or raw-bin: `start_capture_fft` + `fft_to_png.py`
 
 Captures are MCP-native and **async**: `mcp__ferrite__start_capture_fft`
-(also `_iq`, `_audio`) returns a `job_id` immediately, then poll
-`mcp__ferrite__capture_status(job_id)` for `status=done` + the sidecar
-JSON (which carries the `output_path`). (`ferrite-ctl capture fft` is
+(also `_iq`, `_audio`) returns a `job_id` immediately, then wait with
+`mcp__ferrite__await_events(kind="jobs/<job_id>", include_retained=true, filter={"status": ["done","failed","interrupted"]})`
+— the job record carries `status`, `error`, `output_path` and the
+`sidecar` (sample_rate_hz, center_freq_hz, samples_written…). (`ferrite-ctl capture fft` is
 the same server job driven from the CLI — it just blocks until done; the
 MCP tool, the CLI and the UI all share one control bus.) Reach for a
 capture when you need a **strip of time** (carrier come-and-go,
 burst-rate observation) or **raw bin data for peak detection**:
 
 1. `mcp__ferrite__start_capture_fft({duration_s: <s>, note: "..."})` →
-   poll `capture_status` → the job's `output_path` is a `.bin` (raw u8
+   `await_events(kind="jobs/<job_id>", …)` → the job's `output_path` is a `.bin` (raw u8
    spectrum bytes) with a `.json` sidecar (`frame_size`,
    `sample_rate_hz`, `center_freq_hz`).
 2. `python3 {{FFT_TO_PNG}} <bin-path>` — renders a PNG strip you can
@@ -665,7 +684,8 @@ tune → `view wide-spectrum` → read PNG → compare against
 transmitter that's silent in any single frame.)
 
 **"Decode this"** *and* **"scan for `<digital mode>` stations"**
-`load_preset` → `recent_decodes(category="decoder")` (loop briefly)
+`load_preset` → `await_events(kind="<mode kind>", max=5, timeout_s=60)`
+(no polling loop; `decodes(kind=…)` for what's already accumulated)
 → report what's flowing → mention how to revert. The decoder *is*
 the eyes for digital modes — wideband scanning won't produce
 decodes. When the user names a digital mode by name (FT8, WSPR,
@@ -673,8 +693,8 @@ APRS, ADS-B, AIS, POCSAG, DTMF, CW, Morse, FLEX, RTTY, …), check
 `{{FERRITE_HOME}}/flowgraphs/` for a matching preset and load it.
 For FT8 specifically: tune to a standard dial frequency (7.074 /
 10.136 / 14.074 / 18.100 / 21.074 / 24.915 / 28.074 MHz), load the
-`ft8` preset, wait ≥30 s (FT8 slots are 15 s, aligned to UTC) before
-reading decodes.
+`ft8` preset, then `await_events(kind="ft8", max=5, timeout_s=60)`
+(FT8 slots are 15 s, aligned to UTC, so allow ≥30 s).
 
 **"Scan `<range>`"** — wide-first, then zoom:
 1. Crank rate to the driver's top setting (often 10 MS/s) for
@@ -708,9 +728,10 @@ What to flag, prefixed with `[REVIEW]` so the user can search for it:
 - `set_block_param(block="chan", params={"freq_shift_hz": ...})`
   accepts the value but the next capture's peak bin hasn't moved
   relative to centre.
-- `load_preset` succeeds but
-  `recent_decodes(category="decoder", lookback_secs=10)` shows
-  nothing on a band where the captured waterfall has obvious signal.
+- `load_preset` succeeds but `await_events(kind="<mode kind>",
+  timeout_s=60)` times out on a band where the captured waterfall has
+  obvious signal (check `status().health.warnings` first — a rate
+  mismatch warning there explains it).
 - A documented knob (`rfnotch_ctrl`, an antenna name from
   `/api/source/capabilities`) returns an error from the daemon.
 - An HTTP 4xx / 5xx that doesn't recover after one well-formed
