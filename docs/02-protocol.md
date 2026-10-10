@@ -484,6 +484,8 @@ request structs; the descriptions below are what `tools/list` returns.
 | `stop` | `POST /api/pipeline/stop` | Stop the pipeline. |
 | `transcribe` | `PATCH /api/profile` | Toggle the speech-to-text tap (sherpa-onnx: in-browser WASM under `balanced`, the node sidecar under `server`). |
 | `recent_decodes` | `GET /api/decoder/recent` | Recent decoder-log entries; filterable by category. |
+| `decodes` | `GET /api/state` | Structured decoder state: one kind (`{recent, current}`) or the whole store. |
+| `await_events` | MQTT `ferrite/state/<kind>/#` | Block until the next `max` records of a kind arrive (or `timeout_s`); `since_seq` skips known records, `include_retained` returns the current value first. The subscription form of `decodes` — no polling. CLI: `ferrite-ctl await <kind> [--follow]`. |
 | `start_capture_iq` | `chan` tee / `src` tee | Async IQ capture — live tee of the channelized slice (default) or, with `wideband`, of the raw full-span stream off the SDR. Neither swaps presets. Returns a `job_id`. |
 | `start_capture_fft` | `logmag` tee | Async FFT-byte-stream capture (live tee). Returns a `job_id`. |
 | `start_capture_audio` | `WsBridgeTxF32` tee | Async 48 kHz WAV of what the operator hears (live tee of the node→browser audio bridge; `freq_hz` optional). Returns a `job_id`. |

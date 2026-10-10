@@ -734,6 +734,7 @@ dependencies = [
  "ferrite-sdr-tables",
  "reqwest",
  "rmcp",
+ "rumqttc",
  "serde",
  "serde_json",
  "tokio",

@@ -163,6 +163,15 @@ the payload (`expires_at_ms`), not v5 properties (WS is v4).
   Retire `recent_decodes`, `decodes`, `capture_jobs`, `capture_status`.
   Jobs/captures/activity visible via `jobs`/`activity` kinds.
 
+**Status (2026-10-10): `await` shipped.** `await_events` MCP tool and
+`ferrite-ctl await <kind> [--max N] [--wait S] [--since-seq] [--retained]
+[--follow]` subscribe to `ferrite/state/<kind>/#` on the daemon's broker
+over **TCP** (port from `GET /api/hello`), not an in-process link — the
+CLI/MCP is a separate process, and a real client is the same path any
+agent or `mosquitto_sub` takes. `decodes` already is `state(kind)`; the
+retirements (`recent_decodes`, `capture_status`) and `tail`-over-MQTT for
+log targets are left until the AI prompts stop referencing them.
+
 ### Phase 5 — resilience, survey, scan (separate plan).
 
 ### Phase 6 — persist the store across daemon restarts.

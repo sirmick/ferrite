@@ -72,6 +72,8 @@ Common moves:
 | `mcp__ferrite__tune` | `{ freq_hz, span_hz?, offset_ratio? }` | Tune the listen freq. **Server applies the per-driver DC dodge** so the spike doesn't land in the demodulated channel — pass `offset_ratio` from the driver notes (HackRF: 0.7; SDRplay / RTL-SDR / Airspy: 0). `span_hz` raises the source rate if larger than current. |
 | `mcp__ferrite__view_snapshot` | `{ pane }` | PNG of one of `wide-spectrum`, `wide-waterfall`, `channel-spectrum`, `channel-waterfall` — the exact frame the operator is looking at, band-plan / VFO / contrast / pause / zoom baked in. ≈ 1 ms. Always reach for this before `capture_*`. |
 | `mcp__ferrite__recent_decodes` | `{ category?, lookback_secs?, limit? }` | Decoder-log tail. `category` is a tracing-target prefix (`decoder`, `decoder::ft8`, `decoder::pocsag`, `decoder::ais`, `decoder::transcribe`, `driver`, `driver::ssi`, …). |
+| `mcp__ferrite__decodes` | `{ kind? }` | Structured decoder state from the server store: `adsb` / `aprs` / `ais` (keyed tables), `ft8` / `wspr` / `pager` / `transcribe` (append logs), `signals` / `rds` / `rssi` (latest). Prefer over scraping log text. |
+| `mcp__ferrite__await_events` | `{ kind, max?, timeout_s?, since_seq?, include_retained? }` | **Your ears.** Block until the next `max` records of a kind land (default 1, `timeout_s` 30) — no polling loop. `kind` is a store kind (`pager`, `adsb`, `transcribe`, `activity`, `jobs`, `graph`, …) or a log subtree (`log/decoder`, `log/driver`). A timeout is not an error (`timed_out: true`). After a `tune`/`load_preset`, `await_events(kind="pager", max=5, timeout_s=60)` is the right way to "listen for a bit". |
 | `mcp__ferrite__set_block_param` | `{ block, params }` | PATCH one block's params delta. `block` is `src` (source), `chan` (channelizer VFO offset), `audio_nr` (NR stages), etc. `params` is a JSON object. |
 | `mcp__ferrite__start` / `mcp__ferrite__stop` | — | Pipeline lifecycle. Prefer leaving running. |
 | `mcp__ferrite__list_devices` / `mcp__ferrite__select_device` | — / `{ args }` | SDR enumerate + bind. |
@@ -175,10 +177,11 @@ so the operator wouldn't see it anyway. Read what they're currently
 looking at with `mcp__ferrite__view_state` if you want to know
 before changing anything.
 
-For mode *output* (decode lines, transcript text), `recent_decodes`
-is the direct path that doesn't depend on which pane is up — use it
-to see decodes yourself even when you've left the operator on the
-FFT.
+For mode *output* (decode lines, transcript text), `decodes` (the
+current state) and `await_events` (wait for the next ones) are the
+direct paths that don't depend on which pane is up — use them to see
+decodes yourself even when you've left the operator on the FFT.
+`recent_decodes` is the raw log-text fallback.
 
 ## Sample-rate strategy — wide first, then zoom
 

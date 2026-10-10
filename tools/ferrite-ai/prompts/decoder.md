@@ -65,8 +65,11 @@ that, surface that as the cause and pick the closest valid value.
    the band drop gain by 6–10 dB, if it's mostly black raise gain.
    AGC (`set_block_param(block="src", params={"agc_enable": true})`)
    is fine for unknown signal levels.
-4. `recent_decodes(category="decoder", lookback_secs=30)` briefly to
-   confirm decodes are flowing.
+4. `await_events(kind="<mode kind>", max=3, timeout_s=45)` to wait for
+   the first decodes (kinds: `pager`, `adsb`, `aprs`, `ft8`, `wspr`,
+   `ais`, `transcribe`, …); `decodes(kind=…)` for what has accumulated.
+   `recent_decodes(category="decoder", lookback_secs=30)` is the raw
+   log-text fallback.
 5. Report what's coming through — first few decoded events.
 6. Stay running unless the user redirects.
 
