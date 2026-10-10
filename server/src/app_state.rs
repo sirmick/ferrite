@@ -665,8 +665,59 @@ impl AppState {
         let doc = tokio::task::spawn_blocking(move || resolve_preset_doc(&dir, &slug))
             .await
             .map_err(|e| anyhow!("preset resolve task panicked: {e}"))??;
+        self.adopt_preset_source_rate(&doc).await;
         let plan = self.patch_flowgraph(doc.clone()).await?;
         Ok((doc, plan))
+    }
+
+    /// A preset's `src.sample_rate_hz` is a *requirement* of its DSP
+    /// chain, not a suggestion: ft8 channelizes 2.4 MS/s ÷ 200 → 12 kHz
+    /// by integer decimation, and at the 2 MS/s a fresh `select_device`
+    /// lands on it gets 11 976 Hz — the decoder logs "input rate
+    /// doesn't match" and every slot comes up empty, from the UI, the
+    /// CLI and MCP alike (observed live 2026-10-10). `compose_source`
+    /// merges the live config *over* the preset hint, so the hint never
+    /// won on its own. Adopt it here, on the hardware source only (a
+    /// replay's rate is the file's), through the same policy pass every
+    /// other rate change gets (driver ceiling, IF bandwidth, notches),
+    /// and store it *before* `patch_flowgraph` composes — one restart,
+    /// not two.
+    async fn adopt_preset_source_rate(&self, doc: &FlowgraphDoc) {
+        let Some(wanted) = doc
+            .blocks
+            .get(SOURCE_ID)
+            .and_then(|b| b.params.as_ref())
+            .and_then(|p| p.get("sample_rate_hz"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|r| r.is_finite() && *r > 0.0)
+        else {
+            return;
+        };
+        let _gate = self.inner.patch_gate.lock().await;
+        let current = self.inner.source_config.read().await.clone();
+        if current.type_name != "SoapySource" {
+            return;
+        }
+        let have = current
+            .params
+            .get("sample_rate_hz")
+            .and_then(serde_json::Value::as_f64);
+        if have.is_some_and(|h| (h - wanted).abs() < 0.5) {
+            return;
+        }
+        let mut next = current.clone();
+        if let Some(p) = next.params.as_object_mut() {
+            p.insert("sample_rate_hz".into(), serde_json::json!(wanted));
+        }
+        self.apply_source_policy(&current, &mut next).await;
+        tracing::info!(
+            target: "ai::activity",
+            preset = %doc.name,
+            from = ?have,
+            to = next.params.get("sample_rate_hz").and_then(serde_json::Value::as_f64),
+            "preset-load: adopting the preset's source sample rate"
+        );
+        *self.inner.source_config.write().await = next;
     }
 
     /// Apply a new preset. If the pipeline is running, reconfigures it
