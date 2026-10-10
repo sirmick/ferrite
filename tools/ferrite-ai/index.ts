@@ -45,6 +45,19 @@ console.log(`[ferrite-ai] FERRITE_CTL=${FERRITE_CTL}`);
 // they key off (both keyed by `session_id`) so the visible transcript
 // and the LLM context reset and resume together by construction.
 const STATE_DIR = process.env.FERRITE_AI_STATE_DIR ?? "/tmp/ferrite-ai-state";
+// Station notes the operator keeps on disk (antenna ports, local
+// interference, operating rules). The browser sends its own
+// `setup_description` per turn from localStorage; a headless driver
+// has none, so fall back to this file. Read per turn so edits land
+// without a sidecar restart.
+const SETUP_FILE = process.env.FERRITE_AI_SETUP_FILE ?? join(STATE_DIR, "setup.md");
+function defaultSetupDescription(): string | undefined {
+  try {
+    return existsSync(SETUP_FILE) ? readFileSync(SETUP_FILE, "utf-8") : undefined;
+  } catch {
+    return undefined;
+  }
+}
 try {
   mkdirSync(STATE_DIR, { recursive: true });
 } catch (e) {
@@ -714,7 +727,7 @@ wss.on("connection", (ws) => {
         parsed.current_source,
         parsed.preset_notes,
         parsed.block_notes,
-        parsed.setup_description,
+        parsed.setup_description?.trim() || defaultSetupDescription(),
         parsed.local_time_human,
         parsed.local_time_iso,
         parsed.time_zone,

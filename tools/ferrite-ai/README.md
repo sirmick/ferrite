@@ -85,6 +85,14 @@ Per turn, the browser may send `{"text": …, "mode": …, "model": "<id>"}`;
 the picker may choose (`model_options`). Unknown ids are ignored, not
 forwarded.
 
+### Station notes
+
+The browser sends the operator's `setup_description` (antenna ports,
+station facts) with every turn. When a turn carries none — a headless
+driver, or an empty field in the UI — the sidecar reads
+`$FERRITE_AI_STATE_DIR/setup.md` (override: `FERRITE_AI_SETUP_FILE`),
+re-read per turn so edits apply without a restart.
+
 ### Isolation
 
 The sidecar runs the Agent SDK in isolation mode: no `~/.claude` or
