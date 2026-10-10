@@ -133,20 +133,12 @@ impl SpectralStage {
     }
 
     pub fn reset(&mut self) {
-        for v in &mut self.in_buf {
-            *v = 0.0;
-        }
+        self.in_buf.fill(0.0);
         self.in_filled = self.block_size / 2;
-        for v in &mut self.ola {
-            *v = 0.0;
-        }
+        self.ola.fill(0.0);
         self.ola_read = 0;
-        for v in &mut self.noise_mag2 {
-            *v = COLD_START_NOISE_MAG2;
-        }
-        for v in &mut self.prior_snr {
-            *v = 1.0;
-        }
+        self.noise_mag2.fill(COLD_START_NOISE_MAG2);
+        self.prior_snr.fill(1.0);
     }
 
     /// Live-update the scalar params without touching the FFT plan,

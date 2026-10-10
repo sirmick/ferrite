@@ -59,6 +59,13 @@ export default defineConfig({
         ws: true,
         changeOrigin: false,
       },
+      // Event bus: MQTT over WebSocket. ferrited reverse-proxies this to
+      // its embedded broker, so dev and prod share one same-origin URL.
+      '/mqtt': {
+        target: ferritedTarget,
+        ws: true,
+        changeOrigin: false,
+      },
     },
   },
 });

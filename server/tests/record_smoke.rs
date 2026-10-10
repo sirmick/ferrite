@@ -12,6 +12,10 @@ use std::{path::PathBuf, time::Duration};
 use ferrite_runtime::{FlowgraphDoc, SourceConfig};
 use serde_json::json;
 
+#[path = "../src/event_plane.rs"]
+#[allow(dead_code)]
+mod event_plane;
+
 #[path = "../src/log_stream.rs"]
 #[allow(dead_code)]
 mod log_stream;
@@ -155,8 +159,8 @@ fn parse_mono_wav(bytes: &[u8]) -> (u32, usize, f32) {
     assert_eq!(bytes.len(), 44 + data_len, "file length must match header");
     let sample_count = data_len / 2;
     let mut sum_sq: f64 = 0.0;
-    for chunk in bytes[44..].chunks_exact(2) {
-        let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+    for chunk in bytes[44..].as_chunks::<2>().0 {
+        let s = i16::from_le_bytes(*chunk);
         let f = f32::from(s) / 32_767.0;
         sum_sq += f64::from(f * f);
     }

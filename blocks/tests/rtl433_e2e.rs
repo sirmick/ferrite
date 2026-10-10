@@ -116,7 +116,9 @@ fn acurite_606tx_capture_decodes_at_least_one_event() {
     // CU8 → Complex<f32> in ±1.0 convention. u8 128 = zero; the upstream
     // rtl_sdr capture tool emits this directly off the RTL2832.
     let samples: Vec<Complex<f32>> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| {
             let i = (i32::from(c[0]) - 128) as f32 / 128.0;
             let q = (i32::from(c[1]) - 128) as f32 / 128.0;

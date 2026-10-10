@@ -25,7 +25,7 @@
 
   // Server-side transcription (sherpa, node-whisper) flows through the
   // unified decoder store: each segment is a record under kind
-  // `transcribe`, mirrored to every browser over `/ws/state`. Drive the
+  // `transcribe`, mirrored to every browser over the event bus. Drive the
   // transcript store from that mirror (deduped by the store's monotonic
   // `seq`). Browser-placed whisper feeds the same `transcript` store via
   // the Worker's `push`, so the panel renders both regardless of which

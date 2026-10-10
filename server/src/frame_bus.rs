@@ -50,7 +50,7 @@ pub const DEFAULT_SUBSCRIBER_CAPACITY: usize = 16384;
 
 /// Minimum gap between consecutive "subscriber full" warnings per sub.
 /// Without this, a slow subscriber produces one warn per dropped frame
-/// — hundreds per second — which rides the `/ws/logs` broadcast back
+/// — hundreds per second — which rides the log broadcast back
 /// into the (already overloaded) browser client and compounds the
 /// backlog. Counting drops in between keeps visibility without the
 /// feedback loop.

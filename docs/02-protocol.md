@@ -1,10 +1,13 @@
 # 02 — Control API and WS frame format
 
-Two surfaces:
+Three surfaces:
 
 - **REST under `/api/*`** — JSON over HTTP. Enumeration, control, lifecycle.
-- **WebSocket under `/ws/*`** — `/ws/preset` (binary postcard frames),
-  `/ws/logs` (text log lines).
+  The only control plane.
+- **WebSocket `/ws/preset`** — binary postcard sample frames.
+- **MQTT (the event plane)** — every observable change as a record on a
+  topic, from an embedded broker (`/mqtt` over WebSocket for browsers, a
+  plain TCP port for everything else). See [Event plane](#event-plane-mqtt).
 
 All routes are wired in
 [`server/src/main.rs:269-297`](../server/src/main.rs); handlers in
@@ -34,7 +37,7 @@ client ── PATCH /api/source       {SourceConfig}        ─► ReconfigureRe
 client ── PATCH /api/flowgraph    {FlowgraphDoc}        ─► ReconfigureResponse
 client ── POST  /api/pipeline/blocks/{id}/params {...}  ─► ReconfigureResponse
 client ── POST  /api/pipeline/stop                      ─► {status:"stopped"}
-client ── WS    /ws/logs                                ─► text log lines
+client ── MQTT  ferrite/state/#                         ─► every record (graph, status, decodes, logs…)
 ```
 
 A patch made while the pipeline is stopped is stored against `AppState` and
@@ -346,19 +349,71 @@ subscriber's* copy and logs `frame bus: subscriber full`; other subscribers
 keep receiving uninterrupted. From the affected subscriber's view this
 shows up as `seq` gaps.
 
-## WebSocket: `/ws/logs`
+## Event plane (MQTT)
 
-Text-only stream of `tracing` lines from the server, in the format
+ferrited embeds an MQTT 3.1.1 broker ([`server/src/event_plane.rs`](../server/src/event_plane.rs),
+`rumqttd`). It listens on two ports — TCP on `<http port>+1`, WebSocket
+on `<http port>+2` (`--mqtt-port` / `--mqtt-ws-port`, `0` = any free
+loopback port, `--no-mqtt` to disable) — and `GET /api/hello` reports both
+under `mqtt`. Browsers never see the ports: `GET /mqtt` on the HTTP
+port reverse-proxies the WebSocket (subprotocol `mqtt`) to the broker,
+and vite proxies `/mqtt` the same way in dev. No auth, no TLS (LAN
+deployment, same posture as the rest of the API).
+
+**State is a set of kinds** in the server store (`/api/state` is the
+whole thing); **every change is one record** and every record is one
+message:
 
 ```
-[INFO] preset_pipeline: starting preset name=wbfm
+ferrite/state/<kind>          every delta of the kind (QoS 0).
+                              Replace kinds (graph, status, readback, rssi,
+                              signals, flowdiag, params/<block>): the latest
+                              record, retained — a new subscriber gets it at once.
+ferrite/state/<kind>/<key>    keyed kinds (adsb, aprs, jobs): the entity,
+                              retained; an empty retained payload = expired.
+ferrite/state/log/<target>    tracing lines, `::` → `/` (decoder::pocsag is
+                              ferrite/state/log/decoder/pocsag) as
+                              {target, level, message, at_ms}.
+ferrite/state/activity        one record per mutating ferrite-ctl / agent
+                              request (X-Ferrite-Command / -Note).
+ferrite/ingest/<kind>         publish a raw event here and the server folds
+                              it into <kind>; an `epoch` field that doesn't
+                              match the current graph epoch is dropped.
 ```
 
-Used by the LogPanel ([`web/src/lib/layout/LogPanel.svelte`](../web/src/lib/layout/LogPanel.svelte))
-and `web/src/lib/logs/`. Lagged subscribers see synthetic
-`[WARN] log stream lagged by N lines`. Returns 503 if the log broadcaster
-isn't installed (it always is in `main`, so 503 only surfaces in stripped
-test harnesses).
+Payloads are the store's delta JSON — the same shape the REST snapshot
+is built from:
+
+```json
+{"kind":"adsb","seq":4821,"epoch":7,"op":"upsert",
+ "record":{"seq":4821,"epoch":7,"at_ms":1791650000000,"key":"a1b2c3","data":{…}}}
+```
+
+`op` is `add` (append kinds), `upsert`, `expire` (`key` instead of
+`record`) or `reset`. `seq` is the store-wide cursor; dedup **per kind**
+(the server coalesces replace-kind bursts to ≤10 Hz, so a coalesced
+record can arrive after a higher-seq append). `epoch` is the graph
+epoch — bumped once per topology rebuild and stamped on every record and
+every `/ws/preset` frame, so a consumer can tell which graph a record (or
+a sample) belongs to. The `graph` record carries the composed doc, the
+browser half and its hash: a browser reloads its half when the hash
+changes and moves its frame gate when the epoch changes, with no REST
+round trip.
+
+Append kinds are stream-only; history is the snapshot: subscribe first,
+`GET /api/state`, then apply anything with a higher seq. The browser
+mirror ([`web/src/lib/decoders/store.svelte.ts`](../web/src/lib/decoders/store.svelte.ts))
+does exactly this on every (re)connect through one shared client
+([`web/src/lib/events/bus.ts`](../web/src/lib/events/bus.ts)); the log
+sidebar is a subscriber of `ferrite/state/log/#` on the same connection.
+
+By hand:
+
+```bash
+mosquitto_sub -p 12002 -t 'ferrite/state/log/decoder/#' -v     # every decoder log line
+mosquitto_sub -p 12002 -t 'ferrite/state/graph' -v              # retained: what's running
+mosquitto_pub -p 12002 -t ferrite/ingest/pager -m '{"msg":"hi"}'
+```
 
 ## Cross-origin isolation
 
@@ -427,11 +482,13 @@ request structs; the descriptions below are what `tools/list` returns.
 | `set_block_param` | `POST /api/pipeline/blocks/{id}/params` | Patch one block's params. `src` accepts gain/agc/antenna/bandwidth_hz/dc_offset_correction/`settings`. |
 | `start` | `POST /api/pipeline/start` | Start the pipeline. |
 | `stop` | `POST /api/pipeline/stop` | Stop the pipeline. |
-| `transcribe` | `PATCH /api/profile` | Toggle the in-browser whisper.cpp tap. |
+| `transcribe` | `PATCH /api/profile` | Toggle the speech-to-text tap (sherpa-onnx: in-browser WASM under `balanced`, the node sidecar under `server`). |
 | `recent_decodes` | `GET /api/decoder/recent` | Recent decoder-log entries; filterable by category. |
-| `start_capture_iq` | `chan` tee / `capture_fm` preset | Async IQ capture — live narrowband tee (default) or `wideband` full-rate slice. Returns a `job_id`. |
+| `decodes` | `GET /api/state` | Structured decoder state: one kind (`{recent, current}`) or the whole store. |
+| `await_events` | MQTT `ferrite/state/<kind>/#` | Block until the next `max` records of a kind arrive (or `timeout_s`); `since_seq` skips known records, `include_retained` returns the current value first. The subscription form of `decodes` — no polling. CLI: `ferrite-ctl await <kind> [--follow]`. |
+| `start_capture_iq` | `chan` tee / `src` tee | Async IQ capture — live tee of the channelized slice (default) or, with `wideband`, of the raw full-span stream off the SDR. Neither swaps presets. Returns a `job_id`. |
 | `start_capture_fft` | `logmag` tee | Async FFT-byte-stream capture (live tee). Returns a `job_id`. |
-| `start_capture_audio` | `*-audio-record` preset | Async demodulated-audio capture to WAV (preset-swap). Returns a `job_id`. |
+| `start_capture_audio` | `WsBridgeTxF32` tee | Async 48 kHz WAV of what the operator hears (live tee of the node→browser audio bridge; `freq_hz` optional). Returns a `job_id`. |
 | `capture_status` | (in-memory job registry) | Poll one capture job by id, or list all. `running` / `done` (+ sidecar) / `failed`. |
 | `view_snapshot` | `GET /api/ui-views/{pane}` | PNG of a live FFT/waterfall canvas. |
 | `view_state` | `GET /api/view` | Browser-authored UI chrome state. |

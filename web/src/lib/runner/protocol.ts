@@ -21,8 +21,16 @@ export type RunnerRequest =
       readonly kind: 'load';
       readonly doc: FlowgraphDoc;
       readonly wsUrl: string;
+      /** Graph epoch this doc belongs to (the server's `graph` record).
+       *  Frames stamped with a different non-zero epoch are dropped at
+       *  the bridge. Omitted / 0 = accept everything (tests, legacy). */
+      readonly epoch?: number;
     }
   | { readonly id: number; readonly kind: 'start' }
+  /** Move the epoch gate without reloading: the server rebuilt its
+   *  half (new epoch) but the browser half's hash didn't change, so
+   *  the loaded graph is still right — only the frame filter moves. */
+  | { readonly id: number; readonly kind: 'setEpoch'; readonly epoch: number }
   /** Pause the tick loop without tearing the runtime down. The loaded
    *  graph + frame subscribers + audio SAB writers all stay alive, so
    *  a subsequent `start` resumes in milliseconds. Distinct from `stop`
@@ -70,7 +78,11 @@ export interface LoadResult {
 
 export type RunnerResponse =
   | { readonly id: number; readonly ok: true; readonly kind: 'load'; readonly data: LoadResult }
-  | { readonly id: number; readonly ok: true; readonly kind: 'start' | 'stop' | 'pause' }
+  | {
+      readonly id: number;
+      readonly ok: true;
+      readonly kind: 'start' | 'stop' | 'pause' | 'setEpoch';
+    }
   | {
       readonly id: number;
       readonly ok: true;

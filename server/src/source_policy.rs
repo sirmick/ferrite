@@ -236,8 +236,22 @@ pub fn plan_tune(
     let (new_src_center, new_freq_shift) = match chan_rate {
         Some(cr) => {
             let keepout = 0.4 * cr;
-            let dodge = offset_ratio * cr;
-            let dc_guard = if offset_ratio > 0.0 { 0.1 * cr } else { 0.0 };
+            // The dodge parks the LO `offset_ratio × channel` off-target
+            // so the DC spike lands outside the channel — but the whole
+            // channel must still fit inside the source span. A full-rate
+            // preset (channel == span, e.g. ADS-B at 2 MS/s) has no room
+            // at all: an unclamped 0.7 × 2 MHz dodge put 1090 MHz 1.4 MHz
+            // off a 2 MS/s LO, i.e. outside Nyquist, and the decoder saw
+            // nothing. Clamp to the room available; zero room = tune
+            // on-centre and rely on `dc_offset_correction`.
+            let span = span_hz.unwrap_or(0.0).max(cur_rate);
+            let room = if span > 0.0 {
+                (span / 2.0 - cr / 2.0).max(0.0)
+            } else {
+                f64::INFINITY
+            };
+            let dodge = (offset_ratio * cr).min(room);
+            let dc_guard = if dodge > 0.0 { 0.1 * cr } else { 0.0 };
             match cur_src_center {
                 Some(cur)
                     if {
@@ -305,6 +319,29 @@ mod tests {
         let dodge = 0.7 * CR;
         assert_eq!(p.src_center_hz, Some(target - dodge), "must re-snap off DC");
         assert_eq!(p.chan_shift_hz, Some(dodge));
+    }
+
+    /// A full-rate preset (channel == source span — ADS-B's `chan` at
+    /// 2 MS/s in and out) has no room to dodge: 0.7 × 2 MHz would park
+    /// the LO 1.4 MHz off a 2 MS/s stream, outside Nyquist, and the
+    /// decoder would see nothing (observed live 2026-10-10). The dodge
+    /// must clamp to the room available — here zero — and tune
+    /// on-centre.
+    #[test]
+    fn full_span_channel_clamps_dodge_to_zero() {
+        let rate = 2.0e6;
+        let p = plan_tune(1090.0e6, None, 0.7, false, None, rate, Some(rate));
+        assert_eq!(p.src_center_hz, Some(1090.0e6), "no room → on-centre");
+        assert_eq!(p.chan_shift_hz, Some(0.0));
+    }
+
+    /// Partial room: a 1.5 MHz channel in a 2 MS/s span leaves 250 kHz
+    /// of dodge, not 1.05 MHz.
+    #[test]
+    fn dodge_clamps_to_half_the_spare_span() {
+        let p = plan_tune(1090.0e6, None, 0.7, false, None, 2.0e6, Some(1.5e6));
+        assert_eq!(p.src_center_hz, Some(1090.0e6 - 250_000.0));
+        assert_eq!(p.chan_shift_hz, Some(250_000.0));
     }
 
     #[test]

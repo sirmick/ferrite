@@ -12,8 +12,13 @@
 # when ferrited / jq / the binary aren't around (e.g. CI).
 set -u
 
-CTL="${FERRITE_CTL:-/home/mick/ferrite/target/release/ferrite-ctl}"
-CONNECT="${FERRITE_CTL_CONNECT:-http://127.0.0.1:10001}"
+# Resolve the binary relative to this script (the repo may live
+# anywhere) and dial the daemon on run.sh's default port. Both were
+# hard-coded to another checkout + the old port, so every hook exited
+# quietly and nothing ever reached the AI panel.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CTL="${FERRITE_CTL:-$HERE/../target/release/ferrite-ctl}"
+CONNECT="${FERRITE_CTL_CONNECT:-http://127.0.0.1:${FERRITED_PORT:-12001}}"
 EVENT="${1:-}"
 
 command -v jq >/dev/null 2>&1 || exit 0

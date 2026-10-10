@@ -180,7 +180,7 @@ function snapshotMatchesPrev(snap: DiagSnapshot, prev: PrevSnap): boolean {
 export const flow = new FlowStore();
 
 // The node side now arrives via the store mirror (`flowdiag` kind, folded
-// by the server diag tick at 4 Hz and replicated over `/ws/state`) — no
+// by the server diag tick at 4 Hz and replicated over the event bus) — no
 // dedicated poll. An effect ingests each new snapshot app-wide: the feed
 // must run regardless of which UI tab is open because `HealthDots`
 // (always visible in the toolbar) depends on `flow.node.lastUpdate`. The

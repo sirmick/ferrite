@@ -57,10 +57,16 @@ export class FlowgraphRunner {
     this.worker.onmessage = (ev) => this.onResponse(ev.data);
   }
 
-  async load(doc: FlowgraphDoc, wsUrl: string): Promise<LoadResult> {
-    const resp = await this.send({ id: this.nextId++, kind: 'load', doc, wsUrl });
+  async load(doc: FlowgraphDoc, wsUrl: string, epoch = 0): Promise<LoadResult> {
+    const resp = await this.send({ id: this.nextId++, kind: 'load', doc, wsUrl, epoch });
     assertKind(resp, 'load');
     return resp.data;
+  }
+
+  /** Move the frame epoch gate on the loaded graph (no reload). */
+  async setEpoch(epoch: number): Promise<void> {
+    const resp = await this.send({ id: this.nextId++, kind: 'setEpoch', epoch });
+    assertKind(resp, 'setEpoch');
   }
 
   async start(): Promise<void> {

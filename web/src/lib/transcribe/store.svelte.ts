@@ -112,7 +112,7 @@ class TranscriptStore {
   //
   // All server-side transcription (sherpa, node-whisper) lands in the
   // unified `DecoderStore` under kind `transcribe`, mirrored to every
-  // browser over `/ws/state` (see `$lib/decoders/store`). This is the
+  // browser over the event bus (see `$lib/decoders/store`). This is the
   // single source of truth; `TranscriptView` drives `ingestRecords` from
   // that mirror. (Historically this store subscribed to a `ui:transcribe`
   // WS *stream*, but the decoder-store refactor turned that sink into an

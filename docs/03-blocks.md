@@ -203,7 +203,7 @@ Auto-inserted by `split_for_environment` (see
 
 (`Events` `ui:` sinks don't bridge over the sample WS — `env_split`
 terminates them in an `EventStore` that folds records into the
-server-side store, mirrored to the browser over `/ws/state`.)
+server-side store, mirrored to the browser over the event bus.)
 
 All Tx blocks call `BridgeSink::push(Frame::…)` with a zero-stamped
 envelope; the server's `BroadcastSink`

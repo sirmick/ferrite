@@ -45,6 +45,19 @@ console.log(`[ferrite-ai] FERRITE_CTL=${FERRITE_CTL}`);
 // they key off (both keyed by `session_id`) so the visible transcript
 // and the LLM context reset and resume together by construction.
 const STATE_DIR = process.env.FERRITE_AI_STATE_DIR ?? "/tmp/ferrite-ai-state";
+// Station notes the operator keeps on disk (antenna ports, local
+// interference, operating rules). The browser sends its own
+// `setup_description` per turn from localStorage; a headless driver
+// has none, so fall back to this file. Read per turn so edits land
+// without a sidecar restart.
+const SETUP_FILE = process.env.FERRITE_AI_SETUP_FILE ?? join(STATE_DIR, "setup.md");
+function defaultSetupDescription(): string | undefined {
+  try {
+    return existsSync(SETUP_FILE) ? readFileSync(SETUP_FILE, "utf-8") : undefined;
+  } catch {
+    return undefined;
+  }
+}
 try {
   mkdirSync(STATE_DIR, { recursive: true });
 } catch (e) {
@@ -280,16 +293,60 @@ function loadPrompt(name: string): string {
     .replaceAll("{{FT8_WORLDMAP}}", FT8_WORLDMAP);
 }
 
+// Per-mode model. Without an explicit `model` the Agent SDK falls back
+// to the bundled CLI's default, which silently lagged a generation
+// (sessions were running claude-opus-4-5 while Opus 5.5 was current).
+// Tool-driving modes get the current Opus; tools-free chat gets Haiku
+// (it's Q&A over a system prompt — latency matters more than depth).
+// Override globally with FERRITE_AI_MODEL, or per mode with
+// FERRITE_AI_MODEL_<MODE> (e.g. FERRITE_AI_MODEL_CHAT=claude-opus-5-5).
+const MODEL_BY_MODE: Record<Mode, string> = {
+  explorer: "claude-opus-5-5",
+  decoder: "claude-opus-5-5",
+  diagnose: "claude-opus-5-5",
+  chat: "claude-haiku-5-5",
+};
+function modelFor(mode: Mode, override?: string): string {
+  if (override && MODEL_OPTIONS.includes(override)) return override;
+  return (
+    process.env[`FERRITE_AI_MODEL_${mode.toUpperCase()}`] ??
+    process.env.FERRITE_AI_MODEL ??
+    MODEL_BY_MODE[mode]
+  );
+}
+/** Ids the UI picker may select. An unknown override is ignored (the
+ *  mode default applies) rather than forwarded — a typo'd id would
+ *  otherwise 400 every turn. */
+const MODEL_OPTIONS: string[] = [
+  "claude-opus-5-5",
+  "claude-sonnet-5-5",
+  "claude-haiku-5-5",
+];
+
 // "chat" mode is tools-free: the AI is Q&A only, no Bash, no Read.
-// Other modes get the full toolkit ferrite-ctl exploration needs —
-// plus every tool the local `ferrite` MCP server exposes (wildcarded
-// via `mcp__ferrite`, matched by the Agent SDK's prefix rule).
-// `Bash` stays available for the script wrappers
+// Other modes get the toolkit ferrite-ctl exploration needs — plus
+// every tool the local `ferrite` MCP server exposes (MCP tools are
+// not "built-in", so they're governed by `mcpServers`, which chat
+// mode omits). `Bash` stays available for the script wrappers
 // (`fft_to_png.py`, `fft_peaks.py`, `ft8_worldmap.py`) that aren't
 // surfaced through MCP yet, and as an exploratory escape hatch.
+//
+// Two distinct Agent SDK knobs, easy to conflate:
+//   `tools`        — the *base set* of built-in tools the model can
+//                    see at all (`[]` = none). This is the restriction.
+//   `allowedTools` — tools auto-approved without a permission prompt.
+//                    Under `bypassPermissions` it's moot, but keep it
+//                    explicit so a future switch to `default` mode
+//                    doesn't start prompting.
+// Passing only `allowedTools: []` (the pre-fix shape) restricted
+// nothing: chat mode had Bash/Write/Edit under bypassPermissions.
+function builtinToolsFor(mode: Mode): string[] {
+  if (mode === "chat") return [];
+  return ["Bash", "Read", "Glob", "Grep"];
+}
 function allowedToolsFor(mode: Mode): string[] {
   if (mode === "chat") return [];
-  return ["Bash", "Read", "Glob", "Grep", "mcp__ferrite"];
+  return [...builtinToolsFor(mode), "mcp__ferrite"];
 }
 
 // `ferrite-ctl mcp` config the Agent SDK spawns on session start. The
@@ -320,6 +377,9 @@ type IncomingMessage = {
    *  messages have no `type` and use `text`. */
   type?: "stop" | "request_snapshot" | "reset_session" | string;
   text?: string;
+  /** Per-turn model override (a Claude model id). Absent → the mode's
+   *  default from `MODEL_BY_MODE` / env. The UI picker sends this. */
+  model?: string;
   /** Session id the browser believes it is continuing — sent on
    *  `request_snapshot` (on WS connect) so the sidecar, which starts
    *  each connection with no session, knows which transcript to
@@ -554,6 +614,11 @@ wss.on("connection", (ws) => {
       type: "ferrite_ai_hello",
       modes: MODES,
       mode: currentMode,
+      // Per-mode default model (after env overrides) + the ids the UI
+      // picker offers. Keep the list short and current-generation; the
+      // sidecar runs on the operator's Claude subscription.
+      models: Object.fromEntries(MODES.map((m) => [m, modelFor(m)])),
+      model_options: MODEL_OPTIONS,
     }),
   );
 
@@ -662,11 +727,13 @@ wss.on("connection", (ws) => {
         parsed.current_source,
         parsed.preset_notes,
         parsed.block_notes,
-        parsed.setup_description,
+        parsed.setup_description?.trim() || defaultSetupDescription(),
         parsed.local_time_human,
         parsed.local_time_iso,
         parsed.time_zone,
       ),
+      model: modelFor(mode, parsed.model),
+      tools: builtinToolsFor(mode),
       allowedTools: allowedToolsFor(mode),
       // Local `ferrite` MCP server. Spawned per session by the SDK;
       // talks to the same running ferrited the human CLI does (env
@@ -679,6 +746,17 @@ wss.on("connection", (ws) => {
       // confirmation prompts entirely. The activity-log middleware on
       // ferrited still surfaces every API call to the UI panel.
       permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      // SDK isolation. The bundled CLI otherwise behaves like the
+      // operator's interactive `claude`: it loads ~/.claude settings,
+      // project .mcp.json, plugins — and (CLI ≥ 2.1) the account's
+      // claude.ai cloud connectors. That handed a "tools-free" chat
+      // session Google Drive write/share/trash tools under
+      // bypassPermissions. The radio sidecar gets exactly what this
+      // file declares and nothing else.
+      settingSources: [],
+      strictMcpConfig: true,
+      settings: { disableClaudeAiConnectors: true },
       // Stream every token + tool event so the UI can show live
       // progress instead of a long blank pause.
       includePartialMessages: true,

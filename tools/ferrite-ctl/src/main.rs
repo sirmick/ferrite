@@ -22,7 +22,7 @@ use serde_json::{Map, Value};
 mod mcp;
 
 use mcp::{
-    BandAtArgs, BlockParamsArgs, CaptureStatusArgs, ChatPostArgs, FerriteServer, Http,
+    AwaitArgs, BandAtArgs, BlockParamsArgs, CaptureStatusArgs, ChatPostArgs, FerriteServer, Http,
     LoadPresetArgs, PresetDetailArgs, RecentDecodesArgs, ReplayCaptureArgs, SelectDeviceArgs,
     SetViewStateArgs, SignalsArgs, StartCaptureArgs, StartCaptureAudioArgs, TranscribeArgs,
     TuneArgs, ViewSnapshotArgs,
@@ -189,6 +189,31 @@ enum Cmd {
     /// until the async job finishes, then prints the job record.
     #[command(subcommand)]
     Capture(CaptureCmd),
+    /// Wait for the next record(s) of a store kind on the event plane
+    /// (MQTT subscription — no polling). Prints the records as JSON when
+    /// `--max` arrived or `--timeout` elapsed; with `--follow`, streams
+    /// one record per line until SIGINT.
+    Await {
+        /// Store kind or log subtree: `adsb`, `pager`, `transcribe`,
+        /// `activity`, `graph`, `log/decoder`, `log/decoder/pocsag`, …
+        kind: String,
+        /// Stop after this many records (ignored with --follow).
+        #[arg(long, default_value_t = 1)]
+        max: usize,
+        /// Give up after this many seconds (ignored with --follow). Not
+        /// `--timeout`: that's the global per-request HTTP timeout.
+        #[arg(long = "wait", default_value_t = 30.0)]
+        wait_s: f64,
+        /// Skip records with seq <= this.
+        #[arg(long)]
+        since_seq: Option<u64>,
+        /// Also print the retained (current) record first.
+        #[arg(long)]
+        retained: bool,
+        /// Stream records until SIGINT (one JSON line each).
+        #[arg(long, short = 'f')]
+        follow: bool,
+    },
     /// Tail the decoder log buffer until SIGINT.
     Tail {
         /// Tracing-target prefix to filter on (e.g. `decoder::pocsag`,
@@ -262,8 +287,8 @@ enum CaptureCmd {
     /// post-channelizer cf32 stream). `--wideband` = full-rate
     /// `Source → FileIqSink` (clobbers the live preset; needs a freq).
     Iq {
-        /// Centre frequency (Hz, SI shorthand). Optional live; required
-        /// with `--wideband`.
+        /// Centre frequency (Hz, SI shorthand). Optional: omit to
+        /// record the session as-is, give one to retune first.
         freq: Option<String>,
         /// Capture duration in seconds.
         #[arg(long, default_value_t = 5.0)]
@@ -283,17 +308,21 @@ enum CaptureCmd {
         /// `cf32` or `wav-s16`. `--wideband` only.
         #[arg(long, default_value = "cf32")]
         format: String,
-        /// Opt into the preset-swap wideband capture.
+        /// Tee the raw full-span IQ off the SDR (block `src`) instead
+        /// of the channelized slice. Live, no preset swap; 8 B × rate
+        /// per second of disk.
         #[arg(long)]
         wideband: bool,
         /// Proceed even if it would tear down an active transcription.
         #[arg(long)]
         force: bool,
     },
-    /// Capture demodulated audio to disk (preset-swap; disruptive).
+    /// Capture demodulated audio to a WAV — a live tee of what the
+    /// operator is hearing (no preset swap). Omit FREQ to record the
+    /// current session as-is; give one to retune first.
     Audio {
-        /// Centre frequency (Hz, SI shorthand).
-        freq: String,
+        /// Centre frequency (Hz, SI shorthand). Optional.
+        freq: Option<String>,
         /// Capture duration in seconds.
         #[arg(long, default_value_t = 10.0)]
         duration: f64,
@@ -606,6 +635,29 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             emit(&v, json)
         }
         Cmd::Capture(c) => capture(c, server, json).await,
+        Cmd::Await {
+            kind,
+            max,
+            wait_s,
+            since_seq,
+            retained,
+            follow,
+        } => {
+            if follow {
+                return follow_records(&kind, since_seq, retained, server, json).await;
+            }
+            let v = server
+                .await_op(AwaitArgs {
+                    kind,
+                    max: Some(max),
+                    timeout_s: Some(wait_s),
+                    since_seq,
+                    include_retained: Some(retained),
+                })
+                .await
+                .map_err(op_err)?;
+            emit(&v, json)
+        }
         Cmd::Tail {
             category,
             interval,
@@ -723,7 +775,7 @@ async fn capture(cmd: CaptureCmd, server: &FerriteServer, json: bool) -> Result<
             force,
         } => {
             let args = StartCaptureAudioArgs {
-                freq_hz: parse_si(&freq)?,
+                freq_hz: parse_si_opt(freq.as_deref())?,
                 duration_s: Some(duration),
                 sample_rate_hz: Some(parse_si(&rate)?),
                 bandwidth_hz: parse_si_opt(bw.as_deref())?,
@@ -780,6 +832,36 @@ async fn capture(cmd: CaptureCmd, server: &FerriteServer, json: bool) -> Result<
         if started.elapsed() > deadline {
             return emit(&st, json);
         }
+    }
+}
+
+/// `await --follow`: one subscription, one JSON line per record, until
+/// SIGINT. The event-plane form of `tail` for structured kinds.
+async fn follow_records(
+    kind: &str,
+    since_seq: Option<u64>,
+    retained: bool,
+    server: &FerriteServer,
+    json: bool,
+) -> Result<()> {
+    let since = since_seq.unwrap_or(0);
+    let stream = server
+        .http()
+        .subscribe_records(kind, Duration::from_secs(u64::MAX / 4), |rec| {
+            if (rec.retain && !retained) || rec.seq.is_some_and(|s| s <= since) {
+                return true;
+            }
+            let line = if json {
+                serde_json::json!({ "topic": rec.topic, "record": rec.value }).to_string()
+            } else {
+                serde_json::to_string_pretty(&rec.value).unwrap_or_default()
+            };
+            println!("{line}");
+            true
+        });
+    tokio::select! {
+        r = stream => { r.map_err(op_err)?; Ok(()) }
+        _ = tokio::signal::ctrl_c() => Ok(()),
     }
 }
 

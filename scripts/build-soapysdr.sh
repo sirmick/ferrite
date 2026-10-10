@@ -62,6 +62,10 @@ clone_or_update https://github.com/pothosware/SoapyAirspyHF.git   "$SRC_DIR/Soap
 clone_or_update https://github.com/pothosware/SoapyBladeRF.git    "$SRC_DIR/SoapyBladeRF"
 clone_or_update https://github.com/pothosware/SoapyPlutoSDR.git   "$SRC_DIR/SoapyPlutoSDR"
 clone_or_update https://github.com/pothosware/SoapyUHD.git        "$SRC_DIR/SoapyUHD"
+# SoapyRemote: client module so ferrited can open a radio hosted by a
+# SoapySDRServer on another box (`driver=remote,remote=<host>`). The
+# server side is provisioned by scripts/soapy-remote-host.sh.
+clone_or_update https://github.com/pothosware/SoapyRemote.git     "$SRC_DIR/SoapyRemote"
 # LimeSDR (SoapyLMS7) lives inside the LimeSuite repo, not as a
 # standalone Soapy module. Building just that subcomponent would mean
 # a partial-checkout dance against the full LimeSuite tree — skip for
@@ -70,6 +74,11 @@ clone_or_update https://github.com/pothosware/SoapyUHD.git        "$SRC_DIR/Soap
 
 echo ">>> Building SoapySDR"
 build_cmake "$SRC_DIR/SoapySDR"
+
+# No userland lib needed — pure network client (avahi discovery is
+# optional; ferrite addresses the server by host anyway).
+echo ">>> Building SoapyRemote"
+build_cmake "$SRC_DIR/SoapyRemote"
 
 # Each driver requires its userland lib system-wide. If a lib is missing we
 # skip that driver with a warning rather than aborting the whole build, so

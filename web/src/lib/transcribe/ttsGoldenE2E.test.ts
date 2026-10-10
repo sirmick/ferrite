@@ -1,22 +1,23 @@
 // TTS round-trip e2e — text → espeak-ng speech → our pipeline → text.
 //
 // Two layers, both gated `skipIf` (green-by-skip until provisioned —
-// same stance as whisperGoldenE2E and the fldigi/emsdk gates; CI does
-// `apt-get install -y espeak-ng` + `pnpm wasm:build:whisper`):
+// same stance as sherpaGoldenE2E and the fldigi/emsdk gates; CI does
+// `apt-get install -y espeak-ng` + `pnpm wasm:build:sherpa`):
 //
-//   1. TTS → whisper (needs espeak-ng + the built whisper wasm/model):
+//   1. TTS → sherpa (needs espeak-ng + the built sherpa wasm/model):
 //      synthesised speech actually transcribes, incl. a long no-pause
 //      utterance (the continuous-speech case the segmentation/queue work
-//      targets). Runs whisper in a subprocess (`ttsWhisperRunner.mjs`)
-//      since the Emscripten module's async fetch-init doesn't work under
-//      vitest/jsdom — the runner does its own minimal resample.
+//      targets). Runs sherpa in a subprocess (`ttsSherpaRunner.mjs`)
+//      since the Emscripten module's pthread workers need a file:// URL
+//      vitest's module runner can't give them — the runner does its own
+//      minimal resample.
 //   2. TTS → shared Rust core (needs only espeak-ng): a long
 //      *continuous* utterance is chopped into bounded segments, never one
 //      unbounded blob. Drives the WASM `WasmTranscriber` (the SAME core
 //      the worker and the node-side block run) directly — resample + VAD
 //      + queue — so this is the regression gate for the maxSegmentMs cut
 //      on the unified path. The wasm core inits synchronously from bytes
-//      (`initSync`), which works in node (unlike the whisper module).
+//      (`initSync`), which works in node.
 //
 // The old in-process layer-2 drove the TypeScript `EnergyVadSegmenter` +
 // `LinearResampler`; those are gone (one Rust impl now), so it drives the
@@ -31,10 +32,11 @@ import { describe, expect, it } from 'vitest';
 
 import { initSync, WasmTranscriber } from '../wasm/blocks/ferrite_blocks';
 
-const WHISPER_MJS = resolve(__dirname, '../wasm/whisper/whisper.mjs');
-const WHISPER_WASM = resolve(__dirname, '../wasm/whisper/whisper.wasm');
-const MODEL = resolve(__dirname, '../../../static/models/ggml-tiny.en-q5_1.bin');
-const RUNNER = resolve(__dirname, '__fixtures__/ttsWhisperRunner.mjs');
+const SHERPA_JS = resolve(__dirname, '../wasm/sherpa/sherpa-onnx-wasm-main-asr.js');
+const SHERPA_WASM = resolve(__dirname, '../wasm/sherpa/sherpa-onnx-wasm-main-asr.wasm');
+const SHERPA_DATA = resolve(__dirname, '../wasm/sherpa/sherpa-onnx-wasm-main-asr.data');
+const SHERPA_API = resolve(__dirname, '../wasm/sherpa/sherpa-onnx-asr.js');
+const RUNNER = resolve(__dirname, '__fixtures__/ttsSherpaRunner.mjs');
 const BLOCKS_WASM = resolve(__dirname, '../wasm/blocks/ferrite_blocks_bg.wasm');
 
 /** The VAD hard segment cap (ms) — mirrors `VadConfig::default`'s
@@ -54,7 +56,7 @@ function hasEspeak(): boolean {
 }
 
 const TTS = hasEspeak();
-const WHISPER_BUILT = existsSync(WHISPER_WASM) && existsSync(MODEL);
+const SHERPA_BUILT = existsSync(SHERPA_WASM) && existsSync(SHERPA_DATA) && existsSync(SHERPA_API);
 const BLOCKS_BUILT = existsSync(BLOCKS_WASM);
 
 /** espeak-ng → WAV bytes → decoded mono f32 + its sample rate. */
@@ -103,27 +105,32 @@ function speak(text: string): { pcm: Float32Array; rate: number } {
 }
 
 /** How many of `words` appear in `haystack` (case-insensitive). espeak +
- *  tiny.en is intelligible, not verbatim — assert a majority. */
+ *  the 20M zipformer is intelligible, not verbatim — assert a majority. */
 function hits(haystack: string, words: string[]): number {
   const h = haystack.toLowerCase();
   return words.filter((w) => h.includes(w)).length;
 }
 
-describe.skipIf(!(TTS && WHISPER_BUILT))('TTS → whisper round-trip', () => {
-  function transcribe(text: string, prompt = ''): string {
-    const args = [RUNNER, WHISPER_MJS, MODEL, text];
-    if (prompt) args.push(prompt);
-    const stdout = execFileSync(process.execPath, args, {
+describe.skipIf(!(TTS && SHERPA_BUILT))('TTS → sherpa round-trip', () => {
+  function transcribe(text: string): string {
+    const stdout = execFileSync(process.execPath, [RUNNER, SHERPA_JS, SHERPA_API, text], {
       encoding: 'utf8',
       timeout: 180_000,
       maxBuffer: 8 * 1024 * 1024,
     });
-    const parsed = JSON.parse(stdout) as { segments: { text: string }[] };
-    return parsed.segments.map((s) => s.text).join(' ');
+    return (JSON.parse(stdout) as { text: string }).text;
   }
 
   it('round-trips a short spoken phrase', () => {
-    const out = transcribe('the radio operator reported a clear signal from the station');
+    // The streaming 20M model needs ~1–2 s of *speech* to lock on (a
+    // silent pre-roll doesn't help — the first clause of a cold start is
+    // garbled, same as the JFK golden's clipped "fellow"). Operators
+    // repeat themselves on air anyway, so say it twice and assert on the
+    // content words; the second pass is the one that lands.
+    const out = transcribe(
+      'the radio operator reported a clear signal from the station. i repeat. ' +
+        'the radio operator reported a clear signal from the station',
+    );
     expect(
       hits(out, ['radio', 'operator', 'reported', 'clear', 'signal', 'station']),
     ).toBeGreaterThanOrEqual(4);

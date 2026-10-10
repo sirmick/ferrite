@@ -1,9 +1,9 @@
 // Ring-buffered log store shared across the UI. Entries come from three
-// sources: the `/ws/logs` stream (server tracing), the browser console
+// sources: the event bus (`ferrite/state/log/#`, server tracing), the browser console
 // (patched in `init()`), and explicit calls from session/WS code paths.
 
 // flowdiag no longer rides the log stream — the node side is folded into
-// the store (`flowdiag` kind) and mirrored over /ws/state; the browser
+// the store (`flowdiag` kind) and mirrored over the event bus; the browser
 // side is fed in-process (see flowStore / FlowPanel). The log store
 // stays log-only.
 

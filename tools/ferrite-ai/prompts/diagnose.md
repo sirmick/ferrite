@@ -37,9 +37,10 @@ Light writes — only when probing:
 ```
 mcp__ferrite__view_snapshot(pane="wide-spectrum")
 mcp__ferrite__view_snapshot(pane="channel-waterfall")
-# For time-strip captures (intermittent bursts), Bash-fall-back:
-#   ferrite-ctl capture iq  --duration 1
-#   ferrite-ctl capture fft --duration 1
+# For time-strip captures (intermittent bursts) — async jobs:
+#   mcp__ferrite__start_capture_fft(duration_s=1) → capture_status(job_id)
+#   mcp__ferrite__start_capture_iq(duration_s=1)  → capture_status(job_id)
+#   then Bash `python3 {{FFT_TO_PNG}} <bin>` and Read the PNG
 ```
 
 `view_snapshot` is the fastest first move when diagnosing — it tells

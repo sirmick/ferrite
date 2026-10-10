@@ -41,6 +41,7 @@ mod decoder_store;
 mod device;
 mod device_cache;
 mod error;
+mod event_plane;
 mod frame_bus;
 mod log_stream;
 mod preset_pipeline;
@@ -56,6 +57,21 @@ struct Args {
     /// Address to bind the HTTP/WS server to.
     #[arg(long, default_value = "0.0.0.0:8088")]
     bind: String,
+
+    /// MQTT (TCP, v3.1.1) port of the embedded event-plane broker.
+    /// Default: the HTTP port + 1. `0` picks a free loopback port.
+    #[arg(long, env = "FERRITE_MQTT_PORT")]
+    mqtt_port: Option<u16>,
+
+    /// MQTT-over-WebSocket port of the embedded broker (what `/mqtt`
+    /// reverse-proxies to). Default: the HTTP port + 2. `0` picks a
+    /// free loopback port.
+    #[arg(long, env = "FERRITE_MQTT_WS_PORT")]
+    mqtt_ws_port: Option<u16>,
+
+    /// Run without the embedded MQTT broker (no `/mqtt`, no topics).
+    #[arg(long, env = "FERRITE_NO_MQTT")]
+    no_mqtt: bool,
 
     /// Flowgraph preset JSON. Required for the server/headless modes;
     /// not used by `--list-devices` or `--probe-device`. The `src` block
@@ -268,7 +284,7 @@ async fn main() -> Result<()> {
 
     // Hook libSoapySDR's logger into `tracing` so vendored-driver
     // warnings (`Not updating IFGR gain because AGC is enabled`,
-    // `sdrplay_api_OutOfRange`, …) flow into `/ws/logs` + the history
+    // `sdrplay_api_OutOfRange`, …) flow into the log topics + the history
     // ring instead of bypassing the API on stderr. Has to be after
     // tracing init so the callback's first events have a subscriber
     // to attach to.
@@ -372,6 +388,35 @@ async fn main() -> Result<()> {
         "device cache warm-up complete"
     );
 
+    // Seed the coherence records before the first client connects: a
+    // browser that subscribes must find a retained `graph` record even
+    // when nothing has mutated yet (`start()` re-publishes anyway).
+    state.publish_graph().await;
+    state.publish_status("stopped");
+
+    // Event plane: the embedded MQTT broker fans the store's record log
+    // out to the browser (via `/mqtt`), ferrite-ctl and any agent. Ports
+    // default to HTTP+1 / HTTP+2; a `--bind` on port 0 (test harnesses)
+    // gets free loopback ports instead so nothing collides.
+    if !args.no_mqtt {
+        let bind: SocketAddr = args.bind.parse().context("parse --bind")?;
+        let pick = |explicit: Option<u16>, offset: u16| -> Result<SocketAddr> {
+            let port = match explicit {
+                Some(0) => event_plane::free_loopback_port()?,
+                Some(p) => p,
+                None if bind.port() == 0 => event_plane::free_loopback_port()?,
+                None => bind.port() + offset,
+            };
+            Ok(SocketAddr::new(bind.ip(), port))
+        };
+        let tcp = pick(args.mqtt_port, 1)?;
+        let ws = pick(args.mqtt_ws_port, 2)?;
+        let plane =
+            event_plane::EventPlane::start(state.decoder_store(), state.logs().cloned(), tcp, ws)?;
+        println!("ferrited mqtt tcp={tcp} ws={ws}");
+        state = state.with_event_plane(plane);
+    }
+
     if args.auto_start {
         state.start().await.context("auto-start pipeline")?;
         tracing::info!("pipeline auto-started");
@@ -441,16 +486,15 @@ async fn main() -> Result<()> {
             // never lands). Lift the cap on just this route.
             post(routes::save_screenshot).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
         )
-        .route("/ws/logs", get(routes::ws_logs))
         .route("/ws/preset", get(routes::ws_preset))
-        .route("/ws/state", get(routes::ws_state))
+        .route("/mqtt", get(routes::ws_mqtt))
         .route("/ws/chat", get(routes::ws_chat))
         .route("/api/ai/chat-inject", post(routes::post_chat_inject))
         .route("/api/ui-views/:pane", get(routes::get_ui_view))
         .route("/api/view", get(routes::get_view_state))
         .route("/api/ui-view/set", post(routes::set_view_state))
         .route("/ws/ui-views", get(routes::ws_ui_views))
-        .with_state(state);
+        .with_state(state.clone());
 
     if static_root.is_dir() {
         let index = static_root.join("index.html");
@@ -465,7 +509,10 @@ async fn main() -> Result<()> {
     }
 
     let app = app
-        .layer(axum::middleware::from_fn(ai_activity_layer))
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            ai_activity_layer,
+        ))
         .layer(header_layer("cross-origin-opener-policy", "same-origin"))
         .layer(header_layer("cross-origin-embedder-policy", "require-corp"))
         .layer(TraceLayer::new_for_http());
@@ -482,17 +529,19 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Surface CLI / AI activity onto the live log stream. ferrite-ctl
-/// (and an Agent SDK driver) annotate every API call with
-/// `X-Ferrite-Command` (the subcommand kebab-id, e.g. `capture-fft`)
-/// and optional `X-Ferrite-Note` (free-form why-text). When either is
-/// present and the request is mutating, we emit a tracing event under
-/// target `ai::activity` so the existing LogBroadcast pumps it onto
-/// `/ws/logs` for the UI's command-transcript panel.
+/// Surface CLI / AI activity as `activity` records. ferrite-ctl (and an
+/// Agent SDK driver) annotate every API call with `X-Ferrite-Command`
+/// (the subcommand kebab-id, e.g. `capture-fft`) and optional
+/// `X-Ferrite-Note` (free-form why-text). When either is present and
+/// the request is mutating, we fold one record into the store's
+/// `activity` kind (→ `ferrite/state/activity`, the AI panel's
+/// transcript, `/api/state`) and echo it on the tracing log so the
+/// daemon's stdout stays self-describing.
 ///
 /// We gate on method != GET so polling commands (`status`, `tail`,
 /// `device list`) don't drown the panel — only writes show up.
 async fn ai_activity_layer(
+    axum::extract::State(state): axum::extract::State<app_state::AppState>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -530,14 +579,26 @@ async fn ai_activity_layer(
             (_, Some(n)) if !n.is_empty() => n.to_string(),
             _ => format!("{method} {path}"),
         };
+        let status = response.status().as_u16();
         tracing::info!(
             target: "ai::activity",
             method = %method,
             path = %path,
-            status = %response.status().as_u16(),
+            status = %status,
             command = command.as_deref().unwrap_or(""),
             note = note.as_deref().unwrap_or(""),
             "{summary}",
+        );
+        state.decoder_store().apply(
+            "activity",
+            serde_json::json!({
+                "summary": summary,
+                "method": method.as_str(),
+                "path": path,
+                "status": status,
+                "command": command.unwrap_or_default(),
+                "note": note.unwrap_or_default(),
+            }),
         );
     }
 

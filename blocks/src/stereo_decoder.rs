@@ -395,7 +395,19 @@ impl Block for StereoDecoder {
             return Ok(Work::new());
         };
 
-        let n = src.len();
+        // Consume only what BOTH audio outputs can take this tick — the
+        // PLL/filter state advances per consumed sample, so running the
+        // whole input and then truncating the copy would drop audio
+        // (and desync L/R) whenever the audio ring is short.
+        let cap = io
+            .outputs
+            .iter()
+            .filter(|p| p.name == "left" || p.name == "right")
+            .map(OutputPort::len)
+            .min()
+            .unwrap_or(src.len());
+        let n = src.len().min(cap);
+        let src = &src[..n];
 
         // Take temporary Vec output buffers — we resolve actual output
         // ports at the end. Keeps the math readable at the cost of one
@@ -588,6 +600,86 @@ mod tests {
             right: out_r,
             events: out_ev[..ev_len].to_vec(),
         }
+    }
+
+    /// Like `run` but with audio outputs of `cap` slots — returns the
+    /// `Work` plus the written prefixes.
+    fn run_capped(
+        dec: &mut StereoDecoder,
+        input: &[f32],
+        cap: usize,
+    ) -> (Vec<f32>, Vec<f32>, usize) {
+        let mut out_l = vec![0.0_f32; cap];
+        let mut out_r = vec![0.0_f32; cap];
+        let mut out_ev = vec![0u8; 4096];
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::RealF32(input),
+        }];
+        let mut outputs = [
+            OutputPort {
+                name: "left",
+                meta: PortMeta::default(),
+                buf: OutBuf::RealF32(&mut out_l),
+            },
+            OutputPort {
+                name: "right",
+                meta: PortMeta::default(),
+                buf: OutBuf::RealF32(&mut out_r),
+            },
+            OutputPort {
+                name: "events",
+                meta: PortMeta::default(),
+                buf: OutBuf::Events(&mut out_ev),
+            },
+        ];
+        let w = dec
+            .process(&mut BlockIo {
+                inputs: &mut inputs,
+                outputs: &mut outputs,
+            })
+            .unwrap();
+        assert_eq!(w.produced[0], w.consumed[0]);
+        assert_eq!(w.produced[1], w.consumed[0]);
+        (
+            out_l[..w.produced[0]].to_vec(),
+            out_r[..w.produced[1]].to_vec(),
+            w.consumed[0],
+        )
+    }
+
+    /// Backpressure: when the audio ring is short the decoder must
+    /// consume only what it can emit, and the re-fed tail must produce
+    /// bit-identical audio to an unconstrained run. Pre-fix it ran the
+    /// PLL over the whole input and truncated the copy — a dropout every
+    /// time the browser's audio ring lagged.
+    #[test]
+    fn short_audio_ring_is_lossless_and_identical_to_unconstrained() {
+        let fs = 240_000.0;
+        let n = 8_192;
+        let mpx = make_mpx(fs, n, 1_000.0, 2_000.0, 0.1);
+        let params = StereoDecoderParams {
+            sample_rate_hz: fs,
+            ..Default::default()
+        };
+
+        let mut a = StereoDecoder::new(params).unwrap();
+        let ref_out = run(&mut a, &mpx);
+
+        let mut b = StereoDecoder::new(params).unwrap();
+        let cap = 1_000;
+        let (mut l, mut r, mut pos) = (Vec::new(), Vec::new(), 0);
+        while pos < n {
+            let (cl, cr, took) = run_capped(&mut b, &mpx[pos..], cap);
+            assert_eq!(took, cap.min(n - pos), "consume exactly what fits");
+            l.extend(cl);
+            r.extend(cr);
+            pos += took;
+        }
+        assert_eq!(l.len(), n);
+        assert_eq!(l, ref_out.left, "left differs from the unconstrained run");
+        assert_eq!(r, ref_out.right, "right differs from the unconstrained run");
     }
 
     /// Synthesise a valid broadcast MPX: `(L+R) + (L−R)·sin(2π·38k·t) +

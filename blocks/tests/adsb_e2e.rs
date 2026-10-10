@@ -40,7 +40,9 @@ fn read_modes1_iq() -> Vec<Complex<f32>> {
         .read_to_end(&mut bytes)
         .unwrap();
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| {
             Complex::new(
                 (f32::from(c[0]) - 128.0) / 128.0,

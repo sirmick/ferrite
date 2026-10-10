@@ -2,7 +2,7 @@
 //
 // `PacketDemod`→aprs emits per-frame JSON (aprs.rs), wired to `ui:aprs` →
 // the server `DecoderStore` (kind `aprs`, Upsert-by-call which also keeps
-// a capped frame log in `recent`), mirrored over `/ws/state`. This
+// a capped frame log in `recent`), mirrored over the event bus. This
 // keeps the original surface:
 //   - `stations`    — latest frame per callsign, with last-known position
 //                     + a heard-frame count (table + selection)

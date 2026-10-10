@@ -55,6 +55,12 @@ pub struct RealF32Resamp {
     /// Scratch for one `execute` call. Sized to
     /// `MsResamp::max_output_for(input_len)`.
     scratch: Vec<f32>,
+    /// Output already resampled but not yet handed to `dst` — the
+    /// surplus of an `execute` whose true output exceeded the window.
+    /// Drained first on every call; no new input is consumed while it
+    /// is non-empty, so chunking never reorders or drops samples.
+    pending: Vec<f32>,
+    pending_pos: usize,
 }
 
 impl RealF32Resamp {
@@ -76,7 +82,25 @@ impl RealF32Resamp {
             inner: None,
             input_rate_hz: 0.0,
             scratch: Vec::new(),
+            pending: Vec::new(),
+            pending_pos: 0,
         })
+    }
+
+    /// Move as much pending output as fits into `dst[..]`; returns the
+    /// count written. Clears the FIFO once fully drained.
+    fn flush_pending(&mut self, dst: &mut [f32]) -> usize {
+        let avail = self.pending.len() - self.pending_pos;
+        let k = avail.min(dst.len());
+        if k > 0 {
+            dst[..k].copy_from_slice(&self.pending[self.pending_pos..self.pending_pos + k]);
+            self.pending_pos += k;
+        }
+        if self.pending_pos == self.pending.len() {
+            self.pending.clear();
+            self.pending_pos = 0;
+        }
+        k
     }
 
     fn rebuild_for_input_rate(&mut self, input_rate_hz: f64) -> Result<()> {
@@ -90,6 +114,8 @@ impl RealF32Resamp {
         self.inner = Some(inner);
         self.input_rate_hz = input_rate_hz;
         self.scratch.clear();
+        self.pending.clear();
+        self.pending_pos = 0;
         Ok(())
     }
 }
@@ -198,9 +224,9 @@ impl Block for RealF32Resamp {
     }
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
-        let Some(inner) = self.inner.as_mut() else {
+        if self.inner.is_none() {
             return Ok(Work::new());
-        };
+        }
         let Some(src) = io
             .inputs
             .iter()
@@ -217,47 +243,60 @@ impl Block for RealF32Resamp {
         else {
             return Ok(Work::new());
         };
-        if src.is_empty() || dst.is_empty() {
+        if dst.is_empty() {
             return Ok(Work::new());
         }
-        // Bound the input we feed liquid this call so the max output
-        // provably fits `dst.len()`. `max_output_for(nx)` is
-        // `ceil(1 + 2·r·nx) + 8`, and `ceil` can add up to +1 over
-        // `1 + 2·r·nx`, so the true worst case is `2·r·nx + 10` — hence
-        // `nx ≤ (dst.len() - 10) / (2·r)`. (The earlier `- 9` dropped
-        // the ceil's carry, letting `max_out` reach `dst.len() + 1`;
-        // `execute` then produced more than `dst` could hold, the tail
-        // was silently discarded, yet the input was reported consumed —
-        // a timeline slip.) When the ratio is tiny (big downsample) this
-        // leaves `nx` huge; `min(src.len())` reins it in.
+
+        // 1. Drain output left over from an earlier call before touching
+        //    new input. (`src`/`dst` borrow `io`, not `self`, so the
+        //    `&mut self` flush is fine as long as `inner` isn't borrowed
+        //    yet.)
+        let mut written = self.flush_pending(dst);
+        if !self.pending.is_empty() || src.is_empty() || written == dst.len() {
+            // Still back-logged (or nothing to do): report the flush
+            // only. New input waits until the FIFO is empty so the
+            // output stays in order.
+            let mut w = Work::new();
+            w.produced[0] = written;
+            return Ok(w);
+        }
+        let Some(inner) = self.inner.as_mut() else {
+            return Ok(Work::new());
+        };
         let rate = inner.rate() as f64;
+
+        // 2. Size the input chunk so the max output *usually* fits the
+        //    remaining window. `max_output_for(nx)` is `ceil(1 + 2·r·nx)
+        //    + 8`; `ceil` can add +1, so the worst case is `2·r·nx + 10`
+        //    — hence `nx ≤ (room - 10) / (2·r)`. When that leaves no
+        //    room at all we still take ONE input sample: refusing to
+        //    consume anything deadlocks on a wire ring whose contiguous
+        //    tail is < 10 slots (the scheduler's `write_peek` stops at
+        //    the storage boundary; the head never advances, so the tail
+        //    never wraps — observed as audio stopping after ~1014
+        //    samples at 240 k→48 k). Whatever doesn't fit goes to
+        //    `pending` and is emitted first next call — never dropped,
+        //    never consumed-but-unreported, so there is no timeline slip
+        //    either way.
+        let room = dst.len() - written;
         let nx_cap = if rate > 0.0 {
-            ((dst.len().saturating_sub(10)) as f64 / (2.0 * rate)).floor() as usize
+            ((room.saturating_sub(10)) as f64 / (2.0 * rate)).floor() as usize
         } else {
             0
         };
-        let nx = src.len().min(nx_cap);
-        if nx == 0 {
-            // `dst` can't hold even one input sample's worth of output
-            // this call. Consume nothing and wait for a drained `dst` on
-            // the next tick — forcing `nx = 1` here would overflow `dst`
-            // and drop the surplus while still consuming the input.
-            return Ok(Work::new());
-        }
+        let nx = src.len().min(nx_cap.max(1));
         let max_out = inner.max_output_for(nx);
         if self.scratch.len() < max_out {
             self.scratch.resize(max_out, 0.0);
         }
         let produced = inner.execute(&src[..nx], &mut self.scratch[..max_out]);
-        // `nx_cap` guarantees `max_out ≤ dst.len()`, so `produced` fits;
-        // the `min` is a defensive no-op that keeps the copy in bounds.
-        debug_assert!(
-            produced <= dst.len(),
-            "resamp produced {produced} > dst {}",
-            dst.len()
-        );
-        let written = produced.min(dst.len());
-        dst[..written].copy_from_slice(&self.scratch[..written]);
+        let fit = produced.min(room);
+        dst[written..written + fit].copy_from_slice(&self.scratch[..fit]);
+        written += fit;
+        if produced > fit {
+            self.pending.extend_from_slice(&self.scratch[fit..produced]);
+            self.pending_pos = 0;
+        }
 
         let mut w = Work::new();
         w.consumed[0] = nx;
@@ -475,6 +514,38 @@ mod tests {
         }
     }
 
+    /// The live-audio deadlock: 240 k→48 k (wbfm demod → AudioSink) on a
+    /// 1024-slot wire ring. The scheduler's `write_peek` stops at the
+    /// storage boundary, so once the write head sits within 10 slots of
+    /// it the block sees `dst.len() < 10` every call. The old guard then
+    /// consumed nothing forever (observed: audio stops after 1014
+    /// samples). A 10-slot window must still advance — and the output
+    /// must equal the unconstrained run sample-for-sample.
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn ten_slot_dst_tail_still_advances_240k_to_48k() {
+        let (rin, rout) = (240_000.0_f64, 48_000.0_f64);
+        let n_in = 24_000; // 100 ms
+        let tone: Vec<f32> = (0..n_in)
+            .map(|i| (core::f32::consts::TAU * 1_000.0 * i as f32 / rin as f32).sin() * 0.5)
+            .collect();
+        let (c_tail, out_tail) = pump(rin, rout, 10, &tone);
+        let (c_ref, out_ref) = pump(rin, rout, 8192, &tone);
+        assert_eq!(
+            c_tail, n_in,
+            "10-slot dst deadlocked (consumed {c_tail}/{n_in})"
+        );
+        assert_eq!(c_ref, n_in);
+        assert_eq!(
+            out_tail.len(),
+            out_ref.len(),
+            "timeline slip under 10-slot windows"
+        );
+        for (i, (a, b)) in out_tail.iter().zip(out_ref.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "sample {i} differs: {a} vs {b}");
+        }
+    }
+
     #[test]
     #[allow(clippy::cast_precision_loss)]
     fn out_of_band_tone_is_rejected() {
@@ -509,10 +580,12 @@ mod tests {
     fn starved_dst_does_not_slip_timeline() {
         // Upsample 8k -> 48k (r = 6): one input sample yields ~6 output
         // samples. Hand the block a `dst` too small to hold that (4 <
-        // max_output_for(1)). It must refuse — consume nothing — not
-        // consume the input and drop the overflow. The old `.max(1)`
-        // path forced nx=1 here, produced ~6, wrote only 4, and reported
-        // the input consumed: a silent timeline slip.
+        // max_output_for(1)). It must still make progress — take one
+        // input, emit what fits, park the surplus in `pending` — and
+        // never report input consumed whose output was dropped. (Two
+        // earlier shapes both failed: `.max(1)` with no FIFO dropped the
+        // overflow — a timeline slip; refusing to consume at all
+        // deadlocked on a ring whose contiguous tail was < 10 slots.)
         let mut r = init_at(8_000.0, 48_000.0);
         let input = vec![0.5_f32; 100];
         let mut out = vec![0.0_f32; 4];
@@ -531,11 +604,26 @@ mod tests {
             outputs: &mut outputs,
         };
         let w = r.process(&mut io).unwrap();
+        assert_eq!(w.consumed[0], 1, "starved dst must still take one input");
+        assert!(w.produced[0] <= 4);
+        // Pumping the same tone through 4-slot windows must reproduce
+        // the roomy run exactly — the surplus is queued, not dropped.
+        let n_in = 2_000;
+        let tone: Vec<f32> = (0..n_in)
+            .map(|i| (core::f32::consts::TAU * 500.0 * i as f32 / 8_000.0).sin() * 0.5)
+            .collect();
+        let (c_tiny, out_tiny) = pump(8_000.0, 48_000.0, 4, &tone);
+        let (c_ref, out_ref) = pump(8_000.0, 48_000.0, 8192, &tone);
+        assert_eq!(c_tiny, n_in, "4-slot windows left input unconsumed");
+        assert_eq!(c_ref, n_in);
         assert_eq!(
-            (w.consumed[0], w.produced[0]),
-            (0, 0),
-            "starved dst must not consume input it can't fully emit"
+            out_tiny.len(),
+            out_ref.len(),
+            "4-slot chunking slipped the timeline"
         );
+        for (i, (a, b)) in out_tiny.iter().zip(out_ref.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "sample {i} differs: {a} vs {b}");
+        }
 
         // With a roomy dst the same block processes everything, and the
         // output is byte-identical whether fed in one big dst or in many

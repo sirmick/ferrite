@@ -98,7 +98,7 @@ Not required. If the host is exposed beyond the LAN — see D07 and the
 warning attached to it — the user operates a tunnel (Tailscale, WireGuard)
 or a reverse proxy with its own auth. A proxy must:
 
-- Pass through WebSocket upgrades on `/ws/preset` and `/ws/logs`.
+- Pass through WebSocket upgrades on `/ws/preset` and `/mqtt`.
 - Preserve COOP/COEP (or set them itself).
 - Not buffer WS frames (audio latency).
 
@@ -106,7 +106,7 @@ or a reverse proxy with its own auth. A proxy must:
 
 `ferrited` writes `tracing` to stdout. The browser-visible mirror is the
 LogPanel ([`web/src/lib/layout/LogPanel.svelte`](../web/src/lib/layout/LogPanel.svelte))
-which subscribes to `/ws/logs`.
+which subscribes to `ferrite/state/log/#` on the event plane (`/mqtt`).
 
 Levels follow `RUST_LOG` / `EnvFilter`:
 
@@ -136,7 +136,7 @@ rsync -a --delete web/build/ /usr/local/share/ferrite/web/
 sudo systemctl start ferrited
 ```
 
-The browser reconnects `/ws/preset` and `/ws/logs` automatically on close.
+The browser reconnects `/ws/preset` and `/mqtt` automatically on close.
 
 ## Uninstall
 

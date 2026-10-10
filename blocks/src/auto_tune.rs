@@ -271,7 +271,17 @@ impl Block for AutoTune {
         else {
             return Ok(Work::new());
         };
-        let n = src.len();
+        // Consume only what the pass-through can emit: if the `out` ring
+        // is short this tick, the tail stays queued upstream instead of
+        // being silently dropped (and `produced` never over-reports —
+        // in release builds that would walk the ring head past data).
+        let cap = io
+            .outputs
+            .iter()
+            .find(|p| p.name == "out")
+            .map_or(src.len(), OutputPort::len);
+        let n = src.len().min(cap);
+        let src = &src[..n];
 
         for &z in src {
             self.buf.push(z);
@@ -280,12 +290,12 @@ impl Block for AutoTune {
             }
         }
 
+        let mut produced_events = 0;
         for port in io.outputs.iter_mut() {
             match port.name {
                 "out" => {
                     if let Some(dst) = OutputPort::as_iq_f32_mut(port) {
-                        let k = dst.len().min(n);
-                        dst[..k].copy_from_slice(&src[..k]);
+                        dst[..n].copy_from_slice(src);
                     }
                 }
                 "events" => {
@@ -294,6 +304,7 @@ impl Block for AutoTune {
                         if take > 0 {
                             dst[..take].copy_from_slice(&self.pending[..take]);
                             self.pending.drain(..take);
+                            produced_events = take;
                         }
                     }
                 }
@@ -304,6 +315,7 @@ impl Block for AutoTune {
         let mut w = Work::new();
         w.consumed[0] = n;
         w.produced[0] = n;
+        w.produced[1] = produced_events;
         Ok(w)
     }
 }
@@ -450,5 +462,68 @@ mod tests {
         assert!((shift - 5_000.0).abs() < 50.0, "shift {shift}");
         // Drained — a slow poller won't re-apply a stale correction.
         assert!(at.take_estimate().is_none(), "estimate not cleared");
+    }
+
+    /// Backpressure: a short `out` ring must clamp what we consume (the
+    /// tail stays upstream) and `produced` must equal what was actually
+    /// written — never the input length. Pre-fix this reported
+    /// `produced[0] = 8192` for a 1000-slot dst, which in release builds
+    /// advanced the ring head over 7192 unwritten samples.
+    #[test]
+    fn short_out_ring_clamps_consumed_and_produced() {
+        use crate::block::{BlockIo, InBuf, InputPort, OutBuf, OutputPort, PortMeta};
+        let mut at = AutoTune::new(AutoTuneParams {
+            sample_rate_hz: 48_000.0,
+            target_hz: 0.0,
+            gate_hz: 24_000.0,
+            window: 8_192,
+        })
+        .unwrap();
+        let x = tone(5_000.0, 48_000.0, 8_192);
+
+        let run = |at: &mut AutoTune, src: &[Complex<f32>], cap: usize| {
+            let mut out = vec![Complex::new(0.0_f32, 0.0); cap];
+            let mut ev = vec![0u8; 256];
+            let mut inputs = [InputPort {
+                name: "in",
+                meta: PortMeta::default(),
+                buf: InBuf::IqF32(src),
+            }];
+            let mut outputs = [
+                OutputPort {
+                    name: "out",
+                    meta: PortMeta::default(),
+                    buf: OutBuf::IqF32(&mut out),
+                },
+                OutputPort {
+                    name: "events",
+                    meta: PortMeta::default(),
+                    buf: OutBuf::Events(&mut ev),
+                },
+            ];
+            let w = at
+                .process(&mut BlockIo {
+                    inputs: &mut inputs,
+                    outputs: &mut outputs,
+                })
+                .unwrap();
+            (w, out, ev)
+        };
+
+        // Starved dst: only 1000 of 8192 fit.
+        let (w, out, _) = run(&mut at, &x, 1_000);
+        assert_eq!(w.consumed[0], 1_000, "consume only what fits");
+        assert_eq!(w.produced[0], 1_000, "never over-report produced");
+        assert!((out[999] - x[999]).norm() < 1e-6, "pass-through intact");
+        assert!(at.take_estimate().is_none(), "window not complete yet");
+
+        // The leftover, now with room: the window completes exactly as
+        // it would have in one shot, and the event bytes are *reported*
+        // on the events port (pre-fix `produced[1]` was never set, so
+        // the runtime discarded them).
+        let (w, _, ev) = run(&mut at, &x[1_000..], 8_192);
+        assert_eq!(w.consumed[0], 8_192 - 1_000);
+        assert!(w.produced[1] > 0, "events produced count reported");
+        assert!(String::from_utf8_lossy(&ev[..w.produced[1]]).contains("afc_center_hz"));
     }
 }

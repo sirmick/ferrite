@@ -58,6 +58,14 @@ pub enum Frame {
         timestamp_ns: u64,
         sample_rate_hz: u32,
         payload: Vec<u8>,
+        /// Graph epoch the producing block belongs to (see
+        /// `server::app_state` — bumped once per topology rebuild).
+        /// Stream ids are positional and reused across rebuilds, so a
+        /// consumer must drop frames whose epoch isn't the graph it has
+        /// loaded. Trails `payload` so an older decoder that tolerates
+        /// trailing bytes still reads the rest; server + WASM are built
+        /// from this one crate and move together.
+        epoch: u32,
     },
     /// Real audio samples. `payload` is little-endian `f32`, 4 bytes per
     /// sample. `sample_rate_hz` follows the same contract as `IqF32` —
@@ -68,6 +76,7 @@ pub enum Frame {
         timestamp_ns: u64,
         sample_rate_hz: u32,
         payload: Vec<u8>,
+        epoch: u32,
     },
     /// Log-magnitude FFT bins, one `u8` per bin.
     FftU8 {
@@ -75,6 +84,7 @@ pub enum Frame {
         seq: u32,
         timestamp_ns: u64,
         payload: Vec<u8>,
+        epoch: u32,
     },
     /// UTF-8 JSON body — session events, reconfigure notices, warnings.
     JsonEvent {
@@ -82,6 +92,7 @@ pub enum Frame {
         seq: u32,
         timestamp_ns: u64,
         payload: Vec<u8>,
+        epoch: u32,
     },
 }
 
@@ -124,6 +135,27 @@ impl Frame {
                 *seq = new_seq;
                 *timestamp_ns = new_ts_ns;
             }
+        }
+    }
+
+    /// Stamp the graph epoch. Called by the sink right after
+    /// [`Self::set_envelope`].
+    pub const fn set_epoch(&mut self, new_epoch: u32) {
+        match self {
+            Self::IqF32 { epoch, .. }
+            | Self::F32 { epoch, .. }
+            | Self::FftU8 { epoch, .. }
+            | Self::JsonEvent { epoch, .. } => *epoch = new_epoch,
+        }
+    }
+
+    #[must_use]
+    pub const fn epoch(&self) -> u32 {
+        match self {
+            Self::IqF32 { epoch, .. }
+            | Self::F32 { epoch, .. }
+            | Self::FftU8 { epoch, .. }
+            | Self::JsonEvent { epoch, .. } => *epoch,
         }
     }
 
@@ -170,6 +202,9 @@ mod wasm_bindings {
         /// rate populated via `InitCtx.input_rate`; zero for `FftU8` /
         /// `JsonEvent` / legacy IQ frames where rate isn't meaningful.
         sample_rate_hz: u32,
+        /// Graph epoch — the runner drops frames whose epoch isn't the
+        /// graph it has loaded.
+        epoch: u32,
         #[serde(with = "serde_bytes")]
         payload: &'a [u8],
     }
@@ -196,12 +231,14 @@ mod wasm_bindings {
                 timestamp_ns,
                 sample_rate_hz,
                 payload,
+                epoch,
             } => JsFrame {
                 payload_type: PT_IQ_F32,
                 stream_id: *stream_id,
                 seq: *seq,
                 timestamp_ns: *timestamp_ns,
                 sample_rate_hz: *sample_rate_hz,
+                epoch: *epoch,
                 payload,
             },
             Frame::F32 {
@@ -210,12 +247,14 @@ mod wasm_bindings {
                 timestamp_ns,
                 sample_rate_hz,
                 payload,
+                epoch,
             } => JsFrame {
                 payload_type: PT_F32,
                 stream_id: *stream_id,
                 seq: *seq,
                 timestamp_ns: *timestamp_ns,
                 sample_rate_hz: *sample_rate_hz,
+                epoch: *epoch,
                 payload,
             },
             Frame::FftU8 {
@@ -223,12 +262,14 @@ mod wasm_bindings {
                 seq,
                 timestamp_ns,
                 payload,
+                epoch,
             } => JsFrame {
                 payload_type: PT_FFT_U8,
                 stream_id: *stream_id,
                 seq: *seq,
                 timestamp_ns: *timestamp_ns,
                 sample_rate_hz: 0,
+                epoch: *epoch,
                 payload,
             },
             Frame::JsonEvent {
@@ -236,12 +277,14 @@ mod wasm_bindings {
                 seq,
                 timestamp_ns,
                 payload,
+                epoch,
             } => JsFrame {
                 payload_type: PT_JSON_EVENT,
                 stream_id: *stream_id,
                 seq: *seq,
                 timestamp_ns: *timestamp_ns,
                 sample_rate_hz: 0,
+                epoch: *epoch,
                 payload,
             },
         };
@@ -277,6 +320,7 @@ mod tests {
             timestamp_ns: 0x0123_4567_89AB_CDEF,
             sample_rate_hz: 0,
             payload: bytes,
+            epoch: 0,
         };
         let wire = f.to_postcard().unwrap();
         let back = Frame::from_postcard(&wire).unwrap();
@@ -295,6 +339,7 @@ mod tests {
             timestamp_ns: 0x0123_4567_89AB_CDEF,
             sample_rate_hz: 48_000,
             payload: bytes,
+            epoch: 0,
         };
         let wire = f.to_postcard().unwrap();
         let back = Frame::from_postcard(&wire).unwrap();
@@ -308,6 +353,7 @@ mod tests {
             seq: 7,
             timestamp_ns: 42,
             payload: vec![0, 64, 128, 192, 255],
+            epoch: 0,
         };
         let wire = f.to_postcard().unwrap();
         let back = Frame::from_postcard(&wire).unwrap();
@@ -321,6 +367,7 @@ mod tests {
             seq: 1,
             timestamp_ns: 99,
             payload: br#"{"type":"ping"}"#.to_vec(),
+            epoch: 0,
         };
         let wire = f.to_postcard().unwrap();
         let back = Frame::from_postcard(&wire).unwrap();
@@ -335,12 +382,14 @@ mod tests {
             timestamp_ns: 0,
             sample_rate_hz: 0,
             payload: vec![],
+            epoch: 0,
         };
         let b = Frame::FftU8 {
             stream_id: 1,
             seq: 0,
             timestamp_ns: 0,
             payload: vec![],
+            epoch: 0,
         };
         let c = Frame::IqF32 {
             stream_id: 2,
@@ -348,6 +397,7 @@ mod tests {
             timestamp_ns: 0,
             sample_rate_hz: 0,
             payload: vec![],
+            epoch: 0,
         };
         assert_ne!(a.stream_key(), b.stream_key(), "variant tag differs");
         assert_ne!(a.stream_key(), c.stream_key(), "stream id differs");
@@ -361,6 +411,7 @@ mod tests {
             timestamp_ns: 0,
             sample_rate_hz: 0,
             payload: vec![],
+            epoch: 0,
         };
         iq.set_envelope(42, 9_000_000_000);
         let Frame::IqF32 {

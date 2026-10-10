@@ -3,7 +3,7 @@
 //! By default, every vendored SDR driver loaded under SoapySDR writes
 //! its diagnostic messages straight to libSoapySDR's stderr-bound
 //! logger. Those lines bypass `tracing` entirely — they don't reach
-//! ferrited's `/ws/logs` broadcast, the `/api/decoder/recent` history
+//! ferrited's log broadcast (event bus), the `/api/decoder/recent` history
 //! ring, or anything the AI sidecar can `Read`. They surface only to
 //! whoever happens to be tailing the process's stderr.
 //!

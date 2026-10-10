@@ -781,6 +781,17 @@ impl Block for SignalList {
         if row.len() < n {
             return Ok(Work::new());
         }
+        // Whole frame or nothing: a partial row on the pass-through
+        // would shift every downstream waterfall row's framing. Leave
+        // the frame queued and retry next tick when `out` has room.
+        let out_cap = io
+            .outputs
+            .iter()
+            .find(|p| p.name == "out")
+            .map_or(n, OutputPort::len);
+        if out_cap < n {
+            return Ok(Work::new());
+        }
 
         self.frame += 1;
         // Detect on the peak-held spectrum (catches transient bursts) when
@@ -944,6 +955,53 @@ mod tests {
         let text = std::str::from_utf8(&events[..len]).unwrap();
         let last = text.lines().last().unwrap();
         Some(serde_json::from_str(last).unwrap())
+    }
+
+    /// Backpressure: a pass-through `out` shorter than one frame must
+    /// leave the frame queued (consumed 0) rather than emit a partial
+    /// row — a partial row shifts every downstream waterfall row's
+    /// framing. Pre-fix it consumed the frame and wrote `min(dst, n)`.
+    #[test]
+    fn short_out_ring_leaves_whole_frame_queued() {
+        let n = 1024;
+        let mut b = block(
+            n,
+            SignalListParams {
+                emit_interval_ms: 0.0,
+                ..Default::default()
+            },
+        );
+        let row = make_row(n, -120.0, &[(500, 10, -80.0)]);
+        let mut passthrough = vec![0u8; n / 2];
+        let mut events = vec![0u8; 4096];
+        let mut inputs = [InputPort {
+            name: "in",
+            meta: PortMeta::default(),
+            buf: InBuf::FftU8(&row),
+        }];
+        let mut outputs = [
+            OutputPort {
+                name: "out",
+                meta: PortMeta::default(),
+                buf: OutBuf::FftU8(&mut passthrough),
+            },
+            OutputPort {
+                name: "events",
+                meta: PortMeta::default(),
+                buf: OutBuf::Events(&mut events),
+            },
+        ];
+        let w = b
+            .process(&mut BlockIo {
+                inputs: &mut inputs,
+                outputs: &mut outputs,
+            })
+            .unwrap();
+        assert_eq!(w.consumed[0], 0, "frame stays queued");
+        assert_eq!(w.produced[0], 0);
+        assert_eq!(b.frame, 0, "no detection ran on an unemittable frame");
+        // Next tick with room: the same frame goes through whole.
+        assert!(push(&mut b, &row).is_some());
     }
 
     #[test]

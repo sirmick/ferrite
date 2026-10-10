@@ -10,7 +10,8 @@
   import { pipeline } from '$lib/pipeline.svelte';
   import { logs, patchConsole } from '$lib/logs/store.svelte';
   import { connectServerLogs } from '$lib/logs/client';
-  import { connectDecoders } from '$lib/decoders/store.svelte';
+  import { connectDecoders, decoders } from '$lib/decoders/store.svelte';
+  import { connectEventBus } from '$lib/events/connect';
   import { connectAi } from '$lib/ai/client';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
   import { wsUrlFor } from '$lib/api/errors';
@@ -34,8 +35,12 @@
 
   onMount(() => {
     patchConsole();
+    // Subscribers first, then the transport: the bus fires `onConnect`
+    // for already-registered listeners, so the mirror's snapshot pull
+    // and the log sidebar both see the first connect.
     const disconnectLogs = connectServerLogs();
     const disconnectDecodes = connectDecoders();
+    const disconnectBus = connectEventBus();
     const disconnectAi = connectAi();
     void pipeline.init();
     browserRuntime.init();
@@ -54,6 +59,7 @@
       void browserRuntime.teardown();
       disconnectLogs();
       disconnectDecodes();
+      disconnectBus();
       disconnectAi();
       pipeline.teardown();
     };
@@ -85,6 +91,13 @@
   $effect(() => {
     browserRuntime.syncStatus(pipeline.status === 'running');
   });
+  // The graph epoch travels with the `graph` record (same delta that
+  // carries a new browser half). Hand it to the runner *before* the
+  // half-driven reload above can run: `setEpoch` records it
+  // synchronously, so the enqueued `load` picks up the new value.
+  $effect(() => {
+    browserRuntime.setEpoch(pipeline.graphEpoch);
+  });
 
   // Transcribe ⇒ voice-NR, in one place. Engaging transcription (UI
   // tri-state Off|On|Transcribe, or `ferrite-ctl transcribe on` —
@@ -102,15 +115,16 @@
 
   // Out-of-band state sync. `ferrite-ctl` (and the AI sidecar driving
   // it) mutates ferrited via REST without going through `pipeline`'s
-  // setters, so the source/flowgraph/preset mirror would otherwise
-  // stay stale until the user clicked something. The activity-log
-  // middleware emits one `ai::activity` line per CLI-driven mutation;
-  // tail that and refresh the mirror — single trigger, no new WS.
-  let lastAiActivityId = $state(0);
+  // setters, so the source/status/blocks mirror would otherwise stay
+  // stale until the user clicked something. The activity middleware
+  // folds one `activity` record per CLI-driven mutation; tail that kind
+  // and refresh the mirror — single trigger. (The browser half itself
+  // already follows the `graph` record and needs no refresh.)
+  let lastActivitySeq = $state(0);
   $effect(() => {
-    const latest = logs.entries.findLast((e) => e.category === 'ai::activity');
-    if (!latest || latest.id <= lastAiActivityId) return;
-    lastAiActivityId = latest.id;
+    const latest = decoders.kind('activity').recent.at(-1);
+    if (!latest || latest.seq <= lastActivitySeq) return;
+    lastActivitySeq = latest.seq;
     void pipeline.refreshFromServer();
   });
 </script>

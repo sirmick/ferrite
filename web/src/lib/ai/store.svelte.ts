@@ -79,6 +79,7 @@ export type Turn = UserTurn | AssistantTurn;
  *  other localStorage entries (preset filters, panel splits, etc). */
 const LS_TURNS = 'ferrite-ai.turns';
 const LS_MODE = 'ferrite-ai.mode';
+const LS_MODEL = 'ferrite-ai.model';
 const LS_SESSION = 'ferrite-ai.session_id';
 const LS_NEXT_ID = 'ferrite-ai.next_id';
 const LS_SETUP = 'ferrite-ai.setup_description';
@@ -98,6 +99,16 @@ export class AiStore {
    *  client-side list so the dropdown renders immediately on first
    *  load before the WS handshake finishes. */
   availableModes = $state<AiMode[]>(AI_MODES);
+  /** Operator's model override for the next turns, or `null` for the
+   *  sidecar's per-mode default. Sent as `model` on each turn; the
+   *  sidecar ignores ids outside its `model_options`. */
+  model = $state<string | null>(null);
+  /** Model ids the sidecar offers (from `ferrite_ai_hello`). Empty
+   *  until the handshake — the picker then shows only "default". */
+  modelOptions = $state<string[]>([]);
+  /** Per-mode default model the sidecar reports (after its env
+   *  overrides), so the picker can label the default option. */
+  modelDefaults = $state<Record<string, string>>({});
   /** Sidecar-issued session id. Captured from the `system/init` event
    *  on the first turn of each conversation; sent back to the sidecar
    *  on subsequent turns so the Agent SDK can `resume:` instead of
@@ -145,6 +156,8 @@ export class AiStore {
       if (rawMode && (AI_MODES as string[]).includes(rawMode)) {
         this.mode = rawMode as AiMode;
       }
+      const rawModel = localStorage.getItem(LS_MODEL);
+      if (rawModel) this.model = rawModel;
       const rawSession = localStorage.getItem(LS_SESSION);
       if (rawSession) this.sessionId = rawSession;
       const rawNext = localStorage.getItem(LS_NEXT_ID);
@@ -168,6 +181,8 @@ export class AiStore {
         const trimmed = this.turns.slice(-MAX_PERSISTED_TURNS);
         localStorage.setItem(LS_TURNS, JSON.stringify(trimmed));
         localStorage.setItem(LS_MODE, this.mode);
+        if (this.model) localStorage.setItem(LS_MODEL, this.model);
+        else localStorage.removeItem(LS_MODEL);
         localStorage.setItem(LS_NEXT_ID, String(this.nextId));
         if (this.sessionId) localStorage.setItem(LS_SESSION, this.sessionId);
         else localStorage.removeItem(LS_SESSION);
@@ -235,6 +250,21 @@ export class AiStore {
     });
   }
 
+  /** Pick a model override (`null` = sidecar default). Takes effect on
+   *  the next turn; no session reset — the SDK resumes a conversation
+   *  under a different model fine (the system prompt is unchanged). */
+  setModel(model: string | null): void {
+    const next = model && this.modelOptions.includes(model) ? model : null;
+    if (this.model === next) return;
+    this.model = next;
+    this.persist();
+  }
+
+  /** The sidecar's default model for `mode`, once known from hello. */
+  defaultModelFor(mode: AiMode): string | null {
+    return this.modelDefaults[mode] ?? null;
+  }
+
   setMode(mode: AiMode): void {
     if (this.mode === mode) return;
     this.mode = mode;
@@ -286,6 +316,7 @@ export class AiStore {
     // exchange — the same conversation continues across browser
     // reloads and WS reconnects.
     const payload: Record<string, unknown> = { text: trimmed, mode: this.mode };
+    if (this.model) payload.model = this.model;
     if (this.sessionId) payload.resume_session_id = this.sessionId;
     if (this.setupDescription.trim()) payload.setup_description = this.setupDescription;
     // Hand the AI the operator's local clock + IANA timezone on each
@@ -620,6 +651,21 @@ export class AiStore {
       if (Array.isArray(modes)) {
         const valid = modes.filter((m): m is AiMode => AI_MODES.includes(m as AiMode));
         if (valid.length) this.availableModes = valid;
+      }
+      const options = event['model_options'];
+      if (Array.isArray(options)) {
+        this.modelOptions = options.filter((o): o is string => typeof o === 'string');
+        // A persisted override the sidecar no longer offers falls back
+        // to the default rather than 400ing every turn.
+        if (this.model && !this.modelOptions.includes(this.model)) this.model = null;
+      }
+      const defaults = event['models'];
+      if (defaults && typeof defaults === 'object') {
+        const out: Record<string, string> = {};
+        for (const [k, v] of Object.entries(defaults as Record<string, unknown>)) {
+          if (typeof v === 'string') out[k] = v;
+        }
+        this.modelDefaults = out;
       }
       return;
     }

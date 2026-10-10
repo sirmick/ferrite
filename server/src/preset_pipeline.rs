@@ -79,41 +79,52 @@ impl PresetMount {
     /// against the applied doc, and swapped in atomically — with the
     /// same rollback guarantees as [`Runtime::reconfigure`].
     ///
-    /// After a successful swap the shared broadcast sink is
-    /// re-attached to every bridge-Tx in the new graph so frames keep
-    /// flowing to `/ws/preset` without a client reconnect.
+    /// After a real rebuild the epoch is bumped and the shared sinks are
+    /// re-attached to the fresh bridge-Tx / EventStore instances so
+    /// frames keep flowing to `/ws/preset` without a client reconnect.
     pub async fn reconfigure(&self, new_doc: &FlowgraphDoc) -> Result<ReconfigurePlan> {
         let node_half = split_for_environment(new_doc, Environment::Node, &InventorySpecRegistry)
             .map_err(|e| anyhow!("env_split: {e}"))?;
         let mut rt = self.runtime.lock().await;
+        let before = rt.generation();
         let plan = rt.reconfigure(&node_half).context("runtime reconfigure")?;
-        if plan.is_noop() {
-            return Ok(plan);
+        if rt.generation() != before {
+            self.on_rebuilt(&mut rt, &node_half)?;
         }
-        attach_bridge_sinks(&mut rt, &node_half, &self.bridge_sink, &self.decoder_store)?;
         Ok(plan)
     }
 
     /// Try to apply `delta` to block `id` via the live path
     /// (`Block::apply_live_params`). On `Ok(false)` from the block, the
-    /// runtime falls back to a full rebuild — which here means we have
-    /// to attach bridge sinks again, same as [`Self::reconfigure`].
+    /// runtime falls back to a full rebuild — detected via the runtime
+    /// generation, which is the only reliable tell (the plan can be
+    /// `SelfBlock`-scoped either way). Only a rebuild re-attaches sinks:
+    /// re-attaching on the live path reset every decoder kind, so a VFO
+    /// drag used to wipe the ADS-B / APRS tables.
     pub async fn live_reconfigure_block(
         &self,
         id: &str,
         delta: serde_json::Value,
     ) -> Result<ReconfigurePlan> {
         let mut rt = self.runtime.lock().await;
+        let before = rt.generation();
         let plan = rt
             .live_reconfigure_block(id, delta)
             .context("runtime live_reconfigure_block")?;
-        // The fallback path (full rebuild) leaves bridges detached; the
-        // live path doesn't touch them. Re-attach unconditionally — it's
-        // idempotent and keeps the call simple.
-        if let Some(doc) = rt.applied_doc().cloned() {
-            attach_bridge_sinks(&mut rt, &doc, &self.bridge_sink, &self.decoder_store)?;
+        if rt.generation() != before {
+            if let Some(doc) = rt.applied_doc().cloned() {
+                self.on_rebuilt(&mut rt, &doc)?;
+            }
         }
         Ok(plan)
+    }
+
+    /// Block instances were replaced: new graph epoch, then re-attach
+    /// the shared sinks (which resets decoder kinds — correct for a new
+    /// topology, and the reset records carry the new epoch).
+    fn on_rebuilt(&self, rt: &mut Runtime, node_half: &FlowgraphDoc) -> Result<()> {
+        self.decoder_store.bump_epoch();
+        attach_bridge_sinks(rt, node_half, &self.bridge_sink, &self.decoder_store)
     }
 
     /// Snapshot the doc the runtime is *actually* executing (the
@@ -181,7 +192,13 @@ pub fn spawn_preset(
     )
     .context("runtime load_doc")?;
 
-    let bridge_sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::new(frames));
+    // A fresh mount is a new topology: bump before attaching so the
+    // reset records (and the first frames) carry the new epoch.
+    decoder_store.bump_epoch();
+    let bridge_sink: Arc<dyn BridgeSink> = Arc::new(BroadcastSink::with_epoch(
+        frames,
+        decoder_store.epoch_handle(),
+    ));
     attach_bridge_sinks(&mut runtime, &node_half, &bridge_sink, &decoder_store)?;
 
     runtime.init().context("runtime init")?;
@@ -672,6 +689,127 @@ mod tests {
             .await
             .expect("post-rollback frame within 1s")
             .expect("recv ok");
+        mount.handle.shutdown().await.unwrap();
+    }
+
+    /// SineSource → DcBlock (node, has `apply_live_params`) → Decimator
+    /// (browser). The node-side DcBlock lets a test exercise the live
+    /// path (no rebuild) against the rebuild path on one mount.
+    const LIVE_EDIT_DOC: &str = r#"{
+        "name": "test_live_edit",
+        "environments": ["node", "browser"],
+        "blocks": {
+            "src":  { "type": "SineSource", "placement": "node",
+                      "params": { "rate_hz": 1000.0, "tone_freq_abs_hz": 100.0,
+                                  "center_freq_hz": 0.0, "amplitude": 0.5 } },
+            "dc":   { "type": "DcBlock", "placement": "node",
+                      "params": { "sample_rate_hz": 1000.0, "corner_hz": 10.0,
+                                  "enabled": true } },
+            "sink": { "type": "Decimator", "placement": "browser",
+                      "params": { "factor": 2, "num_taps": 17,
+                                  "cutoff_normalized": 0.2 } }
+        },
+        "wires": [["src.out", "dc.in"], ["dc.out", "sink.in"]]
+    }"#;
+
+    async fn next_frame(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::app_state::FrameBytes>,
+    ) -> Frame {
+        let bytes = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("frame within 1s")
+            .expect("recv ok");
+        Frame::from_postcard(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn spawn_bumps_epoch_and_frames_carry_it() {
+        let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
+        let frames = FrameBus::new();
+        let mut rx = frames.subscribe(32);
+        let store = std::sync::Arc::new(crate::decoder_store::DecoderStore::new());
+        assert_eq!(store.epoch(), 0);
+        let mount = spawn_preset(&doc, frames, Duration::from_millis(5), store.clone()).unwrap();
+        assert_eq!(store.epoch(), 1, "a fresh mount is a new topology");
+        let f = next_frame(&mut rx).await;
+        assert_eq!(f.epoch(), 1, "frames are stamped with the mount's epoch");
+        mount.handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_edit_keeps_decoder_tables_and_epoch() {
+        let doc: FlowgraphDoc = serde_json::from_str(LIVE_EDIT_DOC).unwrap();
+        let frames = FrameBus::new();
+        let mut rx = frames.subscribe(32);
+        let store = std::sync::Arc::new(crate::decoder_store::DecoderStore::new());
+        let mount = spawn_preset(&doc, frames, Duration::from_millis(5), store.clone()).unwrap();
+        let _ = next_frame(&mut rx).await;
+        let epoch0 = store.epoch();
+
+        // Something a decoder folded while this topology was running.
+        store.apply("adsb", serde_json::json!({ "icao": "abc123" }));
+
+        // Live path: DcBlock accepts `enabled` without a rebuild.
+        let plan = mount
+            .live_reconfigure_block("dc", serde_json::json!({ "enabled": false }))
+            .await
+            .unwrap();
+        assert!(!plan.is_noop());
+        assert_eq!(
+            store.epoch(),
+            epoch0,
+            "live edit: same topology, same epoch"
+        );
+        assert_eq!(
+            store.snapshot_kind("adsb").unwrap().current.len(),
+            1,
+            "live edit must not wipe decoder tables (the VFO-drag regression)"
+        );
+        while rx.try_recv().is_ok() {}
+        assert_eq!(next_frame(&mut rx).await.epoch(), epoch0 as u32);
+
+        // Rebuild path: `sample_rate_hz` is construction-only → Ok(false)
+        // → block rebuild → new epoch, tables reset, frames restamped.
+        let plan = mount
+            .live_reconfigure_block("dc", serde_json::json!({ "sample_rate_hz": 2000.0 }))
+            .await
+            .unwrap();
+        assert!(!plan.is_noop());
+        assert_eq!(store.epoch(), epoch0 + 1, "rebuild bumps the epoch once");
+        // Re-attach resets only the kinds an `EventStore` in *this*
+        // topology owns (none here) — a rebuild never touches a kind
+        // some other producer folded.
+        assert_eq!(store.snapshot_kind("adsb").unwrap().current.len(), 1);
+        while rx.try_recv().is_ok() {}
+        assert_eq!(next_frame(&mut rx).await.epoch(), (epoch0 + 1) as u32);
+        mount.handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_reconfigure_bumps_epoch_once() {
+        let doc: FlowgraphDoc = serde_json::from_str(CROSS_ENV_DOC).unwrap();
+        let frames = FrameBus::new();
+        let mut rx = frames.subscribe(32);
+        let store = std::sync::Arc::new(crate::decoder_store::DecoderStore::new());
+        let mount = spawn_preset(&doc, frames, Duration::from_millis(5), store.clone()).unwrap();
+        let _ = next_frame(&mut rx).await;
+        let epoch0 = store.epoch();
+        // No-op reconfigure: nothing changes, nothing bumps.
+        mount.reconfigure(&doc).await.unwrap();
+        assert_eq!(store.epoch(), epoch0);
+        // Real change (amplitude) → rebuild → exactly one bump.
+        let mut new_doc = doc.clone();
+        new_doc
+            .blocks
+            .get_mut("src")
+            .unwrap()
+            .params
+            .as_mut()
+            .unwrap()["amplitude"] = serde_json::json!(0.1);
+        mount.reconfigure(&new_doc).await.unwrap();
+        assert_eq!(store.epoch(), epoch0 + 1);
+        while rx.try_recv().is_ok() {}
+        assert_eq!(next_frame(&mut rx).await.epoch(), (epoch0 + 1) as u32);
         mount.handle.shutdown().await.unwrap();
     }
 }

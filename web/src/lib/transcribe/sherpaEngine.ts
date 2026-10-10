@@ -47,11 +47,34 @@ export interface SherpaResult {
   readonly segments: SherpaSegment[];
 }
 
-// The two Emscripten sidecars, imported as URLs so vite emits them and we
-// can resolve them via `Module.locateFile` (the generated loader fetches
-// `sherpa-onnx-wasm-main-asr.wasm` and the preloaded `.data` by basename).
-import sherpaWasmUrl from '../wasm/sherpa/sherpa-onnx-wasm-main-asr.wasm?url';
-import sherpaDataUrl from '../wasm/sherpa/sherpa-onnx-wasm-main-asr.data?url';
+// The Emscripten module, its API glue, and the two sidecars (`.wasm` +
+// preloaded `.data`) are gitignored build outputs — a tree without emsdk
+// legitimately has none of them. `import.meta.glob` is the one import
+// form that is *resilient to absence*: present → vite bundles + hashes
+// them exactly like a literal import; absent → the map is `{}` and the
+// production build still succeeds (a literal `import x from '…?url'`
+// fails `vite build` with "Could not resolve"). `load()` turns an empty
+// map into `EngineUnavailableError` so the Worker degrades gracefully.
+const sherpaModules = import.meta.glob<{ default: SherpaModuleFactory }>(
+  '../wasm/sherpa/sherpa-onnx-wasm-main-asr.js',
+);
+const sherpaApis = import.meta.glob<{
+  createOnlineRecognizer: (mod: SherpaModule) => OnlineRecognizer;
+}>('../wasm/sherpa/sherpa-onnx-asr.js');
+const sherpaAssetUrls = import.meta.glob<string>(
+  '../wasm/sherpa/sherpa-onnx-wasm-main-asr.{wasm,data}',
+  {
+    query: '?url',
+    import: 'default',
+  },
+);
+
+/** The single loader a glob map holds, or `undefined` when the artifact
+ *  isn't built (each glob matches exactly one basename). */
+function only<T>(map: Record<string, () => Promise<T>>): (() => Promise<T>) | undefined {
+  const keys = Object.keys(map);
+  return keys.length === 1 ? map[keys[0]] : undefined;
+}
 
 /** Opaque Emscripten module handle (the generated glue is `@ts-nocheck`,
  *  so we treat it as an unknown bag the API glue indexes into). */
@@ -85,24 +108,29 @@ export class SherpaEngine {
    *  Throws `EngineUnavailableError` when the artifact isn't built (the
    *  dynamic import fails) so the Worker can degrade gracefully. */
   async load(): Promise<void> {
+    const loadModule = only(sherpaModules);
+    const loadApi = only(sherpaApis);
+    const wasmKey = Object.keys(sherpaAssetUrls).find((k) => k.endsWith('.wasm'));
+    const dataKey = Object.keys(sherpaAssetUrls).find((k) => k.endsWith('.data'));
+    if (!loadModule || !loadApi || !wasmKey || !dataKey) {
+      throw new EngineUnavailableError(
+        'sherpa-onnx wasm not built (run pnpm wasm:build:sherpa — needs emsdk + vendored sherpa-onnx + model)',
+      );
+    }
     let factory: SherpaModuleFactory;
     let createOnlineRecognizer: (mod: SherpaModule) => OnlineRecognizer;
+    let sherpaWasmUrl: string;
+    let sherpaDataUrl: string;
     try {
-      // Literal specifiers so vite bundles the Emscripten ESM + the API
-      // glue. Both carry `// @ts-nocheck` once built, so cast to the
-      // shapes we use.
-      const modFactory = await import('../wasm/sherpa/sherpa-onnx-wasm-main-asr.js');
-      const api = await import('../wasm/sherpa/sherpa-onnx-asr.js');
-      factory = modFactory.default as unknown as SherpaModuleFactory;
-      createOnlineRecognizer = (
-        api as unknown as {
-          createOnlineRecognizer: (mod: SherpaModule) => OnlineRecognizer;
-        }
-      ).createOnlineRecognizer;
+      [{ default: factory }, { createOnlineRecognizer }, sherpaWasmUrl, sherpaDataUrl] =
+        await Promise.all([
+          loadModule(),
+          loadApi(),
+          sherpaAssetUrls[wasmKey](),
+          sherpaAssetUrls[dataKey](),
+        ]);
     } catch (e) {
-      throw new EngineUnavailableError(
-        `sherpa-onnx wasm import failed (run pnpm wasm:build:sherpa): ${String(e)}`,
-      );
+      throw new EngineUnavailableError(`sherpa-onnx wasm import failed: ${String(e)}`);
     }
 
     // `locateFile` resolves the `.wasm` and the preloaded `.data` to the

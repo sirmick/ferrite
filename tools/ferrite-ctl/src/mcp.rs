@@ -28,7 +28,7 @@
 //! stderr (`tracing-subscriber` with `with_writer(stderr)` below). A
 //! stray `println!` here corrupts the JSON-RPC stream.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use reqwest::Client;
@@ -158,6 +158,121 @@ impl Http {
 
 fn http_err(ctx: &str, msg: String) -> McpError {
     McpError::internal_error(format!("{ctx}: {msg}"), None)
+}
+
+/// One message off the event plane, as delivered to a `subscribe_records`
+/// callback. `seq` is present for store deltas (not for log lines).
+pub(crate) struct EventRecord {
+    pub topic: String,
+    pub retain: bool,
+    pub seq: Option<u64>,
+    pub value: Value,
+}
+
+impl Http {
+    /// Host part of `base` (`http://host:port` → `host`), for dialling the
+    /// broker on the same machine as the daemon.
+    fn host(&self) -> String {
+        let s = self.base.split("://").nth(1).unwrap_or(&self.base);
+        let s = s.split('/').next().unwrap_or(s);
+        // IPv6 literal `[::1]:12001` → keep the brackets' content.
+        if let Some(rest) = s.strip_prefix('[') {
+            return rest.split(']').next().unwrap_or(rest).to_string();
+        }
+        s.rsplit_once(':').map_or(s, |(h, _)| h).to_string()
+    }
+
+    /// Subscribe to `ferrite/state/<kind>` (and its subtree) on the
+    /// daemon's embedded broker and feed every message to `on_record`
+    /// until it returns `false` or `timeout` elapses. Returns whether the
+    /// timeout hit. The broker's TCP port comes from `GET /api/hello`.
+    pub(crate) async fn subscribe_records(
+        &self,
+        kind: &str,
+        timeout: Duration,
+        mut on_record: impl FnMut(EventRecord) -> bool,
+    ) -> Result<bool, McpError> {
+        use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+        let hello = self.get("/api/hello").await?;
+        let port = hello
+            .pointer("/mqtt/tcp")
+            .and_then(Value::as_str)
+            .and_then(|a| a.rsplit_once(':').map(|(_, p)| p.to_string()))
+            .and_then(|p| p.parse::<u16>().ok())
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    "ferrited has no event plane (started with --no-mqtt?)".to_string(),
+                    None,
+                )
+            })?;
+        let host = self.host();
+        let id = format!(
+            "ferrite-ctl-{}-{}",
+            std::process::id(),
+            now_ms() % 1_000_000
+        );
+        let mut opts = MqttOptions::new(id, host, port);
+        opts.set_keep_alive(Duration::from_secs(15));
+        let (client, mut eventloop) = AsyncClient::new(opts, 64);
+        let kind = kind.trim_matches('/');
+        let topic = format!("ferrite/state/{kind}");
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut subscribed = false;
+        let mut last: Option<(String, Option<u64>)> = None;
+        loop {
+            let ev = match tokio::time::timeout_at(deadline, eventloop.poll()).await {
+                Ok(Ok(ev)) => ev,
+                Ok(Err(e)) => {
+                    return Err(McpError::internal_error(
+                        format!("mqtt {}:{port}: {e}", self.host()),
+                        None,
+                    ))
+                }
+                Err(_) => return Ok(true),
+            };
+            match ev {
+                Event::Incoming(Packet::ConnAck(_)) if !subscribed => {
+                    subscribed = true;
+                    client
+                        // `<topic>/#` also matches `<topic>` itself (MQTT
+                        // 3.1.1 §4.7.1.2); subscribing to both would deliver
+                        // every record twice.
+                        .subscribe(format!("{topic}/#"), QoS::AtMostOnce)
+                        .await
+                        .map_err(|e| {
+                            McpError::internal_error(format!("mqtt subscribe: {e}"), None)
+                        })?;
+                }
+                Event::Incoming(Packet::Publish(p)) => {
+                    if p.payload.is_empty() {
+                        continue; // a cleared retained entity
+                    }
+                    let value: Value = match serde_json::from_slice(&p.payload) {
+                        Ok(v) => v,
+                        Err(_) => Value::String(String::from_utf8_lossy(&p.payload).into_owned()),
+                    };
+                    let seq = value.get("seq").and_then(Value::as_u64);
+                    // Belt and braces against a broker that double-forwards
+                    // (seen on brand-new topics): same topic + seq = same record.
+                    if seq.is_some() && last == Some((p.topic.clone(), seq)) {
+                        continue;
+                    }
+                    last = Some((p.topic.clone(), seq));
+                    let rec = EventRecord {
+                        topic: p.topic.clone(),
+                        retain: p.retain,
+                        seq,
+                        value,
+                    };
+                    if !on_record(rec) {
+                        let _ = client.disconnect().await;
+                        return Ok(false);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 async fn api_response(resp: reqwest::Response, ctx: &str) -> Result<Value, McpError> {
@@ -353,6 +468,33 @@ pub struct DecodesArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AwaitArgs {
+    /// What to wait for, as a store kind or topic subtree under
+    /// `ferrite/state/`: `adsb`, `aprs`, `pager`, `ft8`, `transcribe`,
+    /// `signals`, `graph`, `activity`, `jobs`, `log/decoder` (every
+    /// decoder log line), `log/decoder/pocsag`, … Keyed kinds also
+    /// deliver their per-entity topics.
+    pub kind: String,
+    /// Return as soon as this many records have arrived (default 1).
+    #[serde(default)]
+    pub max: Option<usize>,
+    /// Give up after this many seconds (default 30, max 300). A timeout is
+    /// not an error: the response says `timed_out: true` with whatever
+    /// arrived.
+    #[serde(default)]
+    pub timeout_s: Option<f64>,
+    /// Only records with a store `seq` strictly greater than this — pass
+    /// the last `seq` you saw to skip anything you already have.
+    #[serde(default)]
+    pub since_seq: Option<u64>,
+    /// Also return the retained record (replace kinds: the current value;
+    /// keyed kinds: every live entity) before waiting for new ones.
+    /// Default false: only what arrives *after* you subscribe.
+    #[serde(default)]
+    pub include_retained: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DecodesResetArgs {
     /// Decoder kind to clear (e.g. `adsb`, `aprs`, `ft8`). Drops its
     /// accumulated records (log + keyed table) and bumps the store seq so
@@ -434,8 +576,11 @@ pub struct StartCaptureArgs {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct StartCaptureAudioArgs {
-    /// Centre frequency in Hz to tune for the capture.
-    pub freq_hz: f64,
+    /// Centre frequency in Hz. Optional: omitted = record what the
+    /// operator is hearing right now (the live audio tee, no retune, no
+    /// preset swap). Given = retune to it first (still the live tee).
+    #[serde(default)]
+    pub freq_hz: Option<f64>,
     /// Capture duration in seconds. Default 10.
     #[serde(default)]
     pub duration_s: Option<f64>,
@@ -617,6 +762,11 @@ impl FerriteServer {
             http,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// The transport, for CLI paths that stream (`await --follow`).
+    pub(crate) fn http(&self) -> &Http {
+        &self.http
     }
 
     /// One-shot world snapshot: pipeline status, source config, the full
@@ -833,6 +983,41 @@ impl FerriteServer {
                 .unwrap_or(Value::Null)),
             None => Ok(snapshot),
         }
+    }
+
+    /// Block until `max` records arrive on the event plane for `kind`
+    /// (or the timeout). The subscription form of `decodes`: an agent
+    /// says "wake me when the next ADS-B frame / pager message /
+    /// transcript segment lands" instead of polling.
+    pub(crate) async fn await_op(&self, args: AwaitArgs) -> Result<Value, McpError> {
+        let max = args.max.unwrap_or(1).max(1);
+        let timeout = Duration::from_secs_f64(args.timeout_s.unwrap_or(30.0).clamp(0.0, 300.0));
+        let since = args.since_seq.unwrap_or(0);
+        let include_retained = args.include_retained.unwrap_or(false);
+        let started = std::time::Instant::now();
+        let mut records = Vec::new();
+        let timed_out = self
+            .http
+            .subscribe_records(&args.kind, timeout, |rec| {
+                if rec.retain && !include_retained {
+                    return true;
+                }
+                if rec.seq.is_some_and(|s| s <= since) {
+                    return true;
+                }
+                records.push(
+                    json!({ "topic": rec.topic, "retained": rec.retain, "record": rec.value }),
+                );
+                records.len() < max
+            })
+            .await?;
+        Ok(json!({
+            "kind": args.kind,
+            "count": records.len(),
+            "timed_out": timed_out,
+            "waited_ms": started.elapsed().as_millis(),
+            "records": records,
+        }))
     }
 
     pub(crate) async fn decodes_reset_op(&self, args: DecodesResetArgs) -> Result<Value, McpError> {
@@ -1366,6 +1551,16 @@ impl FerriteServer {
     }
 
     #[tool(
+        description = "Wait for the next record(s) of a kind on the event plane instead of polling. Subscribes to `ferrite/state/<kind>` on the daemon's embedded MQTT broker and returns once `max` records arrived (default 1) or `timeout_s` elapsed (default 30; `timed_out: true` with whatever came, never an error). `kind` is any store kind (`adsb`, `aprs`, `pager`, `ft8`, `transcribe`, `signals`, `activity`, `jobs`, `graph`, `status`) or a log subtree (`log/decoder`, `log/decoder/pocsag`). Each record is the same `{kind, seq, epoch, op, record:{at_ms, key?, data}}` delta `decodes` is built from; log lines are `{target, level, message, at_ms}`. Pass `since_seq` (the last `seq` you saw) to skip anything already known; `include_retained: true` to also get the current value first. Typical loop: `tune` → `await_events(kind='pager', max=5, timeout_s=60)` → read `records[*].record.data`."
+    )]
+    async fn await_events(
+        &self,
+        Parameters(args): Parameters<AwaitArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.await_op(args).await?)
+    }
+
+    #[tool(
         description = "Clear one decoder kind in the DecoderStore — drops its accumulated records (the recent log + the keyed table) and bumps the store seq so browser mirrors clear too. Use after retuning to a new band/channel so stale ADS-B aircraft / APRS stations / decode lines don't linger, or to start a clean capture. Kinds reset themselves automatically on preset load / graph rebuild; this is the explicit on-demand path."
     )]
     async fn reset_decodes(
@@ -1457,7 +1652,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Start an async IQ capture. Default (`wideband=false`) tees the post-channelizer cf32 stream (block `chan`) non-disruptively — the user's UI session keeps running. Set `wideband=true` for a full-rate `Source → FileIqSink` slice straight off the SDR via the `capture_fm` preset (clobbers the live session; requires `freq_hz`, honours `sample_rate_hz`/`bandwidth_hz`/`gain_db`/`format`). **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar JSON. `duration_s` is the wall-clock cap (block enforces it server-side). Optional `freq_hz` retunes first. Defaults `out` to `/tmp/ferrite-captures/iq-<unix_ms>-<freq>mhz.cf32`. The wideband path inherits the live source (antenna/notch/gain), so it refuses against a software/test source (SineSource) — `device select` first, or pass `force:true` to record the synthetic source."
+        description = "Start an async IQ capture — both shapes are live tees, so the operator's UI session keeps running. Default (`wideband=false`) tees the post-channelizer cf32 stream (block `chan`): the narrow slice the demod sees. `wideband=true` tees the raw full-span cf32 straight off the SDR (block `src`, before DC block / channelizer) at the live source rate — 8 bytes × rate per second of disk (16 MB/s at 2 MS/s); the cap is exact in samples. Optional `freq_hz` retunes first (visible to the operator, like a `tune`). `sample_rate_hz`/`bandwidth_hz`/`gain_db` are NOT applied by the wideband tee — change the live source with `set_block_param(block='src', …)` first if you need a different rate. **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar JSON (`sample_rate_hz`, `center_freq_hz`, `samples_written`). Defaults `out` to `/tmp/ferrite-captures/iq-<unix_ms>-<freq>mhz.cf32`. Wideband needs a hardware (SoapySDR) source; against a software/test source it falls back to the old preset-swap recording only with `force:true` + `freq_hz` (session restored afterwards). Start and completion both appear on the operator's AI activity transcript."
     )]
     async fn start_capture_iq(
         &self,
@@ -1477,7 +1672,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Start an async demodulated-audio capture to a WAV on disk. Disruptive — swaps in a recording preset (default `fm-audio-record`; also `am-audio-record`, `capture-aprs`, `capture-pager`), tunes to `freq_hz`, and runs a `Source → … → FileAudioSink` slice, so it clobbers the live UI session. **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar. `duration_s` defaults to 10; `sample_rate_hz` to 2.4e6; `bandwidth_hz` to the rate. Defaults `out` to `/tmp/ferrite-captures/audio-<unix_ms>-<freq>mhz.wav`. Inherits the live source, so it refuses against a software/test source (SineSource) — `device select` first, or `force:true`."
+        description = "Record what the operator is hearing to a 48 kHz mono WAV — a live tee of the node→browser audio bridge, so the UI session keeps running untouched (no preset swap). Omit `freq_hz` to record the current session as-is; give it to retune first (the operator's waterfall + audio follow, same as a `tune`). **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar (`sample_rate_hz` 48000, `samples_written`, `source_rate_hz`). `duration_s` defaults to 10. Defaults `out` to `/tmp/ferrite-captures/audio-<unix_ms>-<freq>mhz.wav`. Only when the running preset has no browser audio at all (a headless `*-record` graph) does it fall back to the old preset-swap recording — that path needs `freq_hz`, refuses against a software source unless `force:true`, and restores the session when done. Start and completion both appear on the operator's AI activity transcript."
     )]
     async fn start_capture_audio(
         &self,
@@ -1521,7 +1716,9 @@ impl ServerHandler for FerriteServer {
              lifecycle, `tune` for the dodge-aware listen-frequency change (now also folds in \
              gain/bw/rate), `set_block_param` for everything else, `flowdiag` + \
              `source_readback` to confirm samples are flowing and a gain/AGC change landed, \
-             `recent_decodes` to read decoder output, `start_capture_{iq,fft,audio}` + \
+             `decodes` to read structured decoder state and `await_events` to block until the \
+             next record of a kind lands (the event plane — no polling), `recent_decodes` for \
+             raw decoder log text, `start_capture_{iq,fft,audio}` + \
              `capture_status` for recordings, `list_captures` + `replay_capture` to drive the \
              full RX chain from a recorded fixture (deterministic testing, no SDR), \
              `view_snapshot` / `view_state` / `set_view_state` to see and steer what the \

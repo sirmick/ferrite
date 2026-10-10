@@ -106,19 +106,27 @@ impl<T: Copy + Default> SpscRing<T> {
         let old_avail = self.available_read();
         // How many of (old unread + new) can't fit — the eviction count.
         let dropped = (old_avail + n).saturating_sub(self.capacity);
+        // NB: the `write` calls below must stay *outside* the
+        // `debug_assert_eq!` — a `debug_assert!(self.write(..) == n)`
+        // compiles the write away in release builds (the ring evicted
+        // but never stored anything; every release SoapySource delivery
+        // was silently dropped while debug tests stayed green).
         if dropped == 0 {
-            debug_assert_eq!(self.write(samples), n);
+            let wrote = self.write(samples);
+            debug_assert_eq!(wrote, n);
             return 0;
         }
         if n >= self.capacity {
             // The batch alone overfills — keep only its last `capacity`.
             self.reset();
-            debug_assert_eq!(self.write(&samples[n - self.capacity..]), self.capacity);
+            let wrote = self.write(&samples[n - self.capacity..]);
+            debug_assert_eq!(wrote, self.capacity);
         } else {
             // Evict just enough oldest elements to fit all `n` new ones.
             let evict = n - self.available_write();
             self.tail = self.tail.wrapping_add(evict as u32);
-            debug_assert_eq!(self.write(samples), n);
+            let wrote = self.write(samples);
+            debug_assert_eq!(wrote, n);
         }
         dropped
     }

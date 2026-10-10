@@ -16,6 +16,16 @@
 
 let initPromise: Promise<boolean> | undefined;
 
+// `import.meta.glob` rather than a literal `import('./fldigi.mjs')`: the
+// file is a gitignored build output, and a literal specifier that can't
+// be resolved fails `vite build` outright ("Could not resolve"). The glob
+// bundles + hashes the module exactly like a literal import when it's
+// present and is simply `{}` when it isn't — so a tree without emsdk
+// still builds, and the bridge stays inert (same pattern as sherpa).
+const fldigiModules = import.meta.glob<{
+  default: (moduleArg?: Record<string, unknown>) => Promise<Record<string, unknown>>;
+}>('./fldigi.mjs');
+
 /** Instantiate the Emscripten fldigi module and publish it for the
  *  wasm-bindgen snippet. Idempotent; returns whether the bridge is
  *  live. Safe to await unconditionally.
@@ -31,13 +41,13 @@ export function initFldigiBridge(moduleArg?: Record<string, unknown>): Promise<b
     initPromise = (async () => {
       try {
         // fldigi.{mjs,wasm} are emitted by `pnpm wasm:build:fldigi`
-        // (emsdk; git-ignored). Literal specifier so vite bundles the
+        // (emsdk; git-ignored). When present, vite bundles the
         // Emscripten ESM module and emits its
         // `new URL('fldigi.wasm', import.meta.url)` sidecar as a
-        // hashed asset. Types resolve via the committed sibling
-        // `fldigi.d.ts` ambient declaration, so svelte-check passes
-        // whether or not the generated file is present.
-        const mod = await import('./fldigi.mjs');
+        // hashed asset.
+        const load = fldigiModules['./fldigi.mjs'];
+        if (!load) return false; // not built: inert, no throw
+        const mod = await load();
         const M = await mod.default(moduleArg);
         (globalThis as Record<string, unknown>).__FERRITE_FLDIGI__ = M;
         return true;

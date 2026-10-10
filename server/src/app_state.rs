@@ -123,6 +123,16 @@ struct Inner {
     decoder_store: Arc<crate::decoder_store::DecoderStore>,
     preset_doc: RwLock<FlowgraphDoc>,
     source_config: RwLock<SourceConfig>,
+    /// Serialises [`AppState::patch_source`] end to end. The patch
+    /// reads `source_config`, probes caps (async), computes a delta,
+    /// hot-applies it, then writes the *whole* new config back. Two
+    /// concurrent patches (UI mouse + headless AI are the realistic
+    /// pair) would otherwise both derive from the same `current` and
+    /// the second full write would silently revert the first's fields
+    /// — the hardware would carry A's gain while the daemon believed
+    /// B's. Held across the whole body; never taken by anything the
+    /// body calls, so it can't deadlock.
+    patch_gate: Mutex<()>,
     /// Runtime profile (audio toggle, demod placement override) applied
     /// to the composed doc before [`split_for_environment`] runs. Lives
     /// here so every compose call site picks up the current value
@@ -158,29 +168,49 @@ pub struct AppState {
     /// snapshotter). Lives in `AppState` so the two route handlers
     /// (HTTP + WS) share the same broker instance.
     view_bridge: crate::view_bridge::ViewBridge,
+    /// The embedded MQTT broker's addresses, when the event plane is
+    /// up. `/mqtt` reverse-proxies browser WebSockets to `ws`.
+    event_plane: Option<crate::event_plane::EventPlane>,
 }
 
 impl AppState {
     #[must_use]
     pub fn new(preset: FlowgraphDoc, source: SourceConfig, tick_period: Duration) -> Self {
         let frames = FrameBus::new();
+        let decoder_store = Arc::new(crate::decoder_store::DecoderStore::new());
+        let captures = Arc::new(crate::capture::CaptureRegistry::with_store(Arc::clone(
+            &decoder_store,
+        )));
         Self {
             inner: Arc::new(Inner {
                 frames,
-                decoder_store: Arc::new(crate::decoder_store::DecoderStore::new()),
+                decoder_store,
                 preset_doc: RwLock::new(preset),
                 source_config: RwLock::new(source),
+                patch_gate: Mutex::new(()),
                 profile: RwLock::new(Profile::default()),
                 pipeline: Mutex::new(None),
                 tick_period,
                 device_cache: DeviceCache::new(),
-                captures: Arc::new(crate::capture::CaptureRegistry::new()),
+                captures,
             }),
             logs: None,
             presets_dir: None,
             captures_dir: None,
             view_bridge: crate::view_bridge::ViewBridge::default(),
+            event_plane: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_event_plane(mut self, plane: crate::event_plane::EventPlane) -> Self {
+        self.event_plane = Some(plane);
+        self
+    }
+
+    #[must_use]
+    pub fn event_plane(&self) -> Option<&crate::event_plane::EventPlane> {
+        self.event_plane.as_ref()
     }
 
     #[must_use]
@@ -251,7 +281,7 @@ impl AppState {
     /// when stopped. The single reader-of-record while live — callers
     /// overlay these params via [`overlay_live_params`] so reads
     /// reflect the runtime, not the staged `preset_doc`.
-    async fn applied_doc_if_running(&self) -> Option<FlowgraphDoc> {
+    pub(crate) async fn applied_doc_if_running(&self) -> Option<FlowgraphDoc> {
         let guard = self.inner.pipeline.lock().await;
         match guard.as_ref() {
             Some(mount) => mount.applied_doc_snapshot().await,
@@ -541,9 +571,17 @@ impl AppState {
                 // window / lock-order hazard the cleanup audit hit —
                 // it's gone. Reads go through applied_doc; stop() folds
                 // the final live state back into preset_doc once.
+                let epoch_before = self.epoch();
                 let plan = mount
                     .live_reconfigure_block(id, serde_json::Value::Object(delta_obj.clone()))
                     .await?;
+                drop(pipeline);
+                self.publish_params(id, &delta_obj);
+                if self.epoch() != epoch_before {
+                    // The live path fell back to a rebuild — new epoch,
+                    // new graph record.
+                    self.publish_graph().await;
+                }
                 return Ok(Some(plan));
             }
         }
@@ -559,10 +597,14 @@ impl AppState {
             Some(serde_json::Value::Object(m)) => m,
             _ => serde_json::Map::new(),
         };
-        for (k, v) in delta_obj {
-            merged.insert(k, v);
+        for (k, v) in &delta_obj {
+            merged.insert(k.clone(), v.clone());
         }
         block.params = Some(serde_json::Value::Object(merged));
+        // Browser-placed blocks (and stopped node blocks) stage here;
+        // the params record is what a running browser half applies
+        // without waiting for a reload.
+        self.publish_params(id, &delta_obj);
         self.patch_flowgraph(new_doc).await
     }
 
@@ -601,12 +643,23 @@ impl AppState {
             ));
         }
         let path = dir.join(format!("{name}.json"));
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| anyhow!("read {}: {e}", path.display()))?;
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|e| anyhow!("parse {}: {e}", path.display()))?;
-        Ok(value)
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|e| anyhow!("parse {}: {e}", path.display()))
+            }
+            // No file by that name: it may be a variant slug (`${base}-${id}`,
+            // the form `/api/presets` lists and `/api/preset` loads). Resolve
+            // it the same way the loader does and hand back the patched doc,
+            // so detail → load agree on what a slug means.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let slug = name.to_string();
+                let doc = tokio::task::spawn_blocking(move || resolve_preset_doc(&dir, &slug))
+                    .await
+                    .map_err(|e| anyhow!("preset resolve task panicked: {e}"))??;
+                serde_json::to_value(doc).map_err(|e| anyhow!("serialize preset {name:?}: {e}"))
+            }
+            Err(e) => Err(anyhow!("read {}: {e}", path.display())),
+        }
     }
 
     /// Enumerate replayable captures under [`Self::captures_dir`].
@@ -643,8 +696,59 @@ impl AppState {
         let doc = tokio::task::spawn_blocking(move || resolve_preset_doc(&dir, &slug))
             .await
             .map_err(|e| anyhow!("preset resolve task panicked: {e}"))??;
+        self.adopt_preset_source_rate(&doc).await;
         let plan = self.patch_flowgraph(doc.clone()).await?;
         Ok((doc, plan))
+    }
+
+    /// A preset's `src.sample_rate_hz` is a *requirement* of its DSP
+    /// chain, not a suggestion: ft8 channelizes 2.4 MS/s ÷ 200 → 12 kHz
+    /// by integer decimation, and at the 2 MS/s a fresh `select_device`
+    /// lands on it gets 11 976 Hz — the decoder logs "input rate
+    /// doesn't match" and every slot comes up empty, from the UI, the
+    /// CLI and MCP alike (observed live 2026-10-10). `compose_source`
+    /// merges the live config *over* the preset hint, so the hint never
+    /// won on its own. Adopt it here, on the hardware source only (a
+    /// replay's rate is the file's), through the same policy pass every
+    /// other rate change gets (driver ceiling, IF bandwidth, notches),
+    /// and store it *before* `patch_flowgraph` composes — one restart,
+    /// not two.
+    async fn adopt_preset_source_rate(&self, doc: &FlowgraphDoc) {
+        let Some(wanted) = doc
+            .blocks
+            .get(SOURCE_ID)
+            .and_then(|b| b.params.as_ref())
+            .and_then(|p| p.get("sample_rate_hz"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|r| r.is_finite() && *r > 0.0)
+        else {
+            return;
+        };
+        let _gate = self.inner.patch_gate.lock().await;
+        let current = self.inner.source_config.read().await.clone();
+        if current.type_name != "SoapySource" {
+            return;
+        }
+        let have = current
+            .params
+            .get("sample_rate_hz")
+            .and_then(serde_json::Value::as_f64);
+        if have.is_some_and(|h| (h - wanted).abs() < 0.5) {
+            return;
+        }
+        let mut next = current.clone();
+        if let Some(p) = next.params.as_object_mut() {
+            p.insert("sample_rate_hz".into(), serde_json::json!(wanted));
+        }
+        self.apply_source_policy(&current, &mut next).await;
+        tracing::info!(
+            target: "ai::activity",
+            preset = %doc.name,
+            from = ?have,
+            to = next.params.get("sample_rate_hz").and_then(serde_json::Value::as_f64),
+            "preset-load: adopting the preset's source sample rate"
+        );
+        *self.inner.source_config.write().await = next;
     }
 
     /// Apply a new preset. If the pipeline is running, reconfigures it
@@ -660,6 +764,8 @@ impl AppState {
             None
         };
         *self.inner.preset_doc.write().await = new_doc;
+        drop(pipeline);
+        self.publish_graph().await;
         Ok(plan)
     }
 
@@ -677,6 +783,8 @@ impl AppState {
         &self,
         mut new_source: SourceConfig,
     ) -> Result<Option<ReconfigurePlan>> {
+        // One patch at a time — see `Inner::patch_gate`.
+        let _gate = self.inner.patch_gate.lock().await;
         // Compute the delta in its own scope so the read guard drops
         // before we try to take the pipeline mutex or the source_config
         // write — Rust extends temporary lifetimes across an `if let`
@@ -695,11 +803,16 @@ impl AppState {
         if let Some(delta) = maybe_delta {
             let pipeline = self.inner.pipeline.lock().await;
             if let Some(mount) = pipeline.as_ref() {
+                let delta_for_record = delta.clone();
                 let plan = mount
                     .live_reconfigure_block(SOURCE_ID, serde_json::Value::Object(delta))
                     .await?;
                 drop(pipeline);
                 *self.inner.source_config.write().await = new_source;
+                // The source is part of the graph record; a live retune
+                // also lands as `params/src` so param-only consumers see it.
+                self.publish_params(SOURCE_ID, &delta_for_record);
+                self.publish_graph().await;
                 return Ok(Some(plan));
             }
         }
@@ -713,6 +826,8 @@ impl AppState {
             None
         };
         *self.inner.source_config.write().await = new_source;
+        drop(pipeline);
+        self.publish_graph().await;
         Ok(plan)
     }
 
@@ -756,6 +871,17 @@ impl AppState {
                 return;
             }
         };
+        // SoapyRemote: `driver=remote` names the transport. Stamp the
+        // probed radio's key into the args (`remote:driver=sdrplay`) so
+        // the compose-time policies that only see the args string —
+        // `inject_dc_block`'s default, the dodge ratio fast path — key
+        // on the real radio. Idempotent; a no-op for local drivers.
+        if let Some(stamped) = ferrite_sdr_tables::with_remote_driver_hint(&args, &caps.driver_key)
+        {
+            if let Some(p) = next.params.as_object_mut() {
+                p.insert("args".into(), serde_json::Value::String(stamped));
+            }
+        }
         // Pure decision logic (exhaustively unit-tested in `source_policy`).
         crate::source_policy::apply(current, next, &caps);
     }
@@ -777,7 +903,74 @@ impl AppState {
             Arc::clone(&self.inner.decoder_store),
         )?;
         *guard = Some(mount);
+        drop(guard);
+        self.publish_graph().await;
+        self.publish_status("running");
         Ok(())
+    }
+
+    /// Current graph epoch (bumped once per topology rebuild; stamped on
+    /// every store record and every sample frame).
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.inner.decoder_store.epoch()
+    }
+
+    /// Fold the `graph` record: the composed doc, the browser half and
+    /// its hash, the source, at the current epoch. The coherence record
+    /// — a consumer rebuilds its half when the hash changes and filters
+    /// frames by the epoch; nothing has to be fetched. Published after
+    /// every mutation that can change the composed doc (preset, source,
+    /// profile, start/stop). Compose failures are logged, not fatal: the
+    /// mutation itself already succeeded or failed on its own terms.
+    pub async fn publish_graph(&self) {
+        let preset = self.inner.preset_doc.read().await.clone();
+        let source = self.inner.source_config.read().await.clone();
+        let composed = match self.compose_full(&preset, &source).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "publish_graph: compose failed");
+                return;
+            }
+        };
+        let browser_half =
+            split_for_environment(&composed, Environment::Browser, &InventorySpecRegistry).ok();
+        let hash = browser_half.as_ref().map(|d| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_string(d).unwrap_or_default().hash(&mut h);
+            format!("{:016x}", h.finish())
+        });
+        self.inner.decoder_store.apply(
+            "graph",
+            serde_json::json!({
+                "epoch": self.epoch(),
+                "preset": preset.name,
+                "composed": composed,
+                "browser_half": browser_half,
+                "browser_half_hash": hash,
+                "source": source,
+            }),
+        );
+    }
+
+    /// Fold the `status` record (`running` / `stopped`).
+    pub fn publish_status(&self, status: &str) {
+        self.inner.decoder_store.apply(
+            "status",
+            serde_json::json!({ "status": status, "epoch": self.epoch() }),
+        );
+    }
+
+    /// Fold a `params/<block>` record — the last live param delta applied
+    /// to one block, at the current epoch. Browser-placed blocks apply
+    /// these on receipt, which is how a UI knob, the CLI and an agent all
+    /// drive the same block through one path.
+    fn publish_params(&self, id: &str, delta: &serde_json::Map<String, serde_json::Value>) {
+        self.inner.decoder_store.apply(
+            &format!("params/{id}"),
+            serde_json::json!({ "block": id, "epoch": self.epoch(), "params": delta }),
+        );
     }
 
     /// Tear down every loaded SoapySDR driver module and re-load them
@@ -850,6 +1043,11 @@ impl AppState {
             let mut doc = self.inner.preset_doc.write().await;
             overlay_live_params(&mut doc, &applied);
         }
+        // Stop is a topology change too: frames of the old mount must
+        // never be mistaken for a later start's.
+        self.inner.decoder_store.bump_epoch();
+        self.publish_graph().await;
+        self.publish_status("stopped");
         true
     }
 
@@ -1025,7 +1223,15 @@ impl AppState {
         else {
             return 0.0;
         };
-        if let Some(driver) = ferrite_sdr_tables::driver_arg(args) {
+        // Fast path on the literal `driver=` — except `remote`, which is
+        // SoapyRemote's transport, not the radio. `driver_arg` already
+        // unwraps a `remote:driver=` hint when enumerate supplied one;
+        // a hand-typed `driver=remote,remote=<host>` has none, so fall
+        // through to the probe, whose `driver_key` is proxied from the
+        // real device (e.g. `sdrplay`).
+        if let Some(driver) =
+            ferrite_sdr_tables::driver_arg(args).filter(|d| !d.eq_ignore_ascii_case("remote"))
+        {
             return ferrite_sdr_tables::tune_offset_ratio_for(driver);
         }
         match self.inner.device_cache.ensure_args(args).await {
@@ -1215,11 +1421,33 @@ fn scan_presets(dir: &std::path::Path) -> Result<Vec<PresetEntry>> {
             FlowgraphDoc::from_json(&b)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:#}")))
         }) {
-            Ok(doc) => out.push(PresetEntry {
+            // Mirrors the browser catalog (web/src/lib/presets/catalog.ts):
+            // hidden presets (e2e canaries whose `src` is a synthetic
+            // generator, ad-hoc `_*` record graphs) stay loadable by
+            // name but are never *listed* — some of them 4xx on
+            // `POST /api/preset`, which would break the MCP list→load
+            // round-trip.
+            Ok(doc) if doc.catalog_visible == Some(false) => {}
+            Ok(doc) if doc.variants.is_empty() => out.push(PresetEntry {
                 name: stem.to_string(),
                 label: doc.label,
                 description: doc.description,
             }),
+            // A base with variants is not loadable bare (hard cut, D-V4),
+            // so listing the stem would hand `load_preset` a name it
+            // rejects. List each variant under its loadable `${stem}-${id}`
+            // slug instead — the list→load round-trip (MCP's primary use)
+            // must hold for every entry.
+            Ok(doc) => {
+                let base = doc.label.clone().unwrap_or_else(|| stem.to_string());
+                for v in &doc.variants {
+                    out.push(PresetEntry {
+                        name: format!("{stem}-{}", v.id),
+                        label: Some(format!("{base} — {}", v.label.as_deref().unwrap_or(&v.id))),
+                        description: doc.description.clone(),
+                    });
+                }
+            }
             Err(err) => tracing::warn!(path = %path.display(), ?err, "skipping bad preset"),
         }
     }
@@ -1489,6 +1717,67 @@ mod tests {
     async fn stop_while_stopped_returns_false() {
         let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
         assert!(!state.stop().await);
+    }
+
+    #[tokio::test]
+    async fn start_and_stop_publish_graph_and_status_at_the_epoch() {
+        // The coherence contract: every topology change folds a `graph`
+        // record (composed doc + browser half + hash) and a `status`
+        // record, both stamped with the epoch the frames now carry.
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        let store = state.decoder_store();
+        assert!(
+            store.snapshot_kind("graph").is_none(),
+            "nothing published yet"
+        );
+
+        state.start().await.unwrap();
+        let e1 = state.epoch();
+        assert_eq!(e1, 1, "spawn bumps once");
+        let g = store.snapshot_kind("graph").unwrap();
+        let rec = &g.current["current"];
+        assert_eq!(rec.epoch, e1);
+        assert_eq!(rec.data["epoch"], e1);
+        assert_eq!(rec.data["preset"], "t");
+        assert!(rec.data["browser_half"]["blocks"]["sink"].is_object());
+        assert!(rec.data["browser_half_hash"].is_string());
+        assert_eq!(
+            store.snapshot_kind("status").unwrap().current["current"].data["status"],
+            "running"
+        );
+
+        state.stop().await;
+        let e2 = state.epoch();
+        assert_eq!(e2, e1 + 1, "stop is a topology change too");
+        let s = store.snapshot_kind("status").unwrap();
+        assert_eq!(s.current["current"].data["status"], "stopped");
+        assert_eq!(s.current["current"].epoch, e2);
+        assert_eq!(
+            store.snapshot_kind("graph").unwrap().current["current"].epoch,
+            e2
+        );
+    }
+
+    #[tokio::test]
+    async fn live_source_edit_publishes_params_and_keeps_epoch() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        state.start().await.unwrap();
+        let e1 = state.epoch();
+        let store = state.decoder_store();
+        let mut new_source = test_source();
+        new_source.params = json!({
+            "rate_hz": 1000.0,
+            "tone_freq_abs_hz": 250.0,
+            "center_freq_hz": 0.0,
+            "amplitude": 0.1,
+        });
+        state.patch_source(new_source).await.unwrap();
+        // SineSource has no live path → rebuild → epoch moves and the
+        // graph record follows it; a Soapy tune would keep the epoch.
+        let g = store.snapshot_kind("graph").unwrap();
+        assert_eq!(g.current["current"].epoch, state.epoch());
+        assert!(state.epoch() >= e1);
+        state.stop().await;
     }
 
     #[tokio::test]
@@ -1896,6 +2185,107 @@ mod tests {
         let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
         let err = state.load_preset_by_name("wbfm").await.unwrap_err();
         assert!(format!("{err:#}").contains("not configured"));
+    }
+
+    /// `GET /api/presets` must only list names `POST /api/preset` accepts:
+    /// a base with variants is listed as its `${stem}-${id}` slugs, never
+    /// bare. (Pre-fix the 8 shipped variant families — ft8, rtty, olivia,
+    /// … — were listed bare, and the AI's list→load round-trip 4xx'd on
+    /// every one of them.) Likewise `catalog_visible: false` docs are
+    /// omitted: the e2e canaries' `src` is a synthetic generator that
+    /// `POST /api/preset` refuses to compose with a real Source.
+    #[test]
+    fn scan_presets_lists_loadable_variant_slugs_not_bare_base() {
+        let dir = tempdir().unwrap();
+        let write = |name: &str, json: serde_json::Value| {
+            std::fs::write(
+                dir.path().join(format!("{name}.json")),
+                serde_json::to_vec(&json).unwrap(),
+            )
+            .unwrap();
+        };
+        write(
+            "wbfm",
+            json!({ "name": "wbfm", "label": "WBFM", "environments": ["node"],
+                    "blocks": { "a": { "type": "X" } }, "wires": [] }),
+        );
+        write(
+            "olivia",
+            json!({
+                "name": "olivia", "label": "Olivia", "description": "MFSK",
+                "environments": ["node"],
+                "blocks": { "demod": { "type": "OliviaDemod",
+                                       "params": { "variant": "olivia-8-500" } } },
+                "wires": [],
+                "variants": [
+                    { "id": "8-500", "label": "8/500", "default": true, "patch": {} },
+                    { "id": "16-500", "patch": { "demod": { "variant": "olivia-16-500" } } }
+                ]
+            }),
+        );
+
+        // `catalog_visible: false` — hidden from the list (like the
+        // browser catalog) but still resolvable by name.
+        write(
+            "dtmf-e2e",
+            json!({ "name": "dtmf-e2e", "label": "DTMF canary", "catalog_visible": false,
+                    "environments": ["node"],
+                    "blocks": { "src": { "type": "DtmfAudioSource" } }, "wires": [] }),
+        );
+
+        let entries = scan_presets(dir.path()).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["olivia-16-500", "olivia-8-500", "wbfm"]);
+        resolve_preset_doc(dir.path(), "dtmf-e2e").unwrap();
+        // Every listed name resolves through the loader's own path.
+        for n in &names {
+            resolve_preset_doc(dir.path(), n).unwrap_or_else(|e| panic!("{n}: {e:#}"));
+        }
+        let by_name = |n: &str| entries.iter().find(|e| e.name == n).unwrap();
+        assert_eq!(
+            by_name("olivia-8-500").label.as_deref(),
+            Some("Olivia — 8/500")
+        );
+        assert_eq!(
+            by_name("olivia-16-500").label.as_deref(),
+            Some("Olivia — 16-500")
+        );
+        assert_eq!(
+            by_name("olivia-16-500").description.as_deref(),
+            Some("MFSK")
+        );
+        assert_eq!(by_name("wbfm").label.as_deref(), Some("WBFM"));
+    }
+
+    /// `GET /api/presets/:name` (MCP `preset_detail`) accepts the same
+    /// variant slugs the listing emits and returns the *patched* doc.
+    #[tokio::test]
+    async fn read_preset_doc_resolves_variant_slugs() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("olivia.json"),
+            serde_json::to_vec(&json!({
+                "name": "olivia", "environments": ["node"],
+                "blocks": { "demod": { "type": "OliviaDemod",
+                                       "params": { "variant": "olivia-8-500" } } },
+                "wires": [],
+                "variants": [
+                    { "id": "8-500", "default": true, "patch": {} },
+                    { "id": "16-500", "patch": { "demod": { "variant": "olivia-16-500" } } }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5))
+            .with_presets_dir(dir.path().to_path_buf());
+
+        let v = state.read_preset_doc("olivia-16-500").await.unwrap();
+        assert_eq!(v["blocks"]["demod"]["params"]["variant"], "olivia-16-500");
+        // The base file itself is still readable raw (shows the family).
+        let base = state.read_preset_doc("olivia").await.unwrap();
+        assert_eq!(base["variants"].as_array().map(Vec::len), Some(2));
+        assert!(state.read_preset_doc("olivia-9999").await.is_err());
     }
 
     #[test]

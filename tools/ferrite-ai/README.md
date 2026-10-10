@@ -67,6 +67,42 @@ prior context badly).
 - **diagnose** — full toolkit but read-leaning. Inspects state,
   flowgraph JSONs, recent logs; mentions writes before making them.
 - **chat** — *no tools*. Pure Q&A about SDR / Ferrite internals.
+
+### Models
+
+Each mode pins a model explicitly (the Agent SDK's fallback is whatever
+the bundled CLI defaults to, which silently lagged a generation):
+
+| mode | model |
+|---|---|
+| explorer / decoder / diagnose | `claude-opus-5-5` |
+| chat | `claude-haiku-5-5` |
+
+Override globally with `FERRITE_AI_MODEL=…`, or per mode with
+`FERRITE_AI_MODEL_<MODE>=…` (e.g. `FERRITE_AI_MODEL_CHAT=claude-opus-5-5`).
+Per turn, the browser may send `{"text": …, "mode": …, "model": "<id>"}`;
+`ferrite_ai_hello` advertises the per-mode defaults (`models`) and the ids
+the picker may choose (`model_options`). Unknown ids are ignored, not
+forwarded.
+
+### Station notes
+
+The browser sends the operator's `setup_description` (antenna ports,
+station facts) with every turn. When a turn carries none — a headless
+driver, or an empty field in the UI — the sidecar reads
+`$FERRITE_AI_STATE_DIR/setup.md` (override: `FERRITE_AI_SETUP_FILE`),
+re-read per turn so edits apply without a restart.
+
+### Isolation
+
+The sidecar runs the Agent SDK in isolation mode: no `~/.claude` or
+project settings (`settingSources: []`), only the MCP servers declared
+in `index.ts` (`strictMcpConfig`), and the account's claude.ai cloud
+connectors disabled (`disableClaudeAiConnectors`). Without this the
+bundled CLI behaves like the operator's interactive `claude` and — under
+`bypassPermissions` — a "tools-free" chat session inherits things like
+Google Drive write/share/trash tools. `tools` (the built-in set) is the
+restriction; `allowedTools` only auto-approves.
   Use this when burning a tool call would be overkill.
 
 ## Adding a new mode

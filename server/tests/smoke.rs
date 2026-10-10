@@ -14,6 +14,10 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
+#[path = "../src/event_plane.rs"]
+#[allow(dead_code)]
+mod event_plane;
+
 #[path = "../src/log_stream.rs"]
 #[allow(dead_code)]
 mod log_stream;

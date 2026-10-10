@@ -31,6 +31,8 @@ import { nrBundle } from '$lib/presets/nrPresets';
 import { transcript } from '$lib/transcribe/store.svelte';
 import type { FlowgraphDoc } from '$lib/flowgraph';
 
+import { publishTranscriptSegment } from '$lib/events/ingest';
+
 import { FlowgraphRunner } from './runnerClient';
 
 type AudioState = 'unavailable' | 'suspended' | 'running';
@@ -116,6 +118,11 @@ class BrowserRuntime {
    *  block id. Reads the tap SAB directly; not an audio node. */
   private transcribeWorkers = new Map<string, Worker>();
   private lastStructuralFingerprint: string | undefined;
+  /** Graph epoch the page last handed us (`pipeline.graphEpoch`). Passed
+   *  to `load` so the worker's frame gate starts closed to stale
+   *  frames; moved in place by `setEpoch` when the server rebuilt but
+   *  our half is unchanged. */
+  private epoch = 0;
   /** Serialise concurrent reload/start/stop so a rapid preset swap
    *  doesn't interleave two lifecycles against one runner. */
   private inflight: Promise<unknown> = Promise.resolve();
@@ -244,6 +251,24 @@ class BrowserRuntime {
     this.enqueue(() => this.reload(doc, wsUrl));
   }
 
+  /** Called by the page when `pipeline.graphEpoch` changes. Records
+   *  the epoch for the next `load` and moves the live gate on the
+   *  loaded graph; ordered through the same queue as reload so it can't
+   *  overtake a load in flight. */
+  setEpoch(epoch: number): void {
+    if (epoch === this.epoch) return;
+    this.epoch = epoch;
+    if (!this.runner) return;
+    this.enqueue(async () => {
+      if (this.runnerState !== 'loaded' && this.runnerState !== 'running') return;
+      try {
+        await this.runner?.setEpoch(epoch);
+      } catch (err) {
+        logs.push('client', 'warn', `runner setEpoch: ${errorMessage(err)}`);
+      }
+    });
+  }
+
   /** Apply a params delta to a browser-placed block. Routes through
    *  the worker's Rust runtime via `FlowgraphRunner.reconfigureBlock`.
    *  Surface-level wrapper so `applyControl(\`browser.${id}.${key}\`, v)`
@@ -320,7 +345,7 @@ class BrowserRuntime {
       // object could not be cloned". Snapshotting produces a plain
       // deep-clone the worker can receive.
       const plain = $state.snapshot(doc) as FlowgraphDoc;
-      const result = await this.runner.load(plain, wsUrl);
+      const result = await this.runner.load(plain, wsUrl, this.epoch);
       this.loadedBlocks = result.blocks;
       this.uiSinks = result.uiSinks;
       await this.attachAudioNodes(result.audioSabs);
@@ -346,7 +371,7 @@ class BrowserRuntime {
       logs.push(
         'client',
         'info',
-        `runner loaded: blocks=${result.blocks.length} audioSinks=${audioCount} audioState=${this.audioState}`,
+        `runner loaded: blocks=${result.blocks.length} audioSinks=${audioCount} audioState=${this.audioState} epoch=${this.epoch}`,
       );
       // Catch the status-before-load case: `syncStatus(true)` may have
       // been called before `reload` landed, returning early because
@@ -570,19 +595,30 @@ class BrowserRuntime {
   private onTranscribeMessage(msg: { type: string; [k: string]: unknown }): void {
     if (msg.type === 'segment') {
       const vfoHz = this.vfoHzProvider?.() ?? null;
-      transcript.push({
+      const seg = {
         atMs: msg.atMs as number,
         vfoHz,
         t0: msg.t0 as number,
         t1: msg.t1 as number,
         text: msg.text as string,
-        tokens: (msg.tokens as { text: string; p: number }[]) ?? [],
         confidence: msg.confidence as number,
         noSpeechProb: msg.noSpeechProb as number,
         cont: msg.cont as boolean,
         gapMs: msg.gapMs as number,
         speakerTurn: msg.speakerTurn === true,
-      });
+      };
+      // One path for every transcript: publish the segment as a
+      // `transcribe` record and let it come back through the store
+      // mirror (TranscriptView ingests the kind), the same way a
+      // node-side sherpa segment arrives — so other tabs, the CLI and
+      // the AI hear in-browser transcription too. Only when the bus is
+      // down does the segment stay tab-local.
+      if (!publishTranscriptSegment(seg, this.epoch)) {
+        transcript.push({
+          ...seg,
+          tokens: (msg.tokens as { text: string; p: number }[]) ?? [],
+        });
+      }
       // The recognised text itself → decoder log (server files
       // `[transcribe]`-prefixed client lines under `decoder::transcribe`)
       // so the embedded AI / `ferrite-ctl decoder recent` can read the
@@ -654,6 +690,7 @@ class BrowserRuntime {
     this.runnerState = 'idle';
     this.audioState = 'suspended';
     this.lastStructuralFingerprint = undefined;
+    this.epoch = 0;
     this.loadedBlocks = [];
     this.voiceTranscribeIds = [];
     this.audioNrId = null;

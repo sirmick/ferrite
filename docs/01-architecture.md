@@ -28,7 +28,7 @@ demodulation and audio. Both ends run the same Rust runtime
    │  └──────────────────┘  └─────────────────────────┘   │
    └──────────────────────────▲───────────────────────────┘
                               │  WS /ws/preset (binary, postcard Frame)
-                              │  WS /ws/logs   (text)
+                              │  WS /mqtt      (MQTT event plane: records + logs)
                               │  REST /api/*   (JSON)
                               │
        ┌──────────────────────▼─────────────────────────┐
@@ -48,7 +48,7 @@ demodulation and audio. Both ends run the same Rust runtime
        │  └────────────────┬─────────────────────────┘  │
        │                   ▼                            │
        │  ┌─ axum router (server/src/main.rs) ───────┐  │
-       │  │  /api/* · /ws/preset · /ws/logs · static │  │
+       │  │  /api/* · /ws/preset · /mqtt · static    │  │
        │  └──────────────────────────────────────────┘  │
        │                                                │
        │  + SoapySource reader thread (only extra OS    │
@@ -76,7 +76,8 @@ Responsibilities:
   `ferrite_runtime::Runtime`, and ticks them on a 400 µs default period
   (CLI: `--tick-period-us`).
 - **Serve the wire.** axum router in `main.rs:269–297`. REST under `/api/*`,
-  binary frame stream on `/ws/preset`, text log stream on `/ws/logs`.
+  binary frame stream on `/ws/preset`, the MQTT event plane behind `/mqtt`
+  (`server/src/event_plane.rs`: every store record + log line as a topic).
 - **Cache device probes.** `DeviceCache`
   ([`server/src/device_cache.rs`](../server/src/device_cache.rs)) keys probes
   by serial (or canonicalized args). Warmed at boot (`main.rs:249`); CLI
@@ -180,8 +181,9 @@ preset selector, a Source dialog, a Flowgraph dialog, and Start/Stop.
   [`frame.ts`](../web/src/lib/ws/frame.ts) calls `decodeFrame` exported from
   the `ferrite-blocks` WASM crate, so server and browser cannot disagree on
   the schema without a build break (D02).
-- A second WebSocket to `/ws/logs` (text) mirrors the server's `tracing`
-  output into the LogPanel.
+- One MQTT-over-WebSocket connection to `/mqtt` (`web/src/lib/events/`)
+  carries the store mirror (`ferrite/state/#`) and the server's `tracing`
+  lines (`ferrite/state/log/#`) into the LogPanel.
 
 ### Vite / dev
 
