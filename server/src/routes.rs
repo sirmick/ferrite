@@ -673,7 +673,7 @@ pub async fn patch_flowgraph(
     let plan = state
         .patch_flowgraph(new_doc)
         .await
-        .map_err(|e| AppError::bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::radio_or_bad_request("RECONFIGURE_FAILED", &e))?;
     Ok(Json(reconfigure_response(plan)))
 }
 
@@ -694,7 +694,7 @@ pub async fn patch_source(
     let plan = state
         .patch_source(new_source)
         .await
-        .map_err(|e| AppError::bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::radio_or_bad_request("RECONFIGURE_FAILED", &e))?;
     let mut resp = reconfigure_response(plan);
     resp.source_readback = state.source_readback().await;
     Ok(Json(resp))
@@ -721,7 +721,7 @@ pub async fn pipeline_start(
     state
         .start()
         .await
-        .map_err(|e| AppError::bad_request("PIPELINE_START_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::radio_or_bad_request("PIPELINE_START_FAILED", &e))?;
     Ok(Json(PipelineStatusResponse {
         status: PipelineStatus::Running,
     }))
@@ -817,7 +817,7 @@ pub async fn post_tune(
     let plan = state
         .tune(req.freq_hz, req.span_hz, req.offset_ratio, req.keep_lo)
         .await
-        .map_err(|e| AppError::bad_request("TUNE_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::radio_or_bad_request("TUNE_FAILED", &e))?;
     let mut resp = reconfigure_response(plan);
     resp.source_readback = state.source_readback().await;
     Ok(Json(resp))
@@ -854,7 +854,7 @@ pub async fn patch_pipeline_block(
     let plan = state
         .apply_block_params(&id, delta)
         .await
-        .map_err(|e| AppError::bad_request("RECONFIGURE_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::radio_or_bad_request("RECONFIGURE_FAILED", &e))?;
     let mut resp = reconfigure_response(plan);
     // Source goes through `patch_source` internally; mirror the
     // `/api/source` handler so a single-key `src` write still gets the
@@ -1020,7 +1020,7 @@ pub async fn load_preset(
     let (doc, plan) = state
         .load_preset_by_name(&req.name)
         .await
-        .map_err(|e| AppError::bad_request("LOAD_PRESET_FAILED", format!("{e:#}")))?;
+        .map_err(|e| AppError::radio_or_bad_request("LOAD_PRESET_FAILED", &e))?;
     let dt_ms = started.elapsed().as_millis();
     let scope = plan.as_ref().map_or("no-pipeline", |p| match p.overall {
         ferrite_blocks::ReconfigureScope::SelfBlock => "self-block",

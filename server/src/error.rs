@@ -46,6 +46,27 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// A failure from a path that touches the radio: a SoapyRemote
+    /// transport failure (host down, server restarted, "Broken pipe")
+    /// becomes a typed 503 `RADIO_UNREACHABLE` an agent can branch on;
+    /// anything else stays the caller's 400 `code`.
+    #[must_use]
+    pub fn radio_or_bad_request(code: &'static str, err: &anyhow::Error) -> Self {
+        let raw = format!("{err:#}");
+        if ferrite_blocks::soapy_retry::is_remote_transport_error(&raw) {
+            Self::unavailable(
+                "RADIO_UNREACHABLE",
+                format!(
+                    "the remote radio isn't answering (SoapyRemote). While the pipeline is \
+                     meant to run, ferrited keeps reconnecting — watch `health` / the activity \
+                     log. Detail: {raw}"
+                ),
+            )
+        } else {
+            Self::bad_request(code, raw)
+        }
+    }
+
     #[must_use]
     pub fn bad_request(code: &'static str, message: impl Into<String>) -> Self {
         Self::BadRequest {

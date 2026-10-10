@@ -435,6 +435,10 @@ async fn main() -> Result<()> {
         state = state.with_event_plane(plane);
     }
 
+    // Radio supervisor + `health` record (1 Hz): recovers a lost radio
+    // while the operator wants the pipeline running.
+    state.spawn_supervisor();
+
     if args.auto_start {
         state.start().await.context("auto-start pipeline")?;
         tracing::info!("pipeline auto-started");

@@ -46,7 +46,7 @@ pub trait DecoderSink: Send + Sync {
 }
 
 /// Construction-time params.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct EventStoreParams {
     /// Store kind this sink feeds (e.g. `adsb`, `aprs`, `ft8`, `signals`).
@@ -56,15 +56,6 @@ pub struct EventStoreParams {
     /// graph rebuild. Default false: decode history is the point (agents
     /// read it, the store persists it), and records carry their epoch.
     pub reset_on_init: bool,
-}
-
-impl Default for EventStoreParams {
-    fn default() -> Self {
-        Self {
-            kind: String::new(),
-            reset_on_init: false,
-        }
-    }
 }
 
 pub struct EventStore {

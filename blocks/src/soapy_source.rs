@@ -113,6 +113,11 @@ struct ReaderCounters {
     /// aborts the whole process — so on a hung device we leak the handle
     /// (the service restart frees it) rather than crash.
     hung: AtomicBool,
+    /// Set when the reader thread ended on a fatal read error — the
+    /// stream is gone for good and only a reopen brings samples back.
+    reader_ended: AtomicBool,
+    /// The fatal read error that ended the reader, for health/MCP.
+    reader_error: Mutex<Option<String>>,
 }
 
 /// No samples delivered for this long ⇒ treat the driver as hung. Long
@@ -445,6 +450,31 @@ pub struct SoapySource {
     /// session keeps running. Driven by the daemon's wideband IQ
     /// capture; no preset swap.
     record: crate::iq_record_tap::IqRecordTap,
+    /// Opened through SoapyRemote (`driver=remote`). Decides `Drop`'s
+    /// leak-vs-unmake on a hung driver; see [`soapy_retry::is_remote_args`].
+    is_remote: bool,
+}
+
+/// Liveness of the radio behind a [`SoapySource`], for the daemon's
+/// supervisor and the `health` record. All counters are cumulative since
+/// the block was built.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceHealth {
+    /// Opened through SoapyRemote.
+    pub remote: bool,
+    /// The reader stopped seeing deliveries for the hung window.
+    pub hung: bool,
+    /// The reader thread ended on a fatal read error.
+    pub reader_ended: bool,
+    pub reader_error: Option<String>,
+    /// Milliseconds since the last delivery; `None` before the first.
+    pub stalled_ms: Option<u64>,
+    /// Milliseconds since the block was built (for "never delivered").
+    pub age_ms: u64,
+    pub samples_pushed: u64,
+    pub overflow_drops: u64,
+    pub ring_drops: u64,
+    pub ring_gaps: u64,
 }
 
 impl SoapySource {
@@ -650,6 +680,7 @@ impl SoapySource {
             underrun_samples: 0,
             start_instant: std::time::Instant::now(),
             record: crate::iq_record_tap::IqRecordTap::new(),
+            is_remote: soapy_retry::is_remote_args(&params.args),
         })
     }
 
@@ -667,6 +698,28 @@ impl SoapySource {
         }
         let now = self.start_instant.elapsed().as_nanos() as u64;
         Some(now.saturating_sub(last))
+    }
+
+    /// Radio liveness snapshot (see [`SourceHealth`]).
+    #[must_use]
+    pub fn health(&self) -> SourceHealth {
+        SourceHealth {
+            remote: self.is_remote,
+            hung: self.counters.hung.load(Ordering::Relaxed),
+            reader_ended: self.counters.reader_ended.load(Ordering::Relaxed),
+            reader_error: self
+                .counters
+                .reader_error
+                .lock()
+                .ok()
+                .and_then(|g| g.clone()),
+            stalled_ms: self.stalled_ns().map(|ns| ns / 1_000_000),
+            age_ms: u64::try_from(self.start_instant.elapsed().as_millis()).unwrap_or(u64::MAX),
+            samples_pushed: self.samples_pushed(),
+            overflow_drops: self.overflow_drops(),
+            ring_drops: self.ring_drops(),
+            ring_gaps: self.ring_gaps(),
+        }
     }
 
     /// Post-configure readback — what the hardware actually locked to.
@@ -1112,7 +1165,19 @@ impl Drop for SoapySource {
         if let Some(handle) = self.reader.take() {
             let _ = handle.join();
         }
-        if self.counters.hung.load(Ordering::Relaxed) {
+        if self.counters.hung.load(Ordering::Relaxed) && self.is_remote {
+            // A SoapyRemote handle is a socket client: its destructor
+            // catches its own RPC failures, so unmaking a dead one is
+            // safe. Leaking it would be harmful — SoapySDR's factory
+            // table would hand the same dead object back on the next
+            // open with matching args, and a later module reload would
+            // leave it pointing at unmapped code.
+            tracing::info!(
+                target: "driver",
+                "SoapySource dropped with an unresponsive remote radio; releasing the handle"
+            );
+            unsafe { ManuallyDrop::drop(&mut self.device) };
+        } else if self.counters.hung.load(Ordering::Relaxed) {
             // The driver stopped delivering — the service is wedged.
             // `SoapySDRDevice_unmake` (the `Device` Drop) calls the SDRplay
             // `ReleaseDevice()`, which throws `sdrplay_api_ServiceNotResponding`
@@ -1127,6 +1192,7 @@ impl Drop for SoapySource {
                  (restart the SDR service to reclaim it)"
             );
             // Do NOT run the device's Drop (the throwing unmake).
+            soapy_retry::note_leaked_handle();
         } else {
             // Healthy: release normally.
             unsafe { ManuallyDrop::drop(&mut self.device) };
@@ -1246,6 +1312,10 @@ fn run_reader<S: RxStreamLike>(
                 // wedged — flag it so Drop skips the throwing unmake().
                 tracing::warn!(%msg, "soapy read error; ending reader");
                 counters.hung.store(true, Ordering::Relaxed);
+                counters.reader_ended.store(true, Ordering::Relaxed);
+                if let Ok(mut e) = counters.reader_error.lock() {
+                    *e = Some(msg);
+                }
                 stream.deactivate();
                 return;
             }
@@ -1776,6 +1846,15 @@ mod tests {
         assert!(
             counters.hung.load(Ordering::Relaxed),
             "a fatal read must flag the driver hung (so Drop skips unmake)"
+        );
+        assert!(
+            counters.reader_ended.load(Ordering::Relaxed),
+            "a fatal read ends the reader for good — the supervisor must see it"
+        );
+        assert_eq!(
+            counters.reader_error.lock().unwrap().as_deref(),
+            Some("device gone"),
+            "the fatal error is kept for the health record"
         );
     }
 

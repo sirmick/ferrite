@@ -193,6 +193,94 @@ pub fn flatten_chain(err: &anyhow::Error) -> String {
         .join(" :: ")
 }
 
+/// True when `args` open a device through SoapyRemote (`driver=remote`).
+/// A remote handle is a socket client: unmaking it is always safe (its
+/// destructor catches its own RPC failures), and *not* unmaking it is
+/// harmful — SoapySDR's factory table hands the same dead object back
+/// on the next open with matching args.
+#[must_use]
+pub fn is_remote_args(args: &str) -> bool {
+    args.split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .any(|(k, v)| k.trim() == "driver" && v.trim() == "remote")
+}
+
+/// The `remote=` endpoint in `args` (`tcp://host:port`), when present.
+#[must_use]
+pub fn remote_endpoint(args: &str) -> Option<String> {
+    args.split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| k.trim() == "remote")
+        .map(|(_, v)| v.trim().to_string())
+}
+
+/// An error chain that means "the remote radio host isn't answering"
+/// (SoapyRemote server died, host down, network gone) rather than a
+/// configuration mistake. Callers turn these into a typed
+/// `RADIO_UNREACHABLE` and the supervisor keeps retrying.
+#[must_use]
+pub fn is_remote_transport_error(chain: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "Broken pipe",
+        "Connection refused",
+        "Connection reset",
+        "connection timed out",
+        "No route to host",
+        "Network is unreachable",
+        "SoapyRPC",
+        "SoapyRemote",
+        "SoapyStreamEndpoint",
+        "remote device",
+    ];
+    NEEDLES.iter().any(|n| chain.contains(n))
+}
+
+/// Device handles this process deliberately leaked because unmaking
+/// them would abort (a wedged SDRplay service throws from
+/// `ReleaseDevice()`). While any are leaked, unloading driver modules
+/// would leave their vtables pointing at unmapped code — `device reload`
+/// must refuse.
+static LEAKED_HANDLES: AtomicU64 = AtomicU64::new(0);
+
+/// Record one leaked handle (called from `SoapySource::drop`).
+pub fn note_leaked_handle() {
+    LEAKED_HANDLES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// How many handles this process has leaked (never decreases — only a
+/// process restart reclaims them).
+#[must_use]
+pub fn leaked_handles() -> u64 {
+    LEAKED_HANDLES.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    #[test]
+    fn remote_args_and_endpoint() {
+        let a = "driver=remote,remote=tcp://172.16.16.159:55132,remote:driver=sdrplay,serial=X";
+        assert!(is_remote_args(a));
+        assert_eq!(
+            remote_endpoint(a).as_deref(),
+            Some("tcp://172.16.16.159:55132")
+        );
+        assert!(!is_remote_args("driver=sdrplay,serial=X"));
+        // `remote:driver=` is the server-side driver, not ours.
+        assert!(!is_remote_args("remote:driver=remote"));
+    }
+
+    #[test]
+    fn transport_errors_classify() {
+        assert!(is_remote_transport_error(
+            "live set_frequency=7074000: SoapyRPCPacker::send() FAIL: Broken pipe"
+        ));
+        assert!(is_remote_transport_error("connect: Connection refused"));
+        assert!(!is_remote_transport_error("sample rate 9e9 out of range"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

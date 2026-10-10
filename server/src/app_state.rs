@@ -149,7 +149,17 @@ struct Inner {
     /// start/stop like `frames`; the capture state machines live in
     /// [`crate::capture`] and drive this AppState directly.
     captures: Arc<crate::capture::CaptureRegistry>,
+    /// The operator *wants* the pipeline running: set by `start`, cleared
+    /// by an explicit `stop`. The radio supervisor only recovers while
+    /// this holds, and an operator stop mid-recovery ends the recovery.
+    run_intent: std::sync::atomic::AtomicBool,
+    /// Radio liveness as the supervisor last judged it (the `health`
+    /// record's `radio` section).
+    radio: std::sync::Mutex<supervisor::RadioState>,
 }
+
+#[path = "app_state_supervisor.rs"]
+mod supervisor;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -193,6 +203,8 @@ impl AppState {
                 tick_period,
                 device_cache: DeviceCache::new(),
                 captures,
+                run_intent: std::sync::atomic::AtomicBool::new(false),
+                radio: std::sync::Mutex::new(supervisor::RadioState::default()),
             }),
             logs: None,
             presets_dir: None,
@@ -889,6 +901,29 @@ impl AppState {
     /// Start the pipeline if it isn't already running. Idempotent:
     /// re-calling while running is a no-op and returns `Ok(())`.
     pub async fn start(&self) -> Result<()> {
+        self.inner
+            .run_intent
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let res = self.start_inner().await;
+        if let Err(e) = &res {
+            // An unreachable remote radio keeps the intent: the radio
+            // supervisor brings the pipeline up once the host answers
+            // (what `RADIO_UNREACHABLE` promises). Any other failure is a
+            // real "not running" — clear it so nothing retries a bad
+            // config forever.
+            if !ferrite_blocks::soapy_retry::is_remote_transport_error(&format!("{e:#}")) {
+                self.inner
+                    .run_intent
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        res
+    }
+
+    /// `start` without touching the operator's run intent — the radio
+    /// supervisor's restart, which must not resurrect an intent an
+    /// operator stop just cleared.
+    async fn start_inner(&self) -> Result<()> {
         let mut guard = self.inner.pipeline.lock().await;
         if guard.is_some() {
             return Ok(());
@@ -999,6 +1034,30 @@ impl AppState {
                 "cannot reload SoapySDR drivers while the pipeline is running — stop it first",
             ));
         }
+        // A leaked (hung, unmakeable) handle or a probe thread still
+        // inside a driver would be left pointing at unmapped code once
+        // the modules unload — that is a crash, not a recovery.
+        let leaked = ferrite_blocks::soapy_retry::leaked_handles();
+        if leaked > 0 {
+            return Err(AppError::conflict(
+                "RELOAD_UNSAFE",
+                format!(
+                    "cannot reload SoapySDR drivers: {leaked} hung device handle(s) are still \
+                     loaded (unmaking them would abort the daemon) — restart the SDR service \
+                     and then ferrited instead"
+                ),
+            ));
+        }
+        let probes = crate::device::probes_in_flight();
+        if probes > 0 {
+            return Err(AppError::conflict(
+                "RELOAD_UNSAFE",
+                format!(
+                    "cannot reload SoapySDR drivers: {probes} device probe(s) are still running \
+                     inside a driver — wait for them to finish or restart ferrited"
+                ),
+            ));
+        }
         self.inner.device_cache.clear().await;
         // dlclose/dlopen are blocking and contend on the C runtime's
         // mutex; off-runtime keeps the axum worker free.
@@ -1016,6 +1075,16 @@ impl AppState {
     /// to join before returning so the caller knows the source device
     /// has been released.
     pub async fn stop(&self) -> bool {
+        self.inner
+            .run_intent
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.stop_with_status("stopped").await
+    }
+
+    /// Tear the pipeline down, publishing `status` as given — `stopped`
+    /// for an operator stop, `recovering` when the radio supervisor
+    /// cycles a dead radio (the operator's run intent is untouched).
+    async fn stop_with_status(&self, status: &str) -> bool {
         let mut guard = self.inner.pipeline.lock().await;
         let Some(mount) = guard.take() else {
             return false;
@@ -1047,7 +1116,7 @@ impl AppState {
         // never be mistaken for a later start's.
         self.inner.decoder_store.bump_epoch();
         self.publish_graph().await;
-        self.publish_status("stopped");
+        self.publish_status(status);
         true
     }
 

@@ -282,7 +282,21 @@ async fn api_response(resp: reqwest::Response, ctx: &str) -> Result<Value, McpEr
         .await
         .map_err(|e| http_err(ctx, format!("read body: {e}")))?;
     if !status.is_success() {
-        return Err(http_err(ctx, format!("{status}: {text}")));
+        // Lead with the server's typed code + message so an agent can
+        // branch on it (e.g. `RADIO_UNREACHABLE`) instead of parsing a
+        // raw driver string; fall back to the raw body.
+        let typed = serde_json::from_str::<Value>(&text).ok().and_then(|v| {
+            let e = v.get("error")?;
+            Some(format!(
+                "{}: {}",
+                e.get("code")?.as_str()?,
+                e.get("message")?.as_str()?
+            ))
+        });
+        return Err(http_err(
+            ctx,
+            typed.unwrap_or_else(|| format!("{status}: {text}")),
+        ));
     }
     if text.is_empty() {
         return Ok(Value::Null);
@@ -777,6 +791,15 @@ impl FerriteServer {
         let source = self.http.get("/api/source").await.unwrap_or(Value::Null);
         let flowgraph = self.http.get("/api/flowgraph").await.unwrap_or(Value::Null);
         let ui_sinks = self.http.get("/api/ui-sinks").await.unwrap_or(Value::Null);
+        // The `health` record: radio liveness, requested-vs-actual LO /
+        // rate, listen frequency, decoder/driver warnings, and `issues`
+        // in plain words — check `health.ok` before trusting a result.
+        let health = self
+            .http
+            .get("/api/state")
+            .await
+            .map(|snap| store_current(&snap, "health"))
+            .unwrap_or(Value::Null);
         let preset = flowgraph.get("name").cloned().unwrap_or(Value::Null);
         let ready = pipeline.get("status").and_then(Value::as_str) == Some("running");
         // Explicit hardware-vs-software flag so a blind caller can't mistake
@@ -795,6 +818,7 @@ impl FerriteServer {
             "flowgraph": flowgraph,
             "preset": preset,
             "ui_sinks": ui_sinks,
+            "health": health,
             "ready": ready,
         }))
     }
@@ -1421,7 +1445,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "One-shot snapshot of the running ferrited: pipeline status (running/stopped) with a hoisted `ready` boolean, the active source config (driver/freq/rate/gain), the full active flowgraph + its `preset` name, and the set of UI sinks. Cheap; the AI calls this first to learn what the world looks like."
+        description = "One-shot snapshot of the running ferrited: pipeline status (running/stopped) with a hoisted `ready` boolean, the active source config (driver/freq/rate/gain), the full active flowgraph + its `preset` name, the set of UI sinks, and `health` — `health.ok` / `health.issues` say in plain words whether you are getting what you asked for (radio lost/recovering, preset-declared vs configured vs actual sample rate, requested vs actual LO, decoder/driver warnings such as a rate mismatch), with `health.tuning.listen_hz` the real listen frequency. Check `health.ok` before trusting an empty decode result. Cheap; call this first."
     )]
     async fn status(&self) -> Result<CallToolResult, McpError> {
         ok_json(&self.status_op().await?)
