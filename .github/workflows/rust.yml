@@ -66,5 +66,14 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-targets
 
+      - name: cargo test --release (blocks)
+        # The shipped artefact is a release build; debug tests can't see
+        # what `debug_assert!`/`cfg(debug_assertions)` hide. A write
+        # inside `debug_assert_eq!` once dropped every release-mode
+        # SoapySDR delivery for three months while this job was green.
+        # Blocks only — it's where the hot-path DSP lives and the extra
+        # compile is ~1 min on a warm cache.
+        run: cargo test --release -p ferrite-blocks
+
       - name: cargo check (wasm32)
         run: cargo check -p ferrite-blocks --target wasm32-unknown-unknown --features wasm

@@ -59,44 +59,50 @@ jobs:
           version: 5.0.7
           actions-cache-folder: emsdk-cache
 
-      - name: Vendor whisper.cpp (pinned)
-        # `wasm:build:whisper` is inert until whisper.cpp is vendored,
-        # which leaves the whisper golden e2e green-by-skip. Vendor the
-        # pinned commit (see blocks/native/whisper/README.md) so the
-        # Emscripten whisper module is actually built and that e2e
-        # becomes a hard gate. Exact-commit fetch, not a --depth 1
-        # clone, so the pin can't drift.
-        run: |
-          PIN=968eebe77225d25e57a3f981da7c696310f0e881
-          mkdir -p blocks/native/whisper/vendor/whisper.cpp
-          cd blocks/native/whisper/vendor/whisper.cpp
-          git init -q
-          git remote add origin https://github.com/ggml-org/whisper.cpp
-          git fetch -q --depth 1 origin "$PIN"
-          git checkout -q FETCH_HEAD
-
-      - name: Cache whisper tiny model
-        id: whisper-model
+      # --- In-browser speech-to-text: sherpa-onnx (replaced whisper.cpp) ---
+      # `wasm:build:sherpa` is inert until the source is vendored, the
+      # model is present and emsdk is on PATH — which leaves the sherpa
+      # golden e2e green-by-skip. Provide all three so the module is
+      # really built and the "Artifacts present" step below makes the
+      # transcript gate hard. Pins mirror scripts/bootstrap.sh
+      # (SHERPA_PIN / SHERPA_MODEL_URL) and blocks/native/sherpa/README.md.
+      - name: Cache sherpa-onnx source + wasm build tree
+        id: sherpa-src
         uses: actions/cache@v4
         with:
-          path: web/static/models/ggml-tiny.en-q5_1.bin
-          key: whisper-tiny-en-q5_1-v1
+          # Source *and* the out-of-tree build dir live here, so a hit
+          # skips the clone and makes the Emscripten build incremental
+          # (~3 min cold: onnxruntime is prebuilt, only sherpa compiles).
+          path: blocks/native/sherpa/vendor/sherpa-onnx
+          key: sherpa-onnx-v1.13.2-emsdk5.0.7-${{ hashFiles('blocks/native/sherpa/emscripten/build.sh') }}
 
-      - name: Fetch whisper tiny model (best-effort)
-        if: steps.whisper-model.outputs.cache-hit != 'true'
-        # The golden e2e (whisperGoldenE2E.test.ts) `skipIf`s when the model
-        # is absent, so a HuggingFace rate-limit (HF 429s unauthenticated
-        # downloads from shared CI IPs) must NOT fail the job — fetch
-        # best-effort and let the e2e skip this run. Once any fetch succeeds
-        # it's cached, so later runs gate the transcript for real. NB: models
-        # live under `ggerganov/whisper.cpp` — `ggml-org` (where the source
-        # moved) 401s on the model blobs.
+      - name: Vendor sherpa-onnx (pinned tag)
+        if: steps.sherpa-src.outputs.cache-hit != 'true'
         run: |
-          mkdir -p web/static/models
-          curl -fL --retry 6 --retry-all-errors --retry-delay 10 --connect-timeout 30 --remove-on-error \
-            -o web/static/models/ggml-tiny.en-q5_1.bin \
-            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin \
-            || { echo "::warning::whisper model fetch failed (HF rate-limit); golden e2e will skip this run"; rm -f web/static/models/ggml-tiny.en-q5_1.bin; }
+          PIN=v1.13.2
+          DIR=blocks/native/sherpa/vendor/sherpa-onnx
+          mkdir -p "$DIR"
+          git -C "$DIR" init -q
+          git -C "$DIR" remote add origin https://github.com/k2-fsa/sherpa-onnx
+          git -C "$DIR" fetch -q --depth 1 origin "refs/tags/$PIN:refs/tags/$PIN"
+          git -C "$DIR" checkout -q --detach "$PIN"
+
+      - name: Cache sherpa EN-20M model
+        id: sherpa-model
+        uses: actions/cache@v4
+        with:
+          path: tools/sherpa-asr/models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17
+          key: sherpa-model-streaming-zipformer-en-20M-2023-02-17
+
+      - name: Fetch sherpa EN-20M model
+        if: steps.sherpa-model.outputs.cache-hit != 'true'
+        # GitHub release CDN (no HuggingFace rate-limit); ~42 MB int8.
+        run: |
+          mkdir -p tools/sherpa-asr/models
+          curl -fL --retry 6 --retry-all-errors --retry-delay 10 --connect-timeout 30 \
+            -o /tmp/sherpa-model.tar.bz2 \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2
+          tar xjf /tmp/sherpa-model.tar.bz2 -C tools/sherpa-asr/models
 
       - name: pnpm install
         run: pnpm install --frozen-lockfile
@@ -105,9 +111,25 @@ jobs:
         # `pnpm -r check` (svelte-check) imports from
         # web/src/lib/wasm/{blocks,runtime}; both are produced by
         # wasm-pack. `wasm:build:fldigi` emits the Emscripten fldigi
-        # bridge and `wasm:build:whisper` the whisper module (emsdk +
-        # vendored sources above). Build all before lint / check / test.
+        # bridge and `wasm:build:sherpa` the speech-to-text module
+        # (emsdk + vendored sources above). Build all before lint /
+        # check / test.
         run: pnpm --filter @ferrite/web wasm:build
+
+      - name: Artifacts present (hard gate)
+        # The Emscripten builds exit 0 when their inputs are missing so a
+        # dev box degrades gracefully — CI must not. If any of these is
+        # absent the matching e2e would silently `skipIf`.
+        run: |
+          set -e
+          for f in web/src/lib/wasm/blocks/ferrite_blocks_bg.wasm \
+                   web/src/lib/wasm/runtime/runtime_bg.wasm \
+                   web/src/lib/wasm/fldigi/fldigi.wasm \
+                   web/src/lib/wasm/sherpa/sherpa-onnx-wasm-main-asr.wasm \
+                   web/src/lib/wasm/sherpa/sherpa-onnx-wasm-main-asr.data \
+                   web/src/lib/wasm/sherpa/sherpa-onnx-asr.js; do
+            [ -s "$f" ] || { echo "::error::missing wasm artifact: $f"; exit 1; }
+          done
 
       - name: pnpm -r lint
         run: pnpm -r lint
