@@ -85,6 +85,13 @@
   $effect(() => {
     browserRuntime.syncStatus(pipeline.status === 'running');
   });
+  // The graph epoch travels with the `graph` record (same delta that
+  // carries a new browser half). Hand it to the runner *before* the
+  // half-driven reload above can run: `setEpoch` records it
+  // synchronously, so the enqueued `load` picks up the new value.
+  $effect(() => {
+    browserRuntime.setEpoch(pipeline.graphEpoch);
+  });
 
   // Transcribe ⇒ voice-NR, in one place. Engaging transcription (UI
   // tri-state Off|On|Transcribe, or `ferrite-ctl transcribe on` —

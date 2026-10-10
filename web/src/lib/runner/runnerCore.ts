@@ -105,9 +105,28 @@ interface UiEventsBinding {
   readonly streamId: number;
 }
 
+/** The frame epoch gate. Shared by reference between `LoadedState`
+ *  and every bridge subscription so `setEpoch` moves it in place. A
+ *  frame passes when the gate is 0 (unset), the frame is unstamped
+ *  (0), or the two agree; everything else is a leftover of a previous
+ *  topology and is dropped — the server bumps the epoch exactly once
+ *  per rebuild, and the `graph` record carrying the new value is what
+ *  (re)loads this graph. */
+interface EpochGate {
+  epoch: number;
+  dropped: number;
+}
+
+function passesGate(gate: EpochGate, frameEpoch: number): boolean {
+  if (gate.epoch === 0 || frameEpoch === 0 || frameEpoch === gate.epoch) return true;
+  gate.dropped += 1;
+  return false;
+}
+
 interface LoadedState {
   rt: RuntimeHandle;
   client: FrameClient;
+  gate: EpochGate;
   subscribers: Array<() => void>;
   audio: AudioBinding[];
   transcribe: TranscribeBinding[];
@@ -137,11 +156,14 @@ export class RunnerCore {
             id: req.id,
             ok: true,
             kind: 'load',
-            data: await this.load(req.doc, req.wsUrl),
+            data: await this.load(req.doc, req.wsUrl, req.epoch ?? 0),
           };
         case 'start':
           this.doStart();
           return { id: req.id, ok: true, kind: 'start' };
+        case 'setEpoch':
+          if (this.loaded) this.loaded.gate.epoch = req.epoch;
+          return { id: req.id, ok: true, kind: 'setEpoch' };
         case 'stop':
           this.doStop();
           return { id: req.id, ok: true, kind: 'stop' };
@@ -195,22 +217,24 @@ export class RunnerCore {
     return toProtocolState(this.loaded.rt.state);
   }
 
-  private async load(doc: FlowgraphDoc, wsUrl: string): Promise<LoadResult> {
+  private async load(doc: FlowgraphDoc, wsUrl: string, epoch: number): Promise<LoadResult> {
     if (this.loaded) {
       throw new Error('RunnerCore.load: already loaded — stop() first');
     }
     const splitDoc = await this.env.splitDoc(doc, 'browser');
     const client = this.env.createFrameClient(wsUrl);
+    const gate: EpochGate = { epoch, dropped: 0 };
     let rt: RuntimeHandle | null = null;
     try {
       rt = await this.env.createRuntime(splitDoc, 'browser');
       rt.init();
       const { subscribers, audio, audioSabs, transcribe, transcribeSabs, bridges, uiEvents } =
-        wireBlocks(splitDoc, client, rt);
+        wireBlocks(splitDoc, client, rt, gate);
       const blocks = Object.keys(splitDoc.blocks ?? {});
       this.loaded = {
         rt,
         client,
+        gate,
         subscribers,
         audio,
         transcribe,
@@ -360,9 +384,14 @@ export class RunnerCore {
       // `rx[] audio[]` once a second — pure noise. Only emit it when
       // there's something bound on the browser side to report on.
       if (state.bridges.length > 0 || state.audio.length > 0) {
-        const text = `runner: runner 1s: ticks=${state.ticks} rx[${bridgeSummary}] audio[${audioSummary}]`;
+        const gateTag =
+          state.gate.dropped > 0
+            ? ` epoch=${state.gate.epoch} stale_dropped=${state.gate.dropped}`
+            : '';
+        const text = `runner: runner 1s: ticks=${state.ticks} rx[${bridgeSummary}] audio[${audioSummary}]${gateTag}`;
         postDiag(text);
       }
+      state.gate.dropped = 0;
       try {
         const json = state.rt.diagSnapshot();
         // Skip the empty `{"blocks":[]}` snapshot a node-only graph
@@ -474,6 +503,7 @@ function wireBlocks(
   doc: FlowgraphDoc,
   client: FrameClient,
   rt: RuntimeHandle,
+  gate: EpochGate,
 ): {
   subscribers: Array<() => void>;
   audio: AudioBinding[];
@@ -511,6 +541,7 @@ function wireBlocks(
       bridges.push(counter);
       const unsub = client.subscribe(streamId, (frame) => {
         if (frame.header.payloadType !== PayloadType.IqF32) return;
+        if (!passesGate(gate, frame.header.epoch)) return;
         const samples = viewIqF32(frame.payload);
         counter.samples += samples.length / 2; // complex pairs → IQ samples
         // When the producer advertises its runtime output rate on the
@@ -545,6 +576,7 @@ function wireBlocks(
       bridges.push(counter);
       const unsub = client.subscribe(streamId, (frame) => {
         if (frame.header.payloadType !== PayloadType.F32) return;
+        if (!passesGate(gate, frame.header.epoch)) return;
         const samples = viewF32(frame.payload);
         counter.samples += samples.length;
         const rate = frame.header.sampleRateHz;

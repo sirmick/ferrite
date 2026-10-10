@@ -28,7 +28,10 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -134,6 +137,11 @@ impl Serialize for CaptureJob {
 pub struct CaptureRegistry {
     jobs: RwLock<Vec<CaptureJob>>,
     next_job: AtomicU64,
+    /// Every job change is also folded into the state store's `jobs`
+    /// kind (keyed by `job_id`), so the UI, the CLI and an agent all see
+    /// progress + completion as records — no jobs view needed. `None`
+    /// only in harnesses that build a bare registry.
+    store: Option<Arc<crate::decoder_store::DecoderStore>>,
 }
 
 impl CaptureRegistry {
@@ -142,16 +150,33 @@ impl CaptureRegistry {
         Self {
             jobs: RwLock::new(Vec::new()),
             next_job: AtomicU64::new(1),
+            store: None,
+        }
+    }
+
+    /// The production constructor: publish every job record to `store`.
+    #[must_use]
+    pub fn with_store(store: Arc<crate::decoder_store::DecoderStore>) -> Self {
+        Self {
+            jobs: RwLock::new(Vec::new()),
+            next_job: AtomicU64::new(1),
+            store: Some(store),
         }
     }
 
     async fn upsert(&self, job: CaptureJob) {
-        let mut guard = self.jobs.write().await;
-        if let Some(pos) = guard.iter().position(|j| j.job_id == job.job_id) {
-            guard[pos] = job;
-        } else {
-            guard.insert(0, job);
-            guard.truncate(JOBS_CAP);
+        let record = serde_json::to_value(&job).unwrap_or(Value::Null);
+        {
+            let mut guard = self.jobs.write().await;
+            if let Some(pos) = guard.iter().position(|j| j.job_id == job.job_id) {
+                guard[pos] = job;
+            } else {
+                guard.insert(0, job);
+                guard.truncate(JOBS_CAP);
+            }
+        }
+        if let Some(store) = &self.store {
+            store.apply("jobs", record);
         }
     }
 

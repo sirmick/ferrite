@@ -127,6 +127,13 @@ pub struct Runtime {
     /// so a reconfigure can rebuild through [`Runtime::load_doc`] with
     /// the same half of a cross-env split.
     environment: Option<Environment>,
+    /// Bumped once at the commit point of every *real* rebuild
+    /// ([`Runtime::reconfigure`] past the noop check, including the
+    /// fallback inside [`Runtime::live_reconfigure_block`]). A live
+    /// param apply never bumps it. The host compares it before/after a
+    /// call to learn whether block instances were replaced — the plan
+    /// alone can't say (a rebuild can also be `SelfBlock`-scoped).
+    generation: u64,
 }
 
 /// Lifecycle state of a [`Runtime`]. Transitions are explicit and
@@ -576,7 +583,14 @@ impl Runtime {
             state: RuntimeState::Created,
             applied_doc: None,
             environment: None,
+            generation: 0,
         })
+    }
+
+    /// Rebuild counter — see the field doc. Starts at 0 for a fresh load.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 
     #[must_use]
@@ -1351,6 +1365,7 @@ impl Runtime {
             state,
             applied_doc,
             environment,
+            generation: _,
         } = replacement;
         self.entries = entries;
         self.wires = wires;
@@ -1359,6 +1374,8 @@ impl Runtime {
         self.state = state;
         self.applied_doc = applied_doc;
         self.environment = environment;
+        // The commit point: block instances were replaced.
+        self.generation = self.generation.wrapping_add(1);
 
         if prev_state == RuntimeState::Running {
             self.start()?;

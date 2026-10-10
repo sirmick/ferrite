@@ -13,7 +13,8 @@
 //! store owns the *fold policy*.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ferrite_blocks::DecoderSink;
@@ -69,8 +70,19 @@ fn policy_for(kind: &str) -> Policy {
         // (live SoapySource driver state) and `flowdiag` (per-block
         // throughput/health) are folded by the pipeline diag tick — the
         // store is the one home for all live state, sliced by MCP and
-        // mirrored to the UI over WS.
-        "rssi" | "signals" | "readback" | "flowdiag" => Policy::Replace,
+        // mirrored to the UI over WS. `graph` (the composed doc + browser
+        // half + source at the current epoch), `status` (pipeline run
+        // state) and `params/<block>` (last live param set per block) are
+        // the coherence kinds: whole-document, retained, no reducer.
+        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" => Policy::Replace,
+        k if k.starts_with("params/") => Policy::Replace,
+        // Capture / survey / scan jobs — keyed by id, never expire (the
+        // registry caps its own list), no track.
+        "jobs" => Policy::Upsert {
+            key_field: "job_id",
+            ttl_ms: 0,
+            track: false,
+        },
         // AI transcript — append log of conversation turns (one record per
         // user/assistant turn), folded by ferrited's `/ws/chat` proxy +
         // `chat-inject` path. Read by MCP via `decodes ai`.
@@ -86,6 +98,9 @@ fn policy_for(kind: &str) -> Policy {
 #[derive(Debug, Clone, Serialize)]
 pub struct Record {
     pub seq: u64,
+    /// Graph epoch current when this record was folded. A consumer that
+    /// has loaded a different graph can attribute (or discard) it.
+    pub epoch: u64,
     pub at_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -104,6 +119,7 @@ pub struct KindState {
 #[derive(Debug, Clone, Serialize)]
 pub struct StoreSnapshot {
     pub seq: u64,
+    pub epoch: u64,
     pub kinds: BTreeMap<String, KindState>,
 }
 
@@ -125,6 +141,7 @@ pub enum DeltaOp {
 pub struct StateDelta {
     pub kind: String,
     pub seq: u64,
+    pub epoch: u64,
     #[serde(flatten)]
     pub op: DeltaOp,
 }
@@ -142,11 +159,26 @@ struct Inner {
 pub struct DecoderStore {
     inner: Mutex<Inner>,
     tx: broadcast::Sender<StateDelta>,
+    /// Graph epoch — owned here, shared (by `Arc`) with the frame sink
+    /// and bumped by `AppState` once per topology rebuild. Every record
+    /// and every frame carries the value current at fold/emit time.
+    epoch: Arc<AtomicU64>,
 }
 
 impl Default for DecoderStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::fmt::Debug for DecoderStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let g = self.guard();
+        f.debug_struct("DecoderStore")
+            .field("seq", &g.seq)
+            .field("epoch", &self.epoch())
+            .field("kinds", &g.kinds.keys().collect::<Vec<_>>())
+            .finish()
     }
 }
 
@@ -160,6 +192,7 @@ impl DecoderStore {
                 kinds: BTreeMap::new(),
             }),
             tx,
+            epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -167,6 +200,23 @@ impl DecoderStore {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<StateDelta> {
         self.tx.subscribe()
+    }
+
+    /// The shared epoch counter (hand it to the frame sink / mount).
+    #[must_use]
+    pub fn epoch_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.epoch)
+    }
+
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
+    /// Bump the epoch; returns the new value. Called by the pipeline
+    /// layer at each topology commit.
+    pub fn bump_epoch(&self) -> u64 {
+        self.epoch.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Lock the inner state, recovering from a poisoned mutex (mirrors
@@ -186,6 +236,7 @@ impl DecoderStore {
         let g = self.guard();
         StoreSnapshot {
             seq: g.seq,
+            epoch: self.epoch(),
             kinds: g.kinds.clone(),
         }
     }
@@ -202,6 +253,7 @@ impl DecoderStore {
     /// Fold one record into `kind` per its policy; broadcasts the delta.
     pub fn apply(&self, kind: &str, data: Value) {
         let policy = policy_for(kind);
+        let epoch = self.epoch();
         let mut g = self.guard();
         g.seq += 1;
         let seq = g.seq;
@@ -211,6 +263,7 @@ impl DecoderStore {
             Policy::Append { cap } => {
                 let record = Record {
                     seq,
+                    epoch,
                     at_ms: now_ms(),
                     key: None,
                     data,
@@ -241,6 +294,7 @@ impl DecoderStore {
                 }
                 let record = Record {
                     seq,
+                    epoch,
                     at_ms: now_ms(),
                     key: Some(key.clone()),
                     data,
@@ -258,6 +312,7 @@ impl DecoderStore {
             Policy::Replace => {
                 let record = Record {
                     seq,
+                    epoch,
                     at_ms: now_ms(),
                     key: None,
                     data,
@@ -283,6 +338,7 @@ impl DecoderStore {
                 }
                 let record = Record {
                     seq,
+                    epoch,
                     at_ms: now_ms(),
                     key: None,
                     data: merged,
@@ -298,12 +354,14 @@ impl DecoderStore {
         let _ = self.tx.send(StateDelta {
             kind: kind.to_string(),
             seq,
+            epoch,
             op,
         });
     }
 
     /// Clear a kind (fresh decode session / explicit reset).
     pub fn reset_kind(&self, kind: &str) {
+        let epoch = self.epoch();
         let mut g = self.guard();
         g.seq += 1;
         let seq = g.seq;
@@ -315,6 +373,7 @@ impl DecoderStore {
         let _ = self.tx.send(StateDelta {
             kind: kind.to_string(),
             seq,
+            epoch,
             op: DeltaOp::Reset,
         });
     }
@@ -344,12 +403,14 @@ impl DecoderStore {
             }
         }
         let n = expired.len();
+        let epoch = self.epoch();
         for (kind, key) in expired {
             g.seq += 1;
             let seq = g.seq;
             let _ = self.tx.send(StateDelta {
                 kind,
                 seq,
+                epoch,
                 op: DeltaOp::Expire { key },
             });
         }
@@ -587,5 +648,71 @@ mod tests {
         let s = DecoderStore::new();
         DecoderSink::emit(&s, "pager", serde_json::json!({"msg": "hi"}));
         assert_eq!(s.snapshot_kind("pager").unwrap().recent.len(), 1);
+    }
+
+    #[test]
+    fn records_carry_the_epoch_current_at_fold_time() {
+        let s = DecoderStore::new();
+        let mut rx = s.subscribe();
+        s.apply("pager", serde_json::json!({"msg": "before"}));
+        assert_eq!(s.bump_epoch(), 1);
+        s.apply("pager", serde_json::json!({"msg": "after"}));
+        let recent = &s.snapshot_kind("pager").unwrap().recent;
+        assert_eq!(recent[0].epoch, 0, "folded before the bump");
+        assert_eq!(recent[1].epoch, 1, "folded after the bump");
+        // The deltas say the same thing as the records.
+        let d0 = rx.try_recv().unwrap();
+        let d1 = rx.try_recv().unwrap();
+        assert_eq!((d0.epoch, d1.epoch), (0, 1));
+        assert_eq!(s.snapshot().epoch, 1);
+    }
+
+    #[test]
+    fn epoch_handle_is_shared_with_the_sink_side() {
+        // The frame sink stamps frames from the same counter the store
+        // stamps records with — one epoch, two observers.
+        let s = DecoderStore::new();
+        let h = s.epoch_handle();
+        s.bump_epoch();
+        assert_eq!(h.load(Ordering::Relaxed), 1);
+        h.store(7, Ordering::Relaxed);
+        assert_eq!(s.epoch(), 7);
+        s.apply("ft8", serde_json::json!({"x": 1}));
+        assert_eq!(s.snapshot_kind("ft8").unwrap().recent[0].epoch, 7);
+    }
+
+    #[test]
+    fn reset_delta_carries_the_new_epoch() {
+        let s = DecoderStore::new();
+        let mut rx = s.subscribe();
+        s.bump_epoch();
+        s.reset_kind("adsb");
+        let d = rx.try_recv().unwrap();
+        assert!(matches!(d.op, DeltaOp::Reset));
+        assert_eq!(d.epoch, 1);
+    }
+
+    #[test]
+    fn graph_status_params_and_jobs_policies() {
+        let s = DecoderStore::new();
+        s.apply("graph", serde_json::json!({"epoch": 1}));
+        s.apply("graph", serde_json::json!({"epoch": 2}));
+        let g = s.snapshot_kind("graph").unwrap();
+        assert_eq!(g.current.len(), 1, "graph is a Replace kind");
+        assert_eq!(g.current[REPLACE_KEY].data["epoch"], 2);
+        assert!(g.recent.is_empty(), "replace kinds keep no log");
+
+        s.apply("params/demod", serde_json::json!({"params": {"a": 1}}));
+        s.apply("params/demod", serde_json::json!({"params": {"a": 2}}));
+        let p = s.snapshot_kind("params/demod").unwrap();
+        assert_eq!(p.current.len(), 1, "params/<block> is a Replace kind");
+
+        s.apply("jobs", serde_json::json!({"job_id": 1, "state": "running"}));
+        s.apply("jobs", serde_json::json!({"job_id": 1, "state": "done"}));
+        s.apply("jobs", serde_json::json!({"job_id": 2, "state": "running"}));
+        let j = s.snapshot_kind("jobs").unwrap();
+        assert_eq!(j.current.len(), 2, "jobs upsert by job_id");
+        assert_eq!(j.current["1"].data["state"], "done");
+        assert_eq!(s.expire(now_ms() + 1_000_000), 0, "jobs never expire");
     }
 }

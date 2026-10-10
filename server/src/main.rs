@@ -372,6 +372,12 @@ async fn main() -> Result<()> {
         "device cache warm-up complete"
     );
 
+    // Seed the coherence records before the first client connects: a
+    // browser that opens `/ws/state` must find a `graph` record even
+    // when nothing has mutated yet (`start()` re-publishes anyway).
+    state.publish_graph().await;
+    state.publish_status("stopped");
+
     if args.auto_start {
         state.start().await.context("auto-start pipeline")?;
         tracing::info!("pipeline auto-started");

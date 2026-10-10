@@ -174,10 +174,14 @@ impl AppState {
     #[must_use]
     pub fn new(preset: FlowgraphDoc, source: SourceConfig, tick_period: Duration) -> Self {
         let frames = FrameBus::new();
+        let decoder_store = Arc::new(crate::decoder_store::DecoderStore::new());
+        let captures = Arc::new(crate::capture::CaptureRegistry::with_store(Arc::clone(
+            &decoder_store,
+        )));
         Self {
             inner: Arc::new(Inner {
                 frames,
-                decoder_store: Arc::new(crate::decoder_store::DecoderStore::new()),
+                decoder_store,
                 preset_doc: RwLock::new(preset),
                 source_config: RwLock::new(source),
                 patch_gate: Mutex::new(()),
@@ -185,7 +189,7 @@ impl AppState {
                 pipeline: Mutex::new(None),
                 tick_period,
                 device_cache: DeviceCache::new(),
-                captures: Arc::new(crate::capture::CaptureRegistry::new()),
+                captures,
             }),
             logs: None,
             presets_dir: None,
@@ -552,9 +556,17 @@ impl AppState {
                 // window / lock-order hazard the cleanup audit hit —
                 // it's gone. Reads go through applied_doc; stop() folds
                 // the final live state back into preset_doc once.
+                let epoch_before = self.epoch();
                 let plan = mount
                     .live_reconfigure_block(id, serde_json::Value::Object(delta_obj.clone()))
                     .await?;
+                drop(pipeline);
+                self.publish_params(id, &delta_obj);
+                if self.epoch() != epoch_before {
+                    // The live path fell back to a rebuild — new epoch,
+                    // new graph record.
+                    self.publish_graph().await;
+                }
                 return Ok(Some(plan));
             }
         }
@@ -570,10 +582,14 @@ impl AppState {
             Some(serde_json::Value::Object(m)) => m,
             _ => serde_json::Map::new(),
         };
-        for (k, v) in delta_obj {
-            merged.insert(k, v);
+        for (k, v) in &delta_obj {
+            merged.insert(k.clone(), v.clone());
         }
         block.params = Some(serde_json::Value::Object(merged));
+        // Browser-placed blocks (and stopped node blocks) stage here;
+        // the params record is what a running browser half applies
+        // without waiting for a reload.
+        self.publish_params(id, &delta_obj);
         self.patch_flowgraph(new_doc).await
     }
 
@@ -733,6 +749,8 @@ impl AppState {
             None
         };
         *self.inner.preset_doc.write().await = new_doc;
+        drop(pipeline);
+        self.publish_graph().await;
         Ok(plan)
     }
 
@@ -770,11 +788,16 @@ impl AppState {
         if let Some(delta) = maybe_delta {
             let pipeline = self.inner.pipeline.lock().await;
             if let Some(mount) = pipeline.as_ref() {
+                let delta_for_record = delta.clone();
                 let plan = mount
                     .live_reconfigure_block(SOURCE_ID, serde_json::Value::Object(delta))
                     .await?;
                 drop(pipeline);
                 *self.inner.source_config.write().await = new_source;
+                // The source is part of the graph record; a live retune
+                // also lands as `params/src` so param-only consumers see it.
+                self.publish_params(SOURCE_ID, &delta_for_record);
+                self.publish_graph().await;
                 return Ok(Some(plan));
             }
         }
@@ -788,6 +811,8 @@ impl AppState {
             None
         };
         *self.inner.source_config.write().await = new_source;
+        drop(pipeline);
+        self.publish_graph().await;
         Ok(plan)
     }
 
@@ -863,7 +888,74 @@ impl AppState {
             Arc::clone(&self.inner.decoder_store),
         )?;
         *guard = Some(mount);
+        drop(guard);
+        self.publish_graph().await;
+        self.publish_status("running");
         Ok(())
+    }
+
+    /// Current graph epoch (bumped once per topology rebuild; stamped on
+    /// every store record and every sample frame).
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.inner.decoder_store.epoch()
+    }
+
+    /// Fold the `graph` record: the composed doc, the browser half and
+    /// its hash, the source, at the current epoch. The coherence record
+    /// — a consumer rebuilds its half when the hash changes and filters
+    /// frames by the epoch; nothing has to be fetched. Published after
+    /// every mutation that can change the composed doc (preset, source,
+    /// profile, start/stop). Compose failures are logged, not fatal: the
+    /// mutation itself already succeeded or failed on its own terms.
+    pub async fn publish_graph(&self) {
+        let preset = self.inner.preset_doc.read().await.clone();
+        let source = self.inner.source_config.read().await.clone();
+        let composed = match self.compose_full(&preset, &source).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "publish_graph: compose failed");
+                return;
+            }
+        };
+        let browser_half =
+            split_for_environment(&composed, Environment::Browser, &InventorySpecRegistry).ok();
+        let hash = browser_half.as_ref().map(|d| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_string(d).unwrap_or_default().hash(&mut h);
+            format!("{:016x}", h.finish())
+        });
+        self.inner.decoder_store.apply(
+            "graph",
+            serde_json::json!({
+                "epoch": self.epoch(),
+                "preset": preset.name,
+                "composed": composed,
+                "browser_half": browser_half,
+                "browser_half_hash": hash,
+                "source": source,
+            }),
+        );
+    }
+
+    /// Fold the `status` record (`running` / `stopped`).
+    pub fn publish_status(&self, status: &str) {
+        self.inner.decoder_store.apply(
+            "status",
+            serde_json::json!({ "status": status, "epoch": self.epoch() }),
+        );
+    }
+
+    /// Fold a `params/<block>` record — the last live param delta applied
+    /// to one block, at the current epoch. Browser-placed blocks apply
+    /// these on receipt, which is how a UI knob, the CLI and an agent all
+    /// drive the same block through one path.
+    fn publish_params(&self, id: &str, delta: &serde_json::Map<String, serde_json::Value>) {
+        self.inner.decoder_store.apply(
+            &format!("params/{id}"),
+            serde_json::json!({ "block": id, "epoch": self.epoch(), "params": delta }),
+        );
     }
 
     /// Tear down every loaded SoapySDR driver module and re-load them
@@ -936,6 +1028,11 @@ impl AppState {
             let mut doc = self.inner.preset_doc.write().await;
             overlay_live_params(&mut doc, &applied);
         }
+        // Stop is a topology change too: frames of the old mount must
+        // never be mistaken for a later start's.
+        self.inner.decoder_store.bump_epoch();
+        self.publish_graph().await;
+        self.publish_status("stopped");
         true
     }
 
@@ -1605,6 +1702,67 @@ mod tests {
     async fn stop_while_stopped_returns_false() {
         let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
         assert!(!state.stop().await);
+    }
+
+    #[tokio::test]
+    async fn start_and_stop_publish_graph_and_status_at_the_epoch() {
+        // The coherence contract: every topology change folds a `graph`
+        // record (composed doc + browser half + hash) and a `status`
+        // record, both stamped with the epoch the frames now carry.
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        let store = state.decoder_store();
+        assert!(
+            store.snapshot_kind("graph").is_none(),
+            "nothing published yet"
+        );
+
+        state.start().await.unwrap();
+        let e1 = state.epoch();
+        assert_eq!(e1, 1, "spawn bumps once");
+        let g = store.snapshot_kind("graph").unwrap();
+        let rec = &g.current["current"];
+        assert_eq!(rec.epoch, e1);
+        assert_eq!(rec.data["epoch"], e1);
+        assert_eq!(rec.data["preset"], "t");
+        assert!(rec.data["browser_half"]["blocks"]["sink"].is_object());
+        assert!(rec.data["browser_half_hash"].is_string());
+        assert_eq!(
+            store.snapshot_kind("status").unwrap().current["current"].data["status"],
+            "running"
+        );
+
+        state.stop().await;
+        let e2 = state.epoch();
+        assert_eq!(e2, e1 + 1, "stop is a topology change too");
+        let s = store.snapshot_kind("status").unwrap();
+        assert_eq!(s.current["current"].data["status"], "stopped");
+        assert_eq!(s.current["current"].epoch, e2);
+        assert_eq!(
+            store.snapshot_kind("graph").unwrap().current["current"].epoch,
+            e2
+        );
+    }
+
+    #[tokio::test]
+    async fn live_source_edit_publishes_params_and_keeps_epoch() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        state.start().await.unwrap();
+        let e1 = state.epoch();
+        let store = state.decoder_store();
+        let mut new_source = test_source();
+        new_source.params = json!({
+            "rate_hz": 1000.0,
+            "tone_freq_abs_hz": 250.0,
+            "center_freq_hz": 0.0,
+            "amplitude": 0.1,
+        });
+        state.patch_source(new_source).await.unwrap();
+        // SineSource has no live path → rebuild → epoch moves and the
+        // graph record follows it; a Soapy tune would keep the epoch.
+        let g = store.snapshot_kind("graph").unwrap();
+        assert_eq!(g.current["current"].epoch, state.epoch());
+        assert!(state.epoch() >= e1);
+        state.stop().await;
     }
 
     #[tokio::test]

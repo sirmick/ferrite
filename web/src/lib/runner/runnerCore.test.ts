@@ -87,7 +87,7 @@ class FakeFrameClient {
   }
 
   /** Synthesise an IqF32 frame and deliver it to every subscriber. */
-  deliver(streamId: number, floats: Float32Array): void {
+  deliver(streamId: number, floats: Float32Array, epoch = 0): void {
     const frame: ParsedFrame = {
       header: {
         payloadType: PayloadType.IqF32,
@@ -95,6 +95,7 @@ class FakeFrameClient {
         seq: 0,
         timestampNs: 0n,
         sampleRateHz: 0,
+        epoch,
       },
       payload: new Uint8Array(floats.buffer, floats.byteOffset, floats.byteLength),
     };
@@ -261,6 +262,74 @@ describe('RunnerCore', () => {
     await new Promise((r) => setTimeout(r, 20));
     const stopResp = await core.handle(req('stop', 3));
     expect(stopResp.ok).toBe(true);
+  });
+
+  it('drops bridge frames whose epoch is not the loaded graph epoch', async () => {
+    // Count what reaches the Rust runtime: wrap the handle so pushIq
+    // is observable while every other method/property passes through.
+    let pushed = 0;
+    const { env, clients } = makeEnv({
+      createRuntime: async (doc, e) => {
+        const rt = await createRuntime(doc, e);
+        return new Proxy(rt, {
+          get(target, prop, receiver) {
+            if (prop === 'pushIq') {
+              return (blockId: string, samples: Float32Array) => {
+                pushed += 1;
+                return target.pushIq(blockId, samples);
+              };
+            }
+            const v = Reflect.get(target, prop, receiver);
+            return typeof v === 'function' ? v.bind(target) : v;
+          },
+        });
+      },
+    });
+    const core = new RunnerCore(env);
+    await core.handle({ id: 1, kind: 'load', doc: WS_DOC, wsUrl: 'ws://x', epoch: 7 });
+    const client = clients[0]!;
+    const iq = new Float32Array([0.5, 0.5, -0.5, 0.5]);
+
+    client.deliver(1234, iq, 7); // current epoch → accepted
+    client.deliver(1234, iq, 6); // previous topology → dropped
+    client.deliver(1234, iq, 0); // unstamped (local injection) → accepted
+    expect(pushed).toBe(2);
+
+    // The gate moves without a reload when the server rebuilds its
+    // half but the browser half is unchanged.
+    await core.handle({ id: 2, kind: 'setEpoch', epoch: 8 });
+    client.deliver(1234, iq, 7); // now stale
+    client.deliver(1234, iq, 8);
+    expect(pushed).toBe(3);
+    await core.handle(req('stop', 3));
+  });
+
+  it('an unset epoch gate (load without epoch) accepts every frame', async () => {
+    let pushed = 0;
+    const { env, clients } = makeEnv({
+      createRuntime: async (doc, e) => {
+        const rt = await createRuntime(doc, e);
+        return new Proxy(rt, {
+          get(target, prop, receiver) {
+            if (prop === 'pushIq') {
+              return (blockId: string, samples: Float32Array) => {
+                pushed += 1;
+                return target.pushIq(blockId, samples);
+              };
+            }
+            const v = Reflect.get(target, prop, receiver);
+            return typeof v === 'function' ? v.bind(target) : v;
+          },
+        });
+      },
+    });
+    const core = new RunnerCore(env);
+    await core.handle({ id: 1, kind: 'load', doc: WS_DOC, wsUrl: 'ws://x' });
+    const iq = new Float32Array([0.5, 0.5]);
+    clients[0]!.deliver(1234, iq, 3);
+    clients[0]!.deliver(1234, iq, 4);
+    expect(pushed).toBe(2);
+    await core.handle(req('stop', 2));
   });
 
   it('unsubscribes and closes the client on stop', async () => {

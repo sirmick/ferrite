@@ -76,6 +76,7 @@ export class FrameClient {
         seq: 0,
         timestampNs: 0n,
         sampleRateHz: 0,
+        epoch: 0,
       },
       payload,
     };

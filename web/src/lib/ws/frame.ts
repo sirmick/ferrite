@@ -28,6 +28,12 @@ export interface FrameHeader {
    *  `setBridgeRxRate` so dynamic source-rate changes cross the WS
    *  boundary to the rate-propagation pass. */
   readonly sampleRateHz: number;
+  /** Graph epoch the producing block belongs to (`Frame::epoch`,
+   *  stamped by the server's frame sink from the same counter the
+   *  store records carry). The runner drops frames whose epoch isn't
+   *  the graph it loaded, so a preset swap can't feed stale samples
+   *  into the new chain. `0` = unstamped (local injection, tests). */
+  readonly epoch: number;
 }
 
 export interface ParsedFrame {
@@ -66,6 +72,7 @@ interface WasmFrame {
   seq: number;
   timestamp_ns: bigint;
   sample_rate_hz: number;
+  epoch: number;
   payload: Uint8Array;
 }
 
@@ -90,6 +97,7 @@ export function decodeFrame(input: ArrayBuffer | Uint8Array): ParsedFrame {
       seq: out.seq,
       timestampNs: out.timestamp_ns,
       sampleRateHz: out.sample_rate_hz ?? 0,
+      epoch: out.epoch ?? 0,
     },
     payload: out.payload,
   };

@@ -19,7 +19,10 @@
 use std::{
     collections::HashMap,
     mem::Discriminant,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -40,14 +43,28 @@ pub struct BroadcastSink {
     /// variant each keep their own sequence — a subscriber that filters
     /// by stream id (and variant) sees a clean monotonic series.
     seqs: Mutex<HashMap<(Discriminant<Frame>, u16), u32>>,
+    /// Graph epoch stamped on every frame — shared with `AppState`, which
+    /// bumps it once per topology rebuild. Stream ids are positional and
+    /// reused across rebuilds; the epoch is what lets a subscriber tell
+    /// "stream 1000 of the old graph" from "stream 1000 of the new one".
+    epoch: Arc<AtomicU64>,
 }
 
 impl BroadcastSink {
+    /// A sink with its own (never-bumped) epoch — tests and harnesses.
     #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(bus: FrameBus) -> Self {
+        Self::with_epoch(bus, Arc::new(AtomicU64::new(0)))
+    }
+
+    /// The production constructor: share the daemon's epoch counter.
+    #[must_use]
+    pub fn with_epoch(bus: FrameBus, epoch: Arc<AtomicU64>) -> Self {
         Self {
             bus,
             seqs: Mutex::new(HashMap::new()),
+            epoch,
         }
     }
 
@@ -76,6 +93,8 @@ impl BridgeSink for BroadcastSink {
         }
         let seq = self.next_seq(frame.stream_key());
         frame.set_envelope(seq, now_ns());
+        #[allow(clippy::cast_possible_truncation)]
+        frame.set_epoch(self.epoch.load(Ordering::Relaxed) as u32);
         let bytes = match frame.to_postcard() {
             Ok(b) => b,
             Err(err) => {
@@ -145,9 +164,38 @@ mod tests {
             timestamp_ns: 0,
             sample_rate_hz: 0,
             payload,
+            epoch: 0,
         });
         let bytes = rx.recv().await.unwrap();
         assert!(Frame::from_postcard(&bytes).is_ok());
+    }
+
+    /// The sink stamps the *shared* epoch on every frame it emits — the
+    /// value current at push time, so a bump between two pushes shows up
+    /// on the second frame and a subscriber can tell the graphs apart
+    /// even though the stream id is reused.
+    #[tokio::test]
+    async fn push_stamps_the_shared_epoch() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let bus = FrameBus::new();
+        let mut rx = bus.subscribe(8);
+        let epoch = Arc::new(AtomicU64::new(7));
+        let sink = BroadcastSink::with_epoch(bus, Arc::clone(&epoch));
+        let mk = || Frame::IqF32 {
+            stream_id: 1000,
+            seq: 0,
+            timestamp_ns: 0,
+            sample_rate_hz: 0,
+            payload: vec![0; 8],
+            epoch: 0,
+        };
+        sink.push(mk());
+        epoch.store(8, Ordering::Relaxed);
+        sink.push(mk());
+        let first = Frame::from_postcard(&rx.recv().await.unwrap()).unwrap();
+        let second = Frame::from_postcard(&rx.recv().await.unwrap()).unwrap();
+        assert_eq!(first.epoch(), 7);
+        assert_eq!(second.epoch(), 8);
     }
 
     #[tokio::test]
@@ -165,6 +213,7 @@ mod tests {
             timestamp_ns: 0,
             sample_rate_hz: 0,
             payload: payload.clone(),
+            epoch: 0,
         });
         let bytes = rx.recv().await.unwrap();
         let frame = Frame::from_postcard(&bytes).unwrap();
@@ -194,6 +243,7 @@ mod tests {
             seq: 0,
             timestamp_ns: 0,
             payload: bins.clone(),
+            epoch: 0,
         });
         let bytes = rx.recv().await.unwrap();
         let frame = Frame::from_postcard(&bytes).unwrap();
@@ -227,6 +277,7 @@ mod tests {
             timestamp_ns: 0,
             sample_rate_hz: 0,
             payload: sample.clone(),
+            epoch: 0,
         };
         sink.push(mk(1000));
         sink.push(mk(1001));
@@ -265,12 +316,14 @@ mod tests {
             timestamp_ns: 0,
             sample_rate_hz: 0,
             payload: iq,
+            epoch: 0,
         });
         sink.push(Frame::FftU8 {
             stream_id: 1,
             seq: 0,
             timestamp_ns: 0,
             payload: vec![0, 1, 2],
+            epoch: 0,
         });
         let f0 = Frame::from_postcard(&rx.recv().await.unwrap()).unwrap();
         let f1 = Frame::from_postcard(&rx.recv().await.unwrap()).unwrap();
@@ -303,12 +356,14 @@ mod tests {
             timestamp_ns: 0,
             sample_rate_hz: 0,
             payload: vec![],
+            epoch: 0,
         });
         sink.push(Frame::FftU8 {
             stream_id: 1,
             seq: 0,
             timestamp_ns: 0,
             payload: vec![],
+            epoch: 0,
         });
         assert!(
             rx.try_recv().is_err(),
@@ -326,6 +381,7 @@ mod tests {
             timestamp_ns: 0,
             sample_rate_hz: 0,
             payload: vec![1, 2, 3, 4],
+            epoch: 0,
         });
     }
 }

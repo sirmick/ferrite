@@ -204,6 +204,7 @@ impl BridgeSample for Complex<f32> {
             timestamp_ns: 0,
             sample_rate_hz,
             payload,
+            epoch: 0,
         }
     }
     fn read_input<'a>(port: &'a InputPort<'_>) -> Option<&'a [Self]> {
@@ -230,6 +231,7 @@ impl BridgeSample for f32 {
             timestamp_ns: 0,
             sample_rate_hz,
             payload,
+            epoch: 0,
         }
     }
     fn read_input<'a>(port: &'a InputPort<'_>) -> Option<&'a [Self]> {
@@ -873,6 +875,7 @@ impl Block for WsBridgeTxFftU8 {
                                 seq: 0,
                                 timestamp_ns: 0,
                                 payload: slice[start..end].to_vec(),
+                                epoch: 0,
                             });
                         }
                     }

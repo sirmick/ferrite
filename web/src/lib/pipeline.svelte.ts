@@ -60,6 +60,15 @@ class PipelineStore {
    *  `browserRuntime.syncFlowgraph`; the browser no longer composes or
    *  splits its own graph. `null` until the first fetch completes. */
   browserHalf = $state<FlowgraphDoc | null>(null);
+  /** Graph epoch of the `browserHalf` we hold — from the server's
+   *  `graph` record (store kind, Replace). The runner gates `/ws/preset`
+   *  frames on it so a preset swap can't feed the new chain samples
+   *  from the old one. `0` until the first record lands (gate open). */
+  graphEpoch = $state(0);
+  /** `browser_half_hash` of the last `graph` record we applied — the
+   *  dedup key for `startGraphSync`, so an epoch-only bump (server-side
+   *  rebuild, stop/start) moves the gate without re-sending the doc. */
+  private graphHash: string | null = null;
   source = $state<SourceConfig | null>(null);
   /** Node-advertised `ui:<name>` sinks (`/api/ui-sinks`), keyed by
    *  name. Populated on `init()` and re-fetched on preset/source
@@ -195,6 +204,7 @@ class PipelineStore {
       };
       this.phase = 'ready';
       this.startReadbackSync();
+      this.startGraphSync();
       logs.push('client', 'info', `pipeline init: status=${st}, source=${src.type}`);
     } catch (err) {
       this.phase = 'error';
@@ -235,6 +245,40 @@ class PipelineStore {
   stopReadbackPoll(): void {
     this.readbackDispose?.();
     this.readbackDispose = undefined;
+  }
+
+  /** The coherence record. The server folds a `graph` record (composed
+   *  doc, browser half + its hash, source, epoch) on every mutation that
+   *  can change the topology — preset, source, profile, start/stop,
+   *  whoever asked (UI, CLI, agent). The mirror replicates it; this
+   *  effect is the only writer of `browserHalf` after init: a changed
+   *  hash swaps the doc the runner loads, a changed epoch moves the
+   *  runner's frame gate. No REST round trip, no 8-GET fan-out, and the
+   *  same path for a self-initiated patch and an out-of-band one. */
+  private graphDispose: (() => void) | undefined;
+  private startGraphSync(): void {
+    if (this.graphDispose) return;
+    this.graphDispose = $effect.root(() => {
+      $effect(() => {
+        const rec = decoders.kind('graph').current['current']?.data as
+          | {
+              epoch?: number;
+              browser_half?: FlowgraphDoc | null;
+              browser_half_hash?: string | null;
+            }
+          | undefined;
+        if (!rec) return;
+        untrack(() => {
+          const hash = rec.browser_half_hash ?? null;
+          if (rec.browser_half && hash && hash !== this.graphHash) {
+            this.graphHash = hash;
+            this.browserHalf = rec.browser_half;
+          }
+          const epoch = typeof rec.epoch === 'number' ? rec.epoch : 0;
+          if (epoch !== this.graphEpoch) this.graphEpoch = epoch;
+        });
+      });
+    });
   }
 
   async start(): Promise<void> {
@@ -574,16 +618,14 @@ class PipelineStore {
 
   /** Re-read derivatives of the composed preset (ui_sinks + blocks) in
    *  parallel. Called after every patch so local state stays coherent
-   *  with what the server is actually running. */
+   *  with what the server is actually running. The browser half is
+   *  deliberately *not* here: it arrives via the `graph` record
+   *  (`startGraphSync`), the one writer, so a GET can't race the
+   *  record and hand the runner a doc at the wrong epoch. */
   private async refreshComposed(): Promise<void> {
-    const [sinks, blocks, browserHalf] = await Promise.all([
-      fetchUiSinks(),
-      fetchPipelineBlocks(),
-      fetchBrowserHalf(),
-    ]);
+    const [sinks, blocks] = await Promise.all([fetchUiSinks(), fetchPipelineBlocks()]);
     this.nodeUiSinks = indexByName(sinks);
     this.nodeBlocks = indexById(blocks);
-    this.browserHalf = browserHalf;
   }
 
   /** Pull every server mirror (source + flowgraph + status + composed +
@@ -598,7 +640,7 @@ class PipelineStore {
   async refreshFromServer(): Promise<void> {
     if (this.phase !== 'ready') return;
     try {
-      const [fg, src, st, sinks, blocks, caps, profile, browserHalf] = await Promise.all([
+      const [fg, src, st, sinks, blocks, caps, profile] = await Promise.all([
         fetchFlowgraph(),
         fetchSource(),
         fetchPipelineStatus(),
@@ -606,7 +648,6 @@ class PipelineStore {
         fetchPipelineBlocks(),
         fetchSourceCapabilities(),
         fetchProfile(),
-        fetchBrowserHalf(),
       ]);
       this.flowgraph = fg;
       this.source = src;
@@ -614,7 +655,6 @@ class PipelineStore {
       this.nodeUiSinks = indexByName(sinks);
       this.nodeBlocks = indexById(blocks);
       this.sourceCaps = caps;
-      this.browserHalf = browserHalf;
       // Profile too: a CLI-driven `transcribe on/off` flips this axis
       // without touching `setProfile`. Pulling it here keeps the
       // tri-state Audio control honest and lets the transcribe→voice-NR

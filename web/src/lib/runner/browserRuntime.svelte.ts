@@ -116,6 +116,11 @@ class BrowserRuntime {
    *  block id. Reads the tap SAB directly; not an audio node. */
   private transcribeWorkers = new Map<string, Worker>();
   private lastStructuralFingerprint: string | undefined;
+  /** Graph epoch the page last handed us (`pipeline.graphEpoch`). Passed
+   *  to `load` so the worker's frame gate starts closed to stale
+   *  frames; moved in place by `setEpoch` when the server rebuilt but
+   *  our half is unchanged. */
+  private epoch = 0;
   /** Serialise concurrent reload/start/stop so a rapid preset swap
    *  doesn't interleave two lifecycles against one runner. */
   private inflight: Promise<unknown> = Promise.resolve();
@@ -244,6 +249,24 @@ class BrowserRuntime {
     this.enqueue(() => this.reload(doc, wsUrl));
   }
 
+  /** Called by the page when `pipeline.graphEpoch` changes. Records
+   *  the epoch for the next `load` and moves the live gate on the
+   *  loaded graph; ordered through the same queue as reload so it can't
+   *  overtake a load in flight. */
+  setEpoch(epoch: number): void {
+    if (epoch === this.epoch) return;
+    this.epoch = epoch;
+    if (!this.runner) return;
+    this.enqueue(async () => {
+      if (this.runnerState !== 'loaded' && this.runnerState !== 'running') return;
+      try {
+        await this.runner?.setEpoch(epoch);
+      } catch (err) {
+        logs.push('client', 'warn', `runner setEpoch: ${errorMessage(err)}`);
+      }
+    });
+  }
+
   /** Apply a params delta to a browser-placed block. Routes through
    *  the worker's Rust runtime via `FlowgraphRunner.reconfigureBlock`.
    *  Surface-level wrapper so `applyControl(\`browser.${id}.${key}\`, v)`
@@ -320,7 +343,7 @@ class BrowserRuntime {
       // object could not be cloned". Snapshotting produces a plain
       // deep-clone the worker can receive.
       const plain = $state.snapshot(doc) as FlowgraphDoc;
-      const result = await this.runner.load(plain, wsUrl);
+      const result = await this.runner.load(plain, wsUrl, this.epoch);
       this.loadedBlocks = result.blocks;
       this.uiSinks = result.uiSinks;
       await this.attachAudioNodes(result.audioSabs);
@@ -346,7 +369,7 @@ class BrowserRuntime {
       logs.push(
         'client',
         'info',
-        `runner loaded: blocks=${result.blocks.length} audioSinks=${audioCount} audioState=${this.audioState}`,
+        `runner loaded: blocks=${result.blocks.length} audioSinks=${audioCount} audioState=${this.audioState} epoch=${this.epoch}`,
       );
       // Catch the status-before-load case: `syncStatus(true)` may have
       // been called before `reload` landed, returning early because
@@ -654,6 +677,7 @@ class BrowserRuntime {
     this.runnerState = 'idle';
     this.audioState = 'suspended';
     this.lastStructuralFingerprint = undefined;
+    this.epoch = 0;
     this.loadedBlocks = [];
     this.voiceTranscribeIds = [];
     this.audioNrId = null;
