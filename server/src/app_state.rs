@@ -262,7 +262,7 @@ impl AppState {
     /// when stopped. The single reader-of-record while live — callers
     /// overlay these params via [`overlay_live_params`] so reads
     /// reflect the runtime, not the staged `preset_doc`.
-    async fn applied_doc_if_running(&self) -> Option<FlowgraphDoc> {
+    pub(crate) async fn applied_doc_if_running(&self) -> Option<FlowgraphDoc> {
         let guard = self.inner.pipeline.lock().await;
         match guard.as_ref() {
             Some(mount) => mount.applied_doc_snapshot().await,

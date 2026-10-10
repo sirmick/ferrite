@@ -434,8 +434,11 @@ pub struct StartCaptureArgs {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct StartCaptureAudioArgs {
-    /// Centre frequency in Hz to tune for the capture.
-    pub freq_hz: f64,
+    /// Centre frequency in Hz. Optional: omitted = record what the
+    /// operator is hearing right now (the live audio tee, no retune, no
+    /// preset swap). Given = retune to it first (still the live tee).
+    #[serde(default)]
+    pub freq_hz: Option<f64>,
     /// Capture duration in seconds. Default 10.
     #[serde(default)]
     pub duration_s: Option<f64>,
@@ -1477,7 +1480,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Start an async demodulated-audio capture to a WAV on disk. Disruptive — swaps in a recording preset (default `fm-audio-record`; also `am-audio-record`, `capture-aprs`, `capture-pager`), tunes to `freq_hz`, and runs a `Source → … → FileAudioSink` slice, so it clobbers the live UI session. **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar. `duration_s` defaults to 10; `sample_rate_hz` to 2.4e6; `bandwidth_hz` to the rate. Defaults `out` to `/tmp/ferrite-captures/audio-<unix_ms>-<freq>mhz.wav`. Inherits the live source, so it refuses against a software/test source (SineSource) — `device select` first, or `force:true`."
+        description = "Record what the operator is hearing to a 48 kHz mono WAV — a live tee of the node→browser audio bridge, so the UI session keeps running untouched (no preset swap). Omit `freq_hz` to record the current session as-is; give it to retune first (the operator's waterfall + audio follow, same as a `tune`). **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar (`sample_rate_hz` 48000, `samples_written`, `source_rate_hz`). `duration_s` defaults to 10. Defaults `out` to `/tmp/ferrite-captures/audio-<unix_ms>-<freq>mhz.wav`. Only when the running preset has no browser audio at all (a headless `*-record` graph) does it fall back to the old preset-swap recording — that path needs `freq_hz`, refuses against a software source unless `force:true`, and restores the session when done. Start and completion both appear on the operator's AI activity transcript."
     )]
     async fn start_capture_audio(
         &self,

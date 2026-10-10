@@ -43,8 +43,11 @@ use crate::app_state::AppState;
 const JOBS_CAP: usize = 20;
 
 /// What a capture job is recording. `Iq`/`Fft` use the non-disruptive
-/// live-record tee (`chan`/`logmag`); `Audio` and wideband `Iq` swap in
-/// a recording preset and run a `Source → FileSink` slice.
+/// live-record tee (`chan`/`logmag`); `Audio` tees the node→browser
+/// audio bridge (`WsBridgeTxF32`, found by type at request time) and
+/// only falls back to a preset swap when the graph has no browser audio;
+/// wideband `Iq` always swaps in a recording preset and runs a
+/// `Source → FileSink` slice.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CaptureKind {
@@ -54,8 +57,10 @@ pub enum CaptureKind {
 }
 
 impl CaptureKind {
-    /// Live-record block id for the tee path. Only meaningful for the
-    /// live `Iq`/`Fft` kinds (`Audio` never tees).
+    /// Live-record block id for the tee path. Meaningful for `Iq`/`Fft`
+    /// (fixed preset block ids); `Audio` tees an env_split-inserted
+    /// bridge whose id is discovered at request time
+    /// (`audio_bridge_block_id`), so its arm here is a placeholder.
     fn live_block_id(self) -> &'static str {
         match self {
             Self::Iq => "chan",
@@ -274,7 +279,11 @@ pub struct CaptureIqReq {
 
 #[derive(Debug, Deserialize)]
 pub struct CaptureAudioReq {
-    pub freq_hz: f64,
+    /// Optional. Omitted = record the live session as-is (no retune);
+    /// given = retune to it first. Required only when the graph has no
+    /// audio bridge to tee and the preset-swap fallback is used.
+    #[serde(default)]
+    pub freq_hz: Option<f64>,
     #[serde(default)]
     pub duration_s: Option<f64>,
     #[serde(default)]
@@ -392,18 +401,24 @@ async fn run_live_capture(
     state: AppState,
     job_id: String,
     kind: CaptureKind,
+    block: String,
     duration_s: f64,
     freq_hz: Option<f64>,
     out_path: PathBuf,
 ) {
-    let block = kind.live_block_id();
     let path_str = out_path.display().to_string();
     let result: Result<(), String> = async {
         if let Some(f) = freq_hz {
-            // offset_ratio 0: the live tee rides whatever the pipeline is
-            // already doing, so land the retune on-centre.
+            // IQ/FFT tees ride the raw channel, so land the retune
+            // on-centre (offset_ratio 0). The audio tee records what the
+            // operator *hears*, so it tunes exactly as a listener would —
+            // the daemon's per-driver DC dodge applies.
+            let offset = match kind {
+                CaptureKind::Audio => None,
+                CaptureKind::Iq | CaptureKind::Fft => Some(0.0),
+            };
             state
-                .tune(f, None, Some(0.0), false)
+                .tune(f, None, offset, false)
                 .await
                 .map_err(|e| format!("retune: {e:#}"))?;
         }
@@ -417,7 +432,7 @@ async fn run_live_capture(
         }
         state
             .apply_block_params(
-                block,
+                &block,
                 json!({ "record_path": path_str, "record_max_seconds": duration_s }),
             )
             .await
@@ -425,7 +440,7 @@ async fn run_live_capture(
         tokio::time::sleep(Duration::from_secs_f64(duration_s + 0.5)).await;
         // Belt-and-braces stop in case a missed tick left it recording.
         let _ = state
-            .apply_block_params(block, json!({ "record_path": "" }))
+            .apply_block_params(&block, json!({ "record_path": "" }))
             .await;
         Ok(())
     }
@@ -553,7 +568,16 @@ impl AppState {
         let duration_s = req.duration_s;
         let freq_hz = req.freq_hz;
         tokio::spawn(async move {
-            run_live_capture(state, job_id, CaptureKind::Iq, duration_s, freq_hz, out).await;
+            run_live_capture(
+                state,
+                job_id,
+                CaptureKind::Iq,
+                CaptureKind::Iq.live_block_id().to_string(),
+                duration_s,
+                freq_hz,
+                out,
+            )
+            .await;
         });
         Ok(job)
     }
@@ -573,18 +597,68 @@ impl AppState {
         let duration_s = req.duration_s;
         let freq_hz = req.freq_hz;
         tokio::spawn(async move {
-            run_live_capture(state, job_id, CaptureKind::Fft, duration_s, freq_hz, out).await;
+            run_live_capture(
+                state,
+                job_id,
+                CaptureKind::Fft,
+                CaptureKind::Fft.live_block_id().to_string(),
+                duration_s,
+                freq_hz,
+                out,
+            )
+            .await;
         });
         Ok(job)
     }
 
-    /// `POST /api/capture/audio`. Preset-swap recording to a WAV.
+    /// `POST /api/capture/audio`. A live WAV tee of what the operator
+    /// hears — the node→browser audio bridge — resampled to 48 kHz. Non-
+    /// disruptive: no preset swap, and no retune unless `freq_hz` is
+    /// given (then it tunes exactly as a listener would). Falls back to
+    /// the preset-swap recording only when the running graph has no
+    /// audio bridge (a headless record preset); that path needs
+    /// `freq_hz` and is restored afterwards like any preset-swap job.
     pub async fn start_capture_audio(
         &self,
         req: CaptureAudioReq,
     ) -> Result<CaptureJob, CaptureError> {
         let duration = req.duration_s.unwrap_or(10.0);
         validate_duration(duration)?;
+        if let Some(block) = self.audio_bridge_block_id().await {
+            // Record whatever is playing — a replayed sample or a test
+            // tone included; the hardware guard is for the swap path
+            // where a synthetic source would masquerade as RF.
+            let out = self
+                .resolve_out(req.out, CaptureKind::Audio, req.freq_hz)
+                .await;
+            ensure_parent(&out).await?;
+            let job = self
+                .captures()
+                .register(CaptureKind::Audio, &out, duration)
+                .await;
+            let (state, job_id) = (self.clone(), job.job_id.clone());
+            let freq_hz = req.freq_hz;
+            tokio::spawn(async move {
+                run_live_capture(
+                    state,
+                    job_id,
+                    CaptureKind::Audio,
+                    block,
+                    duration,
+                    freq_hz,
+                    out,
+                )
+                .await;
+            });
+            return Ok(job);
+        }
+        let freq = req.freq_hz.ok_or_else(|| {
+            CaptureError::Invalid(
+                "the running graph has no browser audio bridge to tee (headless preset); \
+                 the preset-swap fallback needs `freq_hz`"
+                    .into(),
+            )
+        })?;
         self.guard_active_audio_profile(req.force, "start_capture_audio")
             .await?;
         self.guard_hardware_source(req.force, "audio capture")
@@ -594,11 +668,11 @@ impl AppState {
         let preset = req.preset.unwrap_or_else(|| "fm-audio-record".into());
         let out = match req.out {
             Some(s) => PathBuf::from(s),
-            None => default_capture_path(CaptureKind::Audio, req.freq_hz),
+            None => default_capture_path(CaptureKind::Audio, freq),
         };
         ensure_parent(&out).await?;
         let cap_source =
-            capture_source_config(&self.get_source().await, req.freq_hz, rate, bw, req.gain_db);
+            capture_source_config(&self.get_source().await, freq, rate, bw, req.gain_db);
         let block_patch = json!({ "path": out.display().to_string(), "max_seconds": duration });
         let job = self
             .captures()
@@ -695,6 +769,24 @@ impl AppState {
                 .unwrap_or(0.0)
         };
         default_capture_path(kind, freq)
+    }
+
+    /// Id of the node→browser audio bridge — the block the audio tee
+    /// records from. Bridges are inserted by `env_split` when the mount
+    /// is spawned, so they live only in the runtime's *applied* doc
+    /// (never in the composed listing); a stopped pipeline is started
+    /// first, exactly as the IQ/FFT tees auto-start. `None` for headless
+    /// record presets (FileAudioSink-terminated, no browser audio).
+    async fn audio_bridge_block_id(&self) -> Option<String> {
+        if self.status().await != crate::app_state::PipelineStatus::Running {
+            self.start().await.ok()?;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        let doc = self.applied_doc_if_running().await?;
+        doc.blocks
+            .iter()
+            .find(|(_, b)| b.type_name == "WsBridgeTxF32")
+            .map(|(id, _)| id.clone())
     }
 
     /// Refuse a preset-swapping capture that would silently tear down an

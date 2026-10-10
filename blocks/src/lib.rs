@@ -20,6 +20,7 @@ pub mod am_demod;
 pub mod am_modulator;
 pub mod aprs;
 pub mod audio_nr;
+pub mod audio_record_tap;
 pub mod audio_shaper;
 pub mod audio_sink;
 pub mod auto_tune;

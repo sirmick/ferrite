@@ -633,11 +633,137 @@ ws_bridge_rx!(
     ai = "Browser-side end of the IQ WebSocket bridge. Auto-inserted by env_split at node→browser boundaries; paired with a WsBridgeTx by `stream_id`.",
 );
 
-ws_bridge_tx!(
-    WsBridgeTxF32<f32>,
-    type_name = "WsBridgeTxF32",
-    ai = "Server-side end of the real-audio WebSocket bridge. Auto-inserted by env_split at node→browser boundaries when the crossing port carries `RealF32` (audio after demod); not authored by hand in presets.",
-);
+// The audio Tx is hand-rolled rather than macro-emitted: on top of the
+// shared body it carries the "record what the operator hears" WAV tap
+// (`record_path` / `record_max_seconds`, live). This is the one node-
+// side block guaranteed to exist at every audio crossing, so the
+// daemon's audio capture can tee here without swapping presets.
+pub struct WsBridgeTxF32 {
+    body: BridgeTxBody<f32>,
+    tap: crate::audio_record_tap::AudioRecordTap,
+}
+
+impl WsBridgeTxF32 {
+    #[must_use]
+    pub fn new(params: WsBridgeParams) -> Self {
+        Self {
+            body: BridgeTxBody::new(params),
+            tap: crate::audio_record_tap::AudioRecordTap::new(),
+        }
+    }
+
+    #[must_use]
+    pub const fn stream_id(&self) -> u32 {
+        self.body.params.stream_id
+    }
+
+    /// Wire a transport sink — see [`WsBridgeTx::attach_sink`].
+    pub fn attach_sink(&mut self, sink: Arc<dyn BridgeSink>) {
+        self.body.attach_sink(sink);
+    }
+
+    /// True while a WAV tee is open.
+    #[must_use]
+    pub fn is_recording(&self) -> bool {
+        self.tap.is_recording()
+    }
+}
+
+const RECORD_PATH_PARAM: ParamSpec = ParamSpec {
+    key: "record_path",
+    label: "Record path",
+    kind: ParamKind::Text { default: "" },
+    reconfig_scope: ReconfigureScope::SelfBlock,
+    ai_notes: "Optional WAV path to tee the audio the browser is about to play — i.e. exactly what the operator hears — resampled to 48 kHz mono s16. Empty = not recording. Driven by `start_capture_audio`; set live, no preset swap.",
+};
+
+const RECORD_MAX_SECONDS_PARAM: ParamSpec = ParamSpec {
+    key: "record_max_seconds",
+    label: "Record cap",
+    kind: ParamKind::Range {
+        min: 0.0,
+        max: 3600.0,
+        step: 0.1,
+        default: 0.0,
+        unit: "s",
+    },
+    reconfig_scope: ReconfigureScope::SelfBlock,
+    ai_notes:
+        "Stop the WAV tee after N seconds of audio (0 = no cap). Guards against runaway disk usage.",
+};
+
+#[ferrite_blocks_macros::ferrite_block]
+impl Block for WsBridgeTxF32 {
+    fn spec() -> BlockSpec {
+        BlockSpec {
+            type_name: "WsBridgeTxF32",
+            placement: Placement::NativeOnly,
+            inputs: &[PortSpec {
+                name: "in",
+                port_type: PortType::RealF32,
+            }],
+            outputs: &[],
+            params: &[STREAM_ID_PARAM, RECORD_PATH_PARAM, RECORD_MAX_SECONDS_PARAM],
+            ai_notes: "Server-side end of the real-audio WebSocket bridge. Auto-inserted by env_split at node→browser boundaries when the crossing port carries `RealF32` (audio after demod); not authored by hand in presets. Carries the live WAV record tap (`record_path`) the audio capture uses.",
+        }
+    }
+
+    fn init(&mut self, ctx: &mut InitCtx<'_>) -> Result<()> {
+        self.body.note_rate(ctx);
+        if let Some(rate) = ctx.input_rate("in") {
+            self.tap.set_input_rate(rate)?;
+        }
+        Ok(())
+    }
+
+    fn update_rates(&mut self, ctx: &InitCtx<'_>) -> Result<()> {
+        self.body.note_rate(ctx);
+        if let Some(rate) = ctx.input_rate("in") {
+            self.tap.set_input_rate(rate)?;
+        }
+        Ok(())
+    }
+
+    fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+        let Some(obj) = delta.as_object() else {
+            return Ok(false);
+        };
+        self.tap.apply_live(obj)
+    }
+
+    fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
+        let w = self.body.process_io(io);
+        if self.tap.is_recording() {
+            if let Some(slice) = io
+                .inputs
+                .iter()
+                .find(|p| p.name == "in")
+                .and_then(<f32 as BridgeSample>::read_input)
+            {
+                // A tee failure (disk full, path vanished) must not take
+                // the audio down with it: log, drop the recording, keep
+                // bridging.
+                if let Err(e) = self.tap.push(slice) {
+                    tracing::warn!(target: "ws_bridge", error = %format!("{e:#}"), "audio record tap failed; recording dropped");
+                    let _ = self.tap.finish();
+                }
+            }
+        }
+        Ok(w)
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        // A pipeline stop mid-capture must still leave a valid WAV.
+        self.tap.finish()
+    }
+}
+
+impl BlockFactory for WsBridgeTxF32 {
+    fn construct(params: &serde_json::Value) -> Result<Box<dyn Block>> {
+        let p: WsBridgeParams = crate::block::deserialize_params(params)?;
+        Ok(Box::new(WsBridgeTxF32::new(p)))
+    }
+}
 
 ws_bridge_rx!(
     WsBridgeRxF32<f32>,

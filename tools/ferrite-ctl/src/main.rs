@@ -290,10 +290,12 @@ enum CaptureCmd {
         #[arg(long)]
         force: bool,
     },
-    /// Capture demodulated audio to disk (preset-swap; disruptive).
+    /// Capture demodulated audio to a WAV — a live tee of what the
+    /// operator is hearing (no preset swap). Omit FREQ to record the
+    /// current session as-is; give one to retune first.
     Audio {
-        /// Centre frequency (Hz, SI shorthand).
-        freq: String,
+        /// Centre frequency (Hz, SI shorthand). Optional.
+        freq: Option<String>,
         /// Capture duration in seconds.
         #[arg(long, default_value_t = 10.0)]
         duration: f64,
@@ -723,7 +725,7 @@ async fn capture(cmd: CaptureCmd, server: &FerriteServer, json: bool) -> Result<
             force,
         } => {
             let args = StartCaptureAudioArgs {
-                freq_hz: parse_si(&freq)?,
+                freq_hz: parse_si_opt(freq.as_deref())?,
                 duration_s: Some(duration),
                 sample_rate_hz: Some(parse_si(&rate)?),
                 bandwidth_hz: parse_si_opt(bw.as_deref())?,

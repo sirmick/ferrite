@@ -117,6 +117,20 @@ impl FileAudioSink {
         self.samples_written
     }
 
+    /// True once `max_seconds` worth of samples has been written (never
+    /// when uncapped).
+    #[must_use]
+    pub fn is_capped(&self) -> bool {
+        self.max_samples
+            .is_some_and(|cap| self.samples_written >= cap)
+    }
+
+    /// Public entry for tees that own a sink outside the block graph
+    /// (the audio record tap). Same clip + cap semantics as `process`.
+    pub fn push_samples(&mut self, samples: &[f32]) -> Result<usize> {
+        self.write_samples(samples)
+    }
+
     fn write_samples(&mut self, samples: &[f32]) -> Result<usize> {
         if samples.is_empty() {
             return Ok(0);
