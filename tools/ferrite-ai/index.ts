@@ -293,13 +293,22 @@ const MODEL_BY_MODE: Record<Mode, string> = {
   diagnose: "claude-opus-5-5",
   chat: "claude-haiku-5-5",
 };
-function modelFor(mode: Mode): string {
+function modelFor(mode: Mode, override?: string): string {
+  if (override && MODEL_OPTIONS.includes(override)) return override;
   return (
     process.env[`FERRITE_AI_MODEL_${mode.toUpperCase()}`] ??
     process.env.FERRITE_AI_MODEL ??
     MODEL_BY_MODE[mode]
   );
 }
+/** Ids the UI picker may select. An unknown override is ignored (the
+ *  mode default applies) rather than forwarded — a typo'd id would
+ *  otherwise 400 every turn. */
+const MODEL_OPTIONS: string[] = [
+  "claude-opus-5-5",
+  "claude-sonnet-5-5",
+  "claude-haiku-5-5",
+];
 
 // "chat" mode is tools-free: the AI is Q&A only, no Bash, no Read.
 // Other modes get the toolkit ferrite-ctl exploration needs — plus
@@ -355,6 +364,9 @@ type IncomingMessage = {
    *  messages have no `type` and use `text`. */
   type?: "stop" | "request_snapshot" | "reset_session" | string;
   text?: string;
+  /** Per-turn model override (a Claude model id). Absent → the mode's
+   *  default from `MODEL_BY_MODE` / env. The UI picker sends this. */
+  model?: string;
   /** Session id the browser believes it is continuing — sent on
    *  `request_snapshot` (on WS connect) so the sidecar, which starts
    *  each connection with no session, knows which transcript to
@@ -589,6 +601,11 @@ wss.on("connection", (ws) => {
       type: "ferrite_ai_hello",
       modes: MODES,
       mode: currentMode,
+      // Per-mode default model (after env overrides) + the ids the UI
+      // picker offers. Keep the list short and current-generation; the
+      // sidecar runs on the operator's Claude subscription.
+      models: Object.fromEntries(MODES.map((m) => [m, modelFor(m)])),
+      model_options: MODEL_OPTIONS,
     }),
   );
 
@@ -702,7 +719,7 @@ wss.on("connection", (ws) => {
         parsed.local_time_iso,
         parsed.time_zone,
       ),
-      model: modelFor(mode),
+      model: modelFor(mode, parsed.model),
       tools: builtinToolsFor(mode),
       allowedTools: allowedToolsFor(mode),
       // Local `ferrite` MCP server. Spawned per session by the SDK;

@@ -190,6 +190,17 @@
           <option value={m}>{m}</option>
         {/each}
       </select>
+      <select
+        class="rounded border border-slate-700 bg-slate-900 px-1 py-0.5 text-[10px] focus:border-slate-500 focus:outline-none"
+        value={ai.model ?? ''}
+        onchange={(e) => ai.setModel((e.currentTarget as HTMLSelectElement).value || null)}
+        title="Claude model for this mode (blank = the sidecar's per-mode default)"
+      >
+        <option value="">{ai.defaultModelFor(ai.mode) ?? 'default'} (default)</option>
+        {#each ai.modelOptions as id (id)}
+          <option value={id}>{id}</option>
+        {/each}
+      </select>
     </div>
     <div class="flex items-center gap-2">
       <span

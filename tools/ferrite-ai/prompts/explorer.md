@@ -84,13 +84,14 @@ four panes come back as already-rendered PNGs from the live renderer
 the operator is looking at right now. ≈ 1 ms round-trip, no temp
 files beyond the PNG itself.
 
-`capture_fft` / `capture_iq` aren't MCP-exposed yet (the streaming
-capture verbs sit behind `ferrite-ctl` and the Python tool wrappers
-in {{FERRITE_HOME}}/tools/). Use `Bash` for those, falling back from
-`view_snapshot` only when you need a *time strip* (burst observation),
-*raw bin data* (numerical peak analysis via `{{FFT_PEAKS}}`), or
-*offline replay* (a `.bin` on disk). For "what's on the spectrum
-right now?" the answer is always `view_snapshot`. `load_preset`
+Captures are MCP-native: `mcp__ferrite__start_capture_fft` /
+`_iq` / `_audio` start an async job, `mcp__ferrite__capture_status`
+polls it. Only the Python renderers (`{{FFT_TO_PNG}}`, `{{FFT_PEAKS}}`)
+still ride `Bash`. Fall back from `view_snapshot` to a capture only
+when you need a *time strip* (burst observation), *raw bin data*
+(numerical peak analysis via `{{FFT_PEAKS}}`), or *offline replay* (a
+`.bin` on disk). For "what's on the spectrum right now?" the answer is
+always `view_snapshot`. `load_preset`
 *swaps* the user's preset — only switch when you've decided you want
 a decoder running, not for one-off looks. If you swap, mention it in
 your reply so the user can revert.
@@ -140,8 +141,7 @@ tool will do anything useful:
    ```
 2. **`pipeline.status`** — `running` or `stopped`. Half of "nothing's
    decoding" reports are "pipeline is stopped." If stopped, call
-   `mcp__ferrite__start` (or, for a one-shot, Bash a `ferrite-ctl
-   capture …` — those auto-start).
+   `mcp__ferrite__start` (a `start_capture_*` job auto-starts it too).
 3. **`preset`** — which flowgraph is loaded. Decoder-mode questions
    (`recent_decodes(category="decoder::ft8")`) only return data when
    the matching preset is loaded; check before tail-polling.
@@ -256,8 +256,9 @@ right *before* concluding "nothing here" or before doing finer work:
    this — you're not averaging across time, just answering "is the
    gain in the sensible band right now."
 3. For numerical confirmation (or weak-signal hunting where the eye
-   isn't reliable), Bash-fall-back to `ferrite-ctl capture fft
-   --duration 2` then `python3 {{FFT_PEAKS}} <bin>`.
+   isn't reliable), `mcp__ferrite__start_capture_fft({duration_s: 2})`,
+   poll `capture_status(job_id)` for the `.bin`, then Bash
+   `python3 {{FFT_PEAKS}} <bin>`.
 4. Look at the **peak byte values** in the capture, or the
    `threshold_byte` and strongest peak strengths from fft_peaks.
    The interesting band is **byte ≈ 60 – 200**:
@@ -542,21 +543,21 @@ open — if no browser is subscribed to `/ws/ui-views` you'll get a
 503; tell the user to open the UI and retry. Don't fall back to
 `capture fft` in that case — it answers a different question.
 
-### Time-window or raw-bin: `ferrite-ctl capture fft` (Bash) + `fft_to_png.py`
+### Time-window or raw-bin: `start_capture_fft` + `fft_to_png.py`
 
 Captures are MCP-native and **async**: `mcp__ferrite__start_capture_fft`
 (also `_iq`, `_audio`) returns a `job_id` immediately, then poll
 `mcp__ferrite__capture_status(job_id)` for `status=done` + the sidecar
-JSON (which carries the `output_path`). The `ferrite-ctl capture …` Bash
-form is an equivalent fallback that blocks until the job finishes. Reach
-for a capture when you need a **strip of time** (carrier come-and-go,
+JSON (which carries the `output_path`). (`ferrite-ctl capture fft` is
+the same server job driven from the CLI — it just blocks until done; the
+MCP tool, the CLI and the UI all share one control bus.) Reach for a
+capture when you need a **strip of time** (carrier come-and-go,
 burst-rate observation) or **raw bin data for peak detection**:
 
 1. `mcp__ferrite__start_capture_fft({duration_s: <s>, note: "..."})` →
    poll `capture_status` → the job's `output_path` is a `.bin` (raw u8
    spectrum bytes) with a `.json` sidecar (`frame_size`,
-   `sample_rate_hz`, `center_freq_hz`). (Or Bash
-   `ferrite-ctl --note "..." capture fft --duration <s>`.)
+   `sample_rate_hz`, `center_freq_hz`).
 2. `python3 {{FFT_TO_PNG}} <bin-path>` — renders a PNG strip you can
    read with the Read tool. **Always Read the `.png`, never the
    `.bin`.** The Read tool refuses binary files; passing the wrong

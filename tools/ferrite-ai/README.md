@@ -80,6 +80,10 @@ the bundled CLI defaults to, which silently lagged a generation):
 
 Override globally with `FERRITE_AI_MODEL=…`, or per mode with
 `FERRITE_AI_MODEL_<MODE>=…` (e.g. `FERRITE_AI_MODEL_CHAT=claude-opus-5-5`).
+Per turn, the browser may send `{"text": …, "mode": …, "model": "<id>"}`;
+`ferrite_ai_hello` advertises the per-mode defaults (`models`) and the ids
+the picker may choose (`model_options`). Unknown ids are ignored, not
+forwarded.
 
 ### Isolation
 

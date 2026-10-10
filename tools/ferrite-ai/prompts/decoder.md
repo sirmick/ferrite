@@ -37,9 +37,8 @@ the FFT/waterfall they were on. Flip back with
 
 Before driving anything, call `mcp__ferrite__status`. It returns the
 pipeline state, active source, preset name, and UI sinks in one
-round-trip. If `pipeline.status == "stopped"`, either call
-`mcp__ferrite__start` explicitly or Bash a `ferrite-ctl capture …` —
-those auto-start when stopped.
+round-trip. If `pipeline.status == "stopped"`, call
+`mcp__ferrite__start` (a `start_capture_*` job auto-starts it too).
 
 For decoding, the **preset's source rate is what matters** — most
 decoder flowgraphs declare `Source.sample_rate_hz` as the rate the
@@ -86,8 +85,9 @@ that, surface that as the cause and pick the closest valid value.
    signal that vanishes in the channel pane means the channelizer /
    VFO is mis-tuned.
 4. If `view_snapshot` shows nothing but you suspect a bursty /
-   intermittent signal: Bash `ferrite-ctl capture iq --duration 3`
-   then `python3 {{FFT_TO_PNG}} <bin>` + read it — the time strip
+   intermittent signal: `mcp__ferrite__start_capture_fft({duration_s: 3})`,
+   poll `capture_status(job_id)` for the `.bin`, then Bash
+   `python3 {{FFT_TO_PNG}} <bin>` + read the PNG — the time strip
    catches transmitters quiet in any single frame.
 5. Check the **front-end config**: wrong antenna (RSPdx has A/B/C —
    Antenna C is HF-only), or an RF notch covering your target band
