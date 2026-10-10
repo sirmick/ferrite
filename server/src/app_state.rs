@@ -1226,6 +1226,13 @@ fn scan_presets(dir: &std::path::Path) -> Result<Vec<PresetEntry>> {
             FlowgraphDoc::from_json(&b)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:#}")))
         }) {
+            // Mirrors the browser catalog (web/src/lib/presets/catalog.ts):
+            // hidden presets (e2e canaries whose `src` is a synthetic
+            // generator, ad-hoc `_*` record graphs) stay loadable by
+            // name but are never *listed* — some of them 4xx on
+            // `POST /api/preset`, which would break the MCP list→load
+            // round-trip.
+            Ok(doc) if doc.catalog_visible == Some(false) => {}
             Ok(doc) if doc.variants.is_empty() => out.push(PresetEntry {
                 name: stem.to_string(),
                 label: doc.label,
@@ -1928,7 +1935,9 @@ mod tests {
     /// a base with variants is listed as its `${stem}-${id}` slugs, never
     /// bare. (Pre-fix the 8 shipped variant families — ft8, rtty, olivia,
     /// … — were listed bare, and the AI's list→load round-trip 4xx'd on
-    /// every one of them.)
+    /// every one of them.) Likewise `catalog_visible: false` docs are
+    /// omitted: the e2e canaries' `src` is a synthetic generator that
+    /// `POST /api/preset` refuses to compose with a real Source.
     #[test]
     fn scan_presets_lists_loadable_variant_slugs_not_bare_base() {
         let dir = tempdir().unwrap();
@@ -1959,9 +1968,19 @@ mod tests {
             }),
         );
 
+        // `catalog_visible: false` — hidden from the list (like the
+        // browser catalog) but still resolvable by name.
+        write(
+            "dtmf-e2e",
+            json!({ "name": "dtmf-e2e", "label": "DTMF canary", "catalog_visible": false,
+                    "environments": ["node"],
+                    "blocks": { "src": { "type": "DtmfAudioSource" } }, "wires": [] }),
+        );
+
         let entries = scan_presets(dir.path()).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["olivia-16-500", "olivia-8-500", "wbfm"]);
+        resolve_preset_doc(dir.path(), "dtmf-e2e").unwrap();
         // Every listed name resolves through the loader's own path.
         for n in &names {
             resolve_preset_doc(dir.path(), n).unwrap_or_else(|e| panic!("{n}: {e:#}"));
