@@ -278,6 +278,13 @@ impl AppState {
     /// and which preset. `None` while stopped. Called on every tune /
     /// source patch / VFO move and once a second by the supervisor.
     pub(crate) async fn refresh_rf_ctx(&self) {
+        self.update_rf_ctx().await;
+        // Every external caller is a mutation: let the health record
+        // catch up now rather than on the next tick.
+        self.inner.health_kick.notify_one();
+    }
+
+    async fn update_rf_ctx(&self) {
         let (running, _, shift) = self.mount_health().await;
         if !running {
             self.inner.decoder_store.set_ctx(None);
@@ -312,7 +319,7 @@ impl AppState {
     /// when it is (and the operator still wants it running).
     pub(super) async fn publish_health(&self, warnings: &mut Warnings) -> Option<String> {
         warnings.sync_epoch(self.epoch());
-        self.refresh_rf_ctx().await;
+        self.update_rf_ctx().await;
         let (running, src, shift) = self.mount_health().await;
         let cfg = self.inner.source_config.read().await.clone();
         let declared = num(self
@@ -480,6 +487,11 @@ impl AppState {
                         if let Some(reason) = me.publish_health(&mut warnings).await {
                             me.recover(reason, &mut warnings).await;
                         }
+                    }
+                    () = me.inner.health_kick.notified() => {
+                        // A mutation landed: refresh `health` now. Loss
+                        // detection stays on the steady tick.
+                        let _ = me.publish_health(&mut warnings).await;
                     }
                 }
             }

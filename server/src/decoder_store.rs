@@ -90,7 +90,7 @@ fn policy_for(kind: &str) -> Policy {
         // half + source at the current epoch), `status` (pipeline run
         // state) and `params/<block>` (last live param set per block) are
         // the coherence kinds: whole-document, retained, no reducer.
-        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" | "health" => {
+        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" | "health" | "blocks" => {
             Policy::Replace
         }
         k if k.starts_with("params/") => Policy::Replace,
@@ -125,7 +125,7 @@ fn policy_for(kind: &str) -> Policy {
 pub fn is_live_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" | "health"
+        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" | "health" | "blocks"
     ) || kind.starts_with("params/")
 }
 

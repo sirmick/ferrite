@@ -268,25 +268,21 @@ class PipelineStore {
   }
 
   /** The coherence record. The server folds a `graph` record (composed
-   *  doc, browser half + its hash, source, epoch) on every mutation that
-   *  can change the topology — preset, source, profile, start/stop,
-   *  whoever asked (UI, CLI, agent). The mirror replicates it; this
-   *  effect is the only writer of `browserHalf` after init: a changed
-   *  hash swaps the doc the runner loads, a changed epoch moves the
-   *  runner's frame gate. No REST round trip, no 8-GET fan-out, and the
+   *  doc, browser half + its hash, source, epoch — plus the UI view: the
+   *  preset doc with live params, profile, ui sinks, source caps) on
+   *  every mutation that can change the topology — preset, source,
+   *  profile, start/stop, whoever asked (UI, CLI, agent, another tab).
+   *  The mirror replicates it; this effect applies it: a changed hash
+   *  swaps the doc the runner loads, a changed epoch moves the runner's
+   *  frame gate, and the view fields replace their local copies when
+   *  they differ. No REST round trip and no refresh-on-activity: the
    *  same path for a self-initiated patch and an out-of-band one. */
   private graphDispose: (() => void) | undefined;
   private startGraphSync(): void {
     if (this.graphDispose) return;
     this.graphDispose = $effect.root(() => {
       $effect(() => {
-        const rec = decoders.kind('graph').current['current']?.data as
-          | {
-              epoch?: number;
-              browser_half?: FlowgraphDoc | null;
-              browser_half_hash?: string | null;
-            }
-          | undefined;
+        const rec = decoders.kind('graph').current['current']?.data as GraphRecord | undefined;
         if (!rec) return;
         untrack(() => {
           const hash = rec.browser_half_hash ?? null;
@@ -296,9 +292,89 @@ class PipelineStore {
           }
           const epoch = typeof rec.epoch === 'number' ? rec.epoch : 0;
           if (epoch !== this.graphEpoch) this.graphEpoch = epoch;
+          this.applyGraphView(rec);
+        });
+      });
+      // Run state, the composed block list, and live param deltas — the
+      // rest of what the old refresh-on-activity used to GET after a CLI/agent
+      // mutation.
+      $effect(() => {
+        const st = decoders.kind('status').current['current']?.data as
+          | { status?: string }
+          | undefined;
+        if (!st?.status) return;
+        const next: PipelineStatus = st.status === 'running' ? 'running' : 'stopped';
+        untrack(() => {
+          if (this.status !== next) this.status = next;
+        });
+      });
+      $effect(() => {
+        const rec = decoders.kind('blocks').current['current']?.data as
+          | { blocks?: PipelineBlock[] }
+          | undefined;
+        if (!rec?.blocks) return;
+        untrack(() => {
+          const next = indexById(rec.blocks ?? []);
+          if (!jsonEq(next, this.nodeBlocks)) this.nodeBlocks = next;
+        });
+      });
+      $effect(() => {
+        const kinds = decoders.kinds;
+        untrack(() => {
+          for (const [name, k] of Object.entries(kinds)) {
+            if (!name.startsWith('params/')) continue;
+            const rec = k.current['current'];
+            if (!rec || rec.seq <= (this.paramsSeen[name] ?? 0)) continue;
+            this.paramsSeen[name] = rec.seq;
+            const d = rec.data as { block?: string; params?: Record<string, unknown> };
+            if (d.block && d.params) this.applyParamDelta(d.block, d.params);
+          }
         });
       });
     });
+  }
+
+  /** Last `params/<block>` seq applied, per kind. */
+  private paramsSeen: Record<string, number> = {};
+
+  /** Replace the local view fields the `graph` record carries, when
+   *  they differ (so a stable record doesn't churn reactive consumers). */
+  private applyGraphView(rec: GraphRecord): void {
+    if (rec.flowgraph && !jsonEq(rec.flowgraph, this.flowgraph)) this.flowgraph = rec.flowgraph;
+    if (rec.source) {
+      const rb = decoders.kind('readback').current['current']?.data as SoapyReadback | undefined;
+      const next = applyReadback(rec.source, rb);
+      if (!this.source || !jsonEq(next, this.source)) this.source = next;
+    }
+    if (rec.profile && !profileEquals(rec.profile, this.profile)) this.profile = rec.profile;
+    if (rec.ui_sinks) {
+      const next = indexByName(rec.ui_sinks);
+      if (!jsonEq(next, this.nodeUiSinks)) this.nodeUiSinks = next;
+    }
+    if (rec.source_caps && !jsonEq(rec.source_caps, this.sourceCaps)) {
+      this.sourceCaps = rec.source_caps;
+    }
+  }
+
+  /** A live param edit made anywhere (`params/<block>` record) — fold it
+   *  into the block list and the preset doc's view of that block. */
+  private applyParamDelta(block: string, delta: Record<string, unknown>): void {
+    const b = this.nodeBlocks[block];
+    if (b) {
+      const values = { ...(b.values ?? {}), ...delta };
+      if (!jsonEq(values, b.values))
+        this.nodeBlocks = { ...this.nodeBlocks, [block]: { ...b, values } };
+    }
+    const decl = this.flowgraph?.blocks?.[block];
+    if (this.flowgraph && decl) {
+      const params = { ...((decl.params as Record<string, unknown> | undefined) ?? {}), ...delta };
+      if (!jsonEq(params, decl.params)) {
+        this.flowgraph = {
+          ...this.flowgraph,
+          blocks: { ...this.flowgraph.blocks, [block]: { ...decl, params } },
+        };
+      }
+    }
   }
 
   async start(): Promise<void> {
@@ -648,44 +724,6 @@ class PipelineStore {
     this.nodeBlocks = indexById(blocks);
   }
 
-  /** Pull every server mirror (source + flowgraph + status + composed +
-   *  caps) in parallel. Used when an out-of-band mutator (ferrite-ctl,
-   *  the AI sidecar) changed state via REST without going through this
-   *  store, so the local mirror is stale. The page-level `$effect`
-   *  fires this on every fresh `ai::activity` log entry — the same
-   *  channel the activity panel reads, so we get refresh-on-CLI for
-   *  free without inventing a new broadcast. Self-initiated UI patches
-   *  set no `X-Ferrite-Command` header, so the middleware skips them
-   *  and we don't double-refresh on our own writes. */
-  async refreshFromServer(): Promise<void> {
-    if (this.phase !== 'ready') return;
-    try {
-      const [fg, src, st, sinks, blocks, caps, profile] = await Promise.all([
-        fetchFlowgraph(),
-        fetchSource(),
-        fetchPipelineStatus(),
-        fetchUiSinks(),
-        fetchPipelineBlocks(),
-        fetchSourceCapabilities(),
-        fetchProfile(),
-      ]);
-      this.flowgraph = fg;
-      this.source = src;
-      this.status = st;
-      this.nodeUiSinks = indexByName(sinks);
-      this.nodeBlocks = indexById(blocks);
-      this.sourceCaps = caps;
-      // Profile too: a CLI-driven `transcribe on/off` flips this axis
-      // without touching `setProfile`. Pulling it here keeps the
-      // tri-state Audio control honest and lets the transcribe→voice-NR
-      // coupling in +page.svelte fire for the CLI path as well.
-      this.profile = profile;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logs.push('client', 'warn', `pipeline refresh failed: ${msg}`);
-    }
-  }
-
   /** Close the WebSocket. Call on unmount; does NOT stop the server
    *  pipeline (the server-side lifecycle is the user's to drive). */
   teardown(): void {
@@ -748,6 +786,23 @@ function sourceEquals(a: SourceConfig, b: SourceConfig): boolean {
 
 function profileEquals(a: Profile, b: Profile): boolean {
   return a.audio === b.audio && a.transcribe === b.transcribe && a.audio_split === b.audio_split;
+}
+
+/** The `graph` store record (see `AppState::publish_graph`). */
+interface GraphRecord {
+  epoch?: number;
+  browser_half?: FlowgraphDoc | null;
+  browser_half_hash?: string | null;
+  source?: SourceConfig;
+  flowgraph?: FlowgraphDoc;
+  profile?: Profile;
+  ui_sinks?: UiSink[] | null;
+  source_caps?: SourceCapabilitiesResponse | null;
+}
+
+/** Structural equality for small JSON-shaped values (record vs local). */
+function jsonEq(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function indexByName(sinks: UiSink[]): Record<string, UiSink> {

@@ -137,6 +137,13 @@ impl DeviceCache {
         Ok(caps)
     }
 
+    /// Cached capabilities for `args`, never probing (safe to call from
+    /// paths that must not touch a radio).
+    pub async fn peek_args(&self, args: &str) -> Option<DeviceCapabilities> {
+        let key = stable_device_key_from_args(args);
+        self.inner.read().await.get(&key).cloned()
+    }
+
     /// Drop every entry whose key isn't in `present` — call after a
     /// fresh `enumerate` so unplugged devices vanish from the cache.
     pub async fn prune(&self, present: &HashSet<String>) {
