@@ -47,6 +47,7 @@ pub mod fm_modulator;
 pub mod frame;
 #[cfg(feature = "ft8")]
 pub mod ft8;
+pub mod iq_record_tap;
 pub mod iq_upmix;
 pub mod log_mag_u8;
 pub mod modulated_file_source;

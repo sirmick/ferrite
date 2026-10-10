@@ -262,8 +262,8 @@ enum CaptureCmd {
     /// post-channelizer cf32 stream). `--wideband` = full-rate
     /// `Source → FileIqSink` (clobbers the live preset; needs a freq).
     Iq {
-        /// Centre frequency (Hz, SI shorthand). Optional live; required
-        /// with `--wideband`.
+        /// Centre frequency (Hz, SI shorthand). Optional: omit to
+        /// record the session as-is, give one to retune first.
         freq: Option<String>,
         /// Capture duration in seconds.
         #[arg(long, default_value_t = 5.0)]
@@ -283,7 +283,9 @@ enum CaptureCmd {
         /// `cf32` or `wav-s16`. `--wideband` only.
         #[arg(long, default_value = "cf32")]
         format: String,
-        /// Opt into the preset-swap wideband capture.
+        /// Tee the raw full-span IQ off the SDR (block `src`) instead
+        /// of the channelized slice. Live, no preset swap; 8 B × rate
+        /// per second of disk.
         #[arg(long)]
         wideband: bool,
         /// Proceed even if it would tear down an active transcription.

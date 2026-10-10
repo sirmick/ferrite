@@ -452,10 +452,12 @@ waterfall while you work. Two rules to not freeze it:
 - **Never `preset load capture_fm` / `capture-aprs` / `capture-pager`
   / `*-audio-record`**. These are node-only headless presets with no
   `ui:fft` wires — switching to one freezes the user's waterfall.
-- For recording, use the **live captures** (`capture fft`, `capture iq`
-  without `--wideband`). They tee to disk on whatever preset is
-  running, leaving the UI's waterfall + audio untouched. That's why
-  they exist.
+- For recording, use the **live captures** — `start_capture_fft`,
+  `start_capture_iq` (narrow slice, or `wideband=true` for the raw
+  full-span stream off the SDR) and `start_capture_audio` (what the
+  operator hears). All three tee to disk on whatever preset is running,
+  leaving the UI's waterfall + audio untouched. Only a `freq_hz` you
+  pass is visible — it retunes the operator exactly like `tune`.
 
 When you legitimately need to swap presets (loading a decoder), pick
 a catalog preset (packet, wbfm, nbfm, nwr, …) — those all wire the FFT

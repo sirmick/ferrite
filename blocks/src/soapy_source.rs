@@ -440,6 +440,11 @@ pub struct SoapySource {
     /// main side can compute "seconds since last pushed sample" from
     /// the atomic counter the reader updates.
     start_instant: std::time::Instant,
+    /// Live wideband cf32 tee (`record_path` / `record_max_seconds`):
+    /// the raw full-span stream off the radio, written while the
+    /// session keeps running. Driven by the daemon's wideband IQ
+    /// capture; no preset swap.
+    record: crate::iq_record_tap::IqRecordTap,
 }
 
 impl SoapySource {
@@ -644,6 +649,7 @@ impl SoapySource {
             ticks: 0,
             underrun_samples: 0,
             start_instant: std::time::Instant::now(),
+            record: crate::iq_record_tap::IqRecordTap::new(),
         })
     }
 
@@ -878,6 +884,26 @@ impl Block for SoapySource {
                     reconfig_scope: ReconfigureScope::SourceRestart,
                     ai_notes: "Receive channel index. 0 for single-tuner SDRs (most common case).",
                 },
+                ParamSpec {
+                    key: "record_path",
+                    label: "Record path",
+                    kind: ParamKind::Text { default: "" },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Optional path to tee the raw full-span IQ (cf32, before DC block / channelizer) to disk while the session keeps running — the wideband IQ capture. Empty = not recording. Driven by `start_capture_iq(wideband=true)`; set live, no preset swap. 8 bytes × sample_rate per second of disk.",
+                },
+                ParamSpec {
+                    key: "record_max_seconds",
+                    label: "Record cap",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 3600.0,
+                        step: 0.1,
+                        default: 0.0,
+                        unit: "s",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Stop the wideband tee after N seconds of samples (0 = no cap). Exact: the cap is counted in samples at the source rate.",
+                },
             ],
             ai_notes: "Hardware IQ source via SoapySDR. The actual radio. Live-tunable params: centre, gain, antenna, AGC, dc_offset_correction. `dc_offset_correction` (bool, default true) drives the driver's automatic DC-offset tracking — suppresses the LO-leakage spike at the tuned centre on zero-IF SDRs (SDRplay honours it; HackRF's driver doesn't expose DC-offset mode, so there it's a no-op — use the off-tune-and-VFO-shift dance). Leave on unless A/B-testing or working around a buggy tracker. Driver-specific gain stages, antenna ports, and notches are documented in the driver-specific operator notes appended to the system prompt. Driver-specific knobs that don't fit a standard param (bias-T, notch filters, decimation, AGC setpoint, …) live in the dynamic `settings` map — patch them with `set_block_param(block='src', params={ settings: { <key>: <value> } })`, discovering the available keys, value types, and options via `source_capabilities` → `settings[]`.",
         }
@@ -905,9 +931,23 @@ impl Block for SoapySource {
             "antenna",
             "agc",
             "dc_offset_correction",
+            "record_path",
+            "record_max_seconds",
         ];
         if !obj.keys().all(|k| LIVE_KEYS.contains(&k.as_str())) {
             return Ok(false);
+        }
+        // Wideband tee keys ride the same live path as the radio knobs.
+        // Split them out so the tap sees only its own keys.
+        let record_keys: serde_json::Map<String, serde_json::Value> = obj
+            .iter()
+            .filter(|(k, _)| k.as_str() == "record_path" || k.as_str() == "record_max_seconds")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !record_keys.is_empty() {
+            self.record
+                .set_meta(self.sample_rate_hz, self.center_freq_hz);
+            self.record.apply_live(&record_keys)?;
         }
         let dir = Direction::Rx;
         let ch = self.channel;
@@ -1037,6 +1077,14 @@ impl Block for SoapySource {
         if got < want {
             self.underrun_samples = self.underrun_samples.saturating_add((want - got) as u64);
         }
+        if self.record.is_recording() {
+            // Disk trouble must not take the radio down: log, drop the
+            // recording, keep streaming.
+            if let Err(e) = self.record.push(&out[..got]) {
+                tracing::warn!(error = %format!("{e:#}"), "wideband record tap failed; recording dropped");
+                let _ = self.record.finish();
+            }
+        }
 
         // Report only the samples we actually produced. Zero-filling the
         // tail and reporting `want` would splice periodic zero-runs into
@@ -1053,7 +1101,8 @@ impl Block for SoapySource {
         if let Some(handle) = self.reader.take() {
             let _ = handle.join();
         }
-        Ok(())
+        // A pipeline stop mid-capture still leaves a valid file + sidecar.
+        self.record.finish()
     }
 }
 

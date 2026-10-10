@@ -699,8 +699,45 @@ impl AppState {
     /// Wideband IQ: swap in `capture_fm`, run a `Source → FileIqSink`
     /// slice off the (live-inherited) source. Needs `freq_hz`.
     async fn start_wideband_iq(&self, req: CaptureIqReq) -> Result<CaptureJob, CaptureError> {
+        // Hardware source → live tee on `src` (the raw full-span stream
+        // off the radio), no preset swap, no retune unless asked. Rate /
+        // bandwidth / gain overrides are deliberately not applied here:
+        // they would silently change the operator's live session — use
+        // `set_block_param(src, …)` first if a different rate is wanted.
+        if self.get_source().await.type_name == "SoapySource" {
+            let out = self
+                .resolve_out(req.out, CaptureKind::Iq, req.freq_hz)
+                .await;
+            ensure_parent(&out).await?;
+            let job = self
+                .captures()
+                .register(CaptureKind::Iq, &out, req.duration_s)
+                .await;
+            let (state, job_id) = (self.clone(), job.job_id.clone());
+            let (duration_s, freq_hz) = (req.duration_s, req.freq_hz);
+            tokio::spawn(async move {
+                run_live_capture(
+                    state,
+                    job_id,
+                    CaptureKind::Iq,
+                    "src".to_string(),
+                    duration_s,
+                    freq_hz,
+                    out,
+                )
+                .await;
+            });
+            return Ok(job);
+        }
+        // Software/test source: the tee lives in SoapySource only. The
+        // preset-swap recording remains as the forced fallback (it
+        // restores the session afterwards).
         let freq = req.freq_hz.ok_or_else(|| {
-            CaptureError::Invalid("wideband IQ capture requires `freq_hz`".into())
+            CaptureError::Invalid(
+                "wideband IQ capture against a software source needs the preset-swap \
+                 fallback, which requires `freq_hz` (and `force:true`)"
+                    .into(),
+            )
         })?;
         self.guard_active_audio_profile(req.force, "wideband IQ capture")
             .await?;

@@ -427,11 +427,11 @@ request structs; the descriptions below are what `tools/list` returns.
 | `set_block_param` | `POST /api/pipeline/blocks/{id}/params` | Patch one block's params. `src` accepts gain/agc/antenna/bandwidth_hz/dc_offset_correction/`settings`. |
 | `start` | `POST /api/pipeline/start` | Start the pipeline. |
 | `stop` | `POST /api/pipeline/stop` | Stop the pipeline. |
-| `transcribe` | `PATCH /api/profile` | Toggle the in-browser whisper.cpp tap. |
+| `transcribe` | `PATCH /api/profile` | Toggle the speech-to-text tap (sherpa-onnx: in-browser WASM under `balanced`, the node sidecar under `server`). |
 | `recent_decodes` | `GET /api/decoder/recent` | Recent decoder-log entries; filterable by category. |
-| `start_capture_iq` | `chan` tee / `capture_fm` preset | Async IQ capture — live narrowband tee (default) or `wideband` full-rate slice. Returns a `job_id`. |
+| `start_capture_iq` | `chan` tee / `src` tee | Async IQ capture — live tee of the channelized slice (default) or, with `wideband`, of the raw full-span stream off the SDR. Neither swaps presets. Returns a `job_id`. |
 | `start_capture_fft` | `logmag` tee | Async FFT-byte-stream capture (live tee). Returns a `job_id`. |
-| `start_capture_audio` | `*-audio-record` preset | Async demodulated-audio capture to WAV (preset-swap). Returns a `job_id`. |
+| `start_capture_audio` | `WsBridgeTxF32` tee | Async 48 kHz WAV of what the operator hears (live tee of the node→browser audio bridge; `freq_hz` optional). Returns a `job_id`. |
 | `capture_status` | (in-memory job registry) | Poll one capture job by id, or list all. `running` / `done` (+ sidecar) / `failed`. |
 | `view_snapshot` | `GET /api/ui-views/{pane}` | PNG of a live FFT/waterfall canvas. |
 | `view_state` | `GET /api/view` | Browser-authored UI chrome state. |
