@@ -31,123 +31,107 @@ pub struct Hello {
     pub app: &'static str,
     pub version: &'static str,
     pub status: &'static str,
+    /// Event-plane broker addresses (`null` with `--no-mqtt`): `tcp`
+    /// for native MQTT clients (ferrite-ctl, agents), `ws` behind the
+    /// `/mqtt` reverse proxy for browsers.
+    pub mqtt: Option<MqttInfo>,
 }
 
-pub async fn hello() -> Json<Hello> {
+#[derive(Serialize)]
+pub struct MqttInfo {
+    pub tcp: std::net::SocketAddr,
+    pub ws: std::net::SocketAddr,
+}
+
+pub async fn hello(State(state): State<AppState>) -> Json<Hello> {
     Json(Hello {
         app: "ferrited",
         version: env!("CARGO_PKG_VERSION"),
         status: "ok",
+        mqtt: state.event_plane().map(|p| MqttInfo {
+            tcp: p.tcp,
+            ws: p.ws,
+        }),
     })
 }
 
-/// Streams every `tracing` log line as a text WS message.
-pub async fn ws_logs(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let Some(logs) = state.logs().cloned() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "logs disabled").into_response();
+/// `GET /mqtt` — reverse-proxy a browser WebSocket to the embedded
+/// MQTT broker's WS listener, so the page talks to one origin (vite in
+/// dev, ferrited in prod) and the broker port stays an implementation
+/// detail. MQTT-over-WS is binary frames with subprotocol `mqtt`; we
+/// echo the subprotocol to the browser and request it upstream.
+pub async fn ws_mqtt(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    let Some(plane) = state.event_plane().cloned() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "event plane disabled").into_response();
     };
-    ws.on_upgrade(move |socket| ws_logs_forward(socket, logs))
+    ws.protocols(["mqtt"])
+        .on_upgrade(move |socket| ws_mqtt_proxy(socket, plane.ws))
         .into_response()
 }
 
-async fn ws_logs_forward(mut socket: WebSocket, logs: crate::log_stream::LogBroadcast) {
-    let mut rx = logs.subscribe();
-    // An idle log stream (no events for a while) used to sit silent
-    // until the Vite dev proxy / browser killed it on its ~60 s idle
-    // timeout, and the client reconnected — logging "server logs
-    // connected" every minute. A periodic ping keeps the connection
-    // hot so a quiet runtime doesn't churn the socket.
-    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(25));
-    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            recv = rx.recv() => match recv {
-                Ok(line) => {
-                    if socket.send(Message::Text(line)).await.is_err() {
-                        return;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    let _ = socket
-                        .send(Message::Text(format!(
-                            "[WARN] log stream lagged by {n} lines"
-                        )))
-                        .await;
-                }
-                Err(broadcast::error::RecvError::Closed) => return,
-            },
-            _ = keepalive.tick() => {
-                if socket.send(Message::Ping(Vec::new())).await.is_err() {
-                    return;
-                }
-            }
-            // Drain client-side frames so a Close (or the read half
-            // erroring) tears the task down promptly instead of only
-            // being noticed on the next send.
-            client = socket.recv() => match client {
-                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
-                Some(Ok(_)) => {}
-            },
+async fn ws_mqtt_proxy(client_ws: WebSocket, upstream: std::net::SocketAddr) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    // The broker binds the same interface as HTTP (often 0.0.0.0); as a
+    // *destination* that means "this host", so dial loopback.
+    let upstream = if upstream.ip().is_unspecified() {
+        std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), upstream.port())
+    } else {
+        upstream
+    };
+    let mut request = match format!("ws://{upstream}/mqtt").into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "mqtt proxy: bad upstream request");
+            let _ = client_ws.close().await;
+            return;
         }
-    }
-}
-
-/// `GET /ws/state` — the store mirror feed. On connect sends a full
-/// snapshot (`{"snapshot": {seq, kinds}}`), then streams each change as
-/// `{"delta": {kind, seq, op}}`. The browser keeps a 1:1 mirror and
-/// de-dupes by `seq` (skips deltas ≤ the snapshot's seq). REST
-/// `/api/state` is the same data for MCP/headless.
-pub async fn ws_state(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let store = state.decoder_store();
-    ws.on_upgrade(move |socket| ws_state_forward(socket, store))
-}
-
-async fn ws_state_forward(
-    mut socket: WebSocket,
-    store: std::sync::Arc<crate::decoder_store::DecoderStore>,
-) {
-    // Subscribe *before* snapshotting so no delta is lost in the gap; the
-    // client de-dupes any overlap by `seq`.
-    let mut rx = store.subscribe();
-    let snapshot = serde_json::json!({ "snapshot": store.snapshot() });
-    if socket
-        .send(Message::Text(snapshot.to_string()))
-        .await
-        .is_err()
-    {
-        return;
-    }
-
-    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(25));
-    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            recv = rx.recv() => match recv {
-                Ok(delta) => {
-                    let msg = serde_json::json!({ "delta": delta }).to_string();
-                    if socket.send(Message::Text(msg)).await.is_err() {
-                        return;
-                    }
-                }
-                // On lag, tell the client to re-fetch the snapshot via REST
-                // rather than try to reconcile a gap.
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let _ = socket
-                        .send(Message::Text(r#"{"resync":true}"#.to_string()))
-                        .await;
-                }
-                Err(broadcast::error::RecvError::Closed) => return,
-            },
-            _ = keepalive.tick() => {
-                if socket.send(Message::Ping(Vec::new())).await.is_err() {
-                    return;
-                }
-            }
-            client = socket.recv() => match client {
-                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
-                Some(Ok(_)) => {}
-            },
+    };
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        http::HeaderValue::from_static("mqtt"),
+    );
+    let upstream_ws = match tokio_tungstenite::connect_async(request).await {
+        Ok((s, _resp)) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, %upstream, "mqtt proxy: broker unreachable");
+            let _ = client_ws.close().await;
+            return;
         }
+    };
+    let (mut up_tx, mut up_rx) = upstream_ws.split();
+    let (mut cli_tx, mut cli_rx) = client_ws.split();
+
+    let c2u = async move {
+        while let Some(Ok(msg)) = cli_rx.next().await {
+            let out = match msg {
+                Message::Binary(b) => TungMessage::Binary(b),
+                Message::Text(t) => TungMessage::Text(t),
+                Message::Close(_) => break,
+                Message::Ping(_) | Message::Pong(_) => continue,
+            };
+            if up_tx.send(out).await.is_err() {
+                break;
+            }
+        }
+        let _ = up_tx.close().await;
+    };
+    let u2c = async move {
+        while let Some(Ok(msg)) = up_rx.next().await {
+            let out = match msg {
+                TungMessage::Binary(b) => Message::Binary(b),
+                TungMessage::Text(t) => Message::Text(t),
+                TungMessage::Close(_) => break,
+                TungMessage::Ping(_) | TungMessage::Pong(_) | TungMessage::Frame(_) => continue,
+            };
+            if cli_tx.send(out).await.is_err() {
+                break;
+            }
+        }
+        let _ = cli_tx.close().await;
+    };
+    tokio::select! {
+        _ = c2u => {},
+        _ = u2c => {},
     }
 }
 
@@ -776,7 +760,7 @@ pub async fn list_block_schemas() -> Json<Vec<crate::block_schema::BlockSchemaDt
 /// AI transcript (`ai`), plus the live `readback` (driver gain/AGC) and
 /// `flowdiag` (per-block throughput) folded by the pipeline diag tick.
 /// MCP slices the kind it needs out of this; the browser mirror uses it
-/// for the initial fetch + resync (the live feed is `/ws/state`).
+/// for the initial fetch + resync (the live feed is the event bus).
 pub async fn get_state(State(state): State<AppState>) -> Json<crate::decoder_store::StoreSnapshot> {
     Json(state.decoder_store().snapshot())
 }

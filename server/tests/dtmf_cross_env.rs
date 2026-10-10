@@ -28,6 +28,10 @@ use ferrite_runtime::{
     CROSS_ENV_STREAM_BASE, DEFAULT_FRAMES_HINT, DEFAULT_TICK_PERIOD,
 };
 
+#[path = "../src/event_plane.rs"]
+#[allow(dead_code)]
+mod event_plane;
+
 #[path = "../src/log_stream.rs"]
 #[allow(dead_code)]
 mod log_stream;

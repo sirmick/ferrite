@@ -3,7 +3,7 @@
 // The server-side `RssiProbe` block emits `{"rssi_dbfs": …}` on its
 // `events` port, wired to `ui:rssi` → an `EventStore` (kind `rssi`,
 // Replace policy: the probe re-emits continuously, the store keeps the
-// single current record), mirrored to the browser over `/ws/state`.
+// single current record), mirrored to the browser over the event bus.
 // This keeps the original `rssi.dbfs` surface so RssiMeter is unchanged.
 
 import { decoders } from '$lib/decoders/store.svelte';

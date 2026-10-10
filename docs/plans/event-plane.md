@@ -117,6 +117,40 @@ the payload (`expires_at_ms`), not v5 properties (WS is v4).
 - Tests: an MQTT client in server tests (rumqttc) asserting retained graph +
   decode records; web store tests with a fake MQTT client.
 
+**Status (2026-10-10): shipped**, with these deltas:
+- `server/src/event_plane.rs`: rumqttd 0.20 (`websocket` feature), TCP on
+  HTTP+1, WS on HTTP+2 (`--mqtt-port` / `--mqtt-ws-port` / `--no-mqtt`;
+  port 0 = free loopback port); `GET /api/hello` advertises both. The
+  browser reaches the broker through ferrited's `GET /mqtt` reverse proxy
+  (vite proxies `/mqtt` → ferrited), so one same-origin URL in dev and prod.
+- Replace kinds coalesce leading-edge (first publish immediate, then ≤10 Hz,
+  latest wins). Reset deltas are published *retained* on the kind topic and
+  clear every retained entity the publisher has seen for that kind.
+- Log lines ride `ferrite/state/log/<target>` straight from the tracing
+  layer (structured `LogEntry` broadcast) — not folded into the store; the
+  history ring behind `/api/decoder/recent` is unchanged. `rumqttd`'s own
+  lines are kept off the bus.
+- Ingest (Phase 3's server half) landed here: `ferrite/ingest/<kind>` →
+  `store.apply`, stale `epoch` dropped.
+- `activity` is a store kind written by the (kept) header-sniffing
+  middleware — one place that knows the headers beats touching every
+  handler; it still echoes an `ai::activity` tracing line for stdout. The
+  AI panel's transcript and the page's refresh-on-activity read the kind.
+- Browser: `web/src/lib/events/{bus,connect}.ts` (MQTT.js 5.16, one broker
+  subscription `ferrite/state/#`, local filter routing, uncovered filters
+  added broker-side only). Mirror dedups **per kind** (coalescing made the
+  global watermark wrong). Log sidebar = `ferrite/state/log/#` subscriber.
+- Deleted: `/ws/state`, `/ws/logs`. **Kept for now:** the chat-inject hub
+  (`/api/ai/chat-inject` → `/ws/chat` fan-out): moving the AI panel onto
+  `ferrite/state/ai/<session>` is a rewrite of the 877-line chat store and
+  belongs with the sidecar-publishes-via-ingest work in Phase 3.
+  `refreshFromServer` also stays until status/source/blocks/profile are
+  records.
+- Not verified live: the browser tab itself (no Chromium on `devel`). Verified
+  live with MQTT.js from node: TCP retained `graph`, WS through vite →
+  `/mqtt` → broker, `activity` + `log/ai/activity` on a CLI call, ingest →
+  `state/pager`.
+
 ### Phase 3 — ingest
 - Server link subscribes `ferrite/ingest/#`, folds into the store with
   epoch validation (drop stale), republishes on `state`.

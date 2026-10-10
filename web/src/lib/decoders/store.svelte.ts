@@ -1,19 +1,28 @@
 // Browser mirror of the server-side store — a 1:1 replica kept in sync
-// over `/ws/state` (snapshot on connect, then deltas). Every live-state
-// UI (APRS, ADS-B, FT8, signals, flowdiag, readback, …) paints out of
-// this one store instead of its own bespoke WS subscription or poll.
-// REST `/api/state` is the same data for MCP/headless.
+// over the event bus (`ferrite/state/<kind>` topics; snapshot via REST
+// `/api/state` on every connect). Every live-state UI (APRS, ADS-B,
+// FT8, signals, flowdiag, readback, graph, activity, …) paints out of
+// this one store instead of its own bespoke subscription or poll.
+// `/api/state` is the same data for MCP/headless.
 //
-// Wire protocol (text JSON, one message per line):
-//   {"snapshot": { seq, kinds: { <kind>: { recent[], current{} } } }}
-//   {"delta":    { kind, seq, op: "add"|"upsert"|"expire"|"reset", record?, key? }}
-//   {"resync": true}   // broadcast lagged — re-fetch the REST snapshot
+// Record vocabulary (one message per change, the same JSON the server
+// broadcasts internally):
+//   {"kind", "seq", "epoch", "op": "add"|"upsert"|"expire"|"reset", "record"?, "key"?}
+// Replace kinds are retained on `ferrite/state/<kind>`; keyed entities
+// on `ferrite/state/<kind>/<key>` (empty payload = cleared); append
+// kinds stream only, so history comes from the snapshot.
+//
+// Dedup is per kind: the server coalesces replace-kind bursts, so a
+// `readback` record can arrive after a `pager` record with a higher
+// seq. A global watermark would drop it. The snapshot's seq is the
+// floor for every kind it covers.
 
-import { wsUrlFor } from '../api/errors';
+import { eventBus, type BusMessage, type EventBus } from '$lib/events/bus';
 
 /** One decoder record. `data` is the emitting block's JSON verbatim. */
 export interface DecoderRecord {
   seq: number;
+  epoch?: number;
   at_ms: number;
   key?: string;
   data: unknown;
@@ -27,24 +36,32 @@ export interface KindState {
 
 const REPLACE_KEY = 'current';
 const LOG_CAP = 512;
+export const STATE_TOPIC_PREFIX = 'ferrite/state/';
 
-interface Snapshot {
+export interface Snapshot {
   seq: number;
+  epoch?: number;
   kinds: Record<string, KindState>;
 }
-interface Delta {
+export interface Delta {
   kind: string;
   seq: number;
+  epoch?: number;
   op: 'add' | 'upsert' | 'expire' | 'reset';
   record?: DecoderRecord;
   key?: string;
 }
 
-class DecoderMirror {
-  /** Global monotonic store cursor (the dedup watermark). */
+export class DecoderMirror {
+  /** Highest store cursor seen (snapshot or delta). */
   seq = $state(0);
+  /** Graph epoch of the last snapshot / delta. */
+  epoch = $state(0);
   /** All kinds, mirrored from the server. */
   kinds = $state<Record<string, KindState>>({});
+  /** Per-kind watermark; kinds absent here fall back to `snapshotSeq`. */
+  private kindSeq: Record<string, number> = {};
+  private snapshotSeq = 0;
 
   /** A kind's state, or an empty one — callers read `.recent`/`.current`. */
   kind(name: string): KindState {
@@ -52,14 +69,21 @@ class DecoderMirror {
   }
 
   replaceSnapshot(snap: Snapshot): void {
-    this.seq = snap.seq ?? 0;
+    this.snapshotSeq = snap.seq ?? 0;
+    this.seq = this.snapshotSeq;
+    if (typeof snap.epoch === 'number') this.epoch = snap.epoch;
+    this.kindSeq = {};
     this.kinds = snap.kinds ?? {};
   }
 
   applyDelta(d: Delta): void {
-    // Skip anything already covered by the snapshot / an older delta.
-    if (d.seq <= this.seq) return;
-    this.seq = d.seq;
+    // Skip anything already covered by the snapshot / an older delta of
+    // the same kind.
+    const floor = this.kindSeq[d.kind] ?? this.snapshotSeq;
+    if (d.seq <= floor) return;
+    this.kindSeq[d.kind] = d.seq;
+    if (d.seq > this.seq) this.seq = d.seq;
+    if (typeof d.epoch === 'number' && d.epoch > this.epoch) this.epoch = d.epoch;
     const k: KindState = this.kinds[d.kind]
       ? { recent: [...this.kinds[d.kind].recent], current: { ...this.kinds[d.kind].current } }
       : { recent: [], current: {} };
@@ -92,56 +116,68 @@ class DecoderMirror {
     }
     this.kinds = { ...this.kinds, [d.kind]: k };
   }
+
+  /** One bus message → one delta. Log topics belong to the log store
+   *  and are ignored here; an empty payload is a cleared retained
+   *  entity (its `expire` delta already streamed on the kind topic). */
+  ingest(m: BusMessage): void {
+    if (!m.topic.startsWith(STATE_TOPIC_PREFIX)) return;
+    if (m.topic.startsWith(`${STATE_TOPIC_PREFIX}log/`)) return;
+    if (m.payload.length === 0) return;
+    let d: Delta;
+    try {
+      d = JSON.parse(m.payload) as Delta;
+    } catch {
+      return;
+    }
+    if (typeof d?.kind !== 'string' || typeof d.seq !== 'number') return;
+    this.applyDelta(d);
+  }
 }
 
 export const decoders = new DecoderMirror();
 
-/** Connect the mirror to `/ws/state` with linear-backoff reconnect.
- *  Call once at app start (alongside the log stream). */
-export function connectDecoders(): () => void {
-  let ws: WebSocket | null = null;
-  let closed = false;
-  let retry = 0;
-  const url = wsUrlFor('/ws/state');
+/** Fetch the authoritative snapshot. Exposed for tests to stub. */
+export async function fetchSnapshot(): Promise<Snapshot> {
+  const r = await fetch('/api/state');
+  if (!r.ok) throw new Error(`/api/state ${r.status}`);
+  return (await r.json()) as Snapshot;
+}
 
-  const open = () => {
-    if (closed) return;
-    ws = new WebSocket(url);
-    ws.addEventListener('message', (e) => {
-      if (typeof e.data !== 'string') return;
-      let msg: { snapshot?: Snapshot; delta?: Delta; resync?: boolean };
-      try {
-        msg = JSON.parse(e.data);
-      } catch {
-        return;
-      }
-      if (msg.snapshot) decoders.replaceSnapshot(msg.snapshot);
-      else if (msg.delta) decoders.applyDelta(msg.delta);
-      else if (msg.resync) {
-        // Broadcast lagged — re-fetch the authoritative snapshot.
-        void fetch('/api/state')
-          .then((r) => r.json())
-          .then((s: Snapshot) => decoders.replaceSnapshot(s))
-          .catch(() => {});
-      }
-    });
-    ws.addEventListener('close', () => {
-      if (closed) return;
-      const delay = Math.min(1000 + retry * 500, 5000);
-      retry += 1;
-      setTimeout(open, delay);
-    });
-    ws.addEventListener('error', () => {
-      // `close` fires next — reconnect there.
-    });
-    ws.addEventListener('open', () => {
-      retry = 0;
-    });
-  };
-
-  open();
+/** Wire the mirror to the event bus. On every (re)connect: subscribe
+ *  first, buffer what arrives, pull `/api/state`, then replay the
+ *  buffer — per-kind dedup drops anything the snapshot already covers.
+ *  Call once at app start. */
+export function connectDecoders(
+  bus: EventBus = eventBus,
+  snapshot: () => Promise<Snapshot> = fetchSnapshot,
+  mirror: DecoderMirror = decoders,
+): () => void {
+  let pending: BusMessage[] | null = [];
+  const unsub = bus.subscribe(`${STATE_TOPIC_PREFIX}#`, (m) => {
+    if (pending) pending.push(m);
+    else mirror.ingest(m);
+  });
+  let generation = 0;
+  const offConnect = bus.onConnect(() => {
+    const mine = ++generation;
+    pending = [];
+    void snapshot()
+      .then((s) => {
+        if (mine !== generation) return; // a newer connect superseded us
+        mirror.replaceSnapshot(s);
+        const buffered = pending ?? [];
+        pending = null;
+        for (const m of buffered) mirror.ingest(m);
+      })
+      .catch(() => {
+        // Keep buffering until the next connect; the retry is the
+        // next reconnect's snapshot (MQTT.js reconnects on its own).
+        if (mine === generation) pending = pending ?? [];
+      });
+  });
   return () => {
-    closed = true;
-    ws?.close();
+    offConnect();
+    unsub();
   };
 }

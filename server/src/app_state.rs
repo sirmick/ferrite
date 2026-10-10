@@ -168,6 +168,9 @@ pub struct AppState {
     /// snapshotter). Lives in `AppState` so the two route handlers
     /// (HTTP + WS) share the same broker instance.
     view_bridge: crate::view_bridge::ViewBridge,
+    /// The embedded MQTT broker's addresses, when the event plane is
+    /// up. `/mqtt` reverse-proxies browser WebSockets to `ws`.
+    event_plane: Option<crate::event_plane::EventPlane>,
 }
 
 impl AppState {
@@ -195,7 +198,19 @@ impl AppState {
             presets_dir: None,
             captures_dir: None,
             view_bridge: crate::view_bridge::ViewBridge::default(),
+            event_plane: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_event_plane(mut self, plane: crate::event_plane::EventPlane) -> Self {
+        self.event_plane = Some(plane);
+        self
+    }
+
+    #[must_use]
+    pub fn event_plane(&self) -> Option<&crate::event_plane::EventPlane> {
+        self.event_plane.as_ref()
     }
 
     #[must_use]

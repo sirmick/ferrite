@@ -13,7 +13,7 @@
   import { flow, type FlowSide } from '$lib/logs/flowStore.svelte';
 
   // The node-side snapshot arrives via the store mirror (`flowdiag`
-  // kind over /ws/state), not the log stream. The ingest effect lives at
+  // kind over the event bus), not the log stream. The ingest effect lives at
   // the store layer (`flowStore.svelte.ts`) so it runs whenever the app
   // is up — not just when this panel is mounted. Gating it on FlowPanel
   // visibility broke `HealthDots`, which depends on the freshness of

@@ -87,6 +87,9 @@ fn policy_for(kind: &str) -> Policy {
         // user/assistant turn), folded by ferrited's `/ws/chat` proxy +
         // `chat-inject` path. Read by MCP via `decodes ai`.
         "ai" => Policy::Append { cap: LOG_CAP },
+        // One record per mutating CLI / agent request (the activity
+        // middleware) — the AI panel's transcript and `ferrite/state/activity`.
+        "activity" => Policy::Append { cap: LOG_CAP },
         // Everything else is an append log — ft8, wspr, pager, eas, dtmf,
         // cw, ais, rtl_433, transcribe, fldigi, …. (ais/rtl_433 can become
         // keyed tables once they emit a parsed mmsi / device id.)

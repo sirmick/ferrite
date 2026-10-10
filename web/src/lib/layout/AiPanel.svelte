@@ -1,18 +1,27 @@
 <script lang="ts">
   import { ai, AI_MODES, type AiMode, renderMarkdown } from '$lib/ai/store.svelte';
-  import { logs } from '$lib/logs/store.svelte';
+  import { decoders } from '$lib/decoders/store.svelte';
   import { tick } from 'svelte';
 
   let scroller: HTMLDivElement | undefined = $state();
   let input = $state('');
   let stickToBottom = $state(true);
 
-  // The activity panel below the chat is just the existing log store
-  // filtered to the `ai::activity` target. Every ferrite-ctl call sets
-  // X-Ferrite-Command, so the AI's tool calls (and the user's manual
-  // CLI invocations) all surface here.
-  const ACTIVITY_TARGET = 'ai::activity';
-  let activity = $derived(logs.entries.filter((e) => e.category === ACTIVITY_TARGET).slice(-50));
+  // The activity panel below the chat renders the store's `activity`
+  // kind (one record per mutating ferrite-ctl / agent request, folded
+  // by the server's activity middleware and mirrored like every other
+  // kind — `ferrite/state/activity` on the bus, `/api/state` over REST).
+  // Survives a reload: the snapshot carries the last 512.
+  let activity = $derived(
+    decoders
+      .kind('activity')
+      .recent.slice(-50)
+      .map((r) => ({
+        seq: r.seq,
+        t: r.at_ms,
+        text: String((r.data as { summary?: unknown })?.summary ?? ''),
+      })),
+  );
 
   $effect(() => {
     void ai.turns.length;
@@ -441,7 +450,7 @@
     <div class="flex items-center justify-between border-b border-slate-800 px-2 py-1">
       <span class="font-semibold text-[color:var(--color-muted)]">Activity</span>
       <span class="text-[10px] text-[color:var(--color-muted)]">
-        ai::activity ({activity.length})
+        ferrite/state/activity ({activity.length})
       </span>
     </div>
     <div class="min-h-0 flex-1 overflow-y-auto px-2 py-1 font-mono text-[10px]">
@@ -450,7 +459,7 @@
           no activity yet — the AI's CLI calls will appear here
         </div>
       {/if}
-      {#each activity as e (e.id)}
+      {#each activity as e (e.seq)}
         <div class="flex items-baseline gap-2 leading-tight">
           <span class="text-slate-500">{fmtTime(e.t)}</span>
           <span class="flex-1 text-slate-300">{e.text}</span>

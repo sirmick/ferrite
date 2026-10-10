@@ -74,6 +74,7 @@ prefix() {
 }
 
 echo "[run] ferrited → http://0.0.0.0:${FERRITED_PORT}/   (REST + WS, plain HTTP on loopback)"
+echo "[run] mqtt     → tcp://0.0.0.0:$((FERRITED_PORT + 1))  ws://0.0.0.0:$((FERRITED_PORT + 2))  (event plane; browser uses /mqtt)"
 echo "[run] ai       → ws://0.0.0.0:${FERRITE_AI_PORT}/ws/chat  (Claude Code sidecar; ferrited reverse-proxies /ws/chat here)"
 echo "[run] vite     → ${UI_SCHEME}://0.0.0.0:${FERRITE_UI_PORT}/  (UI; proxies /api and /ws → ${FERRITED_URL})"
 echo "[run] open the vite URL in a browser; pick preset + source from the UI"

@@ -5,7 +5,7 @@
 // newline-delimited JSON record per decoded chunk on their `events` port
 // — `{"t":"fldigi","mode":"<label>","text":"<decoded>"}` (fldigi_modes.rs)
 // — wired to `ui:fldigi` → the server `DecoderStore` (kind `fldigi`,
-// append log), mirrored to the browser over `/ws/state`. This keeps the
+// append log), mirrored to the browser over the event bus. This keeps the
 // original `fldigi.lines` / `fldigi.mode` surface so FldigiView is
 // unchanged; it's a continuous text console rendered by TextConsole.
 

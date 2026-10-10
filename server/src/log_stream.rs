@@ -1,8 +1,9 @@
 //! Tracing → broadcast channel tee + recent-history ring, consumed by
-//! `/ws/logs` (live stream) and `/api/decoder/recent` (polling lookback).
+//! the event plane (`ferrite/state/log/<target>` topics) and
+//! `/api/decoder/recent` (polling lookback).
 //!
-//! The browser's `LogPanel` connects to `/ws/logs` and receives every
-//! log line ferrited would otherwise only write to stderr. Keeps
+//! The browser's `LogPanel` subscribes to the log topics and receives
+//! every line ferrited would otherwise only write to stderr. Keeps
 //! debugging a headless daemon practical when the UI is the only view
 //! the user has.
 //!
@@ -44,7 +45,7 @@ pub struct LogEntry {
 
 #[derive(Clone)]
 pub struct LogBroadcast {
-    tx: broadcast::Sender<String>,
+    tx: broadcast::Sender<LogEntry>,
     /// Parallel ring buffer of structured entries, kept under a Mutex
     /// because the tracing layer pushes from many threads.
     history: Arc<Mutex<History>>,
@@ -59,8 +60,15 @@ impl LogBroadcast {
         }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+    /// Live structured entries. Lagging receivers get `Lagged(n)`.
+    pub fn subscribe(&self) -> broadcast::Receiver<LogEntry> {
         self.tx.subscribe()
+    }
+
+    /// Inject an entry without going through `tracing` (tests only).
+    #[cfg(test)]
+    pub fn push_for_test(&self, entry: LogEntry) {
+        let _ = self.tx.send(entry);
     }
 
     pub fn layer(&self) -> BroadcastLayer {
@@ -132,7 +140,7 @@ impl History {
 }
 
 pub struct BroadcastLayer {
-    tx: broadcast::Sender<String>,
+    tx: broadcast::Sender<LogEntry>,
     history: Arc<Mutex<History>>,
 }
 
@@ -142,8 +150,6 @@ where
 {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let meta = event.metadata();
-        let mut line = String::with_capacity(96);
-        let _ = write!(line, "[{}] ", meta.level());
         // Prefer the explicit `target` — it's what
         // `tracing::info!(target: "decoder::pocsag", …)` sets, and it
         // defaults to the module_path when the caller didn't override.
@@ -151,28 +157,26 @@ where
         // declare their own category (`decoder::pocsag`,
         // `decoder::flex`, …) instead of being filed under whatever
         // file they happen to live in.
-        let _ = write!(line, "{}: ", meta.target());
         let mut message = String::new();
         let mut visitor = MessageVisitor(&mut message);
         event.record(&mut visitor);
-        line.push_str(&message);
-        let _ = self.tx.send(line);
-
-        // Push a structured copy to the history ring. The Mutex
-        // serialises pushes across threads but is held for only the
-        // O(1) push body.
         let at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0);
+        let entry = LogEntry {
+            target: meta.target().to_string(),
+            level: meta.level().to_string(),
+            message,
+            at_ms,
+        };
+        let _ = self.tx.send(entry.clone());
+
+        // Push a copy to the history ring. The Mutex serialises pushes
+        // across threads but is held for only the O(1) push body.
         {
             let mut g = self.history.lock().unwrap_or_else(|e| e.into_inner());
-            g.push(LogEntry {
-                target: meta.target().to_string(),
-                level: meta.level().to_string(),
-                message,
-                at_ms,
-            });
+            g.push(entry);
         }
     }
 }
