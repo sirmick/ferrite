@@ -123,6 +123,16 @@ struct Inner {
     decoder_store: Arc<crate::decoder_store::DecoderStore>,
     preset_doc: RwLock<FlowgraphDoc>,
     source_config: RwLock<SourceConfig>,
+    /// Serialises [`AppState::patch_source`] end to end. The patch
+    /// reads `source_config`, probes caps (async), computes a delta,
+    /// hot-applies it, then writes the *whole* new config back. Two
+    /// concurrent patches (UI mouse + headless AI are the realistic
+    /// pair) would otherwise both derive from the same `current` and
+    /// the second full write would silently revert the first's fields
+    /// — the hardware would carry A's gain while the daemon believed
+    /// B's. Held across the whole body; never taken by anything the
+    /// body calls, so it can't deadlock.
+    patch_gate: Mutex<()>,
     /// Runtime profile (audio toggle, demod placement override) applied
     /// to the composed doc before [`split_for_environment`] runs. Lives
     /// here so every compose call site picks up the current value
@@ -170,6 +180,7 @@ impl AppState {
                 decoder_store: Arc::new(crate::decoder_store::DecoderStore::new()),
                 preset_doc: RwLock::new(preset),
                 source_config: RwLock::new(source),
+                patch_gate: Mutex::new(()),
                 profile: RwLock::new(Profile::default()),
                 pipeline: Mutex::new(None),
                 tick_period,
@@ -688,6 +699,8 @@ impl AppState {
         &self,
         mut new_source: SourceConfig,
     ) -> Result<Option<ReconfigurePlan>> {
+        // One patch at a time — see `Inner::patch_gate`.
+        let _gate = self.inner.patch_gate.lock().await;
         // Compute the delta in its own scope so the read guard drops
         // before we try to take the pipeline mutex or the source_config
         // write — Rust extends temporary lifetimes across an `if let`
