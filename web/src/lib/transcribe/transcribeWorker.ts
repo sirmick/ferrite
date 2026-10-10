@@ -1,20 +1,20 @@
 // Transcription Worker — one per VoiceTranscribe block.
 //
 // Drains the block's tap SAB on its own coarse cadence (never the audio
-// clock) and runs closed utterances through whisper.cpp. Inference is
-// heavy and fully off-thread here, so it can never stall audio or the
-// UI. Posts results back to the main thread, where browserRuntime
-// forwards them to the transcript store.
+// clock) and runs closed utterances through sherpa-onnx (streaming
+// zipformer, EN-20M). Inference is heavy and fully off-thread here, so
+// it can never stall audio or the UI. Posts results back to the main
+// thread, where browserRuntime forwards them to the transcript store.
 //
 // The VAD, ham cleanup, resampling, and queue/backlog bookkeeping all
 // live in the shared Rust core (`ferrite-whisper`, compiled to wasm via
 // `WasmTranscriber`) — the *same* code the node-side block runs, so both
 // sides segment and clean identically. The only step that stays
-// JavaScript is the whisper.cpp inference call itself (`whisperEngine`,
-// an Emscripten module): the core hands out a 16 kHz clip, JS runs
-// whisper on it, and hands the segments back for cleanup + recording.
+// JavaScript is the inference call itself (`sherpaEngine`, an Emscripten
+// module): the core hands out a 16 kHz clip, JS runs the recognizer on
+// it, and hands the text back for cleanup + recording.
 //
-// Graceful degradation: if the whisper.cpp WASM artifact isn't built the
+// Graceful degradation: if the sherpa WASM artifact isn't built the
 // Worker still runs (draining the ring so the glitch counter is honest)
 // but reports `unavailable` and emits no segments — the VoiceTranscribe
 // block is pure passthrough so audio is unaffected.

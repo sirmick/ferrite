@@ -1,8 +1,8 @@
 // Node runner for the sherpa-onnx golden e2e.
 //
 // Runs the built sherpa-onnx Emscripten ASR module in a *real* Node
-// process (not vitest's http module runner) — same reason as
-// whisperRunner.mjs: Emscripten's pthread workers resolve via file://.
+// process (not vitest's http module runner): Emscripten's pthread
+// workers resolve via file://.
 // Drives the streaming recognizer over a whole clip (acceptWaveform →
 // tail-pad → decode-until-ready → getResult), mirroring how
 // sherpaEngine.transcribe() finalizes one VAD clip in the browser.

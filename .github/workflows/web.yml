@@ -34,12 +34,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install wasm cross-compile deps
+      - name: Install wasm cross-compile deps + espeak-ng
         # vendored multimon-ng + ft8_lib cross-compile to wasm32 via
         # clang against wasi-libc — same recipe as a local build.
+        # espeak-ng feeds the TTS → sherpa round-trip e2e (synthesised
+        # speech through the real browser STT module); without it that
+        # layer skips.
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld wasi-libc
+          sudo apt-get install -y clang lld wasi-libc espeak-ng
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
