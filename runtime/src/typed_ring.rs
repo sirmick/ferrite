@@ -167,9 +167,7 @@ impl TypedRing {
     /// unreadable because both heads are 0.
     pub fn reset(&mut self) {
         self.write_head = 0;
-        for h in &mut self.read_heads {
-            *h = 0;
-        }
+        self.read_heads.fill(0);
     }
 
     /// Read-only view of up to `max` contiguous elements available to

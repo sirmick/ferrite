@@ -228,8 +228,8 @@ fn push_iq_payload(rt: &mut Runtime, block_id: &str, payload: &[u8]) {
     // takes a `&[f32]` and pairs them up internally.
     let n = payload.len() / 4;
     let mut floats = Vec::with_capacity(n);
-    for chunk in payload.chunks_exact(4) {
-        floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    for chunk in payload.as_chunks::<4>().0 {
+        floats.push(f32::from_le_bytes(*chunk));
     }
     let rx_block = rt
         .block_typed::<WsBridgeRx>(block_id)

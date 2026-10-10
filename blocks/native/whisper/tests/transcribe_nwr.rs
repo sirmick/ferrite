@@ -61,8 +61,10 @@ fn read_wav_mono_i16(path: &Path) -> Option<(Vec<f32>, u32)> {
     }
     let data = data?;
     let pcm: Vec<f32> = data
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16::from_le_bytes(*b) as f32 / 32768.0)
         .collect();
     Some((pcm, rate))
 }

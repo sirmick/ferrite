@@ -63,7 +63,9 @@ fn read_iq(path: &PathBuf, fmt: Format) -> std::io::Result<Vec<Complex<f32>>> {
     r.read_to_end(&mut bytes)?;
     Ok(match fmt {
         Format::Cu8 => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| {
                 let i = (f32::from(c[0]) - 128.0) / 128.0;
                 let q = (f32::from(c[1]) - 128.0) / 128.0;
@@ -71,7 +73,9 @@ fn read_iq(path: &PathBuf, fmt: Format) -> std::io::Result<Vec<Complex<f32>>> {
             })
             .collect(),
         Format::Cs8 => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| {
                 let i = f32::from(c[0] as i8) / 128.0;
                 let q = f32::from(c[1] as i8) / 128.0;
@@ -79,7 +83,9 @@ fn read_iq(path: &PathBuf, fmt: Format) -> std::io::Result<Vec<Complex<f32>>> {
             })
             .collect(),
         Format::Cf32 => bytes
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|c| {
                 let i = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                 let q = f32::from_le_bytes([c[4], c[5], c[6], c[7]]);

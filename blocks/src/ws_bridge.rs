@@ -653,8 +653,8 @@ impl WsBridgeRx {
     pub fn push_interleaved(&mut self, floats: &[f32]) {
         let pair_count = floats.len() / 2;
         let mut tmp = Vec::with_capacity(pair_count);
-        for chunk in floats[..pair_count * 2].chunks_exact(2) {
-            tmp.push(Complex::new(chunk[0], chunk[1]));
+        for &[re, im] in floats.as_chunks::<2>().0 {
+            tmp.push(Complex::new(re, im));
         }
         self.push(&tmp);
     }

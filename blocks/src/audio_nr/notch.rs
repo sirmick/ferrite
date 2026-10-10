@@ -48,9 +48,7 @@ impl NotchStage {
 
     pub fn reset(&mut self) {
         self.inner.reset();
-        for v in &mut self.delay_line {
-            *v = 0.0;
-        }
+        self.delay_line.fill(0.0);
         self.delay_write = 0;
     }
 

@@ -41,8 +41,10 @@ fn read_ref_iq() -> (Vec<f32>, Vec<f32>) {
         .unwrap();
 
     let floats: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
 
     // Same conditioning WsprDemod::drain_decodes / the front-end do:
@@ -51,9 +53,9 @@ fn read_ref_iq() -> (Vec<f32>, Vec<f32>) {
     // off absolute amplitude — without this it decodes nothing).
     let mut i = Vec::with_capacity(floats.len() / 2);
     let mut q = Vec::with_capacity(floats.len() / 2);
-    for pair in floats.chunks_exact(2) {
-        i.push(pair[0]);
-        q.push(-pair[1]);
+    for &[iv, qv] in floats.as_chunks::<2>().0 {
+        i.push(iv);
+        q.push(-qv);
     }
     let mut max_sig = 1e-24f32;
     for (&iv, &qv) in i.iter().zip(q.iter()) {
