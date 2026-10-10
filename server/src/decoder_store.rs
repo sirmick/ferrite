@@ -54,6 +54,14 @@ pub enum Policy {
 /// Default cap for append logs.
 const LOG_CAP: usize = 512;
 
+/// Cap for the `ai` session log (one agent turn is several records).
+const AI_LOG_CAP: usize = 1500;
+
+/// Only this many of the newest `ai` records keep inline tool-result
+/// images (base64 data URLs); older ones are stripped to an `images`
+/// count so the log, the snapshot and the persisted store stay small.
+const AI_IMAGE_KEEP: usize = 6;
+
 /// Per-kind fold policy. Block owns the schema; this owns the folding.
 fn policy_for(kind: &str) -> Policy {
     match kind {
@@ -102,10 +110,23 @@ fn policy_for(kind: &str) -> Policy {
             track: false,
             merge: false,
         },
-        // AI transcript — append log of conversation turns (one record per
-        // user/assistant turn), folded by ferrited's `/ws/chat` proxy +
-        // `chat-inject` path. Read by MCP via `decodes ai`.
-        "ai" => Policy::Append { cap: LOG_CAP },
+        // AI session bus — every conversation, whichever client drives
+        // it (the ferrite-ai sidecar, a Claude Code session's hooks):
+        // one record per user prompt / finished text block / tool use /
+        // tool result / turn end / reset, tagged with `session` and
+        // `source`, published through `ferrite/ingest/ai`. Every AI
+        // panel renders from it; MCP reads it via `decodes ai`. Larger
+        // cap than a decode log: one agent turn is several records.
+        "ai" => Policy::Append { cap: AI_LOG_CAP },
+        // In-flight assistant text per session (partial block, ≤4 Hz) so
+        // a panel can show the reply forming. Keyed by session; the
+        // finished block lands in `ai`.
+        "ai_live" => Policy::Upsert {
+            key_field: "session",
+            ttl_ms: 600_000,
+            track: false,
+            merge: false,
+        },
         // One record per mutating CLI / agent request (the activity
         // middleware) — the AI panel's transcript and `ferrite/state/activity`.
         "activity" => Policy::Append { cap: LOG_CAP },
@@ -125,7 +146,15 @@ fn policy_for(kind: &str) -> Policy {
 pub fn is_live_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" | "health" | "blocks"
+        "rssi"
+            | "signals"
+            | "readback"
+            | "flowdiag"
+            | "graph"
+            | "status"
+            | "health"
+            | "blocks"
+            | "ai_live"
     ) || kind.starts_with("params/")
 }
 
@@ -390,6 +419,9 @@ impl DecoderStore {
                 while entry.recent.len() > cap {
                     entry.recent.pop_front();
                 }
+                if kind == "ai" {
+                    strip_old_images(&mut entry.recent);
+                }
                 DeltaOp::Add { record }
             }
             Policy::Upsert {
@@ -563,6 +595,26 @@ impl DecoderSink for DecoderStore {
     }
 }
 
+/// Keep inline `images` only on the newest [`AI_IMAGE_KEEP`] records
+/// that have them; replace older ones with their count.
+fn strip_old_images(log: &mut VecDeque<Record>) {
+    let mut seen = 0usize;
+    for rec in log.iter_mut().rev() {
+        let Some(obj) = rec.data.as_object_mut() else {
+            continue;
+        };
+        let Some(Value::Array(imgs)) = obj.get("images") else {
+            continue;
+        };
+        seen += 1;
+        if seen > AI_IMAGE_KEEP {
+            let n = imgs.len();
+            obj.remove("images");
+            obj.insert("images_stripped".into(), Value::from(n));
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -674,6 +726,26 @@ mod tests {
         );
         assert!(snap.kinds["activity"].recent[0].ctx.is_none());
         assert!(snap.kinds["graph"].current["current"].ctx.is_none());
+    }
+
+    #[test]
+    fn ai_log_keeps_images_only_on_the_newest_records() {
+        let s = DecoderStore::new();
+        for i in 0..(AI_IMAGE_KEEP + 3) {
+            s.apply(
+                "ai",
+                serde_json::json!({"type": "tool_result", "n": i, "images": ["data:image/png;base64,AA"]}),
+            );
+        }
+        let k = s.snapshot_kind("ai").unwrap();
+        let with: Vec<_> = k
+            .recent
+            .iter()
+            .filter(|r| r.data.get("images").is_some())
+            .collect();
+        assert_eq!(with.len(), AI_IMAGE_KEEP);
+        assert_eq!(k.recent[0].data["images_stripped"], 1);
+        assert!(k.recent.back().unwrap().data.get("images").is_some());
     }
 
     #[test]

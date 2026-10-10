@@ -297,7 +297,7 @@
           <div
             class="mb-0.5 flex items-center justify-between text-[10px] text-[color:var(--color-muted)]"
           >
-            <span>you</span>
+            <span>{turn.source && turn.source !== 'ferrite-ai' ? turn.source : 'you'}</span>
             <span class="font-mono">{fmtTime(turn.t)}</span>
           </div>
           <div class="whitespace-pre-wrap text-slate-100">{turn.text}</div>
@@ -308,7 +308,9 @@
             class="mb-0.5 flex items-center justify-between text-[10px] text-[color:var(--color-muted)]"
           >
             <span>
-              ai
+              ai{#if turn.source && turn.source !== 'ferrite-ai'}<span class="ml-1 opacity-70"
+                  >· {turn.source}</span
+                >{/if}
               {#if turn.status === 'streaming'}
                 <span class="ml-1 animate-pulse">▌</span>
               {:else if turn.status === 'error'}

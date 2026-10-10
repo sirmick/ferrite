@@ -36,6 +36,9 @@ export interface KindState {
 
 const REPLACE_KEY = 'current';
 const LOG_CAP = 512;
+/** Per-kind overrides of the server's append caps (decoder_store.rs). */
+const CAPS: Record<string, number> = { ai: 1500 };
+const capFor = (kind: string): number => CAPS[kind] ?? LOG_CAP;
 export const STATE_TOPIC_PREFIX = 'ferrite/state/';
 
 export interface Snapshot {
@@ -91,7 +94,8 @@ export class DecoderMirror {
       case 'add':
         if (d.record) {
           k.recent.push(d.record);
-          if (k.recent.length > LOG_CAP) k.recent.splice(0, k.recent.length - LOG_CAP);
+          if (k.recent.length > capFor(d.kind))
+            k.recent.splice(0, k.recent.length - capFor(d.kind));
         }
         break;
       case 'upsert':
@@ -102,7 +106,8 @@ export class DecoderMirror {
           // ever wants the single current record.
           if (d.record.key !== undefined) {
             k.recent.push(d.record);
-            if (k.recent.length > LOG_CAP) k.recent.splice(0, k.recent.length - LOG_CAP);
+            if (k.recent.length > capFor(d.kind))
+              k.recent.splice(0, k.recent.length - capFor(d.kind));
           }
         }
         break;

@@ -253,7 +253,8 @@ enum Cmd {
     },
     /// Mirror a conversation turn into the operator's browser AI panel
     /// (so a headless driver's prompts / replies / tool calls show in
-    /// the UI alongside the in-browser assistant). Needs a UI tab open.
+    /// every AI panel alongside the in-browser assistant, via the `ai`
+    /// session bus — no tab needed).
     ChatPost {
         /// `user` (a prompt), `assistant` (a reply, auto-closed), or
         /// `tool` (a tool-call card in the open assistant turn).
@@ -271,6 +272,12 @@ enum Cmd {
         /// `tool` role: the tool result text, if any.
         #[arg(long)]
         tool_result: Option<String>,
+        /// The driving session's id (groups its turns on the panel).
+        #[arg(long)]
+        session: Option<String>,
+        /// Who is talking (label on the panel). Default `claude-code`.
+        #[arg(long)]
+        source: Option<String>,
     },
     /// Dev codegen: regenerate the if-filter-ladders artifact from the
     /// Rust source of truth. Purely local — no running ferrited.
@@ -714,6 +721,8 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             tool_name,
             tool_input,
             tool_result,
+            session,
+            source,
         } => {
             let v = server
                 .chat_post_op(ChatPostArgs {
@@ -722,6 +731,8 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                     tool_name,
                     tool_input,
                     tool_result,
+                    session,
+                    source,
                 })
                 .await
                 .map_err(op_err)?;

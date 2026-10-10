@@ -1,27 +1,24 @@
-// Chat store for the ferrite-ai sidecar. Holds the running conversation
-// (user turns + assistant turns), the active mode, and the WebSocket
-// connection state. Each WS message from the server is fed through
-// `ingestEvent` which decides whether it's a new chunk in the current
-// assistant turn (text delta, tool use, tool result) or an envelope
-// signal (turn done, error, hello).
+// AI panel store — a view of the AI session bus.
 //
-// Conversation-state authority: the SIDECAR, keyed by `session_id`
-// (its SDK session + per-session transcript share that id and reset/
-// resume together). This store is a pure VIEW. localStorage is
-// demoted to a first-paint cache: we restore it on construction so
-// the panel paints instantly, but on WS connect we ask the sidecar
-// for the authoritative transcript (`request_snapshot`) and a
-// `conversation_snapshot` *replaces* local turns — or a
-// `session_reset` clears them with an honest banner when that session
-// is unresumable (sidecar restarted, file gone). The cache can lag or
-// be stale; the snapshot/reset always wins, so the visible log and the
-// LLM context can no longer silently diverge.
+// Every conversation, whichever client drives it (this panel via the
+// ferrite-ai sidecar, another tab, a Claude Code session's hooks), is
+// the server's `ai` store kind: one record per user prompt / finished
+// text block / tool use / tool result / turn end / reset, tagged with
+// `session` and `source`. The mirror (`decoders`) replicates it over the
+// event plane and the server persists it, so `turns` is *derived* from
+// those records (plus the `ai_live` partial reply and a few tab-local
+// notices). Nothing about the transcript lives only in this tab.
+//
+// `/ws/chat` (proxied to the sidecar) is the control channel: send a
+// prompt, stop, reset the reasoning context, and the sidecar's hello
+// (modes / models) + session binding (`system/init`) for `resume`.
 
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 
 import { pipeline } from '$lib/pipeline.svelte';
 import { aiOperatorNotesForDriver } from '$lib/controls/optionsModel';
+import { decoders } from '$lib/decoders/store.svelte';
 
 // Markdown configuration. `gfm: true` enables GitHub-Flavoured Markdown
 // (tables, strikethrough, autolinks, code fences with language).
@@ -38,12 +35,9 @@ export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'closed' | '
 
 export type Chunk =
   | { kind: 'text'; text: string }
-  /** A tool call the AI made. `input` is the JSON the SDK streams for
-   *  the tool's arguments — accumulated across `input_json_delta`
-   *  events. `result` is filled in when the matching `tool_result`
-   *  arrives in a later message; `resultImages` is the list of base64
-   *  `data:` URLs extracted from any image content blocks in that
-   *  result (e.g. Read on a PNG produces one). */
+  /** A tool call. `result` fills in when the matching `tool_result`
+   *  record arrives; `resultImages` are `data:` URLs (only the newest
+   *  few records keep them — older ones carry a count). */
   | {
       kind: 'tool';
       id: string;
@@ -53,8 +47,7 @@ export type Chunk =
       resultImages?: string[];
       error?: boolean;
     }
-  /** Out-of-band envelope signals — `done`, `error`, debug. Rendered
-   *  in muted text in the transcript. */
+  /** Out-of-band notices — resets, stops, errors. Muted in the panel. */
   | { kind: 'meta'; label: string };
 
 export interface UserTurn {
@@ -62,6 +55,9 @@ export interface UserTurn {
   role: 'user';
   text: string;
   t: number;
+  /** Who drove this turn (`ferrite-ai` = this panel's sidecar). */
+  source?: string;
+  session?: string | null;
 }
 
 export interface AssistantTurn {
@@ -71,27 +67,220 @@ export interface AssistantTurn {
   chunks: Chunk[];
   status: 'streaming' | 'complete' | 'error';
   errorMessage?: string;
+  source?: string;
+  session?: string | null;
 }
 
 export type Turn = UserTurn | AssistantTurn;
 
-/** Storage keys, namespaced so they don't collide with the app's
- *  other localStorage entries (preset filters, panel splits, etc). */
-const LS_TURNS = 'ferrite-ai.turns';
+/** One `ai` record as the mirror holds it. */
+export interface AiRecord {
+  seq: number;
+  at_ms: number;
+  data: Record<string, unknown>;
+}
+
+/** A tab-local notice (slash-command output, offline banner). */
+export interface LocalNote {
+  t: number;
+  label: string;
+}
+
 const LS_MODE = 'ferrite-ai.mode';
 const LS_MODEL = 'ferrite-ai.model';
 const LS_SESSION = 'ferrite-ai.session_id';
-const LS_NEXT_ID = 'ferrite-ai.next_id';
 const LS_SETUP = 'ferrite-ai.setup_description';
-/** Cap persisted history at 200 turns (~50–100 KB worst-case) so the
- *  ~5 MB localStorage budget stays comfortable even for marathon
- *  sessions. The Claude Agent SDK's actual conversation context is
- *  what continues across reloads via `resume`; this cap is purely a
- *  display ring. */
-const MAX_PERSISTED_TURNS = 200;
+/** Pre-bus transcript cache keys — removed on load (the server keeps it). */
+const LS_LEGACY = ['ferrite-ai.turns', 'ferrite-ai.next_id'];
+
+/** A streaming turn with no record for this long ended unobserved
+ *  (the sidecar died mid-turn); stop showing it as live. */
+const STALE_STREAM_MS = 10 * 60_000;
+
+const str = (v: unknown): string => (typeof v === 'string' ? v : v == null ? '' : String(v));
+
+export function resetBannerLabel(reason: string): string {
+  return `── reasoning context reset (${reason}) — history preserved, assistant won't remember the above`;
+}
+
+/** Fold the `ai` session-bus records (+ live partials, local notes and
+ *  an optimistic pending prompt) into display turns. Pure — the store's
+ *  `turns` is `$derived` from it. A `user` record opens a turn for its
+ *  session; that session's following records fill it until `turn_end`;
+ *  sessions interleave freely. */
+export function buildTurns(
+  records: AiRecord[],
+  live: Record<string, { data: Record<string, unknown> }>,
+  notes: LocalNote[],
+  pending: { text: string; t: number } | null,
+  now: number = Date.now(),
+): Turn[] {
+  const out: Turn[] = [];
+  const open = new Map<string, AssistantTurn>();
+  const lastAt = new Map<AssistantTurn, number>();
+  const sessionKey = (d: Record<string, unknown>) => str(d['session']) || '∅';
+
+  const assistantFor = (rec: AiRecord, d: Record<string, unknown>): AssistantTurn => {
+    const key = sessionKey(d);
+    let a = open.get(key);
+    if (!a) {
+      a = {
+        id: rec.seq * 2 + 1,
+        role: 'assistant',
+        t: rec.at_ms,
+        chunks: [],
+        status: 'streaming',
+        source: str(d['source']) || undefined,
+        session: (d['session'] as string | null | undefined) ?? null,
+      };
+      out.push(a);
+      open.set(key, a);
+    }
+    lastAt.set(a, rec.at_ms);
+    return a;
+  };
+
+  for (const rec of [...records].sort((x, y) => x.seq - y.seq)) {
+    const d = rec.data ?? {};
+    const key = sessionKey(d);
+    switch (d['type']) {
+      case 'user': {
+        const prev = open.get(key);
+        if (prev && prev.status === 'streaming') prev.status = 'complete';
+        out.push({
+          id: rec.seq * 2,
+          role: 'user',
+          text: str(d['text']),
+          t: rec.at_ms,
+          source: str(d['source']) || undefined,
+          session: (d['session'] as string | null | undefined) ?? null,
+        });
+        open.delete(key);
+        assistantFor(rec, d);
+        break;
+      }
+      case 'text': {
+        const a = assistantFor(rec, d);
+        a.chunks.push({ kind: 'text', text: str(d['text']) });
+        break;
+      }
+      case 'tool_use': {
+        const a = assistantFor(rec, d);
+        a.chunks.push({
+          kind: 'tool',
+          id: str(d['tool_id']),
+          name: str(d['name']) || '?',
+          input: str(d['input']),
+        });
+        break;
+      }
+      case 'tool_result': {
+        const a = assistantFor(rec, d);
+        const id = str(d['tool_id']);
+        const images = Array.isArray(d['images']) ? (d['images'] as unknown[]).map(str) : [];
+        const stripped =
+          typeof d['images_stripped'] === 'number' ? (d['images_stripped'] as number) : 0;
+        let result = str(d['text']);
+        if (stripped)
+          result += `${result ? '\n' : ''}[${stripped} image(s) — older results keep only the count]`;
+        const tool = a.chunks.find((c) => c.kind === 'tool' && c.id === id) as
+          | Extract<Chunk, { kind: 'tool' }>
+          | undefined;
+        if (tool) {
+          tool.result = result;
+          if (images.length) tool.resultImages = images;
+          tool.error = Boolean(d['is_error']);
+        } else {
+          a.chunks.push({
+            kind: 'tool',
+            id,
+            name: '(result)',
+            input: '',
+            result,
+            resultImages: images.length ? images : undefined,
+            error: Boolean(d['is_error']),
+          });
+        }
+        break;
+      }
+      case 'turn_end': {
+        const a = open.get(key) ?? assistantFor(rec, d);
+        const status = str(d['status']);
+        if (status === 'error') {
+          a.status = 'error';
+          a.errorMessage = str(d['error']) || 'turn failed';
+        } else {
+          a.status = 'complete';
+          if (status === 'stopped') a.chunks.push({ kind: 'meta', label: '── stopped' });
+        }
+        open.delete(key);
+        break;
+      }
+      case 'reset': {
+        const prev = open.get(key);
+        if (prev && prev.status === 'streaming') prev.status = 'complete';
+        open.delete(key);
+        out.push({
+          id: rec.seq * 2 + 1,
+          role: 'assistant',
+          t: rec.at_ms,
+          chunks: [{ kind: 'meta', label: resetBannerLabel(str(d['reason']) || 'reset') }],
+          status: 'complete',
+          source: str(d['source']) || undefined,
+          session: (d['session'] as string | null | undefined) ?? null,
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  // The reply forming right now, and turns that ended unobserved.
+  for (const [key, a] of open) {
+    if (a.status !== 'streaming') continue;
+    const partial = str(live[key]?.data?.['text']);
+    if (partial) a.chunks = [...a.chunks, { kind: 'text', text: partial }];
+    else if (now - (lastAt.get(a) ?? a.t) > STALE_STREAM_MS) a.status = 'complete';
+  }
+
+  // Tab-local notices, by time.
+  let seq = -1;
+  for (const n of notes) {
+    out.push({
+      id: seq--,
+      role: 'assistant',
+      t: n.t,
+      chunks: [{ kind: 'meta', label: n.label }],
+      status: 'complete',
+    });
+  }
+  out.sort((x, y) => x.t - y.t || x.id - y.id);
+
+  // Optimistic prompt until the sidecar's `user` record lands.
+  if (pending) {
+    const landed = records.some(
+      (r) =>
+        r.data?.['type'] === 'user' &&
+        str(r.data['text']) === pending.text &&
+        r.at_ms >= pending.t - 5_000,
+    );
+    if (!landed) {
+      out.push({ id: seq--, role: 'user', text: pending.text, t: pending.t, source: 'ferrite-ai' });
+      out.push({
+        id: seq--,
+        role: 'assistant',
+        t: pending.t,
+        chunks: [],
+        status: 'streaming',
+        source: 'ferrite-ai',
+      });
+    }
+  }
+  return out;
+}
 
 export class AiStore {
-  turns = $state<Turn[]>([]);
   mode = $state<AiMode>('explorer');
   connection = $state<ConnectionState>('idle');
   lastError = $state<string | null>(null);
@@ -109,10 +298,9 @@ export class AiStore {
   /** Per-mode default model the sidecar reports (after its env
    *  overrides), so the picker can label the default option. */
   modelDefaults = $state<Record<string, string>>({});
-  /** Sidecar-issued session id. Captured from the `system/init` event
-   *  on the first turn of each conversation; sent back to the sidecar
-   *  on subsequent turns so the Agent SDK can `resume:` instead of
-   *  starting fresh. Null when no conversation has happened yet. */
+  /** This tab's sidecar session (from `system/init`), sent back as
+   *  `resume_session_id` so the conversation continues across reloads.
+   *  Null when no conversation has happened yet. */
   sessionId = $state<string | null>(null);
   /** User-supplied description of the physical radio setup — antennas,
    *  noise environment, station notes. Sent on every turn so the
@@ -122,36 +310,34 @@ export class AiStore {
    *  description. Persisted across reloads. */
   setupDescription = $state<string>('');
 
-  private nextId = 1;
+  /** Tab-local notices (slash-command output, offline banners). */
+  private notes = $state<LocalNote[]>([]);
+  /** The prompt this tab just sent, until its `user` record lands. */
+  private pending = $state<{ text: string; t: number } | null>(null);
+
+  /** Every session's turns, from the bus. */
+  turns = $derived.by<Turn[]>(() =>
+    buildTurns(
+      decoders.kind('ai').recent as AiRecord[],
+      decoders.kind('ai_live').current as Record<string, { data: Record<string, unknown> }>,
+      this.notes,
+      this.pending,
+    ),
+  );
+
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private retryCount = 0;
   private url: string | null = null;
-  private persistDebounce: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.restoreFromStorage();
   }
 
-  /** Pull turns + mode + sessionId out of localStorage, tolerating
-   *  partial / corrupt entries by skipping. Streaming turns from a
-   *  previous session are downgraded to `complete` so the UI doesn't
-   *  show a perpetual cursor on something that ended unobserved. */
   private restoreFromStorage(): void {
     if (typeof localStorage === 'undefined') return;
     try {
-      const rawTurns = localStorage.getItem(LS_TURNS);
-      if (rawTurns) {
-        const parsed = JSON.parse(rawTurns);
-        if (Array.isArray(parsed)) {
-          this.turns = parsed.map((t) => {
-            if (t && t.role === 'assistant' && t.status === 'streaming') {
-              return { ...t, status: 'complete' };
-            }
-            return t;
-          }) as Turn[];
-        }
-      }
+      for (const k of LS_LEGACY) localStorage.removeItem(k);
       const rawMode = localStorage.getItem(LS_MODE);
       if (rawMode && (AI_MODES as string[]).includes(rawMode)) {
         this.mode = rawMode as AiMode;
@@ -160,9 +346,6 @@ export class AiStore {
       if (rawModel) this.model = rawModel;
       const rawSession = localStorage.getItem(LS_SESSION);
       if (rawSession) this.sessionId = rawSession;
-      const rawNext = localStorage.getItem(LS_NEXT_ID);
-      const n = rawNext ? parseInt(rawNext, 10) : NaN;
-      if (Number.isFinite(n) && n > 0) this.nextId = n;
       const rawSetup = localStorage.getItem(LS_SETUP);
       if (typeof rawSetup === 'string') this.setupDescription = rawSetup;
     } catch {
@@ -170,28 +353,19 @@ export class AiStore {
     }
   }
 
-  /** Write turns + mode + sessionId back to localStorage. Debounced
-   *  so a long stream of token deltas doesn't thrash the disk. */
   private persist(): void {
     if (typeof localStorage === 'undefined') return;
-    if (this.persistDebounce) clearTimeout(this.persistDebounce);
-    this.persistDebounce = setTimeout(() => {
-      this.persistDebounce = null;
-      try {
-        const trimmed = this.turns.slice(-MAX_PERSISTED_TURNS);
-        localStorage.setItem(LS_TURNS, JSON.stringify(trimmed));
-        localStorage.setItem(LS_MODE, this.mode);
-        if (this.model) localStorage.setItem(LS_MODEL, this.model);
-        else localStorage.removeItem(LS_MODEL);
-        localStorage.setItem(LS_NEXT_ID, String(this.nextId));
-        if (this.sessionId) localStorage.setItem(LS_SESSION, this.sessionId);
-        else localStorage.removeItem(LS_SESSION);
-        if (this.setupDescription) localStorage.setItem(LS_SETUP, this.setupDescription);
-        else localStorage.removeItem(LS_SETUP);
-      } catch {
-        /* quota / private mode / etc — silently degrade to non-persistent */
-      }
-    }, 250);
+    try {
+      localStorage.setItem(LS_MODE, this.mode);
+      if (this.model) localStorage.setItem(LS_MODEL, this.model);
+      else localStorage.removeItem(LS_MODEL);
+      if (this.sessionId) localStorage.setItem(LS_SESSION, this.sessionId);
+      else localStorage.removeItem(LS_SESSION);
+      if (this.setupDescription) localStorage.setItem(LS_SETUP, this.setupDescription);
+      else localStorage.removeItem(LS_SETUP);
+    } catch {
+      /* quota / private mode / etc — silently degrade to non-persistent */
+    }
   }
 
   connect(url: string): void {
@@ -212,21 +386,11 @@ export class AiStore {
     this.connection = 'closed';
   }
 
-  /** Honest banner text for a context reset. Identical online (the
-   *  sidecar's `session_reset` echo) and offline (local fallback) so
-   *  the marker reads the same and the `session_reset` dedupe works. */
-  private resetBannerLabel(reason: string): string {
-    return `── reasoning context reset (${reason}) — history preserved, assistant won't remember the above`;
-  }
-
   /** Single authoritative reset path: tell the sidecar (the authority)
    *  to drop the SDK session binding so the LLM context resets *with*
-   *  the transcript, never independently. The sidecar nulls its
-   *  connection session and echoes `session_reset` (which appends the
-   *  banner, deduped). Returns false when offline so the caller can
-   *  fall back to a local marker. Every reset entry point — `/reset`,
-   *  the Clear button, mode change, setup edit — routes through here,
-   *  so they can't drift apart again. */
+   *  the transcript, never independently. The sidecar publishes a
+   *  `reset` record (the banner every panel shows). Returns false when
+   *  offline so the caller can fall back to a local notice. */
   private requestSidecarReset(reason: string): boolean {
     this.sessionId = null;
     if (typeof localStorage !== 'undefined') localStorage.removeItem(LS_SESSION);
@@ -237,17 +401,11 @@ export class AiStore {
     return false;
   }
 
-  /** Append the reset banner locally — offline fallback for the reset
-   *  entry points (online, the sidecar's `session_reset` echo does
-   *  it). History is preserved either way. */
-  private localResetBanner(reason: string): void {
-    this.pushTurn({
-      id: this.nextId++,
-      role: 'assistant',
-      t: Date.now(),
-      chunks: [{ kind: 'meta', label: this.resetBannerLabel(reason) }],
-      status: 'complete',
-    });
+  /** Append a tab-local notice, skipping an identical consecutive one
+   *  (reconnect storms must not stack banners). */
+  private note(label: string): void {
+    if (this.notes.at(-1)?.label === label) return;
+    this.notes = [...this.notes, { t: Date.now(), label }];
   }
 
   /** Pick a model override (`null` = sidecar default). Takes effect on
@@ -269,23 +427,19 @@ export class AiStore {
     if (this.mode === mode) return;
     this.mode = mode;
     // A different mode is a different system prompt — resuming would
-    // re-prime under the wrong context. Route through the unified
-    // reset so the *sidecar* actually drops the SDK session (nulling
-    // only the browser id would leave the sidecar resuming the old
-    // context — the bug this path closes).
-    if (!this.requestSidecarReset(`mode → ${mode}`)) this.localResetBanner(`mode → ${mode}`);
+    // re-prime under the wrong context, so the sidecar drops the session.
+    if (!this.requestSidecarReset(`mode → ${mode}`)) this.note(resetBannerLabel(`mode → ${mode}`));
     this.persist();
   }
 
   /** Edit the operator-supplied radio setup description. Same
-   *  reasoning as `setMode`: the system prompt changes so resuming
-   *  the SDK session would re-prime under stale facts — route through
-   *  the unified reset so the sidecar actually drops the binding. */
+   *  reasoning as `setMode`: the system prompt changes, so the sidecar
+   *  drops the session binding. */
   setSetupDescription(text: string): void {
     if (text === this.setupDescription) return;
     this.setupDescription = text;
     const reason = text.trim() ? 'radio setup updated' : 'radio setup cleared';
-    if (!this.requestSidecarReset(reason)) this.localResetBanner(reason);
+    if (!this.requestSidecarReset(reason)) this.note(resetBannerLabel(reason));
     this.persist();
   }
 
@@ -296,21 +450,9 @@ export class AiStore {
       this.lastError = 'not connected';
       return;
     }
-    this.pushTurn({
-      id: this.nextId++,
-      role: 'user',
-      text: trimmed,
-      t: Date.now(),
-    });
-    // Open a placeholder assistant turn so the UI immediately shows
-    // "..." while the first delta is in flight.
-    this.pushTurn({
-      id: this.nextId++,
-      role: 'assistant',
-      t: Date.now(),
-      chunks: [],
-      status: 'streaming',
-    });
+    // Optimistic: show the prompt + a working assistant turn now; the
+    // sidecar's `user` record replaces it once the session is known.
+    this.pending = { text: trimmed, t: Date.now() };
     // `resume_session_id` lets the sidecar resume the prior Claude
     // Agent SDK session if we still have its id from a previous
     // exchange — the same conversation continues across browser
@@ -400,42 +542,28 @@ export class AiStore {
     this.ws.send(JSON.stringify(payload));
   }
 
-  /** Hard clear: wipe the *visible* panel as well as drop the SDK
-   *  context. (`/reset` keeps the visible history; this empties it —
-   *  that's the only difference between the two.) Both route through
-   *  the unified sidecar reset so the LLM context is actually dropped,
-   *  not just the browser id. Offline, the local wipe stands and the
-   *  next connect's request_snapshot reconciles the absent session. */
+  /** Hard clear: empty the AI log for *every* panel (the server's `ai`
+   *  kind) and drop the SDK context. `/reset` keeps the history; this
+   *  wipes it. */
   clear(): void {
-    this.turns = [];
-    if (typeof localStorage !== 'undefined') {
-      localStorage.removeItem(LS_TURNS);
-      localStorage.removeItem(LS_NEXT_ID);
-    }
+    this.notes = [];
+    this.pending = null;
+    void fetch('/api/state/ai/reset', { method: 'POST' }).catch(() => {});
+    void fetch('/api/state/ai_live/reset', { method: 'POST' }).catch(() => {});
     this.requestSidecarReset('clear');
     this.persist();
   }
 
   /** `/reset` (and `/clear`, `/new`): drop the SDK context but keep
-   *  the visible history. Routes through the unified sidecar reset so
-   *  the sidecar actually drops its session binding — previously this
-   *  only nulled the browser id, leaving the sidecar to resume the old
-   *  context on the next turn (the banner said "context will reload"
-   *  while it silently didn't). The sidecar's `session_reset` echo
-   *  appends the honest banner; offline we append it locally. */
+   *  the visible history. Offline we add the banner locally. */
   resetSession(opts: { reason?: string } = {}): void {
     const reason = opts.reason?.trim() || 'reset';
-    if (!this.requestSidecarReset(reason)) this.localResetBanner(reason);
+    if (!this.requestSidecarReset(reason)) this.note(resetBannerLabel(reason));
     this.persist();
   }
 
-  /** Send a control envelope asking the sidecar to abort the
-   *  in-flight turn. Optimistically mark the current streaming
-   *  assistant turn so the UI updates immediately — the sidecar
-   *  will follow up with a `ferrite_ai_stopped` envelope when the
-   *  abort actually lands.
-   *
-   *  No-op when no turn is streaming. */
+  /** Ask the sidecar to abort the in-flight turn. The `turn_end`
+   *  (`stopped`) record closes it on every panel. No-op when idle. */
   stop(): void {
     if (!this.isStreaming()) return;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -443,29 +571,22 @@ export class AiStore {
     }
   }
 
-  /** True when the most-recent assistant turn is still streaming.
-   *  Used by the panel to gate the Stop button on the actual
-   *  in-flight state, not just connection state. */
+  /** True while this tab's own conversation has a turn in flight —
+   *  gates the Stop button (another session's turn isn't ours to stop). */
   isStreaming(): boolean {
+    if (this.pending) return true;
     for (let i = this.turns.length - 1; i >= 0; i--) {
       const t = this.turns[i];
-      if (t.role === 'assistant') return t.status === 'streaming';
+      if (t.role !== 'assistant' || !t.chunks || (t.source && t.source !== 'ferrite-ai')) continue;
+      if (this.sessionId && t.session && t.session !== this.sessionId) continue;
+      return t.status === 'streaming';
     }
     return false;
   }
 
-  /** Append a synthetic assistant turn carrying a single meta chunk.
-   *  Used by the slash-command handler to surface UI-side messages
-   *  (errors, help hints) without a round-trip to the AI. */
+  /** A UI-side notice (slash-command errors, help) — tab-local. */
   pushMeta(label: string): void {
-    this.pushTurn({
-      id: this.nextId++,
-      role: 'assistant',
-      t: Date.now(),
-      chunks: [{ kind: 'meta', label }],
-      status: 'complete',
-    });
-    this.persist();
+    this.notes = [...this.notes, { t: Date.now(), label }];
   }
 
   private openSocket(): void {
@@ -485,12 +606,10 @@ export class AiStore {
     ws.addEventListener('open', () => {
       this.retryCount = 0;
       this.connection = 'connected';
-      // Demote the restored localStorage cache to a hint: ask the
-      // sidecar (the authority) for the transcript of the session we
-      // think we're continuing. It replies `conversation_snapshot`
-      // (replace local turns) or `session_reset` (clear + banner) if
-      // that session is gone. With no prior session there's nothing to
-      // reconcile — the cache is the only state and stays as painted.
+      // Ask the sidecar whether the session we think we're continuing
+      // is still resumable; it answers `conversation_snapshot` (yes —
+      // adopt it) or `session_reset` (no — drop the binding). The
+      // transcript itself comes from the bus either way.
       if (this.sessionId && this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: 'request_snapshot', session_id: this.sessionId }));
       }
@@ -498,11 +617,9 @@ export class AiStore {
     ws.addEventListener('message', (e) => {
       if (typeof e.data !== 'string') return;
       try {
-        const parsed = JSON.parse(e.data) as Record<string, unknown>;
-        this.ingestEvent(parsed);
+        this.ingestEvent(JSON.parse(e.data) as Record<string, unknown>);
       } catch {
-        // Non-JSON messages are envelope debug — render as meta.
-        this.appendChunkToCurrentTurn({ kind: 'meta', label: String(e.data) });
+        /* non-JSON debug frames: ignore */
       }
     });
     ws.addEventListener('close', () => {
@@ -529,40 +646,11 @@ export class AiStore {
     }, delay);
   }
 
-  private pushTurn(turn: Turn): void {
-    this.turns = [...this.turns, turn];
-    this.persist();
-  }
-
-  /** Mutate the most-recent assistant turn in place — Svelte's
-   *  reactivity tracks the list reference, so we re-assign `turns` to
-   *  trigger an update after each chunk change. */
-  private updateLatestAssistant(updater: (a: AssistantTurn) => void): void {
-    for (let i = this.turns.length - 1; i >= 0; i--) {
-      const t = this.turns[i];
-      if (t.role === 'assistant') {
-        updater(t);
-        // Slice + reassign so $state notices.
-        this.turns = [...this.turns];
-        this.persist();
-        return;
-      }
-    }
-  }
-
-  private appendChunkToCurrentTurn(chunk: Chunk): void {
-    this.updateLatestAssistant((a) => {
-      a.chunks.push(chunk);
-    });
-  }
-
+  /** Control-channel messages from the sidecar. The SDK's stream
+   *  (`stream_event` / `assistant` / `user` / done) still arrives here
+   *  but is ignored: the conversation renders from the bus. */
   ingestEvent(event: Record<string, unknown>): void {
     const t = event['type'];
-
-    // The Agent SDK emits `system` with `subtype: 'init'` as the first
-    // event of every turn, carrying the session id we need to `resume`
-    // on subsequent turns. Capture + persist so a browser reload keeps
-    // the conversation.
     if (t === 'system' && event['subtype'] === 'init') {
       const sid = event['session_id'];
       if (typeof sid === 'string' && sid !== this.sessionId) {
@@ -571,81 +659,24 @@ export class AiStore {
       }
       return;
     }
-
-    // Authoritative transcript replay from the sidecar. The restored
-    // localStorage was a first-paint cache; this *replaces* it. Fold
-    // each recorded event back through this same reducer (no second
-    // renderer) after clearing: `ferrite_ai_user_turn` rebuilds the
-    // user prompt + its assistant turn, the SDK events rebuild the
-    // assistant body, the terminal envelope resolves status.
     if (t === 'conversation_snapshot') {
-      const events = event['events'];
-      this.turns = [];
-      this.nextId = 1;
-      if (Array.isArray(events)) {
-        for (const ev of events) {
-          if (ev && typeof ev === 'object') {
-            this.ingestEvent(ev as Record<string, unknown>);
-          }
-        }
-      }
       const sid = event['session_id'];
       if (typeof sid === 'string') this.sessionId = sid;
       this.persist();
       return;
     }
-
-    // The session the browser tried to continue is unresumable on the
-    // sidecar (sidecar restarted, transcript rolled, or it predates
-    // persistence). The visible transcript is the *user's* local
-    // record — preserve it (do NOT wipe history; that's the opposite
-    // of "history preserved" and looks like the panel vanished).
-    // Just drop the dead session binding and append ONE honest banner
-    // so the boundary is explicit: the assistant won't remember what's
-    // above. Deduped so reconnects don't stack banners.
     if (t === 'session_reset') {
-      const reason = typeof event['reason'] === 'string' ? event['reason'] : 'reset';
       this.sessionId = null;
       if (typeof localStorage !== 'undefined') localStorage.removeItem(LS_SESSION);
-      const label = this.resetBannerLabel(reason);
-      const last = this.turns[this.turns.length - 1];
-      const alreadyBannered =
-        last?.role === 'assistant' &&
-        last.chunks.length === 1 &&
-        last.chunks[0].kind === 'meta' &&
-        last.chunks[0].label === label;
-      if (!alreadyBannered) {
-        this.pushTurn({
-          id: this.nextId++,
-          role: 'assistant',
-          t: Date.now(),
-          chunks: [{ kind: 'meta', label }],
-          status: 'complete',
-        });
+      // A reset this tab asked for is published on the bus (`on_bus`);
+      // one the sidecar decided alone (session unresumable) is ours to show.
+      if (!event['on_bus']) {
+        const reason = typeof event['reason'] === 'string' ? event['reason'] : 'reset';
+        this.note(resetBannerLabel(reason));
       }
       this.persist();
       return;
     }
-
-    // Snapshot-replay only: reconstruct a user prompt + a fresh
-    // streaming assistant turn (mirrors what `send()` pushes live).
-    // The sidecar records but does NOT forward this on the live
-    // stream, so the live optimistic-bubble UX is unchanged.
-    if (t === 'ferrite_ai_user_turn') {
-      const text = typeof event['text'] === 'string' ? event['text'] : '';
-      const when = typeof event['t'] === 'number' ? (event['t'] as number) : Date.now();
-      this.pushTurn({ id: this.nextId++, role: 'user', text, t: when });
-      this.pushTurn({
-        id: this.nextId++,
-        role: 'assistant',
-        t: when,
-        chunks: [],
-        status: 'streaming',
-      });
-      return;
-    }
-
-    // Envelope signals first — short-circuit before walking SDK shape.
     if (t === 'ferrite_ai_hello') {
       const modes = event['modes'];
       if (Array.isArray(modes)) {
@@ -669,193 +700,18 @@ export class AiStore {
       }
       return;
     }
-    if (t === 'ferrite_ai_done') {
-      this.updateLatestAssistant((a) => {
-        if (a.status === 'streaming') a.status = 'complete';
-      });
+    if (t === 'ferrite_ai_done' || t === 'ferrite_ai_stopped') {
+      this.pending = null;
       return;
     }
     if (t === 'ferrite_ai_error') {
-      const msg = String(event['message'] ?? 'unknown error');
-      this.updateLatestAssistant((a) => {
-        a.status = 'error';
-        a.errorMessage = msg;
-      });
-      return;
-    }
-    if (t === 'ferrite_ai_stopped') {
-      // Sidecar acknowledged a stop. Mark the streaming turn complete
-      // and add a meta line so the boundary is visible in the
-      // transcript. Reason rides on the envelope (`user` vs `idle`).
-      const reason = typeof event['reason'] === 'string' ? event['reason'] : 'user';
-      this.updateLatestAssistant((a) => {
-        if (a.status === 'streaming') {
-          a.status = 'complete';
-          a.chunks.push({ kind: 'meta', label: `── stopped (${reason})` });
-        }
-      });
-      return;
-    }
-
-    // Agent SDK partial-message stream events. We unwrap the inner
-    // event shape and pull out text deltas + tool calls for rendering;
-    // anything else is dropped (the SDK's `stop_reason`, `usage`, etc
-    // don't render in the chat directly).
-    if (t === 'stream_event') {
-      const inner = event['event'] as Record<string, unknown> | undefined;
-      if (inner) this.ingestStreamEvent(inner);
-      return;
-    }
-
-    // Full assistant message arrives at end-of-turn — useful when we
-    // missed a partial (or `includePartialMessages` was off). Walk
-    // content blocks; tool_result blocks here close out tool cards.
-    if (t === 'assistant' || t === 'user') {
-      const message = event['message'] as Record<string, unknown> | undefined;
-      const content = message?.['content'];
-      if (Array.isArray(content)) {
-        for (const block of content) this.ingestContentBlock(block as Record<string, unknown>);
-      }
-      return;
-    }
-
-    // Anything else gets rendered as a muted meta line so the user can
-    // see it for debugging without it disappearing silently.
-    if (typeof t === 'string') {
-      this.appendChunkToCurrentTurn({ kind: 'meta', label: t });
+      // A turn failure also lands as a `turn_end` record; this covers
+      // the control channel itself (sidecar unreachable, bad envelope).
+      this.pending = null;
+      this.lastError = String(event['message'] ?? 'unknown error');
+      this.note(`── ${this.lastError}`);
     }
   }
-
-  private ingestStreamEvent(inner: Record<string, unknown>): void {
-    const it = inner['type'];
-    if (it === 'content_block_start') {
-      const block = inner['content_block'] as Record<string, unknown> | undefined;
-      if (!block) return;
-      if (block['type'] === 'tool_use') {
-        const id = String(block['id'] ?? '');
-        const name = String(block['name'] ?? '?');
-        this.appendChunkToCurrentTurn({ kind: 'tool', id, name, input: '' });
-      }
-      // text blocks just start an empty text chunk lazily on first delta
-      return;
-    }
-    if (it === 'content_block_delta') {
-      const delta = inner['delta'] as Record<string, unknown> | undefined;
-      if (!delta) return;
-      const dt = delta['type'];
-      if (dt === 'text_delta') {
-        const text = String(delta['text'] ?? '');
-        this.appendTextDelta(text);
-      } else if (dt === 'input_json_delta') {
-        const partial = String(delta['partial_json'] ?? '');
-        this.appendToolInput(partial);
-      }
-      return;
-    }
-    // content_block_stop — nothing to do; closing happens implicitly
-    // when the next chunk type starts.
-  }
-
-  private ingestContentBlock(block: Record<string, unknown>): void {
-    if (block['type'] === 'tool_result') {
-      const id = String(block['tool_use_id'] ?? '');
-      const content = block['content'];
-      const errored = Boolean(block['is_error']);
-      const { text, images } = splitToolResult(content);
-      this.updateLatestAssistant((a) => {
-        // Find matching tool chunk by id, otherwise append a synthetic
-        // "orphan result" so the user sees it.
-        for (let i = a.chunks.length - 1; i >= 0; i--) {
-          const c = a.chunks[i];
-          if (c.kind === 'tool' && c.id === id) {
-            c.result = text;
-            if (images.length) c.resultImages = images;
-            c.error = errored;
-            return;
-          }
-        }
-        a.chunks.push({
-          kind: 'tool',
-          id,
-          name: '(orphan result)',
-          input: '',
-          result: text,
-          resultImages: images.length ? images : undefined,
-          error: errored,
-        });
-      });
-    }
-    // Full text blocks may also come on assistant messages at end of
-    // turn — these would duplicate text we already accumulated from
-    // partial deltas, so we ignore them here.
-  }
-
-  private appendTextDelta(text: string): void {
-    if (!text) return;
-    this.updateLatestAssistant((a) => {
-      const last = a.chunks[a.chunks.length - 1];
-      if (last && last.kind === 'text') {
-        last.text += text;
-      } else {
-        a.chunks.push({ kind: 'text', text });
-      }
-    });
-  }
-
-  private appendToolInput(partial: string): void {
-    if (!partial) return;
-    this.updateLatestAssistant((a) => {
-      // Walk back to the most-recent unfinished tool chunk.
-      for (let i = a.chunks.length - 1; i >= 0; i--) {
-        const c = a.chunks[i];
-        if (c.kind === 'tool' && c.result === undefined) {
-          c.input += partial;
-          return;
-        }
-      }
-    });
-  }
-}
-
-/** Split a tool_result `content` payload into a textual summary + the
- *  list of `data:` URLs for any embedded image blocks. The Anthropic
- *  Read tool returns `{type: 'image', source: {type: 'base64',
- *  media_type, data}}` for PNG/JPEG reads; we lift those out so the
- *  UI can render them inline next to the text. Text parts are joined
- *  and `image` parts are dropped from the textual side. */
-function splitToolResult(content: unknown): { text: string; images: string[] } {
-  if (typeof content === 'string') return { text: content, images: [] };
-  if (!Array.isArray(content)) return { text: JSON.stringify(content), images: [] };
-  const texts: string[] = [];
-  const images: string[] = [];
-  for (const part of content) {
-    if (typeof part === 'string') {
-      texts.push(part);
-      continue;
-    }
-    if (typeof part !== 'object' || part === null) {
-      texts.push(JSON.stringify(part));
-      continue;
-    }
-    const p = part as Record<string, unknown>;
-    if (p['type'] === 'image') {
-      const src = p['source'];
-      if (typeof src === 'object' && src !== null) {
-        const s = src as Record<string, unknown>;
-        const media = typeof s['media_type'] === 'string' ? s['media_type'] : 'image/png';
-        const data = typeof s['data'] === 'string' ? s['data'] : '';
-        if (data) images.push(`data:${media};base64,${data}`);
-      }
-      continue;
-    }
-    const t = p['text'];
-    if (typeof t === 'string') {
-      texts.push(t);
-      continue;
-    }
-    texts.push(JSON.stringify(part));
-  }
-  return { text: texts.join(''), images };
 }
 
 export const ai = new AiStore();

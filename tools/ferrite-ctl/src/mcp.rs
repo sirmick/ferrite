@@ -101,21 +101,6 @@ impl Http {
         api_response(resp, &format!("POST {path}")).await
     }
 
-    /// Mutating POST that is deliberately *not* tagged for the activity
-    /// transcript (no `x-ferrite-command` / `x-ferrite-note`). Used by
-    /// `chat_post`: mirroring the headless conversation into the UI's AI
-    /// panel shouldn't also spam the `ai::activity` command log.
-    async fn post_raw(&self, path: &str, body: Value) -> Result<Value, McpError> {
-        let resp = self
-            .client
-            .post(format!("{}{}", self.base, path))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| http_err(&format!("POST {path}"), e.to_string()))?;
-        api_response(resp, &format!("POST {path}")).await
-    }
-
     /// Mutating PATCH, tagged like [`Self::post`].
     async fn patch(
         &self,
@@ -186,15 +171,10 @@ impl Http {
     /// daemon's embedded broker and feed every message to `on_record`
     /// until it returns `false` or `timeout` elapses. Returns whether the
     /// timeout hit. The broker's TCP port comes from `GET /api/hello`.
-    pub(crate) async fn subscribe_records(
-        &self,
-        kind: &str,
-        timeout: Duration,
-        mut on_record: impl FnMut(EventRecord) -> bool,
-    ) -> Result<bool, McpError> {
-        use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+    /// The daemon's MQTT TCP port, from `GET /api/hello`.
+    async fn broker_port(&self) -> Result<u16, McpError> {
         let hello = self.get("/api/hello").await?;
-        let port = hello
+        hello
             .pointer("/mqtt/tcp")
             .and_then(Value::as_str)
             .and_then(|a| a.rsplit_once(':').map(|(_, p)| p.to_string()))
@@ -204,7 +184,69 @@ impl Http {
                     "ferrited has no event plane (started with --no-mqtt?)".to_string(),
                     None,
                 )
-            })?;
+            })
+    }
+
+    /// Publish raw events to `ferrite/ingest/<kind>` (the event plane's
+    /// ingest door — the server folds each into the store). QoS 1 and
+    /// waits for every ack, so a short-lived CLI process (a hook) can't
+    /// exit before delivery.
+    pub(crate) async fn publish_ingest(
+        &self,
+        kind: &str,
+        events: &[Value],
+    ) -> Result<usize, McpError> {
+        use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+        let port = self.broker_port().await?;
+        let id = format!(
+            "ferrite-ctl-pub-{}-{}",
+            std::process::id(),
+            now_ms() % 1_000_000
+        );
+        let mut opts = MqttOptions::new(id, self.host(), port);
+        opts.set_keep_alive(Duration::from_secs(15));
+        opts.set_max_packet_size(8 * 1024 * 1024, 8 * 1024 * 1024);
+        let (client, mut eventloop) = AsyncClient::new(opts, events.len().max(1) + 4);
+        let topic = format!("ferrite/ingest/{}", kind.trim_matches('/'));
+        for ev in events {
+            client
+                .publish(topic.clone(), QoS::AtLeastOnce, false, ev.to_string())
+                .await
+                .map_err(|e| McpError::internal_error(format!("mqtt publish: {e}"), None))?;
+        }
+        let mut acked = 0usize;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while acked < events.len() {
+            match tokio::time::timeout_at(deadline, eventloop.poll()).await {
+                Ok(Ok(Event::Incoming(Packet::PubAck(_)))) => acked += 1,
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    return Err(McpError::internal_error(
+                        format!("mqtt {}:{port}: {e}", self.host()),
+                        None,
+                    ))
+                }
+                Err(_) => {
+                    return Err(McpError::internal_error(
+                        format!("mqtt publish: only {acked}/{} acked in 5 s", events.len()),
+                        None,
+                    ))
+                }
+            }
+        }
+        let _ = client.disconnect().await;
+        let _ = tokio::time::timeout(Duration::from_millis(200), eventloop.poll()).await;
+        Ok(acked)
+    }
+
+    pub(crate) async fn subscribe_records(
+        &self,
+        kind: &str,
+        timeout: Duration,
+        mut on_record: impl FnMut(EventRecord) -> bool,
+    ) -> Result<bool, McpError> {
+        use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+        let port = self.broker_port().await?;
         let host = self.host();
         let id = format!(
             "ferrite-ctl-{}-{}",
@@ -733,6 +775,14 @@ pub struct ChatPostArgs {
     /// `tool` role only: the tool result text, if any.
     #[serde(default)]
     pub tool_result: Option<String>,
+    /// The driving session's id (e.g. Claude Code's `session_id`), so
+    /// every panel groups this conversation's turns together. Default:
+    /// one shared `headless` session.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// Who is talking (shown on the panel's turns). Default `claude-code`.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1314,61 +1364,47 @@ impl FerriteServer {
             .await
     }
 
-    /// Mirror a headless conversation turn into the operator's browser
-    /// AI panel. Builds the exact event frames the chat store already
-    /// renders (`ferrite_ai_user_turn` / `stream_event` text-delta +
-    /// `ferrite_ai_done` / tool cards) and fans them out via
-    /// `POST /api/ai/chat-inject`; ferrited's `/ws/chat` proxy relays
-    /// them to every live tab. Lets an agent driving ferrited from
-    /// outside the browser show its prompts, tool calls, and replies in
-    /// the UI. Needs a UI tab open; returns the daemon's delivery counts.
+    /// Publish a headless conversation turn onto the AI session bus
+    /// (`ferrite/ingest/ai` → the `ai` store kind). Every AI panel —
+    /// open now or later, the log persists — renders it grouped by
+    /// `session`, alongside the in-browser assistant's sessions.
     pub(crate) async fn chat_post_op(&self, args: ChatPostArgs) -> Result<Value, McpError> {
         let t = now_ms();
+        let session = args.session.unwrap_or_else(|| "headless".into());
+        let source = args.source.unwrap_or_else(|| "claude-code".into());
+        let rec = |extra: Value| {
+            let mut base = json!({ "session": session, "source": source, "t": t });
+            if let (Some(b), Some(e)) = (base.as_object_mut(), extra.as_object()) {
+                b.extend(e.clone());
+            }
+            base
+        };
+        // The `ai` session-bus vocabulary (see docs/02-protocol.md): one
+        // record per user prompt / text block / tool use / tool result /
+        // turn end, grouped by `session` on every panel.
         let events: Vec<Value> = match args.role.as_str() {
-            "user" => {
-                let text = args.text.unwrap_or_default();
-                vec![json!({ "type": "ferrite_ai_user_turn", "text": text, "t": t })]
-            }
-            "assistant" => {
-                let text = args.text.unwrap_or_default();
-                vec![
-                    json!({
-                        "type": "stream_event",
-                        "event": {
-                            "type": "content_block_delta",
-                            "delta": { "type": "text_delta", "text": text }
-                        }
-                    }),
-                    json!({ "type": "ferrite_ai_done" }),
-                ]
-            }
+            "user" => vec![rec(
+                json!({ "type": "user", "text": args.text.unwrap_or_default() }),
+            )],
+            "assistant" => vec![
+                rec(json!({ "type": "text", "text": args.text.unwrap_or_default() })),
+                rec(json!({ "type": "turn_end", "status": "done" })),
+            ],
             "tool" => {
                 let id = format!("inj-{t}");
-                let name = args.tool_name.unwrap_or_else(|| "tool".into());
-                let input = args.tool_input.unwrap_or_default();
-                let mut evs = vec![
-                    json!({
-                        "type": "stream_event",
-                        "event": {
-                            "type": "content_block_start",
-                            "content_block": { "type": "tool_use", "id": id, "name": name }
-                        }
-                    }),
-                    json!({
-                        "type": "stream_event",
-                        "event": {
-                            "type": "content_block_delta",
-                            "delta": { "type": "input_json_delta", "partial_json": input }
-                        }
-                    }),
-                ];
+                let mut evs = vec![rec(json!({
+                    "type": "tool_use",
+                    "tool_id": id,
+                    "name": args.tool_name.unwrap_or_else(|| "tool".into()),
+                    "input": args.tool_input.unwrap_or_default(),
+                }))];
                 if let Some(result) = args.tool_result {
-                    evs.push(json!({
-                        "type": "user",
-                        "message": { "content": [
-                            { "type": "tool_result", "tool_use_id": id, "content": result }
-                        ]}
-                    }));
+                    evs.push(rec(json!({
+                        "type": "tool_result",
+                        "tool_id": id,
+                        "text": result,
+                        "is_error": false,
+                    })));
                 }
                 evs
             }
@@ -1379,9 +1415,8 @@ impl FerriteServer {
                 ));
             }
         };
-        self.http
-            .post_raw("/api/ai/chat-inject", json!({ "events": events }))
-            .await
+        let published = self.http.publish_ingest("ai", &events).await?;
+        Ok(json!({ "published": published }))
     }
 
     pub(crate) async fn start_capture_iq_op(
@@ -1443,15 +1478,15 @@ impl FerriteServer {
 #[tool_router]
 impl FerriteServer {
     #[tool(
-        description = "Mirror a conversation turn into the operator's browser AI \
-                       panel so an agent driving ferrited headlessly (CLI / MCP) \
-                       shows its prompts, tool calls, and replies in the UI alongside \
-                       the in-browser assistant. `role`: `user` (a prompt), \
-                       `assistant` (a reply — auto-closed so the spinner resolves), or \
-                       `tool` (a tool-call card in the open assistant turn; use \
-                       `tool_name` / `tool_input` / `tool_result`). Needs a UI tab \
-                       connected to /ws/chat; frames with no viewer are dropped. Not \
-                       logged to the `ai::activity` transcript."
+        description = "Publish a conversation turn onto the AI session bus (the `ai` \
+                       store kind) so an agent driving ferrited headlessly (CLI / MCP) \
+                       shows its prompts, tool calls and replies in every AI panel \
+                       alongside the in-browser assistant — live, and in the persisted \
+                       history. `role`: `user` (a prompt), `assistant` (a reply — ends \
+                       the turn), or `tool` (a tool card; use `tool_name` / \
+                       `tool_input` / `tool_result`). `session` groups the turns (pass \
+                       your session id); `source` labels them (default `claude-code`). \
+                       No browser tab needed."
     )]
     async fn chat_post(
         &self,

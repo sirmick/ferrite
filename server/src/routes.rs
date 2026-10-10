@@ -18,7 +18,6 @@ use ferrite_runtime::{FlowgraphDoc, Profile, SourceConfig};
 use futures_util::{SinkExt, StreamExt};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::protocol::Message as TungMessage;
 
 use crate::app_state::{
@@ -143,36 +142,25 @@ async fn ws_mqtt_proxy(client_ws: WebSocket, upstream: std::net::SocketAddr) {
 /// machine on a trusted LAN).
 const DEFAULT_FERRITE_AI_URL: &str = "ws://127.0.0.1:10002/ws/chat";
 
-/// Process-wide fan-out for externally-injected chat events. The
-/// headless ops layer (`ferrite-ctl chat-post` / the `chat_post` MCP
-/// tool) POSTs to `/api/ai/chat-inject`; every live `/ws/chat` browser
-/// proxy subscribes here and forwards the frames to its socket. That
-/// lets an agent driving ferrited from *outside* the browser mirror its
-/// conversation into the UI's AI panel. One ferrited process → a single
-/// global channel is the whole story; nothing per-connection lives here.
-fn chat_inject_hub() -> &'static broadcast::Sender<String> {
-    static HUB: std::sync::OnceLock<broadcast::Sender<String>> = std::sync::OnceLock::new();
-    HUB.get_or_init(|| broadcast::channel::<String>(256).0)
-}
-
 /// `GET /ws/chat` — reverse-proxy to the ferrite-ai sidecar. The
 /// browser opens this WS to ferrited; we open a second WS upstream to
 /// the sidecar and pump frames bidirectionally until either side
 /// closes. If the sidecar isn't reachable, we surface a structured
 /// error event the UI's chat panel renders, then close the client
 /// socket so the front end can show "ferrite-ai offline" cleanly.
-pub async fn ws_chat(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+///
+/// This is the AI *control* channel only (prompts, stop, reset, the
+/// sidecar's hello + session binding). The conversation itself — every
+/// session, whichever client drives it — is the `ai` store kind: the
+/// sidecar and headless drivers publish records through the event
+/// plane's ingest door, and every panel renders from the mirror.
+pub async fn ws_chat(ws: WebSocketUpgrade) -> impl IntoResponse {
     let upstream_url =
         std::env::var("FERRITE_AI_URL").unwrap_or_else(|_| DEFAULT_FERRITE_AI_URL.to_string());
-    let store = state.decoder_store();
-    ws.on_upgrade(move |socket| ws_chat_proxy(socket, upstream_url, store))
+    ws.on_upgrade(move |socket| ws_chat_proxy(socket, upstream_url))
 }
 
-async fn ws_chat_proxy(
-    mut client_ws: WebSocket,
-    upstream_url: String,
-    store: std::sync::Arc<crate::decoder_store::DecoderStore>,
-) {
+async fn ws_chat_proxy(mut client_ws: WebSocket, upstream_url: String) {
     let upstream = match tokio_tungstenite::connect_async(&upstream_url).await {
         Ok((s, _resp)) => s,
         Err(e) => {
@@ -195,17 +183,11 @@ async fn ws_chat_proxy(
     // Browser → sidecar: text/binary forward, close on Close. We don't
     // attempt to translate ping/pong — both sides exchange them via
     // their own keepalives.
-    let store_c2u = std::sync::Arc::clone(&store);
     let c2u = async move {
         while let Some(msg) = cli_rx.next().await {
             let Ok(msg) = msg else { break };
             let upstream_msg = match msg {
-                Message::Text(t) => {
-                    // Record the operator's prompt in the `ai` transcript on
-                    // its way upstream (the sidecar never echoes it back).
-                    fold_ai_user_frame(&store_c2u, t.as_str());
-                    TungMessage::Text(t)
-                }
+                Message::Text(t) => TungMessage::Text(t),
                 Message::Binary(b) => TungMessage::Binary(b),
                 Message::Close(_) => break,
                 Message::Ping(_) | Message::Pong(_) => continue,
@@ -219,52 +201,17 @@ async fn ws_chat_proxy(
         let _ = up_tx.close().await;
     };
 
-    // Sidecar → browser, plus externally-injected chat frames
-    // (`POST /api/ai/chat-inject`). Both write to the same client
-    // socket, so we select over them: a headless driver's mirrored
-    // turns interleave with the (usually idle) sidecar stream.
-    let mut inject_rx = chat_inject_hub().subscribe();
-    let store_u2c = std::sync::Arc::clone(&store);
+    // Sidecar → browser.
     let u2c = async move {
-        loop {
-            tokio::select! {
-                up = up_rx.next() => {
-                    let Some(Ok(msg)) = up else { break };
-                    let client_msg = match msg {
-                        TungMessage::Text(t) => {
-                            // Record the assistant's reply text from the
-                            // sidecar's full end-of-turn `assistant` message
-                            // (the live cursor still streams from deltas in
-                            // the browser; this is the turn-granular log).
-                            // Injected frames are folded in `post_chat_inject`,
-                            // not here, so they aren't double-counted.
-                            fold_ai_assistant_frame(&store_u2c, t.as_str());
-                            Message::Text(t)
-                        }
-                        TungMessage::Binary(b) => Message::Binary(b),
-                        TungMessage::Close(_) => break,
-                        TungMessage::Ping(_) | TungMessage::Pong(_) | TungMessage::Frame(_) => {
-                            continue
-                        }
-                    };
-                    if cli_tx.send(client_msg).await.is_err() {
-                        break;
-                    }
-                }
-                inj = inject_rx.recv() => {
-                    match inj {
-                        Ok(text) => {
-                            if cli_tx.send(Message::Text(text)).await.is_err() {
-                                break;
-                            }
-                        }
-                        // A slow tab missed some injects — keep serving.
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        // The sender is a 'static OnceLock, so Closed
-                        // shouldn't happen; ignore defensively.
-                        Err(broadcast::error::RecvError::Closed) => continue,
-                    }
-                }
+        while let Some(Ok(msg)) = up_rx.next().await {
+            let client_msg = match msg {
+                TungMessage::Text(t) => Message::Text(t),
+                TungMessage::Binary(b) => Message::Binary(b),
+                TungMessage::Close(_) => break,
+                TungMessage::Ping(_) | TungMessage::Pong(_) | TungMessage::Frame(_) => continue,
+            };
+            if cli_tx.send(client_msg).await.is_err() {
+                break;
             }
         }
         let _ = cli_tx.close().await;
@@ -274,158 +221,8 @@ async fn ws_chat_proxy(
     // other branch when one resolves. Avoids leaking a pump task on
     // an asymmetric disconnect.
     tokio::select! {
-        _ = c2u => {},
-        _ = u2c => {},
-    }
-}
-
-/// `POST /api/ai/chat-inject` — fan an externally-authored chat event
-/// (or a batch) out to every connected `/ws/chat` browser. Body is a
-/// single event object, an array of events, or `{ "events": [ … ] }`;
-/// each is broadcast verbatim, so the event vocabulary
-/// (`ferrite_ai_user_turn`, `stream_event`, `ferrite_ai_done`, …) lives
-/// in the ops layer that builds them, not here. Returns how many live
-/// browser subscribers the frames reached. Deliberately *not* tagged
-/// for `ai_activity_layer` (the ops layer omits the command header) so
-/// mirroring a conversation doesn't also flood the activity transcript.
-///
-/// Injected turns are also folded into the `ai` decoder-store kind here
-/// (not in the per-connection `/ws/chat` proxy), so a headless driver's
-/// conversation is recorded even with no browser tab open — and so the
-/// proxy's inject branch can't double-count what this already logged.
-pub async fn post_chat_inject(
-    State(state): State<AppState>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let events: Vec<serde_json::Value> = match body {
-        serde_json::Value::Array(a) => a,
-        serde_json::Value::Object(o) if o.contains_key("events") => o
-            .get("events")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        other => vec![other],
-    };
-    fold_ai_inject_batch(&state.decoder_store(), &events);
-    let hub = chat_inject_hub();
-    let subscribers = hub.receiver_count();
-    let mut sent = 0usize;
-    for ev in &events {
-        if hub.send(ev.to_string()).is_ok() {
-            sent += 1;
-        }
-    }
-    Json(serde_json::json!({ "subscribers": subscribers, "events": sent }))
-}
-
-/// Fold a browser→sidecar frame into the `ai` transcript when it carries a
-/// user prompt. A send payload is `{ text, mode, … }` with no `type`;
-/// control envelopes (`reset_session` / `stop` / `request_snapshot`) carry
-/// a `type` field and are skipped.
-fn fold_ai_user_frame(store: &crate::decoder_store::DecoderStore, frame: &str) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(frame) else {
-        return;
-    };
-    if v.get("type").is_some() {
-        return; // control envelope, not a prompt
-    }
-    let Some(text) = v.get("text").and_then(serde_json::Value::as_str) else {
-        return;
-    };
-    if text.is_empty() {
-        return;
-    }
-    let mut rec = serde_json::json!({ "role": "user", "text": text });
-    if let Some(mode) = v.get("mode").and_then(serde_json::Value::as_str) {
-        rec["mode"] = serde_json::json!(mode);
-    }
-    store.apply("ai", rec);
-}
-
-/// Fold a sidecar→browser frame into the `ai` transcript when it's a full
-/// assistant message carrying text (emitted at end-of-turn and per
-/// tool-loop step). The browser accumulates the same text from
-/// `stream_event` deltas for the live cursor; this records it
-/// turn-granular for MCP read-back.
-fn fold_ai_assistant_frame(store: &crate::decoder_store::DecoderStore, frame: &str) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(frame) else {
-        return;
-    };
-    if v.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
-        return;
-    }
-    let text = v
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .map(ai_text_from_content)
-        .unwrap_or_default();
-    if text.is_empty() {
-        return;
-    }
-    store.apply(
-        "ai",
-        serde_json::json!({ "role": "assistant", "text": text }),
-    );
-}
-
-/// Join the `text` of every text block in an Agent SDK message `content`
-/// (an array of typed blocks, or a bare string). tool_use / tool_result /
-/// image blocks are skipped.
-fn ai_text_from_content(content: &serde_json::Value) -> String {
-    let Some(arr) = content.as_array() else {
-        return content.as_str().unwrap_or_default().to_string();
-    };
-    let mut out = String::new();
-    for block in arr {
-        if block.get("type").and_then(serde_json::Value::as_str) == Some("text") {
-            if let Some(t) = block.get("text").and_then(serde_json::Value::as_str) {
-                out.push_str(t);
-            }
-        }
-    }
-    out
-}
-
-/// Fold a chat-inject batch into the `ai` transcript. Mirrors the
-/// `chat_post` event vocabulary: a `ferrite_ai_user_turn` becomes a user
-/// record, and the `text_delta`s in an assistant batch coalesce into one
-/// assistant record. `chat_post` POSTs one self-contained role-turn per
-/// call, so reducing within the batch is sufficient. tool_use
-/// (`input_json_delta`) frames are a different delta type and are ignored.
-fn fold_ai_inject_batch(store: &crate::decoder_store::DecoderStore, events: &[serde_json::Value]) {
-    let mut assistant = String::new();
-    for ev in events {
-        match ev.get("type").and_then(serde_json::Value::as_str) {
-            Some("ferrite_ai_user_turn") => {
-                if let Some(text) = ev.get("text").and_then(serde_json::Value::as_str) {
-                    if !text.is_empty() {
-                        store.apply("ai", serde_json::json!({ "role": "user", "text": text }));
-                    }
-                }
-            }
-            Some("stream_event") => {
-                let delta = ev.get("event").and_then(|e| e.get("delta"));
-                let is_text = delta
-                    .and_then(|d| d.get("type"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some("text_delta");
-                if is_text {
-                    if let Some(t) = delta
-                        .and_then(|d| d.get("text"))
-                        .and_then(serde_json::Value::as_str)
-                    {
-                        assistant.push_str(t);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    if !assistant.is_empty() {
-        store.apply(
-            "ai",
-            serde_json::json!({ "role": "assistant", "text": assistant }),
-        );
+        () = c2u => {},
+        () = u2c => {},
     }
 }
 
@@ -1465,87 +1262,5 @@ pub async fn get_view_state(State(state): State<AppState>) -> impl IntoResponse 
             crate::view_bridge::ViewError::NoViewer.to_string(),
         )
         .into_response(),
-    }
-}
-
-#[cfg(test)]
-mod ai_fold_tests {
-    use super::*;
-    use crate::decoder_store::DecoderStore;
-
-    #[test]
-    fn user_frame_records_prompt_and_skips_control() {
-        let s = DecoderStore::new();
-        // A send payload (no `type`) → user record carrying mode.
-        fold_ai_user_frame(&s, r#"{"text":"what is on 2m?","mode":"explorer"}"#);
-        // Control envelopes are skipped.
-        fold_ai_user_frame(&s, r#"{"type":"reset_session","reason":"clear"}"#);
-        fold_ai_user_frame(&s, r#"{"type":"stop"}"#);
-        // Empty / malformed are skipped.
-        fold_ai_user_frame(&s, r#"{"text":""}"#);
-        fold_ai_user_frame(&s, "not json");
-        let k = s.snapshot_kind("ai").unwrap();
-        assert_eq!(k.recent.len(), 1, "only the real prompt is logged");
-        assert_eq!(k.recent[0].data["role"], "user");
-        assert_eq!(k.recent[0].data["text"], "what is on 2m?");
-        assert_eq!(k.recent[0].data["mode"], "explorer");
-    }
-
-    #[test]
-    fn assistant_frame_joins_text_blocks_and_drops_tool_only() {
-        let s = DecoderStore::new();
-        fold_ai_assistant_frame(
-            &s,
-            r#"{"type":"assistant","message":{"content":[
-                {"type":"text","text":"Tuning "},
-                {"type":"tool_use","id":"x","name":"tune","input":{}},
-                {"type":"text","text":"to 145.5."}]}}"#,
-        );
-        // A tool-only assistant message contributes no transcript text.
-        fold_ai_assistant_frame(
-            &s,
-            r#"{"type":"assistant","message":{"content":[
-                {"type":"tool_use","id":"y","name":"status","input":{}}]}}"#,
-        );
-        // Non-assistant frames are ignored.
-        fold_ai_assistant_frame(&s, r#"{"type":"ferrite_ai_done"}"#);
-        let k = s.snapshot_kind("ai").unwrap();
-        assert_eq!(k.recent.len(), 1);
-        assert_eq!(k.recent[0].data["role"], "assistant");
-        assert_eq!(k.recent[0].data["text"], "Tuning to 145.5.");
-    }
-
-    #[test]
-    fn inject_batch_folds_user_and_coalesced_assistant() {
-        let s = DecoderStore::new();
-        // A headless `chat_post role=user` batch.
-        fold_ai_inject_batch(
-            &s,
-            &[serde_json::json!({"type":"ferrite_ai_user_turn","text":"ping","t":1})],
-        );
-        // A headless `chat_post role=assistant` batch: text_delta + done.
-        fold_ai_inject_batch(
-            &s,
-            &[
-                serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
-                    "delta":{"type":"text_delta","text":"po"}}}),
-                serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
-                    "delta":{"type":"text_delta","text":"ng"}}}),
-                serde_json::json!({"type":"ferrite_ai_done"}),
-            ],
-        );
-        // A tool batch (input_json_delta) adds nothing to the transcript.
-        fold_ai_inject_batch(
-            &s,
-            &[
-                serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
-                "delta":{"type":"input_json_delta","partial_json":"{}"}}}),
-            ],
-        );
-        let k = s.snapshot_kind("ai").unwrap();
-        assert_eq!(k.recent.len(), 2);
-        assert_eq!(k.recent[0].data["text"], "ping");
-        assert_eq!(k.recent[1].data["role"], "assistant");
-        assert_eq!(k.recent[1].data["text"], "pong");
     }
 }

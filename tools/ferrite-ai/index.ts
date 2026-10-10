@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
+import { connectBus, publishReset, TurnPublisher } from "./bus.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = join(__dirname, "prompts");
@@ -361,6 +362,10 @@ const FERRITE_MCP_ARGS = ["mcp"];
 const FERRITE_CTL_CONNECT =
   process.env.FERRITE_CTL_CONNECT ?? "http://127.0.0.1:10001";
 
+// AI session bus: every turn is also published onto ferrited's event
+// plane (`ai` kind) so all panels — and agents — see every session.
+void connectBus(FERRITE_CTL_CONNECT);
+
 function ferriteMcpServer(): { command: string; args: string[]; env: Record<string, string> } {
   return {
     command: FERRITE_CTL,
@@ -671,10 +676,14 @@ wss.on("connection", (ws) => {
       // session_reset so the UI clears coherently with an honest
       // banner instead of a now-orphaned log.
       if (parsed.type === "reset_session") {
+        publishReset(sessionId, currentMode, parsed.reason ?? "reset");
         sessionId = null;
         send(ws, {
           type: "session_reset",
           reason: parsed.reason ?? "reset",
+          // The banner is on the session bus (every panel); the
+          // requesting tab must not add a local one too.
+          on_bus: true,
         });
         return;
       }
@@ -691,6 +700,7 @@ wss.on("connection", (ws) => {
     if (mode !== currentMode) {
       // Mode switch resets the session — different system prompt means
       // the old conversation history would re-prime under wrong context.
+      if (sessionId) publishReset(sessionId, currentMode, `mode → ${mode}`);
       sessionId = null;
       currentMode = mode;
     }
@@ -774,6 +784,11 @@ wss.on("connection", (ws) => {
       sessionId = resumeId;
     }
 
+    // Session-bus publisher for this turn (records wait for the SDK's
+    // session id, which a resumed session already has).
+    const bus = new TurnPublisher(mode, opts.model ?? modelFor(mode), resumeId ?? null);
+    bus.user(parsed.text);
+
     try {
       for await (const event of query({ prompt: parsed.text, options: opts })) {
         const e = event as Record<string, unknown>;
@@ -786,14 +801,17 @@ wss.on("connection", (ws) => {
         // Tap the event stream for the readable transcript before
         // forwarding to the WS client unchanged.
         transcript.ingest(e);
+        bus.ingest(e);
         send(ws, event);
         turnRecords.push(event);
       }
       if (turnAbort.signal.aborted) {
         transcript.finish("error", "stopped by user");
+        bus.finish("stopped");
         emit({ type: "ferrite_ai_stopped", reason: "user" });
       } else {
         transcript.finish("done");
+        bus.finish("done");
         emit({ type: "ferrite_ai_done", mode });
       }
     } catch (err) {
@@ -801,10 +819,12 @@ wss.on("connection", (ws) => {
         // The SDK surfaces aborts as thrown errors. Treat as a clean
         // stop, not a fatal error.
         transcript.finish("error", "stopped by user");
+        bus.finish("stopped");
         emit({ type: "ferrite_ai_stopped", reason: "user" });
       } else {
         const msg = String(err);
         transcript.finish("error", msg);
+        bus.finish("error", msg);
         console.error("[ferrite-ai] turn failed:", err);
         emit({
           type: "ferrite_ai_error",
