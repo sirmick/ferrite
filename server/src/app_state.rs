@@ -594,6 +594,8 @@ impl AppState {
                     // new graph record.
                     self.publish_graph().await;
                 }
+                // A VFO move changes where decodes are heard.
+                self.refresh_rf_ctx().await;
                 return Ok(Some(plan));
             }
         }
@@ -825,6 +827,7 @@ impl AppState {
                 // also lands as `params/src` so param-only consumers see it.
                 self.publish_params(SOURCE_ID, &delta_for_record);
                 self.publish_graph().await;
+                self.refresh_rf_ctx().await;
                 return Ok(Some(plan));
             }
         }
@@ -840,6 +843,7 @@ impl AppState {
         *self.inner.source_config.write().await = new_source;
         drop(pipeline);
         self.publish_graph().await;
+        self.refresh_rf_ctx().await;
         Ok(plan)
     }
 
@@ -941,6 +945,7 @@ impl AppState {
         drop(guard);
         self.publish_graph().await;
         self.publish_status("running");
+        self.refresh_rf_ctx().await;
         Ok(())
     }
 

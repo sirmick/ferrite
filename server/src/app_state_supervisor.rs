@@ -273,10 +273,46 @@ impl AppState {
         }
     }
 
+    /// Recompute the RF context stamped on decoder records: where the
+    /// radio is listening right now (requested LO + live channel shift)
+    /// and which preset. `None` while stopped. Called on every tune /
+    /// source patch / VFO move and once a second by the supervisor.
+    pub(crate) async fn refresh_rf_ctx(&self) {
+        let (running, _, shift) = self.mount_health().await;
+        if !running {
+            self.inner.decoder_store.set_ctx(None);
+            return;
+        }
+        let cfg_center = num(self
+            .inner
+            .source_config
+            .read()
+            .await
+            .params
+            .get("center_freq_hz"));
+        let lo = cfg_center.or_else(|| {
+            num(self
+                .inner
+                .decoder_store
+                .snapshot_kind("readback")
+                .and_then(|k| k.current.get("current").map(|r| r.data.clone()))
+                .as_ref()
+                .and_then(|r| r.get("center_freq_hz")))
+        });
+        let preset = self.inner.preset_doc.read().await.name.clone();
+        self.inner.decoder_store.set_ctx(Some(json!({
+            "listen_hz": lo.map(|c| c + shift.unwrap_or(0.0)),
+            "lo_hz": lo,
+            "chan_shift_hz": shift,
+            "preset": preset,
+        })));
+    }
+
     /// Build and fold the `health` record. Returns why the radio is lost
     /// when it is (and the operator still wants it running).
     pub(super) async fn publish_health(&self, warnings: &mut Warnings) -> Option<String> {
         warnings.sync_epoch(self.epoch());
+        self.refresh_rf_ctx().await;
         let (running, src, shift) = self.mount_health().await;
         let cfg = self.inner.source_config.read().await.clone();
         let declared = num(self

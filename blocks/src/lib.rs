@@ -28,6 +28,7 @@ pub mod block;
 pub mod channelizer;
 pub mod dc_block;
 pub mod decimator;
+pub mod decode_parse;
 pub mod digital_spot;
 pub mod dtmf_audio_source;
 pub mod dtmf_decoder;

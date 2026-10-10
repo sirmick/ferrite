@@ -153,7 +153,15 @@ impl Block for EasDemod {
         self.decoder.push(src);
         for line in self.decoder.drain_lines() {
             tracing::info!(target: "decoder::eas", "{line}");
-            push_event_json(&mut self.events_out, &serde_json::json!({ "text": line }));
+            // Raw SAME line + parsed header (originator, event + name,
+            // FIPS locations, purge time, sender) when it parses.
+            let mut rec = serde_json::json!({ "text": line });
+            if let (Some(serde_json::Value::Object(f)), Some(obj)) =
+                (crate::decode_parse::parse_same(&line), rec.as_object_mut())
+            {
+                obj.extend(f);
+            }
+            push_event_json(&mut self.events_out, &rec);
         }
 
         let mut w = Work::new();

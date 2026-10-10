@@ -37,6 +37,11 @@ pub enum Policy {
         /// frames. Powers the ADS-B/APRS map trails without the frontend
         /// re-deriving them from the shared `recent` log. Reads `lat`/`lon`.
         track: bool,
+        /// Shallow-merge each record into the entity's previous data
+        /// instead of replacing it — for decoders whose message types
+        /// carry different halves of an entity (AIS: position reports vs
+        /// static name/callsign).
+        merge: bool,
     },
     /// Single current record holding the whole payload (RSSI/signals).
     Replace,
@@ -57,12 +62,23 @@ fn policy_for(kind: &str) -> Policy {
             key_field: "icao",
             ttl_ms: 60_000,
             track: true,
+            merge: false,
+        },
+        // AIS vessels keyed by MMSI; position (types 1-3/18) and static
+        // (5/24) reports merge into one vessel record. 10 min TTL —
+        // class B ships report every few minutes.
+        "ais" => Policy::Upsert {
+            key_field: "mmsi",
+            ttl_ms: 600_000,
+            track: true,
+            merge: true,
         },
         // APRS stations persist for the session (no TTL expiry).
         "aprs" => Policy::Upsert {
             key_field: "call",
             ttl_ms: 0,
             track: true,
+            merge: false,
         },
         // RDS emits partial groups → accumulate into one record.
         "rds" => Policy::Merge,
@@ -84,6 +100,7 @@ fn policy_for(kind: &str) -> Policy {
             key_field: "job_id",
             ttl_ms: 0,
             track: false,
+            merge: false,
         },
         // AI transcript — append log of conversation turns (one record per
         // user/assistant turn), folded by ferrited's `/ws/chat` proxy +
@@ -93,8 +110,8 @@ fn policy_for(kind: &str) -> Policy {
         // middleware) — the AI panel's transcript and `ferrite/state/activity`.
         "activity" => Policy::Append { cap: LOG_CAP },
         // Everything else is an append log — ft8, wspr, pager, eas, dtmf,
-        // cw, ais, rtl_433, transcribe, fldigi, …. (ais/rtl_433 can become
-        // keyed tables once they emit a parsed mmsi / device id.)
+        // cw, rtl_433, transcribe, fldigi, …. (rtl_433 can become a keyed
+        // table once it emits a stable device id.)
         _ => Policy::Append { cap: LOG_CAP },
     }
 }
@@ -112,6 +129,14 @@ pub fn is_live_kind(kind: &str) -> bool {
     ) || kind.starts_with("params/")
 }
 
+/// Kinds that carry decodes heard off the air (and so get an RF
+/// [`Record::ctx`]): everything except the live kinds and the
+/// bookkeeping logs (activity, AI transcript, jobs).
+#[must_use]
+pub fn is_decode_kind(kind: &str) -> bool {
+    !is_live_kind(kind) && !matches!(kind, "activity" | "ai" | "jobs") && !kind.starts_with("ai/")
+}
+
 /// One decoder record. `data` is the emitting block's JSON verbatim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
@@ -123,6 +148,11 @@ pub struct Record {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     pub data: Value,
+    /// Where the radio was listening when this decode was folded
+    /// (`{listen_hz, lo_hz, preset}`), stamped on decoder kinds only — so
+    /// a decode carries its RF frequency without a join on `graph`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<Value>,
 }
 
 /// Per-kind state. `recent` for append logs; `current` for keyed tables /
@@ -181,6 +211,9 @@ pub struct DecoderStore {
     /// and bumped by `AppState` once per topology rebuild. Every record
     /// and every frame carries the value current at fold/emit time.
     epoch: Arc<AtomicU64>,
+    /// RF context stamped onto decoder records ([`Record::ctx`]); kept
+    /// current by the daemon (supervisor tick + every tune).
+    ctx: Mutex<Option<Value>>,
 }
 
 impl Default for DecoderStore {
@@ -211,7 +244,13 @@ impl DecoderStore {
             }),
             tx,
             epoch: Arc::new(AtomicU64::new(0)),
+            ctx: Mutex::new(None),
         }
+    }
+
+    /// Set the RF context stamped onto subsequent decoder records.
+    pub fn set_ctx(&self, ctx: Option<Value>) {
+        *self.ctx.lock().unwrap_or_else(|e| e.into_inner()) = ctx;
     }
 
     /// Subscribe to the live delta stream (the WS mirror feed).
@@ -327,6 +366,11 @@ impl DecoderStore {
     pub fn apply(&self, kind: &str, data: Value) {
         let policy = policy_for(kind);
         let epoch = self.epoch();
+        let ctx = if is_decode_kind(kind) {
+            self.ctx.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        } else {
+            None
+        };
         let mut g = self.guard();
         g.seq += 1;
         let seq = g.seq;
@@ -340,6 +384,7 @@ impl DecoderStore {
                     at_ms: now_ms(),
                     key: None,
                     data,
+                    ctx: ctx.clone(),
                 };
                 entry.recent.push_back(record.clone());
                 while entry.recent.len() > cap {
@@ -348,10 +393,24 @@ impl DecoderStore {
                 DeltaOp::Add { record }
             }
             Policy::Upsert {
-                key_field, track, ..
+                key_field,
+                track,
+                merge,
+                ..
             } => {
                 let key = extract_key(&data, key_field);
                 let mut data = data;
+                if merge {
+                    if let Some(Value::Object(prev)) = entry.current.get(&key).map(|r| &r.data) {
+                        let mut merged = prev.clone();
+                        if let Some(new) = data.as_object() {
+                            for (k, v) in new {
+                                merged.insert(k.clone(), v.clone());
+                            }
+                        }
+                        data = Value::Object(merged);
+                    }
+                }
                 if track {
                     // Carry the prior track forward and append this fix.
                     let prev = entry
@@ -371,6 +430,7 @@ impl DecoderStore {
                     at_ms: now_ms(),
                     key: Some(key.clone()),
                     data,
+                    ctx: ctx.clone(),
                 };
                 entry.current.insert(key, record.clone());
                 // Tables also keep a capped frame log in `recent`, so
@@ -389,6 +449,7 @@ impl DecoderStore {
                     at_ms: now_ms(),
                     key: None,
                     data,
+                    ctx: ctx.clone(),
                 };
                 entry.current.clear();
                 entry
@@ -415,6 +476,7 @@ impl DecoderStore {
                     at_ms: now_ms(),
                     key: None,
                     data: merged,
+                    ctx: ctx.clone(),
                 };
                 entry
                     .current
@@ -576,6 +638,42 @@ mod tests {
             .expect("kind present after poison recovery");
         assert_eq!(k.recent.len(), 1);
         assert_eq!(store.snapshot().seq, 1);
+    }
+
+    #[test]
+    fn ais_vessels_merge_position_and_static_reports() {
+        let s = DecoderStore::new();
+        s.apply(
+            "ais",
+            serde_json::json!({"mmsi": 366053209, "lat": 37.8, "lon": -122.3}),
+        );
+        s.apply(
+            "ais",
+            serde_json::json!({"mmsi": 366053209, "name": "MT.MITCHELL"}),
+        );
+        let k = s.snapshot_kind("ais").unwrap();
+        let v = &k.current["366053209"].data;
+        assert_eq!(v["name"], "MT.MITCHELL");
+        assert_eq!(v["lat"], 37.8, "a static report keeps the last position");
+        assert!(v["track"].is_array());
+    }
+
+    #[test]
+    fn decode_records_carry_the_rf_context_bookkeeping_does_not() {
+        let s = DecoderStore::new();
+        s.set_ctx(Some(
+            serde_json::json!({"listen_hz": 14_074_000.0, "preset": "ft8"}),
+        ));
+        s.apply("ft8", serde_json::json!({"de": "K6ABC"}));
+        s.apply("activity", serde_json::json!({"summary": "tune"}));
+        s.apply("graph", serde_json::json!({}));
+        let snap = s.snapshot();
+        assert_eq!(
+            snap.kinds["ft8"].recent[0].ctx.as_ref().unwrap()["listen_hz"],
+            14_074_000.0
+        );
+        assert!(snap.kinds["activity"].recent[0].ctx.is_none());
+        assert!(snap.kinds["graph"].current["current"].ctx.is_none());
     }
 
     #[test]

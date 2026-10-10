@@ -63,6 +63,8 @@ pub struct AisDemod {
     warned_off_rate: bool,
     input_rate_hz: f64,
     events_out: Vec<u8>,
+    /// Reassembles multi-sentence AIVDM messages and decodes them.
+    asm: crate::decode_parse::AisAssembler,
 }
 
 impl AisDemod {
@@ -78,6 +80,7 @@ impl AisDemod {
             warned_off_rate: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
             events_out: Vec::new(),
+            asm: crate::decode_parse::AisAssembler::default(),
         })
     }
 
@@ -180,7 +183,15 @@ impl Block for AisDemod {
         self.dec.push_audio(&ch_a[..n], &ch_b[..n]);
         for line in self.dec.drain_lines() {
             tracing::info!(target: "decoder::ais", "{line}");
-            push_event_json(&mut self.events_out, &serde_json::json!({ "text": line }));
+            // One record per complete message: raw sentence(s) as `text`
+            // plus mmsi / position / name / callsign. A fragment waits
+            // for its tail; a non-AIVDM line goes through raw.
+            let is_aivdm = line.starts_with("!AIVDM") || line.starts_with("!AIVDO");
+            if let Some(rec) = self.asm.push(&line) {
+                push_event_json(&mut self.events_out, &rec);
+            } else if !is_aivdm {
+                push_event_json(&mut self.events_out, &serde_json::json!({ "text": line }));
+            }
         }
 
         let mut w = Work::new();

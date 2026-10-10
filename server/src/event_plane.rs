@@ -367,6 +367,13 @@ async fn run_ingest(mut rx: LinkRx, store: Arc<DecoderStore>) {
                         continue;
                     }
                 }
+                // `epoch` is an envelope field (the record carries its own);
+                // keep it out of `data` so browser- and node-placed decodes
+                // of the same kind have the same shape.
+                let mut value = value;
+                if let Some(obj) = value.as_object_mut() {
+                    obj.remove("epoch");
+                }
                 store.apply(kind, value);
             }
             Ok(_) => {}

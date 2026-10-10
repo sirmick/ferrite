@@ -34,10 +34,17 @@ use crate::block::{
 };
 
 /// Append one decoded line to the `events` queue as a JSON record
-/// `{proto, text}` — the structured form the DecoderStore folds. Newline
-/// delimited (the `EventStore` sink splits on `\n`).
+/// `{proto, text, …parsed}` — the raw multimon line plus, when it
+/// parses, `address`/`capcode`, `function`, `format` and `message`
+/// ([`crate::decode_parse`]). Newline delimited (the `EventStore` sink
+/// splits on `\n`).
 fn push_pager_event(out: &mut Vec<u8>, proto: &str, line: &str) {
-    let rec = serde_json::json!({ "proto": proto, "text": line });
+    let mut rec = serde_json::json!({ "proto": proto, "text": line });
+    let parsed =
+        crate::decode_parse::parse_pocsag(line).or_else(|| crate::decode_parse::parse_flex(line));
+    if let (Some(serde_json::Value::Object(fields)), Some(obj)) = (parsed, rec.as_object_mut()) {
+        obj.extend(fields);
+    }
     if let Ok(mut bytes) = serde_json::to_vec(&rec) {
         out.append(&mut bytes);
         out.push(b'\n');
