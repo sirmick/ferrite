@@ -1050,8 +1050,9 @@ pub async fn load_preset(
 // ferrited owns the capture job registry + state machines (see
 // `crate::capture`); ferrite-ctl's MCP verbs are thin wrappers over
 // these. A `POST` registers a job and returns it immediately; the
-// recording runs in a background task and its status is polled via
-// `GET /api/capture/jobs[/:id]`.
+// recording runs in a background task and every status change is a
+// `jobs` record in the store (`ferrite/state/jobs/<id>` on the event
+// plane, `kinds.jobs` in `GET /api/state`).
 
 fn capture_err(e: crate::capture::CaptureError) -> AppError {
     match e {
@@ -1101,27 +1102,6 @@ pub async fn post_capture_audio(
         .await
         .map(Json)
         .map_err(capture_err)
-}
-
-/// `GET /api/capture/jobs` — every capture job this process has tracked,
-/// newest first (LRU-capped).
-pub async fn get_capture_jobs(
-    State(state): State<AppState>,
-) -> Json<Vec<crate::capture::CaptureJob>> {
-    Json(state.capture_jobs().await)
-}
-
-/// `GET /api/capture/jobs/:id` — one capture job by id; 404 when unknown.
-pub async fn get_capture_job(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<crate::capture::CaptureJob>, AppError> {
-    state.capture_job(&id).await.map(Json).ok_or_else(|| {
-        AppError::not_found(
-            "CAPTURE_JOB_NOT_FOUND",
-            format!("no capture job with id {id:?}"),
-        )
-    })
 }
 
 /// `GET /api/profile` — snapshot the active runtime [`Profile`]. Lets

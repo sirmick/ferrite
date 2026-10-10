@@ -218,7 +218,11 @@ impl Http {
         let topic = format!("ferrite/state/{kind}");
         let deadline = tokio::time::Instant::now() + timeout;
         let mut subscribed = false;
-        let mut last: Option<(String, Option<u64>)> = None;
+        // Store seqs are unique per record across every kind. A keyed
+        // upsert is published on both `<kind>` and `<kind>/<key>` (and a
+        // broker may double-forward a retained publish on a new topic),
+        // so dedup by seq — bounded, oldest evicted.
+        let mut seen: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
         loop {
             let ev = match tokio::time::timeout_at(deadline, eventloop.poll()).await {
                 Ok(Ok(ev)) => ev,
@@ -252,12 +256,15 @@ impl Http {
                         Err(_) => Value::String(String::from_utf8_lossy(&p.payload).into_owned()),
                     };
                     let seq = value.get("seq").and_then(Value::as_u64);
-                    // Belt and braces against a broker that double-forwards
-                    // (seen on brand-new topics): same topic + seq = same record.
-                    if seq.is_some() && last == Some((p.topic.clone(), seq)) {
-                        continue;
+                    if let Some(s) = seq {
+                        if seen.contains(&s) {
+                            continue;
+                        }
+                        seen.push_back(s);
+                        if seen.len() > 4096 {
+                            seen.pop_front();
+                        }
                     }
-                    last = Some((p.topic.clone(), seq));
                     let rec = EventRecord {
                         topic: p.topic.clone(),
                         retain: p.retain,
@@ -425,8 +432,8 @@ pub struct TranscribeArgs {
     /// Where transcription runs. `"node"` is **headless**: it sets the
     /// profile's audio split to `server`, pulling the whole audio chain
     /// (demod → resample → NR → transcribe) into `ferrited` so whisper.cpp
-    /// runs with no browser — read results with `recent_decodes` filtered
-    /// to `decoder::transcribe`. `"browser"` sets the split to `browser`
+    /// runs with no browser — read results with `decodes(kind="transcribe")`
+    /// or `await_events(kind="transcribe")`. `"browser"` sets the split to `browser`
     /// (in-browser whisper, needs a UI tab). Omit to leave the current
     /// split unchanged.
     #[serde(default)]
@@ -506,6 +513,32 @@ pub struct AwaitArgs {
     /// Default false: only what arrives *after* you subscribe.
     #[serde(default)]
     pub include_retained: Option<bool>,
+    /// Only records whose `record.data` matches every field here: a
+    /// scalar must be equal, an array means "any of". E.g. wait for a
+    /// capture to finish: `kind: "jobs/cap-3", include_retained: true,
+    /// filter: {"status": ["done", "failed", "interrupted"]}`; or only
+    /// APRS from one station: `kind: "aprs", filter: {"call": "WR6ABD"}`.
+    #[serde(default)]
+    pub filter: Option<serde_json::Map<String, Value>>,
+}
+
+/// Does this event-plane payload's `record.data` satisfy `filter`?
+/// Records without data (resets, expiries) never match a non-empty one.
+#[must_use]
+pub fn record_matches(value: &Value, filter: &serde_json::Map<String, Value>) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let Some(data) = value.pointer("/record/data") else {
+        return false;
+    };
+    filter.iter().all(|(k, want)| {
+        let got = data.get(k);
+        match want {
+            Value::Array(any) => got.is_some_and(|g| any.contains(g)),
+            w => got == Some(w),
+        }
+    })
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -657,15 +690,6 @@ pub struct ReplayCaptureArgs {
     /// Optional "why" note surfaced in the UI's activity transcript.
     #[serde(default)]
     pub note: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CaptureStatusArgs {
-    /// Job id from a previous `start_capture_*` reply. Omit to get a
-    /// list of every job this MCP session knows about (most recent
-    /// first), capped to ~20 entries.
-    #[serde(default)]
-    pub job_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -1018,6 +1042,7 @@ impl FerriteServer {
         let timeout = Duration::from_secs_f64(args.timeout_s.unwrap_or(30.0).clamp(0.0, 300.0));
         let since = args.since_seq.unwrap_or(0);
         let include_retained = args.include_retained.unwrap_or(false);
+        let filter = args.filter.clone().unwrap_or_default();
         let started = std::time::Instant::now();
         let mut records = Vec::new();
         let timed_out = self
@@ -1027,6 +1052,9 @@ impl FerriteServer {
                     return true;
                 }
                 if rec.seq.is_some_and(|s| s <= since) {
+                    return true;
+                }
+                if !record_matches(&rec.value, &filter) {
                     return true;
                 }
                 records.push(
@@ -1356,18 +1384,6 @@ impl FerriteServer {
             .await
     }
 
-    pub(crate) async fn capture_status_op(
-        &self,
-        args: CaptureStatusArgs,
-    ) -> Result<Value, McpError> {
-        // Poll ferrited's capture registry. One job by id, or the whole
-        // list (newest first) when `job_id` is omitted.
-        match args.job_id {
-            Some(id) => self.http.get(&format!("/api/capture/jobs/{id}")).await,
-            None => self.http.get("/api/capture/jobs").await,
-        }
-    }
-
     pub(crate) async fn start_capture_iq_op(
         &self,
         args: StartCaptureArgs,
@@ -1487,7 +1503,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Point the source at a recorded sample (from `list_captures`) so the full RX chain runs against a known signal — no SDR needed. Routes through `ModulatedFileSource`: `audio` fixtures are re-modulated onto a carrier (`modulation` fm/am/usb/lsb), `iq` captures are upmixed verbatim. kind/rate/centre/modulation default from the matching capture entry's sidecar; pass them explicitly for a raw clip. Loops by default. Triggers a source restart — follow with `start` (and `load_preset` for the matching demod), then poll `recent_decodes` / `flowdiag`. The deterministic counterpart to `select_device` + `tune` for testing decoders."
+        description = "Point the source at a recorded sample (from `list_captures`) so the full RX chain runs against a known signal — no SDR needed. Routes through `ModulatedFileSource`: `audio` fixtures are re-modulated onto a carrier (`modulation` fm/am/usb/lsb), `iq` captures are upmixed verbatim. kind/rate/centre/modulation default from the matching capture entry's sidecar; pass them explicitly for a raw clip. Loops by default. Triggers a source restart — follow with `start` (and `load_preset` for the matching demod), then `await_events` on the decoder's kind (or read `decodes` / `flowdiag`). The deterministic counterpart to `select_device` + `tune` for testing decoders."
     )]
     async fn replay_capture(
         &self,
@@ -1565,7 +1581,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Structured decoder output from the server-side DecoderStore — the single home for every event-emitting demod (APRS, ADS-B, AIS, FT8, WSPR, pager, transcribe, signals, RDS, …). With `kind` returns that kind as `{recent:[…], current:{…}}`: `recent` is a time-ordered append log (ft8/wspr/pager/transcribe/…); `current` is a keyed table (adsb by icao, aprs by call, ais by mmsi) or the single latest snapshot (signals/rds/rssi). Omit `kind` for the whole store `{seq, kinds:{…}}`. This is the same structured state the advanced UI views paint — captured server-side, so it works headless. Prefer this over scraping `recent_decodes` text for these decoders. Records carry `{seq, at_ms, key?, data}` where `data` is the decoder's JSON verbatim."
+        description = "Structured decoder output from the server-side DecoderStore — the single home for every event-emitting demod (APRS, ADS-B, AIS, FT8, WSPR, pager, transcribe, signals, RDS, …). With `kind` returns that kind as `{recent:[…], current:{…}}`: `recent` is a time-ordered append log (ft8/wspr/pager/transcribe/…); `current` is a keyed table (adsb by icao, aprs by call, ais by mmsi) or the single latest snapshot (signals/rds/rssi). Omit `kind` for the whole store `{seq, kinds:{…}}`. This is the same structured state the advanced UI views paint — captured server-side, so it works headless. Records carry `{seq, epoch, at_ms, key?, data, ctx?}`: `data` is the decoder's JSON (pager/EAS/AIS add parsed fields — address/capcode + message, SAME event + locations, mmsi + position + name — next to the raw `text`), `ctx` is where the radio was listening (`listen_hz`, `lo_hz`, `preset`). Also reads bookkeeping kinds: `jobs` (captures), `activity`, `health`. Driver/decoder warnings live in `status().health.warnings`."
     )]
     async fn decodes(
         &self,
@@ -1639,23 +1655,13 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Toggle the speech-to-text tap on a voice preset. Splices a VoiceTranscribe block before the AudioSink (`transcribe` implies `audio`). `placement: \"node\"` is **headless** — whisper.cpp runs in `ferrited`, no browser needed (sets the audio split to `server`, pulling the whole audio chain node-side); `\"browser\"` runs whisper in a connected UI tab. Either way read decodes with `recent_decodes` filtered to `decoder::transcribe`. Use a *listen* preset (`wbfm`, `nbfm`, `usb`, `lsb`, `wbam`), not a headless `*-record` preset."
+        description = "Toggle the speech-to-text tap on a voice preset. Splices a VoiceTranscribe block before the AudioSink (`transcribe` implies `audio`). `placement: \"node\"` is **headless** — whisper.cpp runs in `ferrited`, no browser needed (sets the audio split to `server`, pulling the whole audio chain node-side); `\"browser\"` runs whisper in a connected UI tab. Either way read the transcript with `decodes(kind=\"transcribe\")` or wait for lines with `await_events(kind=\"transcribe\")`. Use a *listen* preset (`wbfm`, `nbfm`, `usb`, `lsb`, `wbam`), not a headless `*-record` preset."
     )]
     async fn transcribe(
         &self,
         Parameters(args): Parameters<TranscribeArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_json(&self.transcribe_op(args).await?)
-    }
-
-    #[tool(
-        description = "Recent decoder-log entries — the AI's 'did any decode land?' check. `category` filters on a tracing target prefix (defaults to `decoder` = everything decoder-side); examples: `decoder::rtl_433`, `decoder::pocsag`, `decoder::transcribe`, `decoder::ft8`, `decoder::ais`. **For incremental polling pass `since_ms` = the previous response's `now` field** to get only what's new (the response always echoes a `now` watermark that advances even through quiet stretches). One-shot: `lookback_secs` is a relative window; `limit` is `tail` (newest N). The decoder ring retains ~4096 entries, so without `since_ms`/`lookback_secs`/`limit` you get the whole buffer — set one of them."
-    )]
-    async fn recent_decodes(
-        &self,
-        Parameters(args): Parameters<RecentDecodesArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        ok_json(&self.recent_decodes_op(args).await?)
     }
 
     #[tool(
@@ -1676,7 +1682,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Start an async IQ capture — both shapes are live tees, so the operator's UI session keeps running. Default (`wideband=false`) tees the post-channelizer cf32 stream (block `chan`): the narrow slice the demod sees. `wideband=true` tees the raw full-span cf32 straight off the SDR (block `src`, before DC block / channelizer) at the live source rate — 8 bytes × rate per second of disk (16 MB/s at 2 MS/s); the cap is exact in samples. Optional `freq_hz` retunes first (visible to the operator, like a `tune`). `sample_rate_hz`/`bandwidth_hz`/`gain_db` are NOT applied by the wideband tee — change the live source with `set_block_param(block='src', …)` first if you need a different rate. **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar JSON (`sample_rate_hz`, `center_freq_hz`, `samples_written`). Defaults `out` to `/tmp/ferrite-captures/iq-<unix_ms>-<freq>mhz.cf32`. Wideband needs a hardware (SoapySDR) source; against a software/test source it falls back to the old preset-swap recording only with `force:true` + `freq_hz` (session restored afterwards). Start and completion both appear on the operator's AI activity transcript."
+        description = "Start an async IQ capture — both shapes are live tees, so the operator's UI session keeps running. Default (`wideband=false`) tees the post-channelizer cf32 stream (block `chan`): the narrow slice the demod sees. `wideband=true` tees the raw full-span cf32 straight off the SDR (block `src`, before DC block / channelizer) at the live source rate — 8 bytes × rate per second of disk (16 MB/s at 2 MS/s); the cap is exact in samples. Optional `freq_hz` retunes first (visible to the operator, like a `tune`). `sample_rate_hz`/`bandwidth_hz`/`gain_db` are NOT applied by the wideband tee — change the live source with `set_block_param(block='src', …)` first if you need a different rate. **Returns immediately** with a `job_id`; wait for it with `await_events(kind=\"jobs/<job_id>\", include_retained=true, filter={\"status\":[\"done\",\"failed\",\"interrupted\"]})` — the record carries `output_path` and the sidecar JSON (`sample_rate_hz`, `center_freq_hz`, `samples_written`). Defaults `out` to `/tmp/ferrite-captures/iq-<unix_ms>-<freq>mhz.cf32`. Wideband needs a hardware (SoapySDR) source; against a software/test source it falls back to the old preset-swap recording only with `force:true` + `freq_hz` (session restored afterwards). Start and completion both appear on the operator's AI activity transcript."
     )]
     async fn start_capture_iq(
         &self,
@@ -1686,7 +1692,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Start an async FFT-byte-stream capture against the post-`logmag` u8 spectrum (block `logmag`). Non-disruptive — the UI's waterfall keeps painting while the byte stream side-tees to `output_path`. **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for completion + sidecar. Same live args / defaults as `start_capture_iq` (no wideband) but writes raw `u8` frame bytes (`bin`) plus a sidecar JSON the AI's `find_fft_peaks` / `fft_to_png` python wrappers consume."
+        description = "Start an async FFT-byte-stream capture against the post-`logmag` u8 spectrum (block `logmag`). Non-disruptive — the UI's waterfall keeps painting while the byte stream side-tees to `output_path`. **Returns immediately** with a `job_id`; wait for it with `await_events(kind=\"jobs/<job_id>\", include_retained=true, filter={\"status\":[\"done\",\"failed\",\"interrupted\"]})` — the record carries `output_path` and the sidecar. Same live args / defaults as `start_capture_iq` (no wideband) but writes raw `u8` frame bytes (`bin`) plus a sidecar JSON the AI's `find_fft_peaks` / `fft_to_png` python wrappers consume."
     )]
     async fn start_capture_fft(
         &self,
@@ -1696,23 +1702,13 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Record what the operator is hearing to a 48 kHz mono WAV — a live tee of the node→browser audio bridge, so the UI session keeps running untouched (no preset swap). Omit `freq_hz` to record the current session as-is; give it to retune first (the operator's waterfall + audio follow, same as a `tune`). **Returns immediately** with a `job_id`; poll `capture_status(job_id)` for `status=done` and the sidecar (`sample_rate_hz` 48000, `samples_written`, `source_rate_hz`). `duration_s` defaults to 10. Defaults `out` to `/tmp/ferrite-captures/audio-<unix_ms>-<freq>mhz.wav`. Only when the running preset has no browser audio at all (a headless `*-record` graph) does it fall back to the old preset-swap recording — that path needs `freq_hz`, refuses against a software source unless `force:true`, and restores the session when done. Start and completion both appear on the operator's AI activity transcript."
+        description = "Record what the operator is hearing to a 48 kHz mono WAV — a live tee of the node→browser audio bridge, so the UI session keeps running untouched (no preset swap). Omit `freq_hz` to record the current session as-is; give it to retune first (the operator's waterfall + audio follow, same as a `tune`). **Returns immediately** with a `job_id`; wait for it with `await_events(kind=\"jobs/<job_id>\", include_retained=true, filter={\"status\":[\"done\",\"failed\",\"interrupted\"]})` — the record carries `output_path` and the sidecar (`sample_rate_hz` 48000, `samples_written`, `source_rate_hz`). `duration_s` defaults to 10. Defaults `out` to `/tmp/ferrite-captures/audio-<unix_ms>-<freq>mhz.wav`. Only when the running preset has no browser audio at all (a headless `*-record` graph) does it fall back to the old preset-swap recording — that path needs `freq_hz`, refuses against a software source unless `force:true`, and restores the session when done. Start and completion both appear on the operator's AI activity transcript."
     )]
     async fn start_capture_audio(
         &self,
         Parameters(args): Parameters<StartCaptureAudioArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_json(&self.start_capture_audio_op(args).await?)
-    }
-
-    #[tool(
-        description = "Poll one async capture job by `job_id`, or list every job this MCP session has tracked (most recent first, capped to ~20 entries) when `job_id` is omitted. The reply's `status` is `running` (still recording), `done` (file + sidecar ready on disk; `sidecar` field carries the JSON), or `failed` (with an `error` string). Cheap; safe to poll once a second while a capture is in flight."
-    )]
-    async fn capture_status(
-        &self,
-        Parameters(args): Parameters<CaptureStatusArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        ok_json(&self.capture_status_op(args).await?)
     }
 
     #[tool(
@@ -1741,9 +1737,11 @@ impl ServerHandler for FerriteServer {
              gain/bw/rate), `set_block_param` for everything else, `flowdiag` + \
              `source_readback` to confirm samples are flowing and a gain/AGC change landed, \
              `decodes` to read structured decoder state and `await_events` to block until the \
-             next record of a kind lands (the event plane — no polling), `recent_decodes` for \
-             raw decoder log text, `start_capture_{iq,fft,audio}` + \
-             `capture_status` for recordings, `list_captures` + `replay_capture` to drive the \
+             next record of a kind lands (the event plane — no polling; `filter` narrows to \
+             matching records), `status().health` for whether you're getting what you asked \
+             for (radio liveness, rate/LO mismatches, decoder warnings), \
+             `start_capture_{iq,fft,audio}` + `await_events(kind=\"jobs/<id>\")` for \
+             recordings, `list_captures` + `replay_capture` to drive the \
              full RX chain from a recorded fixture (deterministic testing, no SDR), \
              `view_snapshot` / `view_state` / `set_view_state` to see and steer what the \
              operator is looking at. Source: tools/ferrite-ctl/src/mcp.rs; behaviour matches \

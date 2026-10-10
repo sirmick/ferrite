@@ -3,7 +3,7 @@
 //! ferrited owns the capture job registry and the two capture state
 //! machines. `POST /api/capture/{iq,fft,audio}` register a job, return
 //! it immediately, and spawn a background task that drives the running
-//! pipeline; `GET /api/capture/jobs[/:id]` polls status. ferrite-ctl's
+//! pipeline; every status change is a `jobs` store record. ferrite-ctl's
 //! MCP verbs are thin wrappers over these endpoints.
 //!
 //! This placement is deliberate. The orchestration used to live in
@@ -256,11 +256,6 @@ impl CaptureRegistry {
             }
             self.upsert(j).await;
         }
-    }
-
-    /// Every known job, newest first (already in insert order).
-    pub async fn snapshot(&self) -> Vec<CaptureJob> {
-        self.jobs.read().await.clone()
     }
 
     /// One job by id.
@@ -583,12 +578,9 @@ async fn run_preset_capture(
 // ─── orchestration entry points (called by routes) ──────────────────────
 
 impl AppState {
-    /// Every known capture job, newest first.
-    pub async fn capture_jobs(&self) -> Vec<CaptureJob> {
-        self.captures().snapshot().await
-    }
-
-    /// One capture job by id.
+    /// One capture job by id (harness accessor — clients read the
+    /// `jobs` kind from the store / event plane).
+    #[allow(dead_code)]
     pub async fn capture_job(&self, job_id: &str) -> Option<CaptureJob> {
         self.captures().get(job_id).await
     }

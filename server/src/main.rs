@@ -491,8 +491,6 @@ async fn main() -> Result<()> {
         .route("/api/capture/iq", post(routes::post_capture_iq))
         .route("/api/capture/fft", post(routes::post_capture_fft))
         .route("/api/capture/audio", post(routes::post_capture_audio))
-        .route("/api/capture/jobs", get(routes::get_capture_jobs))
-        .route("/api/capture/jobs/:id", get(routes::get_capture_job))
         .route("/api/preset", post(routes::load_preset))
         .route(
             "/api/profile",
