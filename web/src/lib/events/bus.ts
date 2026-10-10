@@ -38,6 +38,7 @@ export interface MqttLike {
   ): unknown;
   subscribe(filter: string): unknown;
   unsubscribe(filter: string): unknown;
+  publish(topic: string, payload: string): unknown;
   end(force?: boolean): unknown;
 }
 
@@ -146,6 +147,16 @@ export class EventBus {
         }
       }
     };
+  }
+
+  /** Publish `payload` on `topic` (QoS 0, not retained). Returns false
+   *  when there is no live connection — callers fall back or drop; the
+   *  bus never queues, so a disconnected tab can't replay stale events
+   *  into the store minutes later. */
+  publish(topic: string, payload: string): boolean {
+    if (!this._connected || !this.client) return false;
+    this.client.publish(topic, payload);
+    return true;
   }
 
   /** Fire `cb` on every (re)connect. If already connected, fires now. */

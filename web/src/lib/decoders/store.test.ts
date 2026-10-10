@@ -29,6 +29,9 @@ class FakeClient implements MqttLike {
   unsubscribe(): unknown {
     return this;
   }
+  publish(): unknown {
+    return this;
+  }
   end(): unknown {
     return this;
   }

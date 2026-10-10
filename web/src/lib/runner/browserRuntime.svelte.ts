@@ -31,6 +31,8 @@ import { nrBundle } from '$lib/presets/nrPresets';
 import { transcript } from '$lib/transcribe/store.svelte';
 import type { FlowgraphDoc } from '$lib/flowgraph';
 
+import { publishTranscriptSegment } from '$lib/events/ingest';
+
 import { FlowgraphRunner } from './runnerClient';
 
 type AudioState = 'unavailable' | 'suspended' | 'running';
@@ -593,19 +595,30 @@ class BrowserRuntime {
   private onTranscribeMessage(msg: { type: string; [k: string]: unknown }): void {
     if (msg.type === 'segment') {
       const vfoHz = this.vfoHzProvider?.() ?? null;
-      transcript.push({
+      const seg = {
         atMs: msg.atMs as number,
         vfoHz,
         t0: msg.t0 as number,
         t1: msg.t1 as number,
         text: msg.text as string,
-        tokens: (msg.tokens as { text: string; p: number }[]) ?? [],
         confidence: msg.confidence as number,
         noSpeechProb: msg.noSpeechProb as number,
         cont: msg.cont as boolean,
         gapMs: msg.gapMs as number,
         speakerTurn: msg.speakerTurn === true,
-      });
+      };
+      // One path for every transcript: publish the segment as a
+      // `transcribe` record and let it come back through the store
+      // mirror (TranscriptView ingests the kind), the same way a
+      // node-side sherpa segment arrives — so other tabs, the CLI and
+      // the AI hear in-browser transcription too. Only when the bus is
+      // down does the segment stay tab-local.
+      if (!publishTranscriptSegment(seg, this.epoch)) {
+        transcript.push({
+          ...seg,
+          tokens: (msg.tokens as { text: string; p: number }[]) ?? [],
+        });
+      }
       // The recognised text itself → decoder log (server files
       // `[transcribe]`-prefixed client lines under `decoder::transcribe`)
       // so the embedded AI / `ferrite-ctl decoder recent` can read the

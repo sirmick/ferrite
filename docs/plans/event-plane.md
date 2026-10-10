@@ -157,6 +157,24 @@ the payload (`expires_at_ms`), not v5 properties (WS is v4).
 - Runner worker publishes browser-side decoder events + transcript via its
   own MQTT.js connection (fixes #3). Sidecar sessions publish via ingest too.
 
+**Status (2026-10-10): shipped** except the sidecar half:
+- Server side landed with Phase 2 (`run_ingest` in `event_plane.rs`).
+- Browser: `web/src/lib/events/ingest.ts`. The main thread (not the
+  worker) publishes — the worker already hands decoder lines to the page
+  (`onDecodedEvents`) and transcript segments arrive on the main thread
+  too, so one bus connection suffices. Decoder lines → `ferrite/ingest/
+  <ui-sink kind>` stamped with `pipeline.graphEpoch`; in-browser
+  transcription → `ferrite/ingest/transcribe` as the server's camelCase
+  record (`source: "browser"`), and the segment is *not* pushed locally —
+  it returns through the mirror like a node-side segment. Bus down →
+  transcript stays tab-local, decoder lines are dropped with one warning.
+  The dead in-tab loopback (`FrameClient.injectLocal`) is gone.
+- Browser-placed decoder kinds are never reset on a preset swap (only a
+  node-side `EventStore` resets its kind on attach) — the ingest fold
+  could reset on epoch change; left for when it bites.
+- Sidecar (`ferrite-ai`) publishing its conversation via ingest → `ai/
+  <session>` goes with the chat-inject hub retirement (open).
+
 ### Phase 4 — MCP/CLI
 - `state(kind, since)` and `await(kind, since, timeout, max)` tools over the
   in-process link (`recv_deadline`); CLI `tail` = the same subscription.

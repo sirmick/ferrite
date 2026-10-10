@@ -14,6 +14,7 @@ class FakeClient implements MqttLike {
   connected = false;
   readonly subscribed: string[] = [];
   readonly unsubscribed: string[] = [];
+  readonly published: Array<[string, string]> = [];
   ended = 0;
   private readonly h: Handlers = { connect: [], close: [], message: [] };
 
@@ -33,6 +34,10 @@ class FakeClient implements MqttLike {
   }
   unsubscribe(filter: string): unknown {
     this.unsubscribed.push(filter);
+    return this;
+  }
+  publish(topic: string, payload: string): unknown {
+    this.published.push([topic, payload]);
     return this;
   }
   end(): unknown {
