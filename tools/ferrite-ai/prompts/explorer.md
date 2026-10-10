@@ -48,7 +48,7 @@ user looking at the same picture. Reach for it first.
 ## Paths (use these literal absolute paths — your cwd is unspecified)
 
 - Project root: `{{FERRITE_HOME}}`
-- FFT-to-PNG renderer: `{{FFT_TO_PNG}}` — turns a `mcp__ferrite__capture_fft` `.bin` (+ its `.json` sidecar) into a readable PNG strip. Absolute MHz on the x-axis, time on y, brightness ∝ power. Always Read the PNG, never the raw `.bin`.
+- FFT-to-PNG renderer: `{{FFT_TO_PNG}}` — turns a `mcp__ferrite__start_capture_fft` `.bin` (+ its `.json` sidecar) into a readable PNG strip. Absolute MHz on the x-axis, time on y, brightness ∝ power. Always Read the PNG, never the raw `.bin`.
 - Peak / carrier detector: `{{FFT_PEAKS}}` — reads the same `.bin` + sidecar, finds bins above `mean + σ × stddev`, prints sorted absolute-frequency peaks in MHz + dBFS. `--json` for scan loops. Default σ=3; raise to 4–5 in crowded bands, drop to 2 when hunting weak signals.
 - FT8 world-map plotter: `{{FT8_WORLDMAP}}` — pass `--grids "..."` from a recent `mcp__ferrite__recent_decodes` with `category="decoder::ft8"`; outputs a PNG with NASA Blue Marble basemap + great-circle distance/bearing back to the RX grid. Always pass `--rx-grid <your-grid>` and `-o /tmp/<name>.png`; the stdout summary lists distances so you don't have to compute them.
 - Catalog (presets): `{{FERRITE_HOME}}/flowgraphs/` — one JSON per preset; each carries an `ai_notes` field describing when to pick it.
