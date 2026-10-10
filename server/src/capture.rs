@@ -181,6 +181,30 @@ impl CaptureRegistry {
             j.status = status;
             j.finished_at = Some(now_ms());
             j.sidecar = sidecar;
+            // Close the loop on the operator's AI transcript. The
+            // middleware already logged the *start* (`capture-fft: …`)
+            // under `ai::activity`; without this line the UI never
+            // learns whether the recording landed or where. Same target
+            // so it threads into the same panel — no jobs view needed.
+            let kind = format!("{:?}", j.kind).to_lowercase();
+            match &j.status {
+                JobStatus::Done => tracing::info!(
+                    target: "ai::activity",
+                    command = format!("capture-{kind}"),
+                    job_id = %j.job_id,
+                    path = %j.output_path,
+                    "capture-{kind} done ({:.1} s) → {}",
+                    j.duration_s,
+                    j.output_path,
+                ),
+                JobStatus::Failed { error } => tracing::warn!(
+                    target: "ai::activity",
+                    command = format!("capture-{kind}"),
+                    job_id = %j.job_id,
+                    "capture-{kind} failed: {error}",
+                ),
+                JobStatus::Running => {}
+            }
             self.upsert(j).await;
         }
     }
@@ -416,7 +440,12 @@ async fn run_live_capture(
 
 /// Preset-swap (`Audio`, wideband `Iq`): load a recording preset, apply
 /// the live-source-derived capture source + the sink params, start,
-/// sleep, stop. Disruptive — clobbers the live session.
+/// sleep, stop — then put the operator's session back. The swap is
+/// visible in the UI for the duration (waterfall + audio pause on the
+/// recording preset) but it is a *transaction*: preset, source and
+/// running state are restored whether the recording succeeded or not,
+/// so the AI never leaves the operator parked on a headless record
+/// graph with a stopped pipeline.
 #[allow(clippy::too_many_arguments)]
 async fn run_preset_capture(
     state: AppState,
@@ -429,6 +458,13 @@ async fn run_preset_capture(
     duration_s: f64,
     out_path: PathBuf,
 ) {
+    // Snapshot the session before touching anything. The doc, not the
+    // slug: a variant preset's loadable name isn't recoverable from the
+    // doc, and `patch_flowgraph` round-trips the doc as-is.
+    let prev_doc = state.get_flowgraph().await;
+    let prev_source = state.get_source().await;
+    let was_running = state.status().await == crate::app_state::PipelineStatus::Running;
+
     let result: Result<(), String> = async {
         state
             .load_preset_by_name(&preset)
@@ -451,6 +487,31 @@ async fn run_preset_capture(
         Ok(())
     }
     .await;
+
+    // Restore, best-effort, in the same order a human would: graph,
+    // then source, then run state. A restore failure is reported on the
+    // activity log but doesn't mask the capture's own result.
+    let restore: Result<(), String> = async {
+        state
+            .patch_flowgraph(prev_doc)
+            .await
+            .map_err(|e| format!("restore preset: {e:#}"))?;
+        state
+            .patch_source(prev_source)
+            .await
+            .map_err(|e| format!("restore source: {e:#}"))?;
+        if was_running {
+            state
+                .start()
+                .await
+                .map_err(|e| format!("restart pipeline: {e:#}"))?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(e) = restore {
+        tracing::warn!(target: "ai::activity", job_id = %job_id, "capture session restore failed: {e}");
+    }
     let sidecar = if result.is_ok() {
         read_sidecar(&out_path).await
     } else {
