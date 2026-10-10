@@ -230,10 +230,47 @@ pub fn write_web_ladders() -> Result<()> {
 /// case-insensitive; use [`driver_key`] when you need the normalized name.
 #[must_use]
 pub fn driver_arg(args: &str) -> Option<&str> {
-    args.split(',')
-        .filter_map(|p| p.trim().strip_prefix("driver="))
-        .map(str::trim)
-        .find(|v| !v.is_empty())
+    let part = |key: &str| {
+        args.split(',')
+            .filter_map(|p| p.trim().strip_prefix(key))
+            .map(str::trim)
+            .find(|v| !v.is_empty())
+    };
+    let driver = part("driver=")?;
+    // SoapyRemote: `driver=remote` is the transport. Its enumerate
+    // results carry the radio's own key as `remote:driver=<name>` —
+    // that is what every per-driver table here is about (dodge ratio,
+    // DC block, bandwidth ladder), so prefer it when present. Without
+    // the hint (hand-typed `driver=remote,remote=<host>`) callers must
+    // probe the device, whose `driver_key` is proxied from the remote.
+    if driver.eq_ignore_ascii_case("remote") {
+        if let Some(inner) = part("remote:driver=") {
+            return Some(inner);
+        }
+    }
+    Some(driver)
+}
+
+/// For a SoapyRemote args string that lacks the `remote:driver=` hint
+/// (hand-typed `driver=remote,remote=<host>`), return the args with the
+/// probed radio's `driver_key` stamped in, so every args-keyed policy
+/// (DC-blocker default at compose, dodge ratio, notch/BW ladders) sees
+/// the real radio instead of the transport. `None` when nothing needs
+/// stamping (not remote, or the hint is already present).
+#[must_use]
+pub fn with_remote_driver_hint(args: &str, probed_driver_key: &str) -> Option<String> {
+    let literal = driver_arg(args)?;
+    if !literal.eq_ignore_ascii_case("remote") {
+        return None; // the hint was present (driver_arg unwrapped it) or not remote
+    }
+    let key = probed_driver_key.trim().to_ascii_lowercase();
+    if key.is_empty() || key == "remote" {
+        return None;
+    }
+    Some(format!(
+        "{},remote:driver={key}",
+        args.trim().trim_end_matches(',')
+    ))
 }
 
 /// Normalized (lowercased) driver short name from a Soapy args string —
@@ -283,7 +320,10 @@ pub fn tune_offset_ratio_for(driver_key: &str) -> f64 {
 /// **off** there. Keyed on the lowercased Soapy driver short name.
 #[must_use]
 pub fn dc_block_default_enabled(driver_key: &str) -> bool {
-    !matches!(driver_key, "sdrplay")
+    // Case-insensitive like every other table: a probed `driver_key`
+    // arrives as the module spells it (`SDRplay` via SoapyRemote's
+    // proxy, `sdrplay` from the local module).
+    !driver_key.eq_ignore_ascii_case("sdrplay")
 }
 
 /// SDRplay hardware broadcast-notch passbands (Hz). The RF notch covers the
@@ -433,6 +473,27 @@ mod tests {
         assert_eq!(driver_arg("driver=hackrf"), Some("hackrf"));
         assert_eq!(driver_arg("driver=hackrf,serial=abc123"), Some("hackrf"));
         assert_eq!(driver_arg("serial=abc123,driver=sdrplay"), Some("sdrplay"));
+        // SoapyRemote: the radio's key rides along as `remote:driver=`.
+        assert_eq!(
+            driver_arg("driver=remote,remote=tcp://bigear:55132,remote:driver=sdrplay"),
+            Some("sdrplay")
+        );
+        assert_eq!(
+            driver_key("driver=remote,remote=bigear,remote:driver=SDRplay"),
+            "sdrplay"
+        );
+        // No hint → `remote` is all we know (callers must probe).
+        assert_eq!(driver_arg("driver=remote,remote=bigear"), Some("remote"));
+        // …and the probe result gets stamped in once, lowercased.
+        let stamped = with_remote_driver_hint("driver=remote,remote=bigear", "SDRplay").unwrap();
+        assert_eq!(stamped, "driver=remote,remote=bigear,remote:driver=sdrplay");
+        assert_eq!(driver_key(&stamped), "sdrplay");
+        assert_eq!(with_remote_driver_hint(&stamped, "SDRplay"), None);
+        assert_eq!(with_remote_driver_hint("driver=sdrplay", "SDRplay"), None);
+        assert_eq!(
+            with_remote_driver_hint("driver=remote,remote=bigear", ""),
+            None
+        );
         assert_eq!(driver_arg(" driver=rtlsdr "), Some("rtlsdr"));
         assert_eq!(driver_arg("serial=abc123"), None);
         assert_eq!(driver_arg(""), None);
@@ -464,6 +525,7 @@ mod tests {
         assert!(dc_block_default_enabled("rtlsdr"));
         assert!(dc_block_default_enabled("hackrf"));
         assert!(!dc_block_default_enabled("sdrplay"));
+        assert!(!dc_block_default_enabled("SDRplay")); // as proxied by SoapyRemote
     }
 
     #[test]

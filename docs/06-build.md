@@ -93,6 +93,30 @@ The system distro packages (`libsoapysdr-dev`, `soapysdr-module-rtlsdr`)
 also work, but the local prefix is the path the project actually develops
 against and what gets driven by the daily test loop.
 
+### Radio on another box (SoapyRemote)
+
+The prefix also builds SoapyRemote's client module, so `ferrited` can open
+a radio hosted elsewhere as `driver=remote,remote=<host>` — the USB and
+the vendor driver stay next to the antenna, only IQ crosses the LAN
+(~7 MB/s at 2 MS/s). Preferred over USB-over-IP (VirtualHere, usbip),
+which would put the wedge-prone `sdrplay_apiService` behind a TCP hop.
+
+On the radio host (Debian/Ubuntu, passwordless sudo):
+
+```bash
+scripts/sdrplay-api-install.sh SDRplay_RSP_API-Linux-3.15.2.run  # unattended vendor install
+scripts/soapy-remote-host.sh                                     # source-build + systemd unit
+```
+
+The second script source-builds SoapySDR + SoapySDRPlay3 + SoapyRemote
+into `/usr/local` (same upstreams as the local prefix, so both sides can
+be patched in lockstep) and enables `soapy-remote.service`
+(`SoapySDRServer --bind=0.0.0.0:55132`, ordered after `sdrplay.service`).
+`--update` refetches upstream and rebuilds. The daemon stamps the probed
+radio into the args (`remote:driver=sdrplay`) so per-driver policy — DC
+blocker default, LO dodge, notch and bandwidth ladders — keys on the real
+radio rather than the `remote` transport.
+
 ## Cross-origin isolation (COOP/COEP)
 
 Required for `SharedArrayBuffer`, which is what carries audio between the
@@ -150,7 +174,14 @@ HTML response and on every asset.
 **`SDRplay device not found`** — the SDRplay `sdrplay_apiService` daemon
 isn't running. `systemctl status sdrplay`. The vendor `.run` installer
 sets up the unit; it must be active before `SoapySDRUtil --find` shows
-the device.
+the device. Prefer `scripts/sdrplay-api-install.sh` over the vendor's
+interactive `install_lib.sh` — its y/n loops spin forever on piped stdin
+(never feed it `yes`; it will fill the disk with trace output).
+
+**Remote radio missing** — on the radio host: `systemctl status sdrplay
+soapy-remote`; recovery is `sudo systemctl restart sdrplay soapy-remote`
+there. `SoapySDRServer` logs an avahi error at start when no
+`avahi-daemon` runs — harmless, ferrite addresses it by host.
 
 **`wasm-pack` errors about `rust-lld`** — install `lld`
 (`sudo apt install lld`) or `rustup component add llvm-tools-preview`.

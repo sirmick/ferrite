@@ -767,6 +767,17 @@ impl AppState {
                 return;
             }
         };
+        // SoapyRemote: `driver=remote` names the transport. Stamp the
+        // probed radio's key into the args (`remote:driver=sdrplay`) so
+        // the compose-time policies that only see the args string —
+        // `inject_dc_block`'s default, the dodge ratio fast path — key
+        // on the real radio. Idempotent; a no-op for local drivers.
+        if let Some(stamped) = ferrite_sdr_tables::with_remote_driver_hint(&args, &caps.driver_key)
+        {
+            if let Some(p) = next.params.as_object_mut() {
+                p.insert("args".into(), serde_json::Value::String(stamped));
+            }
+        }
         // Pure decision logic (exhaustively unit-tested in `source_policy`).
         crate::source_policy::apply(current, next, &caps);
     }
@@ -1036,7 +1047,15 @@ impl AppState {
         else {
             return 0.0;
         };
-        if let Some(driver) = ferrite_sdr_tables::driver_arg(args) {
+        // Fast path on the literal `driver=` — except `remote`, which is
+        // SoapyRemote's transport, not the radio. `driver_arg` already
+        // unwraps a `remote:driver=` hint when enumerate supplied one;
+        // a hand-typed `driver=remote,remote=<host>` has none, so fall
+        // through to the probe, whose `driver_key` is proxied from the
+        // real device (e.g. `sdrplay`).
+        if let Some(driver) =
+            ferrite_sdr_tables::driver_arg(args).filter(|d| !d.eq_ignore_ascii_case("remote"))
+        {
             return ferrite_sdr_tables::tune_offset_ratio_for(driver);
         }
         match self.inner.device_cache.ensure_args(args).await {
