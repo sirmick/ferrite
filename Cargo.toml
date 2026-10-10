@@ -31,6 +31,10 @@ unsafe_op_in_unsafe_fn = "warn"
 
 [workspace.lints.clippy]
 pedantic          = { level = "warn", priority = -1 }
+# A `debug_assert!(self.write(..) == n)` compiles the *write* away in
+# release builds. Bit us in `SpscRing::write_overwrite` (every release
+# SoapySource delivery was dropped while debug tests stayed green).
+debug_assert_with_mut_call = "warn"
 module_name_repetitions = "allow"
 missing_errors_doc     = "allow"
 missing_panics_doc     = "allow"
