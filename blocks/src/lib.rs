@@ -144,7 +144,7 @@ pub use morse_audio_source::{MorseAudioSource, MorseAudioSourceParams};
 pub use packet::{PacketDemod, PacketDemodParams};
 #[cfg(feature = "multimon")]
 pub use pager::{PagerDemod, PagerDemodParams};
-pub use rds_demod::{RdsDemod, RdsDemodParams};
+pub use rds_demod::{RdsDemod, RdsDemodParams, RdsDiag};
 pub use real_resamp::{RealF32Resamp, RealF32ResampParams};
 pub use render::{collapse_row_to_columns, compute_spectrum_stats, update_max_hold, SpectrumStats};
 pub use rssi_probe::{RssiProbe, RssiProbeParams};

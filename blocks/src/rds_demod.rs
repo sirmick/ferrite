@@ -196,6 +196,25 @@ pub struct RdsDemod {
     events_out: Vec<u8>,
 }
 
+/// Decoder health counters — diagnostics only (measurement harnesses,
+/// tests). Not part of the event output.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RdsDiag {
+    /// Blocks that passed CRC / offset check while locked.
+    pub blocks_ok: u64,
+    /// Complete groups (A + B + D seen, parsed on D).
+    pub groups: u64,
+    /// Locked → Searching transitions (block-sync losses).
+    pub sync_losses: u64,
+    /// Last decoded PI / PTY.
+    pub pi: Option<u16>,
+    pub pty: Option<u8>,
+    /// PS buffer (raw, may be partially filled).
+    pub ps: String,
+    /// RadioText buffer from 2A/2B groups (raw, may be partial).
+    pub rt: String,
+}
+
 impl RdsDemod {
     pub fn new(params: RdsDemodParams) -> Result<Self> {
         if !(params.sample_rate_hz.is_finite() && params.sample_rate_hz >= 128_000.0) {
@@ -269,6 +288,32 @@ impl RdsDemod {
     #[must_use]
     pub const fn q_power(&self) -> f32 {
         self.q_power
+    }
+
+    /// Snapshot of decoder health counters + the last-decoded fields
+    /// (incl. RadioText, which is parsed but not yet an event).
+    #[must_use]
+    pub fn diag(&self) -> RdsDiag {
+        let printable = |b: &[u8]| -> String {
+            b.iter()
+                .map(|&c| {
+                    if (0x20..=0x7E).contains(&c) {
+                        c as char
+                    } else {
+                        ' '
+                    }
+                })
+                .collect()
+        };
+        RdsDiag {
+            blocks_ok: self.block_sync.blocks_ok,
+            groups: self.parser.groups,
+            sync_losses: self.block_sync.sync_losses,
+            pi: self.parser.pi,
+            pty: self.parser.pty,
+            ps: printable(&self.parser.ps_buf),
+            rt: printable(&self.parser.rt_buf),
+        }
     }
 
     /// Integer decimation factor from MPX rate to the output data rate.
@@ -709,6 +754,9 @@ struct BlockSync {
     /// 26-bit rolling window of most recent bits.
     window: u32,
     state: SyncState,
+    /// Diagnostics: CRC-good blocks emitted / Locked→Searching drops.
+    blocks_ok: u64,
+    sync_losses: u64,
 }
 
 impl BlockSync {
@@ -719,6 +767,8 @@ impl BlockSync {
         Self {
             window: 0,
             state: SyncState::Searching,
+            blocks_ok: 0,
+            sync_losses: 0,
         }
     }
 
@@ -752,6 +802,7 @@ impl BlockSync {
                         bits_until_boundary: 26,
                         consecutive_bad: 0,
                     };
+                    self.blocks_ok += 1;
                     return Some(RdsBlock {
                         offset: off,
                         data: ((self.window >> 10) & 0xFFFF) as u16,
@@ -781,6 +832,7 @@ impl BlockSync {
                         bits_until_boundary: 26,
                         consecutive_bad: 0,
                     };
+                    self.blocks_ok += 1;
                     return Some(RdsBlock {
                         offset: off,
                         data: ((self.window >> 10) & 0xFFFF) as u16,
@@ -789,6 +841,7 @@ impl BlockSync {
                 let bad = consecutive_bad + 1;
                 if bad >= Self::UNLOCK_THRESHOLD {
                     self.state = SyncState::Searching;
+                    self.sync_losses += 1;
                 } else {
                     self.state = SyncState::Locked {
                         bits_until_boundary: 26,
@@ -915,6 +968,11 @@ struct GroupParser {
     ps_seen_segments: u8,
     /// Last fully-sent PS snapshot — emits only when content changes.
     last_emitted_ps: Option<[u8; 8]>,
+    /// RadioText (2A: 64 chars, 2B: 32) — parsed for diagnostics only,
+    /// not yet surfaced as an event.
+    rt_buf: [u8; 64],
+    /// Diagnostics: complete groups parsed.
+    groups: u64,
 }
 
 impl GroupParser {
@@ -928,6 +986,8 @@ impl GroupParser {
             ps_buf: [b' '; 8],
             ps_seen_segments: 0,
             last_emitted_ps: None,
+            rt_buf: [b' '; 64],
+            groups: 0,
         }
     }
 
@@ -955,10 +1015,14 @@ impl GroupParser {
             return None;
         };
         let d = self.slots[3]?;
-        // Parsed but not yet surfaced — block C and the B0 variant bit
-        // are what RT / AF / CT group decoding will need once those
-        // group types are implemented.
-        let _c_or_cprime = self.slots[2];
+        // Consume the group: a later D must not pair with this group's
+        // (stale) B if the next A/B are lost — that would write PS
+        // characters into the wrong segment.
+        self.slots = [None; 4];
+        self.groups += 1;
+        // Block C feeds RT (2A) below; AF / CT group decoding will need
+        // it too once those group types are implemented.
+        let c_or_cprime = self.slots[2];
 
         let mut update = GroupUpdate::empty();
 
@@ -970,7 +1034,7 @@ impl GroupParser {
 
         // Block B parse.
         let group_type_code = (b >> 12) & 0x0F;
-        let _variant_b = (b >> 11) & 0x01 == 1;
+        let variant_b = (b >> 11) & 0x01 == 1;
         let tp = (b >> 10) & 0x01 == 1;
         let pty = ((b >> 5) & 0x1F) as u8;
         let b_low5 = (b & 0x1F) as u8;
@@ -1010,6 +1074,20 @@ impl GroupParser {
             if self.ps_seen_segments == 0b1111 && self.last_emitted_ps != Some(self.ps_buf) {
                 self.last_emitted_ps = Some(self.ps_buf);
                 update.ps_changed = Some(self.ps_buf);
+            }
+        }
+
+        // Group 2A/2B: RadioText. Diagnostics-only buffer (no event yet).
+        if group_type_code == 2 {
+            let seg = usize::from(b & 0x0F);
+            if variant_b {
+                self.rt_buf[seg * 2] = (d >> 8) as u8;
+                self.rt_buf[seg * 2 + 1] = (d & 0xFF) as u8;
+            } else if let Some(c) = c_or_cprime {
+                self.rt_buf[seg * 4] = (c >> 8) as u8;
+                self.rt_buf[seg * 4 + 1] = (c & 0xFF) as u8;
+                self.rt_buf[seg * 4 + 2] = (d >> 8) as u8;
+                self.rt_buf[seg * 4 + 3] = (d & 0xFF) as u8;
             }
         }
 
