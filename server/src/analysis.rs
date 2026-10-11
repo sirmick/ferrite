@@ -456,3 +456,97 @@ pub async fn post_envelope(
     out["snapshot"] = json!(snap);
     Ok(Json(out))
 }
+
+#[derive(Debug, Deserialize)]
+pub struct SpotMapReq {
+    /// `ft8` (default), `ft4` or `wspr`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// How far back to look, minutes (default 30).
+    #[serde(default)]
+    pub minutes: Option<f64>,
+    /// The receive station's grid; default `FERRITE_RX_GRID`.
+    #[serde(default)]
+    pub rx_grid: Option<String>,
+}
+
+/// `POST /api/analysis/spot_map` — where the stations a digital-mode
+/// decoder heard are: one spot per callsign (grid → position, distance
+/// and bearing from the receive grid), drawn as a map in the AI panel.
+pub async fn post_spot_map(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<SpotMapReq>,
+) -> Result<Json<Value>, AppError> {
+    let kind = req.kind.unwrap_or_else(|| "ft8".into());
+    if !matches!(kind.as_str(), "ft8" | "ft4" | "wspr") {
+        return Err(AppError::bad_request(
+            "BAD_KIND",
+            format!("spot_map kind {kind:?}: expected ft8, ft4 or wspr"),
+        ));
+    }
+    let minutes = req.minutes.unwrap_or(30.0).clamp(1.0, 24.0 * 60.0);
+    let rx_grid = req
+        .rx_grid
+        .or_else(|| std::env::var("FERRITE_RX_GRID").ok())
+        .filter(|g| fa::geo::grid_to_latlon(g).is_some());
+    let rx = rx_grid.as_deref().and_then(fa::geo::grid_to_latlon);
+    let now = u64::try_from(crate::capture::now_ms()).unwrap_or(0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let since = now.saturating_sub((minutes * 60_000.0) as u64);
+    let heard: Vec<(String, String, Option<f64>, u64)> = state
+        .decoder_store()
+        .snapshot_kind(&kind)
+        .map(|k| {
+            k.recent
+                .iter()
+                .filter(|r| r.at_ms >= since)
+                .filter_map(|r| {
+                    let call = r.data.get("de")?.as_str()?.to_string();
+                    let grid = r.data.get("grid")?.as_str()?.to_string();
+                    let snr = r.data.get("snr").and_then(Value::as_f64);
+                    Some((call, grid, snr, r.at_ms))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let spots = fa::geo::place(&heard, rx);
+    let mut text = format!(
+        "{} {kind} stations with a grid in the last {minutes:.0} min{}\n",
+        spots.len(),
+        rx_grid
+            .as_deref()
+            .map(|g| format!(", from {}", g.to_ascii_uppercase()))
+            .unwrap_or_default()
+    );
+    for s in spots.iter().take(40) {
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
+            format_args!(
+                "{:<10} {:<6} {:>7} {:>5} {:>5}\n",
+                s.call,
+                s.grid,
+                s.km.map(|k| format!("{k:.0} km")).unwrap_or_default(),
+                s.bearing.map(|b| format!("{b:.0}°")).unwrap_or_default(),
+                s.snr.map(|v| format!("{v:+.0}")).unwrap_or_default(),
+            ),
+        );
+    }
+    let body = json!({
+        "params": { "kind": kind, "minutes": minutes, "rx_grid": rx_grid },
+        "result": {
+            "rx": rx.map(|(lat, lon)| json!({ "grid": rx_grid, "lat": lat, "lon": lon })),
+            "spots": spots,
+        },
+        "text": text,
+    });
+    let id = mint_id("an");
+    let mut rec = json!({ "id": id, "tool": "spot_map", "by": caller(&headers) });
+    if let (Some(r), Some(b)) = (rec.as_object_mut(), body.as_object()) {
+        r.extend(b.clone());
+    }
+    state.decoder_store().apply("analysis", rec);
+    let mut out = body;
+    out["analysis_id"] = json!(id);
+    Ok(Json(out))
+}

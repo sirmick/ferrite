@@ -40,9 +40,6 @@ const FERRITE_HOME = process.env.FERRITE_HOME
   : resolve(__dirname, "..", "..");
 const FERRITE_CTL =
   process.env.FERRITE_CTL ?? resolve(FERRITE_HOME, "target/release/ferrite-ctl");
-const FFT_TO_PNG = resolve(FERRITE_HOME, "tools/fft_to_png.py");
-const FFT_PEAKS = resolve(FERRITE_HOME, "tools/fft_peaks.py");
-const FT8_WORLDMAP = resolve(FERRITE_HOME, "tools/ft8_worldmap.py");
 
 console.log(`[ferrite-ai] FERRITE_HOME=${FERRITE_HOME}`);
 console.log(`[ferrite-ai] FERRITE_CTL=${FERRITE_CTL}`);
@@ -113,17 +110,12 @@ function loadPrompt(name: string): string {
   if (!existsSync(path)) {
     throw new Error(`prompt missing: ${path}`);
   }
-  // Substitute environment-derived paths into the prompt template.
-  // Doing it at load-time keeps the per-turn hot path string-free.
-  // The historical `{{FERRITE_CTL}}` + `{{CTL_HELP}}` placeholders are
-  // gone — prompts now drive the radio through the `mcp__ferrite__*`
-  // tools surfaced by the local MCP server; the Python script
-  // wrappers (FFT_TO_PNG / FFT_PEAKS / FT8_WORLDMAP) still ride Bash.
-  return readFileSync(path, "utf-8")
-    .replaceAll("{{FERRITE_HOME}}", FERRITE_HOME)
-    .replaceAll("{{FFT_TO_PNG}}", FFT_TO_PNG)
-    .replaceAll("{{FFT_PEAKS}}", FFT_PEAKS)
-    .replaceAll("{{FT8_WORLDMAP}}", FT8_WORLDMAP);
+  // Prompts are plain text: the AI has no shell or file access, so
+  // they carry no paths (a leftover `{{PLACEHOLDER}}` is a bug).
+  const text = readFileSync(path, "utf-8");
+  const left = text.match(/\{\{[A-Z_]+\}\}/);
+  if (left) throw new Error(`prompt ${name}.md: unresolved ${left[0]}`);
+  return text;
 }
 
 // Per-mode model. Without an explicit `model` the Agent SDK falls back
@@ -156,13 +148,11 @@ const MODEL_OPTIONS: string[] = [
   "claude-haiku-5-5",
 ];
 
-// "chat" mode is tools-free: the AI is Q&A only, no Bash, no Read.
-// Other modes get the toolkit ferrite-ctl exploration needs — plus
-// every tool the local `ferrite` MCP server exposes (MCP tools are
-// not "built-in", so they're governed by `mcpServers`, which chat
-// mode omits). `Bash` stays available for the script wrappers
-// (`fft_to_png.py`, `fft_peaks.py`, `ft8_worldmap.py`) that aren't
-// surfaced through MCP yet, and as an exploratory escape hatch.
+// No built-in tools in any mode — no shell, no file access. The AI's
+// whole surface is the `ferrite` MCP server (governed by `mcpServers`,
+// which chat mode omits): every action shows in the operator's AI tab
+// (tool cards, analysis cards, images), and the radio assistant can't
+// touch the box it runs on.
 //
 // Two distinct Agent SDK knobs, easy to conflate:
 //   `tools`        — the *base set* of built-in tools the model can
@@ -173,13 +163,9 @@ const MODEL_OPTIONS: string[] = [
 //                    doesn't start prompting.
 // Passing only `allowedTools: []` (the pre-fix shape) restricted
 // nothing: chat mode had Bash/Write/Edit under bypassPermissions.
-function builtinToolsFor(mode: Mode): string[] {
-  if (mode === "chat") return [];
-  return ["Bash", "Read", "Glob", "Grep"];
-}
+const BUILTIN_TOOLS: string[] = [];
 function allowedToolsFor(mode: Mode): string[] {
-  if (mode === "chat") return [];
-  return [...builtinToolsFor(mode), "mcp__ferrite"];
+  return mode === "chat" ? [] : ["mcp__ferrite"];
 }
 
 // `ferrite-ctl mcp` config the Agent SDK spawns on session start. The
@@ -445,7 +431,7 @@ const latest = new Map<Mode, string>();
 function sessionSpec(mode: Mode, model: string, m: IncomingMessage) {
   const options: Record<string, unknown> = {
     model,
-    tools: builtinToolsFor(mode),
+    tools: BUILTIN_TOOLS,
     allowedTools: allowedToolsFor(mode),
     // SDK isolation. The bundled CLI otherwise behaves like the
     // operator's interactive `claude`: it loads ~/.claude settings,

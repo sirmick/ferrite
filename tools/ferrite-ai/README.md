@@ -73,13 +73,13 @@ loaded from `prompts/<mode>.md`. The browser picks per turn; switching
 mode resets the conversation (different system prompt would re-prime
 prior context badly).
 
-- **explorer** (default) — full toolkit, autonomy-flavoured. Scans
+- **explorer** (default) — all ferrite tools, autonomy-flavoured. Scans
   the band, captures FFT, identifies signals.
-- **decoder** — full toolkit, focused on running a decoder and
+- **decoder** — all ferrite tools, focused on running a decoder and
   reporting events; doesn't spectrum-hop.
-- **diagnose** — full toolkit but read-leaning. Inspects state,
+- **diagnose** — all ferrite tools but read-leaning. Inspects state,
   flowgraph JSONs, recent logs; mentions writes before making them.
-- **chat** — *no tools*. Pure Q&A about SDR / Ferrite internals.
+- **chat** — *no tools* (no MCP server). Pure Q&A about SDR / Ferrite internals.
 
 ### Models
 
@@ -110,6 +110,16 @@ and block notes whenever they changed.
 
 Thinking is on (`adaptive`, summarised); `FERRITE_AI_EFFORT` sets the
 effort level.
+
+### No shell
+
+No mode has built-in tools (`tools: []`): no Bash, no file reads. The
+AI's whole surface is the `ferrite` MCP server, so everything it does
+is visible in the AI tab — measurements as analysis cards
+(`spectrum`, `spectrogram`, `envelope`, `spot_map`), pictures inline on
+tool cards (`view_snapshot`, `reference_image`), daemon logs via
+`logs`. A capability it lacks is a missing MCP tool, not a script to
+shell out to.
 
 ### Isolation
 

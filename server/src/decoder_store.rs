@@ -394,11 +394,8 @@ impl DecoderStore {
         n
     }
 
-    /// One kind's state. The HTTP read path is the whole-store
-    /// `GET /api/state` (MCP slices the kind it wants), so this has no
-    /// in-crate caller outside tests — kept as a public accessor.
+    /// One kind's state (the spot map reads its decoder kind here).
     #[must_use]
-    #[allow(dead_code)]
     pub fn snapshot_kind(&self, kind: &str) -> Option<KindState> {
         self.guard().kinds.get(kind).cloned()
     }
