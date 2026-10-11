@@ -48,7 +48,17 @@ pub struct FldigiCore {
     /// node-side (`ui:events`), not only via the `decoder::fldigi`
     /// tracing log.
     events_out: Vec<u8>,
+    /// Emit whole words instead of raw character chunks (CW): text is
+    /// held until whitespace, or until [`WORD_FLUSH_SAMPLES`] of input
+    /// pass with nothing new (end of an over). One record per word reads
+    /// cleanly in the console and in `await_events`.
+    word_mode: bool,
+    pending: String,
+    idle_samples: usize,
 }
+
+/// Flush a held partial word after this much quiet input (2 s @ 8 kHz).
+const WORD_FLUSH_SAMPLES: usize = 16_000;
 
 impl FldigiCore {
     /// Build the modem for `mode_id` (the shim's `make_modem` id, e.g.
@@ -64,7 +74,40 @@ impl FldigiCore {
             label: label.into(),
             warned_off_rate: false,
             events_out: Vec::new(),
+            word_mode: false,
+            pending: String::new(),
+            idle_samples: 0,
         })
+    }
+
+    /// Emit whole words (see the `word_mode` field).
+    pub fn set_word_mode(&mut self, on: bool) {
+        self.word_mode = on;
+    }
+
+    /// Text ready to emit from what the modem just produced.
+    fn assemble(&mut self, new_text: &str, samples: usize) -> String {
+        if !self.word_mode {
+            return new_text.to_string();
+        }
+        if new_text.is_empty() {
+            self.idle_samples = self.idle_samples.saturating_add(samples);
+            if !self.pending.is_empty() && self.idle_samples >= WORD_FLUSH_SAMPLES {
+                let mut out = std::mem::take(&mut self.pending);
+                out.push(' ');
+                return out;
+            }
+            return String::new();
+        }
+        self.idle_samples = 0;
+        self.pending.push_str(new_text);
+        match self.pending.rfind(char::is_whitespace) {
+            Some(i) => {
+                let rest = self.pending.split_off(i + 1);
+                std::mem::replace(&mut self.pending, rest)
+            }
+            None => String::new(),
+        }
     }
 
     /// Forward a knob to the modem. `key` is a fldigi config TAG
@@ -160,8 +203,9 @@ impl FldigiCore {
         work.consumed[0] = src.len();
         self.modem.rx(src);
 
-        let text = self.modem.take_text();
-        if !text.is_empty() {
+        let raw = self.modem.take_text();
+        let text = self.assemble(&raw, src.len());
+        if !text.trim().is_empty() {
             tracing::info!(target: "decoder::fldigi", mode = %self.label, "{}", text);
             // Mirror onto the `events` port as one newline-terminated
             // JSON record (serde_json handles escaping). `t:"fldigi"`
@@ -335,6 +379,13 @@ macro_rules! fldigi_family {
                 Ok(self.core.pump(io))
             }
             fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+                // Anything beyond the three runtime seams (a family knob
+                // like CW `wpm`) needs the block rebuilt with its params.
+                if delta.as_object().is_some_and(|o| {
+                    o.keys().any(|k| !matches!(k.as_str(), "afc" | "reverse" | "rx_freq_hz"))
+                }) {
+                    return Ok(false);
+                }
                 let mut changed = false;
                 if let Some(b) = delta.get("afc").and_then(serde_json::Value::as_bool) {
                     self.core.set("afc", if b { 1.0 } else { 0.0 });
@@ -466,10 +517,34 @@ fldigi_family!(
 // meaning so it's not surfaced in the spec — see Psk31Demod).
 fldigi_family!(
     CwDemodParams, CwDemod, "CwDemod",
-    fields {},
-    params_extra: &[AFC_PARAM, RX_FREQ_PARAM],
+    fields { wpm: f64 = 20.0, wpm_range: f64 = 15.0, bandwidth_hz: f64 = 150.0 },
+    params_extra: &[
+        ParamSpec { key: "wpm", label: "Speed",
+            kind: ParamKind::Range { min: 5.0, max: 60.0, step: 1.0, default: 20.0, unit: "WPM" },
+            reconfig_scope: ReconfigureScope::SelfBlock,
+            ai_notes: "Starting speed for the tracker. fldigi follows the sender within ±wpm_range, so set it near the station's speed (contest stations run 28–35)." },
+        ParamSpec { key: "wpm_range", label: "Speed range",
+            kind: ParamKind::Range { min: 5.0, max: 40.0, step: 1.0, default: 15.0, unit: "WPM" },
+            reconfig_scope: ReconfigureScope::SelfBlock,
+            ai_notes: "How far speed tracking may move from `wpm` (fldigi's default 10 misses fast contest CW from a 20 WPM start)." },
+        ParamSpec { key: "bandwidth_hz", label: "Filter",
+            kind: ParamKind::Range { min: 30.0, max: 500.0, step: 10.0, default: 150.0, unit: "Hz" },
+            reconfig_scope: ReconfigureScope::SelfBlock,
+            ai_notes: "Receive filter width around `rx_freq_hz`. The tone must sit inside it (±half) — tune with `tune --carrier <f> --tone <rx_freq_hz>`. Narrower = better SNR on weak signals, less tolerance for tuning error." },
+        AFC_PARAM, RX_FREQ_PARAM,
+    ],
     compose: |_| Ok("cw".to_string()),
-    ai: "Morse/CW via the curated fldigi cw core (decode-side; the multimon MorseDemod is the other CW path). Output: `tail decoder --category fldigi`.",
+    post_init: |p, core| {
+        core.set("CWSPEED", p.wpm);
+        core.set("CWDEFSPEED", p.wpm);
+        core.set("CWRANGE", p.wpm_range);
+        core.set("CWLOWERLIMIT", (p.wpm - p.wpm_range).max(5.0));
+        core.set("CWUPPERLIMIT", (p.wpm + p.wpm_range).min(80.0));
+        core.set("CWBANDWIDTH", p.bandwidth_hz);
+        core.set_word_mode(true);
+        Ok(())
+    },
+    ai: "Morse/CW via the curated fldigi cw core — narrow filter around `rx_freq_hz` + speed tracking, emitting one record per decoded word. Leave `afc` off: headless fldigi can't search, and between overs AFC drifts onto noise. Put the tone on `rx_freq_hz` with `tune --carrier <f> --tone <rx_freq_hz>`. Output: the `fldigi` kind (`await_events(kind=\"fldigi\")`).",
 );
 
 // ---------------------------------------------------------------------
@@ -774,6 +849,27 @@ mod tests {
             assert_eq!(s.outputs[0].name, "events");
             assert_eq!(s.outputs[0].port_type, crate::block::PortType::Events);
         }
+    }
+
+    #[test]
+    fn cw_word_mode_emits_whole_words_and_flushes_on_quiet() {
+        let mut core = super::FldigiCore::new("cw", "cw").unwrap();
+        core.set_word_mode(true);
+        assert_eq!(core.assemble("CQ TE", 100), "CQ ");
+        assert_eq!(core.assemble("ST K6A", 100), "TEST ");
+        assert_eq!(
+            core.assemble("", 1_000),
+            "",
+            "short quiet holds the partial word"
+        );
+        assert_eq!(core.assemble("BC", 100), "");
+        assert_eq!(core.assemble("", super::WORD_FLUSH_SAMPLES), "K6ABC ");
+        core.set_word_mode(false);
+        assert_eq!(
+            core.assemble("E", 10),
+            "E",
+            "char mode passes chunks through"
+        );
     }
 
     #[test]
