@@ -753,6 +753,31 @@ pub async fn get_source_capabilities(
     Ok(Json(response))
 }
 
+/// Body of `POST /api/presets/:name`.
+#[derive(Debug, Default, Deserialize)]
+pub struct SavePresetRequest {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// `POST /api/presets/:name` — save the running graph (live params
+/// included) as a user preset; it then lists and loads like any other.
+pub async fn save_preset(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Option<Json<SavePresetRequest>>,
+) -> Result<Json<crate::app_state::PresetEntry>, AppError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    state
+        .save_user_preset(&name, req.label, req.description, req.overwrite)
+        .await
+        .map(Json)
+}
+
 /// `GET /api/presets` — enumerate every `*.json` preset the server can
 /// load. Returns an empty list when no presets dir is configured.
 pub async fn list_presets(

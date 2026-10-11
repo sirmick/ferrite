@@ -219,6 +219,9 @@ enum Cmd {
     /// until the async job finishes, then prints the job record.
     #[command(subcommand)]
     Capture(CaptureCmd),
+    /// Read / replace / edit the running flowgraph.
+    #[command(subcommand)]
+    Flowgraph(FlowgraphCmd),
     /// Wait for the next record(s) of a store kind on the event plane
     /// (MQTT subscription — no polling). Prints the records as JSON when
     /// `--max` arrived or `--timeout` elapsed; with `--follow`, streams
@@ -422,6 +425,35 @@ enum PresetCmd {
     /// Full JSON of one preset by name (ai_notes, block graph, sigwiki
     /// refs, sample path) — the gotchas + canonical frequencies.
     Detail { name: String },
+    /// Save the running graph (live params included) as a user preset.
+    Save {
+        name: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Replace an earlier save of the same name.
+        #[arg(long)]
+        overwrite: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum FlowgraphCmd {
+    /// Print the running preset doc (live params folded in).
+    Get,
+    /// Replace the running preset with a doc from a JSON file (`-` = stdin).
+    Put { file: String },
+    /// Swap one block's type + params, keeping its id and wiring:
+    /// `flowgraph swap morse CwDemod afc=false rx_freq_hz=700`.
+    Swap {
+        block: String,
+        #[arg(value_name = "TYPE")]
+        type_name: String,
+        /// `key=value` params for the new block (JSON values parse).
+        #[arg(value_parser = parse_kv)]
+        kv: Vec<(String, Value)>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -565,6 +597,58 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
         Cmd::Preset(PresetCmd::Load { name }) => {
             let v = server
                 .load_preset_op(LoadPresetArgs { name, note: None })
+                .await
+                .map_err(op_err)?;
+            emit(&v, json)
+        }
+        Cmd::Preset(PresetCmd::Save {
+            name,
+            label,
+            description,
+            overwrite,
+        }) => {
+            let v = server
+                .save_preset_op(mcp::SavePresetArgs {
+                    name,
+                    label,
+                    description,
+                    overwrite,
+                })
+                .await
+                .map_err(op_err)?;
+            emit(&v, json)
+        }
+        Cmd::Flowgraph(FlowgraphCmd::Get) => {
+            emit(&server.get_flowgraph_op().await.map_err(op_err)?, json)
+        }
+        Cmd::Flowgraph(FlowgraphCmd::Put { file }) => {
+            let text = if file == "-" {
+                let mut t = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)?;
+                t
+            } else {
+                std::fs::read_to_string(&file).with_context(|| format!("read {file}"))?
+            };
+            let doc: Value = serde_json::from_str(&text).context("parse flowgraph JSON")?;
+            let v = server
+                .set_flowgraph_op(mcp::SetFlowgraphArgs { doc, note: None })
+                .await
+                .map_err(op_err)?;
+            emit(&v, json)
+        }
+        Cmd::Flowgraph(FlowgraphCmd::Swap {
+            block,
+            type_name,
+            kv,
+        }) => {
+            let params: Map<String, Value> = kv.into_iter().collect();
+            let v = server
+                .swap_block_op(mcp::SwapBlockArgs {
+                    block,
+                    type_name,
+                    params: Some(params),
+                    note: None,
+                })
                 .await
                 .map_err(op_err)?;
             emit(&v, json)
