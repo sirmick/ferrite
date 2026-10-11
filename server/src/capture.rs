@@ -341,7 +341,7 @@ pub struct CaptureAudioReq {
 
 // ─── pure helpers ───────────────────────────────────────────────────────
 
-fn now_ms() -> u128 {
+pub(crate) fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -359,7 +359,7 @@ fn default_capture_path(kind: CaptureKind, freq_hz: f64) -> PathBuf {
 /// **Must match** the block-side `sidecar_path_for` in
 /// `blocks/src/{channelizer,log_mag_u8,file_sink}.rs` — a capture writes
 /// `foo.cf32` and its sidecar lands at `foo.json`, not `foo.cf32.json`.
-fn sidecar_path_for(bin_path: &Path) -> PathBuf {
+pub(crate) fn sidecar_path_for(bin_path: &Path) -> PathBuf {
     let mut p = bin_path.to_path_buf();
     if p.extension().is_some() {
         p.set_extension("json");
@@ -373,7 +373,7 @@ fn sidecar_path_for(bin_path: &Path) -> PathBuf {
 
 /// Read the sidecar JSON the recording block wrote next to `out_path`.
 /// Best-effort — `None` if absent / unparseable.
-async fn read_sidecar(out_path: &Path) -> Option<Value> {
+pub(crate) async fn read_sidecar(out_path: &Path) -> Option<Value> {
     let side = sidecar_path_for(out_path);
     match tokio::fs::read(&side).await {
         Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),

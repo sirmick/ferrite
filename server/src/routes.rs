@@ -407,6 +407,10 @@ pub struct ReconfigureResponse {
     /// varies IFGR, tune-step rounds the centre freq, etc).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_readback: Option<ferrite_blocks::SoapyReadback>,
+    /// `POST /api/tune` with `carrier_hz`: the dial it set and why
+    /// (`{carrier_hz, tone_hz, sideband, dial_hz}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tuned: Option<serde_json::Value>,
 }
 
 fn reconfigure_response(plan: Option<ferrite_runtime::ReconfigurePlan>) -> ReconfigureResponse {
@@ -418,6 +422,7 @@ fn reconfigure_response(plan: Option<ferrite_runtime::ReconfigurePlan>) -> Recon
             structural_count: 0,
             noop: true,
             source_readback: None,
+            tuned: None,
         },
         Some(p) => ReconfigureResponse {
             applied: true,
@@ -436,6 +441,7 @@ fn reconfigure_response(plan: Option<ferrite_runtime::ReconfigurePlan>) -> Recon
             structural_count: p.structural.len(),
             noop: p.is_noop(),
             source_readback: None,
+            tuned: None,
         },
     }
 }
@@ -582,7 +588,19 @@ pub async fn reset_state_kind(
 /// `driver_key`; pass an explicit value to override (`0` = don't dodge).
 #[derive(Deserialize)]
 pub struct TuneRequest {
-    pub freq_hz: f64,
+    /// Listen (dial) frequency. Omit when giving `carrier_hz`.
+    #[serde(default)]
+    pub freq_hz: Option<f64>,
+    /// Tune so this RF carrier lands on an audio tone instead: the dial
+    /// becomes `carrier − tone` (USB) or `carrier + tone` (LSB), the
+    /// sideband read from the preset's `SsbDemod`. For CW / digital
+    /// modes whose decoder wants the signal at a fixed tone.
+    #[serde(default)]
+    pub carrier_hz: Option<f64>,
+    /// The tone for `carrier_hz`. Default: the decoder's own
+    /// `rx_freq_hz` (CwDemod / the fldigi blocks) in the running preset.
+    #[serde(default)]
+    pub tone_hz: Option<f64>,
     #[serde(default)]
     pub span_hz: Option<f64>,
     #[serde(default)]
@@ -605,18 +623,38 @@ pub async fn post_tune(
     Json(req): Json<TuneRequest>,
 ) -> Result<Json<ReconfigureResponse>, AppError> {
     tracing::info!(
-        freq_hz = req.freq_hz,
+        freq_hz = ?req.freq_hz,
+        carrier_hz = ?req.carrier_hz,
+        tone_hz = ?req.tone_hz,
         span_hz = ?req.span_hz,
         offset_ratio = ?req.offset_ratio,
         keep_lo = req.keep_lo,
         "POST /api/tune"
     );
+    let (freq_hz, tuned) = match (req.freq_hz, req.carrier_hz) {
+        (_, Some(carrier)) => {
+            let t = state
+                .dial_for_carrier(carrier, req.tone_hz)
+                .await
+                .map_err(|e| AppError::bad_request("TUNE_FAILED", format!("{e:#}")))?;
+            let dial = t.dial_hz;
+            (dial, Some(serde_json::to_value(t).unwrap_or_default()))
+        }
+        (Some(f), None) => (f, None),
+        (None, None) => {
+            return Err(AppError::bad_request(
+                "TUNE_FAILED",
+                "give freq_hz (dial) or carrier_hz (+ optional tone_hz)",
+            ))
+        }
+    };
     let plan = state
-        .tune(req.freq_hz, req.span_hz, req.offset_ratio, req.keep_lo)
+        .tune(freq_hz, req.span_hz, req.offset_ratio, req.keep_lo)
         .await
         .map_err(|e| AppError::radio_or_bad_request("TUNE_FAILED", &e))?;
     let mut resp = reconfigure_response(plan);
     resp.source_readback = state.source_readback().await;
+    resp.tuned = tuned;
     Ok(Json(resp))
 }
 
@@ -713,6 +751,31 @@ pub async fn get_source_capabilities(
         },
     };
     Ok(Json(response))
+}
+
+/// Body of `POST /api/presets/:name`.
+#[derive(Debug, Default, Deserialize)]
+pub struct SavePresetRequest {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// `POST /api/presets/:name` — save the running graph (live params
+/// included) as a user preset; it then lists and loads like any other.
+pub async fn save_preset(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Option<Json<SavePresetRequest>>,
+) -> Result<Json<crate::app_state::PresetEntry>, AppError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    state
+        .save_user_preset(&name, req.label, req.description, req.overwrite)
+        .await
+        .map(Json)
 }
 
 /// `GET /api/presets` — enumerate every `*.json` preset the server can

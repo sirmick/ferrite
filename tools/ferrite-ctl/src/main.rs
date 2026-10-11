@@ -75,9 +75,17 @@ enum Cmd {
     /// bandwidth / sample-rate / gain). Routes through the dodge-aware
     /// tune path.
     Tune {
-        /// Centre frequency in Hz. Accepts plain integers or the
-        /// `123.45M` / `915k` shorthand.
-        freq: String,
+        /// Listen (dial) frequency in Hz. Accepts plain integers or the
+        /// `123.45M` / `915k` shorthand. Omit with `--carrier`.
+        freq: Option<String>,
+        /// Put this RF carrier on an audio tone instead: dial = carrier
+        /// − tone (USB) / + tone (LSB). For CW: the decoder's tone is
+        /// used unless `--tone` is given.
+        #[arg(long)]
+        carrier: Option<String>,
+        /// Tone (Hz) for `--carrier`; default = the decoder's rx_freq_hz.
+        #[arg(long)]
+        tone: Option<f64>,
         /// Optional bandwidth (Hz, with same shorthand).
         #[arg(long)]
         bw: Option<String>,
@@ -185,10 +193,35 @@ enum Cmd {
         #[arg(long)]
         max_age_ms: Option<u64>,
     },
+    /// Few-Hz-resolution spectrum of a range from live IQ (no retune):
+    /// peaks with interpolated frequency, level over the floor, width,
+    /// and whether they're keyed (CW / beacons). Feed a peak's freq_hz
+    /// to `tune --carrier`.
+    Spectrum {
+        /// Range start (Hz; `14.040M` shorthand ok).
+        lo: String,
+        /// Range end.
+        hi: String,
+        /// Seconds of IQ to analyse.
+        #[arg(long, default_value_t = 3.0)]
+        secs: f64,
+        /// Target resolution, Hz/bin.
+        #[arg(long, default_value_t = 10.0)]
+        res: f64,
+        /// Peaks to list.
+        #[arg(long, default_value_t = 25)]
+        peaks: usize,
+        /// Only keyed peaks (CW / beacons).
+        #[arg(long)]
+        keyed: bool,
+    },
     /// Capture a slice of signal to disk (IQ / audio / FFT). Blocks
     /// until the async job finishes, then prints the job record.
     #[command(subcommand)]
     Capture(CaptureCmd),
+    /// Read / replace / edit the running flowgraph.
+    #[command(subcommand)]
+    Flowgraph(FlowgraphCmd),
     /// Wait for the next record(s) of a store kind on the event plane
     /// (MQTT subscription — no polling). Prints the records as JSON when
     /// `--max` arrived or `--timeout` elapsed; with `--follow`, streams
@@ -392,6 +425,35 @@ enum PresetCmd {
     /// Full JSON of one preset by name (ai_notes, block graph, sigwiki
     /// refs, sample path) — the gotchas + canonical frequencies.
     Detail { name: String },
+    /// Save the running graph (live params included) as a user preset.
+    Save {
+        name: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Replace an earlier save of the same name.
+        #[arg(long)]
+        overwrite: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum FlowgraphCmd {
+    /// Print the running preset doc (live params folded in).
+    Get,
+    /// Replace the running preset with a doc from a JSON file (`-` = stdin).
+    Put { file: String },
+    /// Swap one block's type + params, keeping its id and wiring:
+    /// `flowgraph swap morse CwDemod afc=false rx_freq_hz=700`.
+    Swap {
+        block: String,
+        #[arg(value_name = "TYPE")]
+        type_name: String,
+        /// `key=value` params for the new block (JSON values parse).
+        #[arg(value_parser = parse_kv)]
+        kv: Vec<(String, Value)>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -539,6 +601,58 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 .map_err(op_err)?;
             emit(&v, json)
         }
+        Cmd::Preset(PresetCmd::Save {
+            name,
+            label,
+            description,
+            overwrite,
+        }) => {
+            let v = server
+                .save_preset_op(mcp::SavePresetArgs {
+                    name,
+                    label,
+                    description,
+                    overwrite,
+                })
+                .await
+                .map_err(op_err)?;
+            emit(&v, json)
+        }
+        Cmd::Flowgraph(FlowgraphCmd::Get) => {
+            emit(&server.get_flowgraph_op().await.map_err(op_err)?, json)
+        }
+        Cmd::Flowgraph(FlowgraphCmd::Put { file }) => {
+            let text = if file == "-" {
+                let mut t = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)?;
+                t
+            } else {
+                std::fs::read_to_string(&file).with_context(|| format!("read {file}"))?
+            };
+            let doc: Value = serde_json::from_str(&text).context("parse flowgraph JSON")?;
+            let v = server
+                .set_flowgraph_op(mcp::SetFlowgraphArgs { doc, note: None })
+                .await
+                .map_err(op_err)?;
+            emit(&v, json)
+        }
+        Cmd::Flowgraph(FlowgraphCmd::Swap {
+            block,
+            type_name,
+            kv,
+        }) => {
+            let params: Map<String, Value> = kv.into_iter().collect();
+            let v = server
+                .swap_block_op(mcp::SwapBlockArgs {
+                    block,
+                    type_name,
+                    params: Some(params),
+                    note: None,
+                })
+                .await
+                .map_err(op_err)?;
+            emit(&v, json)
+        }
         Cmd::Preset(PresetCmd::Detail { name }) => {
             let v = server
                 .preset_detail_op(PresetDetailArgs { name })
@@ -548,6 +662,8 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
         }
         Cmd::Tune {
             freq,
+            carrier,
+            tone,
             bw,
             rate,
             gain,
@@ -555,8 +671,13 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             offset,
             keep_lo,
         } => {
+            if freq.is_none() && carrier.is_none() {
+                bail!("give a frequency or --carrier");
+            }
             let args = TuneArgs {
-                freq_hz: parse_si(&freq)?,
+                freq_hz: parse_si_opt(freq.as_deref())?,
+                carrier_hz: parse_si_opt(carrier.as_deref())?,
+                tone_hz: tone,
                 span_hz: parse_si_opt(span.as_deref())?,
                 offset_ratio: offset,
                 gain_db: gain,
@@ -633,6 +754,33 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 })
                 .await
                 .map_err(op_err)?;
+            emit(&v, json)
+        }
+        Cmd::Spectrum {
+            lo,
+            hi,
+            secs,
+            res,
+            peaks,
+            keyed,
+        } => {
+            let mut v = server
+                .spectrum_op(mcp::SpectrumArgs {
+                    lo_hz: parse_si(&lo)?,
+                    hi_hz: parse_si(&hi)?,
+                    secs: Some(secs),
+                    res_hz: Some(res),
+                    max_peaks: Some(peaks),
+                    profile_points: Some(if json { 120 } else { 0 }),
+                    note: None,
+                })
+                .await
+                .map_err(op_err)?;
+            if keyed {
+                if let Some(arr) = v.get_mut("peaks").and_then(Value::as_array_mut) {
+                    arr.retain(|p| p.get("keyed").and_then(Value::as_bool) == Some(true));
+                }
+            }
             emit(&v, json)
         }
         Cmd::Signals { max_age_ms } => {

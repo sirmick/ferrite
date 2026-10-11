@@ -56,6 +56,9 @@ pub struct PresetEntry {
     pub name: String,
     pub label: Option<String>,
     pub description: Option<String>,
+    /// Saved by an operator/agent (`preset save`), not shipped.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub user: bool,
 }
 
 /// One replayable capture under the `samples/` tree, surfaced by
@@ -162,6 +165,16 @@ struct Inner {
     health_kick: tokio::sync::Notify,
 }
 
+/// What `tune` with a carrier chose (see [`AppState::dial_for_carrier`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CarrierTune {
+    pub carrier_hz: f64,
+    pub tone_hz: f64,
+    pub tone_from: &'static str,
+    pub sideband: String,
+    pub dial_hz: f64,
+}
+
 #[path = "app_state_supervisor.rs"]
 mod supervisor;
 
@@ -173,6 +186,10 @@ pub struct AppState {
     /// [`Self::load_preset_by_name`]. `None` means the browse/swap
     /// endpoints return an empty list / 501 respectively.
     presets_dir: Option<Arc<PathBuf>>,
+    /// Where `preset save` writes and where saved presets are listed /
+    /// loaded from alongside `presets_dir` (kept out of the git-tracked
+    /// shipped presets). `None` = saving disabled.
+    user_presets_dir: Option<Arc<PathBuf>>,
     /// Root scanned by [`Self::list_captures`] (`GET /api/captures`) —
     /// the curated `samples/` tree of replayable IQ/audio fixtures.
     /// `None` means the captures browser returns an empty list.
@@ -213,6 +230,7 @@ impl AppState {
             }),
             logs: None,
             presets_dir: None,
+            user_presets_dir: None,
             captures_dir: None,
             view_bridge: crate::view_bridge::ViewBridge::default(),
             event_plane: None,
@@ -254,6 +272,95 @@ impl AppState {
     pub fn with_captures_dir(mut self, dir: PathBuf) -> Self {
         self.captures_dir = Some(Arc::new(dir));
         self
+    }
+
+    #[must_use]
+    pub fn with_user_presets_dir(mut self, dir: PathBuf) -> Self {
+        self.user_presets_dir = Some(Arc::new(dir));
+        self
+    }
+
+    /// The directory holding preset `name`: the user dir when it has
+    /// `<name>.json`, else the shipped presets dir.
+    fn preset_dir_for(&self, name: &str) -> Option<PathBuf> {
+        if let Some(u) = self.user_presets_dir.as_ref() {
+            if u.join(format!("{name}.json")).is_file() {
+                return Some(u.as_ref().clone());
+            }
+        }
+        self.presets_dir.as_ref().map(|a| a.as_ref().clone())
+    }
+
+    /// Save the running graph — the preset with every live param edit
+    /// folded in — as user preset `name`. Refuses to shadow a shipped
+    /// preset, and to overwrite an existing user preset unless asked.
+    pub async fn save_user_preset(
+        &self,
+        name: &str,
+        label: Option<String>,
+        description: Option<String>,
+        overwrite: bool,
+    ) -> Result<PresetEntry, AppError> {
+        let dir = self
+            .user_presets_dir
+            .as_ref()
+            .ok_or_else(|| {
+                AppError::unavailable(
+                    "PRESET_SAVE_DISABLED",
+                    "no user presets dir (start ferrited with --state-dir or --user-presets-dir)",
+                )
+            })?
+            .as_ref()
+            .clone();
+        if !is_valid_preset_name(name) {
+            return Err(AppError::bad_request(
+                "PRESET_NAME_INVALID",
+                format!("invalid preset name {name:?}: must match [A-Za-z0-9_-]+"),
+            ));
+        }
+        if let Some(shipped) = self.presets_dir.as_ref() {
+            if shipped.join(format!("{name}.json")).is_file() {
+                return Err(AppError::conflict(
+                    "PRESET_NAME_TAKEN",
+                    format!("{name:?} is a shipped preset — pick another name"),
+                ));
+            }
+        }
+        let path = dir.join(format!("{name}.json"));
+        if path.is_file() && !overwrite {
+            return Err(AppError::conflict(
+                "PRESET_EXISTS",
+                format!("user preset {name:?} exists — pass overwrite to replace it"),
+            ));
+        }
+        let mut doc = self.get_flowgraph().await;
+        doc.name = name.to_string();
+        if label.is_some() {
+            doc.label = label;
+        } else if let Some(l) = doc.label.take() {
+            doc.label = Some(format!("{l} (saved)"));
+        }
+        if description.is_some() {
+            doc.description = description;
+        }
+        doc.catalog_visible = None;
+        let json = serde_json::to_vec_pretty(&doc)
+            .map_err(|e| AppError::internal("PRESET_SAVE_FAILED", format!("serialize: {e}")))?;
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, json))
+            .map_err(|e| {
+                AppError::internal(
+                    "PRESET_SAVE_FAILED",
+                    format!("write {}: {e}", path.display()),
+                )
+            })?;
+        tracing::info!(target: "ai::activity", preset = %name, path = %path.display(), "preset saved");
+        Ok(PresetEntry {
+            name: name.to_string(),
+            label: doc.label,
+            description: doc.description,
+            user: true,
+        })
     }
 
     #[must_use]
@@ -633,12 +740,25 @@ impl AppState {
     /// parse are skipped with a warning — one bad file shouldn't hide
     /// the rest. Returns an empty list when no presets dir is set.
     pub async fn list_presets(&self) -> Result<Vec<PresetEntry>> {
-        let Some(dir) = self.presets_dir.as_ref().map(|a| a.as_ref().clone()) else {
-            return Ok(Vec::new());
-        };
-        let entries = tokio::task::spawn_blocking(move || scan_presets(&dir))
-            .await
-            .map_err(|e| anyhow!("presets scan task panicked: {e}"))??;
+        let shipped = self.presets_dir.as_ref().map(|a| a.as_ref().clone());
+        let user = self.user_presets_dir.as_ref().map(|a| a.as_ref().clone());
+        let entries = tokio::task::spawn_blocking(move || -> Result<Vec<PresetEntry>> {
+            let mut out = match shipped {
+                Some(d) => scan_presets(&d)?,
+                None => Vec::new(),
+            };
+            if let Some(u) = user {
+                let mut mine = scan_presets(&u)?;
+                for e in &mut mine {
+                    e.user = true;
+                }
+                out.extend(mine);
+            }
+            out.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(out)
+        })
+        .await
+        .map_err(|e| anyhow!("presets scan task panicked: {e}"))??;
         Ok(entries)
     }
 
@@ -651,11 +771,8 @@ impl AppState {
     /// signal_wiki_url, …) without re-typing the schema.
     pub async fn read_preset_doc(&self, name: &str) -> Result<serde_json::Value> {
         let dir = self
-            .presets_dir
-            .as_ref()
-            .ok_or_else(|| anyhow!("presets browser not configured"))?
-            .as_ref()
-            .clone();
+            .preset_dir_for(name)
+            .ok_or_else(|| anyhow!("presets browser not configured"))?;
         if !is_valid_preset_name(name) {
             return Err(anyhow!(
                 "invalid preset name {name:?}: must match [A-Za-z0-9_-]+"
@@ -701,11 +818,8 @@ impl AppState {
         name: &str,
     ) -> Result<(FlowgraphDoc, Option<ReconfigurePlan>)> {
         let dir = self
-            .presets_dir
-            .as_ref()
-            .ok_or_else(|| anyhow!("presets browser not configured"))?
-            .as_ref()
-            .clone();
+            .preset_dir_for(name)
+            .ok_or_else(|| anyhow!("presets browser not configured"))?;
         if !is_valid_preset_name(name) {
             return Err(anyhow!(
                 "invalid preset name {name:?}: must match [A-Za-z0-9_-]+"
@@ -880,6 +994,9 @@ impl AppState {
         if args.is_empty() {
             return;
         }
+        // A radio the operator selected stays in the device list even
+        // when SoapyRemote's multicast discovery comes back empty.
+        crate::device::note_remote_args(&args);
         // Cached after warm-up; a probe error/timeout must NOT block a
         // tune — skip the policy and keep the caller's params.
         let caps = match self.inner.device_cache.ensure_args(&args).await {
@@ -1219,6 +1336,69 @@ impl AppState {
     /// is acceptable (a tune is an explicit operator action, not a
     /// continuous control loop). Returns the channelizer-side plan when
     /// it applied, else the source plan, else `None`.
+    /// The dial that puts RF `carrier_hz` on audio tone `tone_hz` —
+    /// `carrier − tone` on USB, `carrier + tone` on LSB (sideband from
+    /// the preset's `SsbDemod`). Without `tone_hz`, the tone is the
+    /// decoder's own `rx_freq_hz` (CwDemod / fldigi blocks) as running.
+    pub async fn dial_for_carrier(
+        &self,
+        carrier_hz: f64,
+        tone_hz: Option<f64>,
+    ) -> Result<CarrierTune> {
+        if !carrier_hz.is_finite() || carrier_hz <= 0.0 {
+            return Err(anyhow!("carrier_hz must be a positive frequency"));
+        }
+        let doc = self.get_flowgraph().await;
+        let param = |ty: &str, key: &str| {
+            doc.blocks
+                .values()
+                .filter(|b| b.type_name == ty || ty.is_empty())
+                .find_map(|b| b.params.as_ref()?.get(key).cloned())
+        };
+        let sideband = doc
+            .blocks
+            .values()
+            .find(|b| b.type_name == "SsbDemod")
+            .map(|b| {
+                b.params
+                    .as_ref()
+                    .and_then(|p| p.get("sideband"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("usb")
+                    .to_ascii_lowercase()
+            })
+            .ok_or_else(|| {
+                anyhow!("the preset has no SsbDemod — tuning a carrier onto a tone needs an SSB/CW receive chain")
+            })?;
+        let (tone, from) = match tone_hz {
+            Some(t) => (t, "request"),
+            None => {
+                let t = param("", "rx_freq_hz")
+                    .and_then(|v| v.as_f64())
+                    .filter(|t| *t > 0.0)
+                    .ok_or_else(|| {
+                        anyhow!("no tone given and no decoder in the preset sets rx_freq_hz — pass tone_hz")
+                    })?;
+                (t, "decoder rx_freq_hz")
+            }
+        };
+        if !(tone.is_finite() && tone > 0.0 && tone < 4_000.0) {
+            return Err(anyhow!("tone_hz must be between 0 and 4000 Hz, got {tone}"));
+        }
+        let dial_hz = if sideband == "lsb" {
+            carrier_hz + tone
+        } else {
+            carrier_hz - tone
+        };
+        Ok(CarrierTune {
+            carrier_hz,
+            tone_hz: tone,
+            tone_from: from,
+            sideband,
+            dial_hz,
+        })
+    }
+
     pub async fn tune(
         &self,
         freq_hz: f64,
@@ -1558,6 +1738,7 @@ fn scan_presets(dir: &std::path::Path) -> Result<Vec<PresetEntry>> {
                 name: stem.to_string(),
                 label: doc.label,
                 description: doc.description,
+                user: false,
             }),
             // A base with variants is not loadable bare (hard cut, D-V4),
             // so listing the stem would hand `load_preset` a name it
@@ -1571,6 +1752,7 @@ fn scan_presets(dir: &std::path::Path) -> Result<Vec<PresetEntry>> {
                         name: format!("{stem}-{}", v.id),
                         label: Some(format!("{base} — {}", v.label.as_deref().unwrap_or(&v.id))),
                         description: doc.description.clone(),
+                        user: false,
                     });
                 }
             }
@@ -1724,6 +1906,75 @@ mod tests {
     }
 
     // `driver_arg` moved to `ferrite-sdr-tables` and is tested there.
+
+    fn repo_preset(name: &str) -> FlowgraphDoc {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../flowgraphs")
+            .join(format!("{name}.json"));
+        FlowgraphDoc::from_json(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn carrier_tune_puts_the_carrier_on_the_decoder_tone() {
+        // The cw preset: USB, CwDemod rx_freq_hz 700.
+        let st = AppState::new(repo_preset("cw"), test_source(), Duration::from_millis(5));
+        let t = st.dial_for_carrier(14_062_007.0, None).await.unwrap();
+        assert_eq!(t.sideband, "usb");
+        assert!((t.tone_hz - 700.0).abs() < 1e-9);
+        assert!((t.dial_hz - 14_061_307.0).abs() < 1e-6);
+        let t = st
+            .dial_for_carrier(14_062_007.0, Some(600.0))
+            .await
+            .unwrap();
+        assert!((t.dial_hz - 14_061_407.0).abs() < 1e-6);
+        // LSB flips the sign; a preset without a decoder tone needs one.
+        let st = AppState::new(repo_preset("lsb"), test_source(), Duration::from_millis(5));
+        assert!(st.dial_for_carrier(7_074_000.0, None).await.is_err());
+        let t = st
+            .dial_for_carrier(7_074_000.0, Some(1_000.0))
+            .await
+            .unwrap();
+        assert_eq!(t.sideband, "lsb");
+        assert!((t.dial_hz - 7_075_000.0).abs() < 1e-6);
+        // No SSB chain at all → a clear error.
+        let st = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        assert!(st.dial_for_carrier(1e6, Some(700.0)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn saved_presets_list_load_and_never_shadow_shipped_ones() {
+        let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../flowgraphs");
+        let user = tempfile::tempdir().unwrap();
+        let st = AppState::new(repo_preset("cw"), test_source(), Duration::from_millis(5))
+            .with_presets_dir(shipped)
+            .with_user_presets_dir(user.path().to_path_buf());
+        let e = st
+            .save_user_preset("my-cw", Some("My CW".into()), None, false)
+            .await
+            .unwrap();
+        assert!(e.user);
+        let list = st.list_presets().await.unwrap();
+        let mine = list.iter().find(|p| p.name == "my-cw").expect("listed");
+        assert!(mine.user);
+        assert!(list.iter().any(|p| p.name == "wbfm" && !p.user));
+        let doc = st.read_preset_doc("my-cw").await.unwrap();
+        assert_eq!(doc["label"], "My CW");
+        assert_eq!(doc["blocks"]["cw"]["type"], "CwDemod");
+        assert!(
+            st.save_user_preset("cw", None, None, true).await.is_err(),
+            "shipped name"
+        );
+        assert!(
+            st.save_user_preset("my-cw", None, None, false)
+                .await
+                .is_err(),
+            "exists"
+        );
+        assert!(
+            st.save_user_preset("my-cw", None, None, true).await.is_ok(),
+            "overwrite"
+        );
+    }
 
     fn test_source() -> SourceConfig {
         SourceConfig {

@@ -32,16 +32,16 @@
 mod common;
 
 use common::{
-    init_at, load_audio, pump_iq_to_iq, pump_iq_to_real, pump_real_to_iq, pump_real_to_real,
-    sample_path,
+    full_chain_ssb, init_at, load_audio, pump_iq_to_iq, pump_iq_to_real, pump_real_to_iq,
+    pump_real_to_real, sample_path,
 };
 use ferrite_blocks::block::{Block, BlockIo, InBuf, InputPort, OutputPort, PortMeta};
 use ferrite_blocks::{
-    Channelizer, ChannelizerParams, ContestiaDemod, ContestiaDemodParams, DominoexDemod,
-    DominoexDemodParams, Mt63Demod, Mt63DemodParams, NavtexDemod, NavtexDemodParams, OliviaDemod,
-    OliviaDemodParams, Psk31Demod, Psk31DemodParams, RealF32Resamp, RealF32ResampParams, RttyDemod,
-    RttyDemodParams, SsbDemod, SsbDemodParams, SsbModulator, SsbModulatorParams, ThrobDemod,
-    ThrobDemodParams,
+    Channelizer, ChannelizerParams, ContestiaDemod, ContestiaDemodParams, CwDemod, CwDemodParams,
+    DominoexDemod, DominoexDemodParams, Mt63Demod, Mt63DemodParams, NavtexDemod, NavtexDemodParams,
+    OliviaDemod, OliviaDemodParams, Psk31Demod, Psk31DemodParams, RealF32Resamp,
+    RealF32ResampParams, RttyDemod, RttyDemodParams, SsbDemod, SsbDemodParams, SsbModulator,
+    SsbModulatorParams, ThrobDemod, ThrobDemodParams,
 };
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -294,5 +294,77 @@ fn navtex_demod_decodes_full_chain() {
             OFFSET,
         ),
         "NavtexDemod",
+    );
+}
+
+/// The `cw` preset's decoder on real off-air CW (the sigidwiki Morse
+/// recording, tone ≈ 790 Hz): full SSB chain at 22 050 Hz, resampled to
+/// the modem's 8 kHz, `CwDemod` pinned on the tone with AFC off — the
+/// exact settings the preset ships. Word mode must hand back whole
+/// words, and a working chain must produce a real run of letters.
+#[test]
+fn cw_demod_decodes_real_recording_full_chain() {
+    let _g = fldigi_guard();
+    let rel = "sigidwiki/22050_mono/Cw_morse.wav";
+    assert!(
+        sample_path(rel).exists(),
+        "{rel} missing — run samples/sigidwiki/convert.py"
+    );
+    let (audio, rate) = load_audio(rel);
+    let rx = full_chain_ssb(&audio, rate);
+    let mut rs = RealF32Resamp::new(RealF32ResampParams {
+        output_rate_hz: A_RATE,
+        stopband_db: 60.0,
+    })
+    .unwrap();
+    init_at(&mut rs, rate);
+    let rx8k = pump_real_to_real(&mut rs, &rx);
+
+    let mut block = CwDemod::new(CwDemodParams {
+        afc: false,
+        rx_freq_hz: 790.0,
+        ..CwDemodParams::default()
+    })
+    .unwrap();
+    let got = with_fldigi_capture(|| {
+        let mut idx = 0;
+        while idx < rx8k.len() {
+            let take = 2_048.min(rx8k.len() - idx);
+            let mut inputs = [InputPort {
+                name: "in",
+                meta: PortMeta::default(),
+                buf: InBuf::RealF32(&rx8k[idx..idx + take]),
+            }];
+            let mut outputs: [OutputPort; 0] = [];
+            block
+                .process(&mut BlockIo {
+                    inputs: &mut inputs,
+                    outputs: &mut outputs,
+                })
+                .unwrap();
+            idx += take;
+        }
+        // 3 s of silence flushes the last held word.
+        let quiet = vec![0.0_f32; 24_000];
+        for chunk in quiet.chunks(2_048) {
+            let mut inputs = [InputPort {
+                name: "in",
+                meta: PortMeta::default(),
+                buf: InBuf::RealF32(chunk),
+            }];
+            let mut outputs: [OutputPort; 0] = [];
+            block
+                .process(&mut BlockIo {
+                    inputs: &mut inputs,
+                    outputs: &mut outputs,
+                })
+                .unwrap();
+        }
+    });
+    let letters: String = got.chars().filter(char::is_ascii_alphanumeric).collect();
+    println!("CwDemod decoded: {got:?}");
+    assert!(
+        letters.len() >= 8,
+        "expected a substantial CW decode from the real recording, got {got:?}"
     );
 }

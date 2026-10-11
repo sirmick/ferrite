@@ -539,7 +539,12 @@ request structs; the descriptions below are what `tools/list` returns.
 | `preset_detail` | `GET /api/presets/{name}` | Full JSON of one preset (ai_notes, block graph, sigwiki refs, sample path). |
 | `band_at` | `GET /api/band-plan/at?hz=` | US allocation band(s) containing a frequency. |
 | `load_preset` | `POST /api/preset` | Swap to a different preset (preserves centre freq). |
-| `tune` | `POST /api/tune` (+ `PATCH /api/source`) | Listen-frequency change with the per-driver DC-spike dodge; optionally folds in `gain_db` (+`agc=false`), `bandwidth_hz`, `sample_rate_hz`. |
+| `tune` | `POST /api/tune` (+ `PATCH /api/source`) | Listen-frequency change with the per-driver DC-spike dodge; optionally folds in `gain_db` (+`agc=false`), `bandwidth_hz`, `sample_rate_hz`. Or `carrier_hz` (+ `tone_hz`): put an RF carrier on an audio tone — dial = carrier − tone (USB) / + tone (LSB); the tone defaults to the running decoder's `rx_freq_hz`. CLI: `tune --carrier 14.062007M`. |
+| `spectrum` | `POST /api/spectrum` | Few-Hz spectrum of a ≤ 400 kHz range from a few seconds of live IQ (the source's tee on hardware, the channel's on a software source; no retune): peaks with interpolated `freq_hz`, `avg_db`/`peak_db` over the floor, `width_hz`, `keyed` + `duty` from a 20 ms envelope, and a max-hold `profile`. CLI: `spectrum <lo> <hi> [--secs --res --keyed]`. |
+| `get_flowgraph` | `GET /api/flowgraph` | The running preset doc, live params folded in. CLI: `flowgraph get`. |
+| `swap_block` | `PATCH /api/flowgraph` | Replace one block's type + params, keeping id and wires (validated; a port mismatch is rejected, the running graph untouched). CLI: `flowgraph swap <block> <Type> k=v…`. |
+| `set_flowgraph` | `PATCH /api/flowgraph` | Replace the running preset with a whole doc. CLI: `flowgraph put <file>`. |
+| `save_preset` | `POST /api/presets/{name}` | Save the running graph as a user preset (`--user-presets-dir`, default `<state-dir>/presets`); listed with `user: true`, loads by name, can't shadow a shipped preset. CLI: `preset save <name>`. |
 | `set_block_param` | `POST /api/pipeline/blocks/{id}/params` | Patch one block's params. `src` accepts gain/agc/antenna/bandwidth_hz/dc_offset_correction/`settings`. |
 | `start` | `POST /api/pipeline/start` | Start the pipeline. |
 | `stop` | `POST /api/pipeline/stop` | Stop the pipeline. |

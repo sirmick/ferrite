@@ -4,7 +4,7 @@
   "category": "HF digital modes",
   "label": "CW / Morse decode (HF)",
   "description": "Auto-decoded Morse on the HF CW calling frequencies (3.5\u201328 MHz).",
-  "ai_notes": "Morse / CW decoder for HF ham bands. Standard calling frequencies: 14.030 / 7.030 / 10.115 / 21.030 / 28.030 MHz. Tune so the CW tone sits at 600\u2013800 Hz audio (USB demod, dial freq slightly below the carrier). The auto-WPM detector handles ~5\u201340 wpm. Output: `tail decoder --category cw`.",
+  "ai_notes": "Morse / CW decoder for HF ham bands (fldigi's CW core: a narrow filter on the tone + speed tracking, one record per word in the `fldigi` kind / Journal view). CW lives in the bottom ~70 kHz of each band (20 m: 14.000\u201314.070; 40 m: 7.000\u20137.060; 30 m: 10.100\u201310.130); NCDXF beacons on 14.100 / 18.110 / 21.150 / 24.930 / 28.200 in 10-s slots. The tone must land within \u00b1bandwidth/2 of `cw.rx_freq_hz` (700 Hz): find the exact carrier with `spectrum <lo> <hi>` (few-Hz resolution) and park with `tune --carrier <f>` (it reads the tone from this block). AFC is off on purpose \u2014 headless fldigi can't search and drifts onto noise between overs. For fast contest CW raise `cw.wpm` (tracking spans \u00b1`wpm_range`). Use AGC off + fixed gain on HF.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Morse_Code_(CW)",
   "sample_path": "samples/sigidwiki/Cw_morse.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/CW.jpg",
@@ -64,15 +64,8 @@
       "placement_role": "audio",
       "placement": "node",
       "params": {
-        "output_rate_hz": 22050.0,
+        "output_rate_hz": 8000.0,
         "stopband_db": 60.0
-      }
-    },
-    "morse": {
-      "type": "MorseDemod",
-      "placement": "node",
-      "params": {
-        "sample_rate_hz": 22050.0
       }
     },
     "audio_tee": {
@@ -114,6 +107,16 @@
       "params": {
         "buffer_samples": 8192
       }
+    },
+    "cw": {
+      "type": "CwDemod",
+      "params": {
+        "afc": false,
+        "rx_freq_hz": 700,
+        "wpm": 20,
+        "wpm_range": 15,
+        "bandwidth_hz": 150
+      }
     }
   },
   "wires": [
@@ -150,10 +153,6 @@
       "ui:fft"
     ],
     [
-      "resamp.out",
-      "morse.in"
-    ],
-    [
       "audio_tee.out1",
       "audio_resamp.in"
     ],
@@ -166,8 +165,12 @@
       "audio.in"
     ],
     [
-      "morse.events",
-      "ui:cw"
+      "resamp.out",
+      "cw.in"
+    ],
+    [
+      "cw.events",
+      "ui:fldigi"
     ]
   ]
 }

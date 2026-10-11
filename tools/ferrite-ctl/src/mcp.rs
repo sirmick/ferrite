@@ -101,6 +101,29 @@ impl Http {
         api_response(resp, &format!("POST {path}")).await
     }
 
+    /// [`Self::post`] with its own timeout — for calls that do work on
+    /// the daemon for longer than the default per-request limit.
+    async fn post_slow(
+        &self,
+        path: &str,
+        body: Value,
+        cmd: &str,
+        note: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value, McpError> {
+        let req = self
+            .client
+            .post(format!("{}{}", self.base, path))
+            .timeout(timeout)
+            .json(&body);
+        let resp = self
+            .activity(req, cmd, note)
+            .send()
+            .await
+            .map_err(|e| http_err(&format!("POST {path}"), e.to_string()))?;
+        api_response(resp, &format!("POST {path}")).await
+    }
+
     /// Mutating PATCH, tagged like [`Self::post`].
     async fn patch(
         &self,
@@ -407,8 +430,21 @@ pub struct TuneArgs {
     /// Listen frequency in Hz (the operator-visible tune target). For
     /// zero-IF radios the server places the source LO off-target per
     /// the per-driver dodge ratio and pulls this freq back through
-    /// the channelizer — see D29 in docs/09-decisions.md.
-    pub freq_hz: f64,
+    /// the channelizer — see D29 in docs/09-decisions.md. Omit when
+    /// giving `carrier_hz`.
+    #[serde(default)]
+    pub freq_hz: Option<f64>,
+    /// Put this RF carrier on an audio tone instead of naming the dial:
+    /// the daemon sets dial = carrier − tone (USB) / + tone (LSB) from
+    /// the preset's SSB demod. Use for CW and digital modes — e.g. a CW
+    /// carrier found with `spectrum` → `tune(carrier_hz=…)` lands it on
+    /// the CW decoder's `rx_freq_hz`.
+    #[serde(default)]
+    pub carrier_hz: Option<f64>,
+    /// Tone for `carrier_hz`, Hz. Omit to use the running decoder's own
+    /// `rx_freq_hz` (CwDemod / fldigi blocks).
+    #[serde(default)]
+    pub tone_hz: Option<f64>,
     /// Optional sample-rate floor in Hz. When given and larger than
     /// the current source rate, the source rate is raised (the driver
     /// clamps to its rate ladder).
@@ -508,6 +544,71 @@ pub struct RecentDecodesArgs {
     /// Applied after the time filter, so `limit: 5` is "the last 5 lines".
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetFlowgraphArgs {
+    /// A complete flowgraph document (the shape `get_flowgraph` returns:
+    /// `{name, blocks:{id:{type, params}}, wires:[[from, to]], …}`). The
+    /// daemon validates it (port types, wiring) before swapping it in.
+    pub doc: Value,
+    /// Optional "why" note for the activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SwapBlockArgs {
+    /// Block id in the running preset (e.g. `morse`, `demod`).
+    pub block: String,
+    /// New block type (see `list_block_types`). Its port names must
+    /// match the old block's wiring or the daemon rejects the doc.
+    #[serde(rename = "type")]
+    pub type_name: String,
+    /// Params for the new block (replaces the old block's params).
+    #[serde(default)]
+    pub params: Option<Map<String, Value>>,
+    /// Optional "why" note for the activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SavePresetArgs {
+    /// Name to save under (`[A-Za-z0-9_-]+`; can't be a shipped preset's).
+    pub name: String,
+    /// Label shown in the preset list (default: the current one + "(saved)").
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Replace an existing saved preset of that name.
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SpectrumArgs {
+    /// Range start, Hz (≤ 400 kHz wide, inside the radio's current span).
+    pub lo_hz: f64,
+    /// Range end, Hz.
+    pub hi_hz: f64,
+    /// Seconds of IQ to analyse (default 3, 0.5–15). Longer catches more
+    /// of an intermittent signal — a beacon slot, a QSO's overs.
+    #[serde(default)]
+    pub secs: Option<f64>,
+    /// Target resolution, Hz/bin (default 10).
+    #[serde(default)]
+    pub res_hz: Option<f64>,
+    /// Peaks to return, strongest first (default 25).
+    #[serde(default)]
+    pub max_peaks: Option<usize>,
+    /// Points in the max-hold profile (default 120; 0 = none).
+    #[serde(default)]
+    pub profile_points: Option<usize>,
+    /// Optional "why" note for the activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -1050,6 +1151,26 @@ impl FerriteServer {
     /// `signals` kind; `max_age_ms` (default 2000) gates on the record's
     /// `at_ms` so a stale list (pipeline stopped / no `SignalList`) reports
     /// empty rather than frozen. `max_age_ms=0` disables the gate.
+    pub(crate) async fn spectrum_op(&self, args: SpectrumArgs) -> Result<Value, McpError> {
+        let secs = args.secs.unwrap_or(3.0).clamp(0.5, 15.0);
+        self.http
+            .post_slow(
+                "/api/spectrum",
+                json!({
+                    "lo_hz": args.lo_hz,
+                    "hi_hz": args.hi_hz,
+                    "secs": secs,
+                    "res_hz": args.res_hz,
+                    "max_peaks": args.max_peaks,
+                    "profile_points": args.profile_points,
+                }),
+                "spectrum",
+                args.note.as_deref(),
+                Duration::from_secs_f64(secs + 30.0),
+            )
+            .await
+    }
+
     pub(crate) async fn signals_op(&self, args: SignalsArgs) -> Result<Value, McpError> {
         let snapshot = self.state_op().await?;
         let rec = snapshot
@@ -1133,6 +1254,71 @@ impl FerriteServer {
             .await
     }
 
+    /// The running preset doc (live params folded in).
+    pub(crate) async fn get_flowgraph_op(&self) -> Result<Value, McpError> {
+        self.http.get("/api/flowgraph").await
+    }
+
+    /// Replace the running preset doc wholesale (validated server-side).
+    pub(crate) async fn set_flowgraph_op(&self, args: SetFlowgraphArgs) -> Result<Value, McpError> {
+        self.http
+            .patch(
+                "/api/flowgraph",
+                args.doc,
+                "flowgraph-set",
+                args.note.as_deref(),
+            )
+            .await
+    }
+
+    /// Swap one block's type (+ params), keeping its id and wiring.
+    pub(crate) async fn swap_block_op(&self, args: SwapBlockArgs) -> Result<Value, McpError> {
+        let mut doc = self.get_flowgraph_op().await?;
+        let block = doc
+            .get_mut("blocks")
+            .and_then(|b| b.get_mut(&args.block))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    format!("no block {:?} in the running preset", args.block),
+                    None,
+                )
+            })?;
+        let old = block.get("type").cloned().unwrap_or(Value::Null);
+        block.insert("type".into(), Value::from(args.type_name.clone()));
+        block.insert(
+            "params".into(),
+            Value::Object(args.params.clone().unwrap_or_default()),
+        );
+        let reply = self
+            .http
+            .patch(
+                "/api/flowgraph",
+                doc,
+                "flowgraph-swap",
+                Some(args.note.as_deref().unwrap_or(&format!(
+                    "{}: {} → {}",
+                    args.block,
+                    old.as_str().unwrap_or("?"),
+                    args.type_name
+                ))),
+            )
+            .await?;
+        Ok(json!({ "block": args.block, "from": old, "to": args.type_name, "reconfigure": reply }))
+    }
+
+    /// Save the running graph as a user preset.
+    pub(crate) async fn save_preset_op(&self, args: SavePresetArgs) -> Result<Value, McpError> {
+        self.http
+            .post(
+                &format!("/api/presets/{}", args.name),
+                json!({ "label": args.label, "description": args.description, "overwrite": args.overwrite }),
+                "preset-save",
+                None,
+            )
+            .await
+    }
+
     pub(crate) async fn load_preset_op(&self, args: LoadPresetArgs) -> Result<Value, McpError> {
         self.http
             .post(
@@ -1163,6 +1349,8 @@ impl FerriteServer {
                 "/api/tune",
                 json!({
                     "freq_hz": args.freq_hz,
+                    "carrier_hz": args.carrier_hz,
+                    "tone_hz": args.tone_hz,
                     "span_hz": args.span_hz,
                     // Pass the Option through: `null` lets the daemon apply
                     // the per-driver dodge default; `Some` overrides it.
@@ -1613,6 +1801,53 @@ impl FerriteServer {
         Parameters(args): Parameters<SignalsArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_json(&self.signals_op(args).await?)
+    }
+
+    #[tool(
+        description = "The running preset document with every live param edit folded in: `{name, label, blocks:{id:{type, params}}, wires:[[\"a.out\",\"b.in\"]], ai_notes, …}`. Read it before `swap_block` / `set_flowgraph`."
+    )]
+    async fn get_flowgraph(&self) -> Result<CallToolResult, McpError> {
+        ok_json(&self.get_flowgraph_op().await?)
+    }
+
+    #[tool(
+        description = "Replace one block in the running preset — same id, same wires — with another type and params, e.g. swap the multimon `MorseDemod` for fldigi's `CwDemod`. Port names must match the old block's wiring (the daemon validates and rejects otherwise; a rate change upstream is a separate `set_block_param`). Live: the graph rebuilds in place. Follow with `save_preset` to keep it."
+    )]
+    async fn swap_block(
+        &self,
+        Parameters(args): Parameters<SwapBlockArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.swap_block_op(args).await?)
+    }
+
+    #[tool(
+        description = "Replace the running preset with a complete flowgraph document (from `get_flowgraph`, edited) — for changes `swap_block` can't express (adding blocks, rewiring). Validated server-side before it goes live."
+    )]
+    async fn set_flowgraph(
+        &self,
+        Parameters(args): Parameters<SetFlowgraphArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.set_flowgraph_op(args).await?)
+    }
+
+    #[tool(
+        description = "Save the running graph (live params included) as a user preset `name` — it then appears in `list_presets` (flagged `user`) and loads with `load_preset` like a shipped one. Won't shadow a shipped preset; `overwrite` replaces an earlier save."
+    )]
+    async fn save_preset(
+        &self,
+        Parameters(args): Parameters<SavePresetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.save_preset_op(args).await?)
+    }
+
+    #[tool(
+        description = "A few-Hz-resolution look at a frequency range (≤ 400 kHz, inside the current span) over `secs` of live IQ — without retuning or interrupting the session. Returns `{res_hz, floor_dbfs, frames, peaks:[{freq_hz, avg_db, peak_db, duty, width_hz, keyed}], profile:[[freq_hz, maxhold_db]], tapped}`: `freq_hz` is interpolated to a fraction of a bin; `*_db` are over the range's noise floor; `keyed` marks on/off signals (CW, beacon slots) from a 20 ms envelope and `duty` their on-fraction. Use it where `signals` is too coarse (~146 Hz bins, fixed threshold): find CW / digital carriers, then `tune(carrier_hz=freq_hz)` to land one on the decoder's tone. For an intermittent signal give `secs` long enough to cover it (NCDXF beacons: 10-s slots every 3 min)."
+    )]
+    async fn spectrum(
+        &self,
+        Parameters(args): Parameters<SpectrumArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.spectrum_op(args).await?)
     }
 
     #[tool(

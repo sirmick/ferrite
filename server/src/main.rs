@@ -48,6 +48,7 @@ mod preset_pipeline;
 mod routes;
 mod soapy_log;
 mod source_policy;
+mod spectrum;
 mod store_persist;
 mod view_bridge;
 
@@ -80,6 +81,11 @@ struct Args {
     /// so test harnesses never inherit records).
     #[arg(long, env = "FERRITE_STATE_DIR", value_name = "PATH")]
     state_dir: Option<PathBuf>,
+
+    /// Where `preset save` stores operator/agent presets (listed and
+    /// loadable next to the shipped ones). Default: `<state-dir>/presets`.
+    #[arg(long, env = "FERRITE_USER_PRESETS_DIR", value_name = "PATH")]
+    user_presets_dir: Option<PathBuf>,
 
     /// Flowgraph preset JSON. Required for the server/headless modes;
     /// not used by `--list-devices` or `--probe-device`. The `src` block
@@ -369,6 +375,14 @@ async fn main() -> Result<()> {
         }
         state = state.with_presets_dir(dir);
     }
+    if let Some(dir) = args
+        .user_presets_dir
+        .clone()
+        .or_else(|| args.state_dir.as_ref().map(|d| d.join("presets")))
+    {
+        tracing::info!(path = %dir.display(), "user presets enabled");
+        state = state.with_user_presets_dir(dir);
+    }
 
     // Captures browser: the curated `samples/` tree of replayable
     // IQ/audio fixtures. `FERRITE_CAPTURES_DIR` overrides; default is
@@ -485,12 +499,16 @@ async fn main() -> Result<()> {
         .route("/api/ui-sinks", get(routes::list_ui_sinks))
         .route("/api/blocks", get(routes::list_block_schemas))
         .route("/api/presets", get(routes::list_presets))
-        .route("/api/presets/:name", get(routes::get_preset))
+        .route(
+            "/api/presets/:name",
+            get(routes::get_preset).post(routes::save_preset),
+        )
         .route("/api/band-plan/at", get(routes::band_at))
         .route("/api/captures", get(routes::list_captures))
         .route("/api/capture/iq", post(routes::post_capture_iq))
         .route("/api/capture/fft", post(routes::post_capture_fft))
         .route("/api/capture/audio", post(routes::post_capture_audio))
+        .route("/api/spectrum", post(spectrum::post_spectrum))
         .route("/api/preset", post(routes::load_preset))
         .route(
             "/api/profile",

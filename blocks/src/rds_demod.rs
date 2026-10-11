@@ -34,7 +34,10 @@
 //!
 //! I and Q are decimated by `DECIMATE_TO_BAUD_RATIO × symbol_rate`
 //! before bit sync so the symbol tracker sees a manageable sample
-//! count. The `data` port still carries the decimated baseband stream
+//! count. Bit sync then derotates (I, Q) with a slow Costas loop and
+//! tracks symbol timing with an early–late gate on the Manchester
+//! matched filter, so decoding follows the SDR's sample-clock error
+//! instead of drifting off the symbols (audit P5-H3). The `data` port still carries the decimated baseband stream
 //! for diagnostics; decoded RDS events go out the `events` port as
 //! newline-delimited JSON.
 //!
@@ -182,8 +185,8 @@ pub struct RdsDemod {
     accum_i: f32,
     accum_q: f32,
 
-    /// Phase 2: Manchester bit sync + differential decoder fed from
-    /// the decimated I stream.
+    /// Phase 2: carrier-phase + symbol-timing recovery, Manchester bit
+    /// decision and differential decoder fed from the decimated (I, Q).
     bit_sync: BitSync,
     /// Phase 3: 26-bit block assembler with CRC-10 / offset-word
     /// sync detection.
@@ -194,6 +197,28 @@ pub struct RdsDemod {
     /// Newline-delimited so a downstream `EventsSink` or UI shim can
     /// split them cleanly — same convention `StereoDecoder` uses.
     events_out: Vec<u8>,
+}
+
+/// Decoder health counters — diagnostics only (measurement harnesses,
+/// tests). Not part of the event output.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RdsDiag {
+    /// Blocks that passed CRC / offset check while locked.
+    pub blocks_ok: u64,
+    /// Complete groups (A + B + D seen, parsed on D).
+    pub groups: u64,
+    /// Locked → Searching transitions (block-sync losses).
+    pub sync_losses: u64,
+    /// Symbol-timing loop's tracked clock error (ppm; + = symbols
+    /// longer than nominal in input samples).
+    pub clock_ppm: f64,
+    /// Last decoded PI / PTY.
+    pub pi: Option<u16>,
+    pub pty: Option<u8>,
+    /// PS buffer (raw, may be partially filled).
+    pub ps: String,
+    /// RadioText buffer from 2A/2B groups (raw, may be partial).
+    pub rt: String,
 }
 
 impl RdsDemod {
@@ -269,6 +294,33 @@ impl RdsDemod {
     #[must_use]
     pub const fn q_power(&self) -> f32 {
         self.q_power
+    }
+
+    /// Snapshot of decoder health counters + the last-decoded fields
+    /// (incl. RadioText, which is parsed but not yet an event).
+    #[must_use]
+    pub fn diag(&self) -> RdsDiag {
+        let printable = |b: &[u8]| -> String {
+            b.iter()
+                .map(|&c| {
+                    if (0x20..=0x7E).contains(&c) {
+                        c as char
+                    } else {
+                        ' '
+                    }
+                })
+                .collect()
+        };
+        RdsDiag {
+            blocks_ok: self.block_sync.blocks_ok,
+            groups: self.parser.groups,
+            sync_losses: self.block_sync.sync_losses,
+            clock_ppm: self.bit_sync.clock_error() * 1e6,
+            pi: self.parser.pi,
+            pty: self.parser.pty,
+            ps: printable(&self.parser.ps_buf),
+            rt: printable(&self.parser.rt_buf),
+        }
     }
 
     /// Integer decimation factor from MPX rate to the output data rate.
@@ -352,7 +404,7 @@ impl RdsDemod {
             // compact change set whenever something new was decoded;
             // we serialize that to newline-delimited JSON into
             // `events_out` for the `events` port drain.
-            if let Some(bit) = self.bit_sync.push(out_i) {
+            if let Some(bit) = self.bit_sync.push(out_i, out_q) {
                 if let Some(block) = self.block_sync.push(bit) {
                     if let Some(update) = self.parser.push_block(block) {
                         update.write_json(&mut self.events_out);
@@ -524,7 +576,8 @@ impl BlockFactory for RdsDemod {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: Manchester bit sync + differential decode
+// Phase 2: carrier-phase + symbol-timing recovery, Manchester bit
+// decision, differential decode
 // ---------------------------------------------------------------------------
 //
 // RDS source bits S[n] are transmitted as T[n] = S[n] XOR T[n-1]
@@ -532,66 +585,192 @@ impl BlockFactory for RdsDemod {
 // transition mid-symbol, T[n]=0 is high→low. Receiver reverses:
 // recover T_r[n] from the symbol, then S_r[n] = T_r[n] XOR T_r[n-1].
 //
-// Bit sync uses a fractional-rate two-half integrator. At the input
-// rate of ~9.5 kS/s (8 × 1187.5 baud), one symbol spans ~8 samples.
-// We accumulate the first half and second half of each symbol window
-// separately; the sign of `second - first` is the received T bit
-// (Manchester polarity). `samples_per_bit` is a float because the
-// MPX-to-output decimation doesn't divide evenly into the symbol
-// rate; the fractional carry over `samples_in_bit` keeps the timing
-// aligned to the baud clock on average.
+// Input is the decimated complex baseband (I, Q) at ~8 samples per
+// symbol. Three loops run on it:
+//
+// 1. **Carrier phase (Costas).** The 57 kHz LO is 3× the pilot PLL's
+//    phase, but the spec allows the subcarrier in phase *or* in
+//    quadrature with the pilot's third harmonic, and the pilot PLL /
+//    band-pass carry their own static offsets. A slow BPSK Costas loop
+//    rotates (I, Q) so the data lands on the real axis whatever that
+//    offset is (180° ambiguity is harmless — differential coding).
+//
+// 2. **Symbol timing (early–late gate) — audit P5-H3.** The symbol
+//    metric is the Manchester matched filter evaluated at an arbitrary
+//    (fractional) symbol-end time τ over the zero-order-hold sample
+//    stream: `y(τ) = ∫[τ−T/2, τ] − ∫[τ−T, τ−T/2]`. `|y|` peaks when τ
+//    sits on the true symbol boundary, so `|y(τ+δ)| − |y(τ−δ)|` is a
+//    timing error. A PI loop steers both the strobe phase and the
+//    symbol period, so the decoder tracks the sample-clock error
+//    between the SDR and the broadcaster (which is what made the old
+//    free-running flywheel drift off the symbols every few tens of
+//    seconds and drop sync).
+//
+// 3. **Half-symbol check.** Manchester has a weak second equilibrium
+//    half a symbol off (on runs of equal T bits it looks like a square
+//    wave at the baud rate). We keep running averages of `|y|` at τ and
+//    at τ−T/2; if the off-phase is persistently stronger, jump half a
+//    symbol.
+
+/// Ring of recent derotated samples; must cover 1.5 T + δ + slack.
+const SYNC_RING: usize = 64;
 
 struct BitSync {
-    first_half: f32,
-    second_half: f32,
-    samples_in_bit: f32,
-    samples_per_bit: f32,
-    half_bit: f32,
+    // --- carrier phase -------------------------------------------------
+    /// Current carrier-phase correction (rad).
+    phase: f32,
+    /// Smoothed |z| for normalising the Costas error.
+    amp: f32,
+    // --- symbol timing --------------------------------------------------
+    /// Derotated real samples, indexed by absolute sample number.
+    ring: [f32; SYNC_RING],
+    /// Number of samples pushed so far (sample k covers [k, k+1)).
+    n: u64,
+    /// Nominal samples per symbol.
+    sps: f64,
+    /// Absolute time (samples) of the next symbol-end strobe.
+    tau: f64,
+    /// Integrator of the timing loop — fractional period correction
+    /// (i.e. the tracked clock error).
+    freq: f64,
+    /// Running means of |y| on-phase and half a symbol off.
+    avg_on: f32,
+    avg_off: f32,
+    /// Symbols since the last half-symbol jump.
+    since_flip: u32,
     last_raw: bool,
 }
 
 impl BitSync {
+    /// Costas loop gain (per sample, on the normalised error).
+    const COSTAS_GAIN: f32 = 0.002;
+    /// Timing loop proportional / integral gains (per symbol, on the
+    /// normalised early–late error).
+    const KP: f64 = 0.01;
+    const KI: f64 = 2e-5;
+    /// Clamp on the tracked clock error (±0.5 %).
+    const FREQ_LIMIT: f64 = 5e-3;
+    /// Early/late offset as a fraction of a symbol.
+    const EL_FRAC: f64 = 0.125;
+    /// Half-symbol check: averaging constant, ratio and holdoff.
+    const AVG_ALPHA: f32 = 1.0 / 64.0;
+    const FLIP_RATIO: f32 = 1.3;
+    const FLIP_HOLDOFF: u32 = 128;
+
     fn new(input_rate_hz: f32) -> Self {
-        let samples_per_bit = input_rate_hz / RDS_BAUD;
+        let sps = f64::from(input_rate_hz / RDS_BAUD);
         Self {
-            first_half: 0.0,
-            second_half: 0.0,
-            samples_in_bit: 0.0,
-            samples_per_bit,
-            half_bit: samples_per_bit / 2.0,
+            phase: 0.0,
+            amp: 0.0,
+            ring: [0.0; SYNC_RING],
+            n: 0,
+            sps,
+            tau: sps,
+            freq: 0.0,
+            avg_on: 0.0,
+            avg_off: 0.0,
+            since_flip: 0,
             last_raw: false,
         }
     }
 
-    /// Push one soft sample; return `Some(bit)` each time a full
-    /// symbol completes. `bit` is the differentially-decoded source
-    /// bit (true = 1).
-    fn push(&mut self, sample: f32) -> Option<bool> {
-        if self.samples_in_bit < self.half_bit {
-            self.first_half += sample;
-        } else {
-            self.second_half += sample;
+    /// Tracked clock error (fractional; +1e-6 = symbols 1 ppm longer
+    /// than nominal in input samples).
+    const fn clock_error(&self) -> f64 {
+        self.freq
+    }
+
+    /// ∫ x(t) dt over [a, b] (absolute sample time, ZOH samples).
+    /// Caller guarantees the span is inside the ring and already pushed.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    fn integral(&self, a: f64, b: f64) -> f32 {
+        let mut acc = 0.0_f64;
+        let mut k = a.floor().max(0.0) as u64;
+        while (k as f64) < b {
+            let lo = a.max(k as f64);
+            let hi = b.min((k + 1) as f64);
+            if hi > lo {
+                acc += f64::from(self.ring[(k as usize) % SYNC_RING]) * (hi - lo);
+            }
+            k += 1;
         }
-        self.samples_in_bit += 1.0;
+        acc as f32
+    }
 
-        if self.samples_in_bit >= self.samples_per_bit {
-            // Manchester: low→high transition means T=1. Sign of
-            // `second − first` picks that out directly.
-            let raw = self.second_half > self.first_half;
-            let decoded = raw != self.last_raw;
-            self.last_raw = raw;
+    /// Manchester matched-filter output for a symbol ending at `t`.
+    fn metric(&self, t: f64) -> f32 {
+        let h = self.sps * 0.5;
+        self.integral(t - h, t) - self.integral(t - 2.0 * h, t - h)
+    }
 
-            self.first_half = 0.0;
-            self.second_half = 0.0;
-            // Fractional carry: don't reset to zero — keep the
-            // remainder so we don't drift over many symbols. This is
-            // what makes an 8.08-samples-per-bit decimation stable.
-            self.samples_in_bit -= self.samples_per_bit;
-
-            Some(decoded)
-        } else {
-            None
+    /// Push one complex soft sample; return `Some(bit)` each time a
+    /// full symbol completes. `bit` is the differentially-decoded
+    /// source bit (true = 1).
+    #[allow(clippy::cast_precision_loss)]
+    fn push(&mut self, i: f32, q: f32) -> Option<bool> {
+        // Carrier derotation + Costas update (BPSK: error = sgn(re)·im).
+        let (s, c) = self.phase.sin_cos();
+        let re = i * c + q * s;
+        let im = q * c - i * s;
+        self.amp += 0.001 * ((re * re + im * im).sqrt() - self.amp);
+        if self.amp > 1e-12 {
+            let err = re.signum() * im / self.amp;
+            self.phase += Self::COSTAS_GAIN * err.clamp(-1.0, 1.0);
+            if self.phase > core::f32::consts::PI {
+                self.phase -= core::f32::consts::TAU;
+            } else if self.phase < -core::f32::consts::PI {
+                self.phase += core::f32::consts::TAU;
+            }
         }
+
+        self.ring[(self.n as usize) % SYNC_RING] = re;
+        self.n += 1;
+
+        let delta = self.sps * Self::EL_FRAC;
+        // Strobe once the late gate's window has been fully received.
+        if (self.n as f64) < self.tau + delta {
+            return None;
+        }
+        let tau = self.tau;
+        let y = self.metric(tau);
+        let early = self.metric(tau - delta).abs();
+        let late = self.metric(tau + delta).abs();
+        let off = self.metric(tau - self.sps * 0.5).abs();
+
+        // Early–late timing error, normalised to ~[-1, 1]. Positive =
+        // the peak is later than τ → stretch the next interval.
+        let denom = early + late;
+        let err = if denom > 1e-20 {
+            f64::from((late - early) / denom)
+        } else {
+            0.0
+        };
+        self.freq = (self.freq + Self::KI * err).clamp(-Self::FREQ_LIMIT, Self::FREQ_LIMIT);
+        let mut next = tau + self.sps * (1.0 + self.freq + Self::KP * err);
+
+        // Half-symbol ambiguity check.
+        self.avg_on += Self::AVG_ALPHA * (y.abs() - self.avg_on);
+        self.avg_off += Self::AVG_ALPHA * (off - self.avg_off);
+        self.since_flip = self.since_flip.saturating_add(1);
+        if self.since_flip > Self::FLIP_HOLDOFF && self.avg_off > Self::FLIP_RATIO * self.avg_on {
+            // The better phase is half a symbol earlier: strobe there
+            // next instead of a full symbol on.
+            next -= self.sps * 0.5;
+            std::mem::swap(&mut self.avg_on, &mut self.avg_off);
+            self.since_flip = 0;
+        }
+        self.tau = next;
+
+        // Manchester: low→high transition (second half > first half)
+        // means T=1.
+        let raw = y > 0.0;
+        let decoded = raw != self.last_raw;
+        self.last_raw = raw;
+        Some(decoded)
     }
 }
 
@@ -709,6 +888,9 @@ struct BlockSync {
     /// 26-bit rolling window of most recent bits.
     window: u32,
     state: SyncState,
+    /// Diagnostics: CRC-good blocks emitted / Locked→Searching drops.
+    blocks_ok: u64,
+    sync_losses: u64,
 }
 
 impl BlockSync {
@@ -719,6 +901,8 @@ impl BlockSync {
         Self {
             window: 0,
             state: SyncState::Searching,
+            blocks_ok: 0,
+            sync_losses: 0,
         }
     }
 
@@ -752,6 +936,7 @@ impl BlockSync {
                         bits_until_boundary: 26,
                         consecutive_bad: 0,
                     };
+                    self.blocks_ok += 1;
                     return Some(RdsBlock {
                         offset: off,
                         data: ((self.window >> 10) & 0xFFFF) as u16,
@@ -781,6 +966,7 @@ impl BlockSync {
                         bits_until_boundary: 26,
                         consecutive_bad: 0,
                     };
+                    self.blocks_ok += 1;
                     return Some(RdsBlock {
                         offset: off,
                         data: ((self.window >> 10) & 0xFFFF) as u16,
@@ -789,6 +975,7 @@ impl BlockSync {
                 let bad = consecutive_bad + 1;
                 if bad >= Self::UNLOCK_THRESHOLD {
                     self.state = SyncState::Searching;
+                    self.sync_losses += 1;
                 } else {
                     self.state = SyncState::Locked {
                         bits_until_boundary: 26,
@@ -915,6 +1102,11 @@ struct GroupParser {
     ps_seen_segments: u8,
     /// Last fully-sent PS snapshot — emits only when content changes.
     last_emitted_ps: Option<[u8; 8]>,
+    /// RadioText (2A: 64 chars, 2B: 32) — parsed for diagnostics only,
+    /// not yet surfaced as an event.
+    rt_buf: [u8; 64],
+    /// Diagnostics: complete groups parsed.
+    groups: u64,
 }
 
 impl GroupParser {
@@ -928,6 +1120,8 @@ impl GroupParser {
             ps_buf: [b' '; 8],
             ps_seen_segments: 0,
             last_emitted_ps: None,
+            rt_buf: [b' '; 64],
+            groups: 0,
         }
     }
 
@@ -955,10 +1149,14 @@ impl GroupParser {
             return None;
         };
         let d = self.slots[3]?;
-        // Parsed but not yet surfaced — block C and the B0 variant bit
-        // are what RT / AF / CT group decoding will need once those
-        // group types are implemented.
-        let _c_or_cprime = self.slots[2];
+        // Consume the group: a later D must not pair with this group's
+        // (stale) B if the next A/B are lost — that would write PS
+        // characters into the wrong segment.
+        self.slots = [None; 4];
+        self.groups += 1;
+        // Block C feeds RT (2A) below; AF / CT group decoding will need
+        // it too once those group types are implemented.
+        let c_or_cprime = self.slots[2];
 
         let mut update = GroupUpdate::empty();
 
@@ -970,7 +1168,7 @@ impl GroupParser {
 
         // Block B parse.
         let group_type_code = (b >> 12) & 0x0F;
-        let _variant_b = (b >> 11) & 0x01 == 1;
+        let variant_b = (b >> 11) & 0x01 == 1;
         let tp = (b >> 10) & 0x01 == 1;
         let pty = ((b >> 5) & 0x1F) as u8;
         let b_low5 = (b & 0x1F) as u8;
@@ -1010,6 +1208,20 @@ impl GroupParser {
             if self.ps_seen_segments == 0b1111 && self.last_emitted_ps != Some(self.ps_buf) {
                 self.last_emitted_ps = Some(self.ps_buf);
                 update.ps_changed = Some(self.ps_buf);
+            }
+        }
+
+        // Group 2A/2B: RadioText. Diagnostics-only buffer (no event yet).
+        if group_type_code == 2 {
+            let seg = usize::from(b & 0x0F);
+            if variant_b {
+                self.rt_buf[seg * 2] = (d >> 8) as u8;
+                self.rt_buf[seg * 2 + 1] = (d & 0xFF) as u8;
+            } else if let Some(c) = c_or_cprime {
+                self.rt_buf[seg * 4] = (c >> 8) as u8;
+                self.rt_buf[seg * 4 + 1] = (c & 0xFF) as u8;
+                self.rt_buf[seg * 4 + 2] = (d >> 8) as u8;
+                self.rt_buf[seg * 4 + 3] = (d & 0xFF) as u8;
             }
         }
 
@@ -1195,12 +1407,16 @@ mod tests {
             }
         }
 
+        // The late timing gate looks ~1 sample past the symbol end, so
+        // pad with a couple of trailing samples for the final strobe.
+        mpx.extend_from_slice(&[0.0, 0.0]);
+
         let mut bs = BitSync::new(fs_out);
         // At fs_out=9500, samples_per_bit = 8.0 exactly — no fractional
         // drift. Each 8 samples emits one bit.
         let mut decoded = Vec::new();
         for &s in &mpx {
-            if let Some(bit) = bs.push(s) {
+            if let Some(bit) = bs.push(s, 0.0) {
                 decoded.push(bit);
             }
         }
@@ -1338,5 +1554,158 @@ mod tests {
         let s = std::str::from_utf8(&out).unwrap();
         let expected = "{\"t\":\"rds\",\"pi\":4660,\"pty\":22,\"tp\":true,\"ps\":\"KEXP 90 \"}\n";
         assert_eq!(s, expected, "full JSON: {s}");
+    }
+
+    // ----- P5-H3: symbol-timing recovery under sample-clock error ------
+
+    /// Encode one 26-bit block (16 data + 10 check ⊕ offset), MSB first.
+    fn encode_block(data: u16, off: BlockOffset, out: &mut Vec<bool>) {
+        let shifted = u32::from(data) << 10;
+        let word = (shifted | u32::from(rds_syndrome(shifted))) ^ u32::from(off.syndrome());
+        for i in (0..26).rev() {
+            out.push((word >> i) & 1 == 1);
+        }
+    }
+
+    /// Source bit stream of `n_groups` 0A groups: PI 0x12BC, PTY 10,
+    /// PS "FERRITE!" cycling over its 4 segments.
+    fn synth_groups(n_groups: usize) -> Vec<bool> {
+        const PI: u16 = 0x12BC;
+        const PS: &[u8; 8] = b"FERRITE!";
+        let mut bits = Vec::with_capacity(n_groups * 104);
+        for g in 0..n_groups {
+            let seg = (g % 4) as u16;
+            let b = (10 << 5) | seg; // 0A, TP=0, PTY=10, TA=0
+            let d = u16::from(PS[seg as usize * 2]) << 8 | u16::from(PS[seg as usize * 2 + 1]);
+            encode_block(PI, BlockOffset::A, &mut bits);
+            encode_block(b, BlockOffset::B, &mut bits);
+            encode_block(0xE0CD, BlockOffset::C, &mut bits);
+            encode_block(d, BlockOffset::D, &mut bits);
+        }
+        bits
+    }
+
+    /// Render the bits as differential-Manchester baseband sampled at
+    /// `fs` by a receiver whose clock disagrees with the broadcaster's:
+    /// `ppm(t)` is the instantaneous error (+ = receiver sees symbols
+    /// that are longer, in its own samples). Each output sample is the
+    /// mean of the waveform over its interval (what the block's boxcar
+    /// decimator does), plus deterministic noise, rotated by a static
+    /// carrier-phase offset onto (I, Q).
+    fn synth_baseband(bits: &[bool], fs: f64, ppm: impl Fn(f64) -> f64) -> Vec<(f32, f32)> {
+        // Differential encode.
+        let mut t_prev = false;
+        let tx: Vec<bool> = bits
+            .iter()
+            .map(|&b| {
+                t_prev ^= b;
+                t_prev
+            })
+            .collect();
+        const SUB: usize = 8;
+        let (rot_s, rot_c) = 0.5_f32.sin_cos(); // ~29° carrier offset
+        let mut lcg: u32 = 0x1234_5678;
+        let mut noise = move || {
+            lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (lcg >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let mut out = Vec::new();
+        // Symbol-clock phase (in symbols), integrated sub-sample by
+        // sub-sample so time-varying ppm is handled. Starts mid-symbol
+        // so acquisition from an arbitrary phase is exercised too.
+        let mut sym = 0.37_f64;
+        let dt = 1.0 / (fs * SUB as f64);
+        let mut t = 0.0_f64;
+        'outer: loop {
+            let mut acc = 0.0_f32;
+            for _ in 0..SUB {
+                let k = sym.floor() as usize;
+                if k >= tx.len() {
+                    break 'outer;
+                }
+                let first_half = sym.fract() < 0.5;
+                // T=1: low→high; T=0: high→low.
+                let high = if tx[k] { !first_half } else { first_half };
+                acc += if high { 1.0 } else { -1.0 };
+                sym += f64::from(super::RDS_BAUD) * dt / (1.0 + ppm(t) * 1e-6);
+                t += dt;
+            }
+            let v = acc / SUB as f32 + 0.8 * noise();
+            out.push((v * rot_c, v * rot_s));
+        }
+        out
+    }
+
+    /// Run soft samples through bit sync → block sync → group parser
+    /// (exactly the chain `pump` drives). Returns groups decoded per
+    /// whole second plus the parser for field checks.
+    fn decode(fs: f32, samples: &[(f32, f32)]) -> (Vec<u64>, u64, GroupParser) {
+        let mut bs = BitSync::new(fs);
+        let mut bsync = BlockSync::new();
+        let mut parser = GroupParser::new();
+        let per_sec = fs as usize;
+        let mut buckets = Vec::new();
+        let mut last = 0;
+        for (n, &(i, q)) in samples.iter().enumerate() {
+            if let Some(bit) = bs.push(i, q) {
+                if let Some(block) = bsync.push(bit) {
+                    let _ = parser.push_block(block);
+                }
+            }
+            if (n + 1) % per_sec == 0 {
+                buckets.push(parser.groups - last);
+                last = parser.groups;
+            }
+        }
+        (buckets, bsync.sync_losses, parser)
+    }
+
+    fn assert_tracks(label: &str, ppm: impl Fn(f64) -> f64) {
+        // 240 kHz MPX / decim 25 = 9600 Hz, the block's internal rate.
+        let fs = 9_600.0_f32;
+        let secs = 70.0;
+        let n_groups = (secs * f64::from(super::RDS_BAUD) / 104.0) as usize;
+        let samples = synth_baseband(&synth_groups(n_groups), f64::from(fs), ppm);
+        let (per_sec, losses, parser) = decode(fs, &samples);
+        let ideal = f64::from(super::RDS_BAUD) / 104.0;
+        // Skip the first second (acquisition); every later full second
+        // must decode near the ideal group rate — no drop-outs.
+        let steady = &per_sec[1..per_sec.len() - 1];
+        assert!(
+            steady.len() >= 60,
+            "{label}: only {} s decoded",
+            steady.len()
+        );
+        let min = *steady.iter().min().unwrap();
+        let mean = steady.iter().sum::<u64>() as f64 / steady.len() as f64;
+        assert!(
+            min >= 10 && mean >= 0.95 * ideal && losses == 0,
+            "{label}: group rate min {min}/s mean {mean:.2}/s (ideal {ideal:.2}), \
+             {losses} sync losses; per-second: {per_sec:?}"
+        );
+        assert_eq!(parser.pi, Some(0x12BC), "{label}: PI");
+        assert_eq!(parser.pty, Some(10), "{label}: PTY");
+        assert_eq!(&parser.ps_buf, b"FERRITE!", "{label}: PS");
+    }
+
+    #[test]
+    fn symbol_timing_tracks_plus_300_ppm_clock_error() {
+        assert_tracks("+300 ppm", |_| 300.0);
+    }
+
+    #[test]
+    fn symbol_timing_tracks_minus_300_ppm_clock_error() {
+        assert_tracks("-300 ppm", |_| -300.0);
+    }
+
+    #[test]
+    fn symbol_timing_tracks_slow_clock_drift() {
+        // Drift −150 → +150 ppm over the run (thermal-drift shape).
+        assert_tracks("drift", |t| -150.0 + 300.0 * t / 70.0);
+    }
+
+    #[test]
+    fn symbol_timing_holds_with_nominal_clock() {
+        assert_tracks("0 ppm", |_| 0.0);
     }
 }

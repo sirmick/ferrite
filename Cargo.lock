@@ -866,6 +866,7 @@ dependencies = [
  "postcard",
  "rumqttc",
  "rumqttd",
+ "rustfft",
  "serde",
  "serde_json",
  "soapysdr",
