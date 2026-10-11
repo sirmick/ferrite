@@ -10,27 +10,22 @@
   let input = $state('');
   let stickToBottom = $state(true);
 
-  // The activity panel below the chat renders the store's `activity`
-  // kind (one record per mutating ferrite-ctl / agent request, folded
-  // by the server's activity middleware and mirrored like every other
-  // kind — `ferrite/state/activity` on the bus, `/api/state` over REST).
-  // Survives a reload: the snapshot carries the last 512.
-  let activity = $derived(
-    decoders
-      .kind('activity')
-      .recent.slice(-50)
-      .map((r) => ({
-        seq: r.seq,
-        t: r.at_ms,
-        text: String((r.data as { summary?: unknown })?.summary ?? ''),
-      })),
-  );
-
-  // One timeline: conversation turns and analysis records (whoever ran
-  // the measurement — the AI, the CLI, the UI), by time.
+  // One timeline, by time: conversation turns, analysis records (whoever
+  // ran the measurement — the AI, the CLI, the UI), and activity — the
+  // store's `activity` kind, one record per mutating request (a tune, a
+  // preset load, an AI prompt over REST…). Adjacent activity collapses
+  // into one compact block.
+  interface Act {
+    seq: number;
+    t: number;
+    text: string;
+    note: string;
+    error: boolean;
+  }
   type Item =
     | { k: 'turn'; key: string; t: number; turn: Turn }
-    | { k: 'analysis'; key: string; t: number; rec: AnalysisRecord };
+    | { k: 'analysis'; key: string; t: number; rec: AnalysisRecord }
+    | { k: 'activity'; key: string; t: number; acts: Act[] };
   let timeline = $derived.by<Item[]>(() => {
     const items: Item[] = ai.turns.map((turn) => ({
       k: 'turn' as const,
@@ -46,11 +41,37 @@
         rec: r.data as unknown as AnalysisRecord,
       });
     }
-    // Stable: turns keep their own order; analyses slot in by time.
-    return items
+    for (const r of decoders.kind('activity').recent.slice(-80)) {
+      const d = (r.data ?? {}) as Record<string, unknown>;
+      const status = Number(d['status'] ?? 200);
+      items.push({
+        k: 'activity',
+        key: `v${r.seq}`,
+        t: r.at_ms,
+        acts: [
+          {
+            seq: r.seq,
+            t: r.at_ms,
+            text: String(d['summary'] ?? d['command'] ?? ''),
+            note: String(d['note'] ?? ''),
+            error: status >= 400,
+          },
+        ],
+      });
+    }
+    // Stable: turns keep their own order; the rest slot in by time.
+    const sorted = items
       .map((it, i) => ({ it, i }))
       .sort((a, b) => a.it.t - b.it.t || a.i - b.i)
       .map(({ it }) => it);
+    const out: Item[] = [];
+    for (const it of sorted) {
+      const prev = out.at(-1);
+      if (it.k === 'activity' && prev?.k === 'activity') {
+        out[out.length - 1] = { ...prev, acts: [...prev.acts, ...it.acts] };
+      } else out.push(it);
+    }
+    return out;
   });
 
   $effect(() => {
@@ -326,6 +347,19 @@
     {#each timeline as item (item.key)}
       {#if item.k === 'analysis'}
         <AnalysisCard rec={item.rec} t={item.t} />
+      {:else if item.k === 'activity'}
+        <div
+          class="mb-2 border-l-2 border-slate-700 pl-1.5 font-mono text-[10px] leading-tight text-slate-400"
+          title="activity — mutating requests (ferrite/state/activity)"
+        >
+          {#each item.acts as e (e.seq)}
+            <div class="flex items-baseline gap-2">
+              <span class="text-slate-600">{fmtTime(e.t)}</span>
+              <span class:text-rose-400={e.error}>⇢ {e.text}</span>
+              {#if e.note}<span class="truncate italic text-slate-500">{e.note}</span>{/if}
+            </div>
+          {/each}
+        </div>
       {:else}
         {@const turn = item.turn}
         {#if turn.role === 'user'}
@@ -525,29 +559,6 @@
       >
         ◼ stop
       </button>
-    </div>
-  </div>
-
-  <!-- Activity transcript: filtered ai::activity log -->
-  <div class="flex max-h-[35%] min-h-[6rem] flex-col border-t border-slate-800 bg-slate-950/50">
-    <div class="flex items-center justify-between border-b border-slate-800 px-2 py-1">
-      <span class="font-semibold text-[color:var(--color-muted)]">Activity</span>
-      <span class="text-[10px] text-[color:var(--color-muted)]">
-        ferrite/state/activity ({activity.length})
-      </span>
-    </div>
-    <div class="min-h-0 flex-1 overflow-y-auto px-2 py-1 font-mono text-[10px]">
-      {#if activity.length === 0}
-        <div class="text-[color:var(--color-muted)]">
-          no activity yet — the AI's CLI calls will appear here
-        </div>
-      {/if}
-      {#each activity as e (e.seq)}
-        <div class="flex items-baseline gap-2 leading-tight">
-          <span class="text-slate-500">{fmtTime(e.t)}</span>
-          <span class="flex-1 text-slate-300">{e.text}</span>
-        </div>
-      {/each}
     </div>
   </div>
 </div>
