@@ -101,6 +101,29 @@ impl Http {
         api_response(resp, &format!("POST {path}")).await
     }
 
+    /// [`Self::post`] with its own timeout — for calls that do work on
+    /// the daemon for longer than the default per-request limit.
+    async fn post_slow(
+        &self,
+        path: &str,
+        body: Value,
+        cmd: &str,
+        note: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value, McpError> {
+        let req = self
+            .client
+            .post(format!("{}{}", self.base, path))
+            .timeout(timeout)
+            .json(&body);
+        let resp = self
+            .activity(req, cmd, note)
+            .send()
+            .await
+            .map_err(|e| http_err(&format!("POST {path}"), e.to_string()))?;
+        api_response(resp, &format!("POST {path}")).await
+    }
+
     /// Mutating PATCH, tagged like [`Self::post`].
     async fn patch(
         &self,
@@ -521,6 +544,30 @@ pub struct RecentDecodesArgs {
     /// Applied after the time filter, so `limit: 5` is "the last 5 lines".
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SpectrumArgs {
+    /// Range start, Hz (≤ 400 kHz wide, inside the radio's current span).
+    pub lo_hz: f64,
+    /// Range end, Hz.
+    pub hi_hz: f64,
+    /// Seconds of IQ to analyse (default 3, 0.5–15). Longer catches more
+    /// of an intermittent signal — a beacon slot, a QSO's overs.
+    #[serde(default)]
+    pub secs: Option<f64>,
+    /// Target resolution, Hz/bin (default 10).
+    #[serde(default)]
+    pub res_hz: Option<f64>,
+    /// Peaks to return, strongest first (default 25).
+    #[serde(default)]
+    pub max_peaks: Option<usize>,
+    /// Points in the max-hold profile (default 120; 0 = none).
+    #[serde(default)]
+    pub profile_points: Option<usize>,
+    /// Optional "why" note for the activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -1063,6 +1110,26 @@ impl FerriteServer {
     /// `signals` kind; `max_age_ms` (default 2000) gates on the record's
     /// `at_ms` so a stale list (pipeline stopped / no `SignalList`) reports
     /// empty rather than frozen. `max_age_ms=0` disables the gate.
+    pub(crate) async fn spectrum_op(&self, args: SpectrumArgs) -> Result<Value, McpError> {
+        let secs = args.secs.unwrap_or(3.0).clamp(0.5, 15.0);
+        self.http
+            .post_slow(
+                "/api/spectrum",
+                json!({
+                    "lo_hz": args.lo_hz,
+                    "hi_hz": args.hi_hz,
+                    "secs": secs,
+                    "res_hz": args.res_hz,
+                    "max_peaks": args.max_peaks,
+                    "profile_points": args.profile_points,
+                }),
+                "spectrum",
+                args.note.as_deref(),
+                Duration::from_secs_f64(secs + 30.0),
+            )
+            .await
+    }
+
     pub(crate) async fn signals_op(&self, args: SignalsArgs) -> Result<Value, McpError> {
         let snapshot = self.state_op().await?;
         let rec = snapshot
@@ -1628,6 +1695,16 @@ impl FerriteServer {
         Parameters(args): Parameters<SignalsArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_json(&self.signals_op(args).await?)
+    }
+
+    #[tool(
+        description = "A few-Hz-resolution look at a frequency range (≤ 400 kHz, inside the current span) over `secs` of live IQ — without retuning or interrupting the session. Returns `{res_hz, floor_dbfs, frames, peaks:[{freq_hz, avg_db, peak_db, duty, width_hz, keyed}], profile:[[freq_hz, maxhold_db]], tapped}`: `freq_hz` is interpolated to a fraction of a bin; `*_db` are over the range's noise floor; `keyed` marks on/off signals (CW, beacon slots) from a 20 ms envelope and `duty` their on-fraction. Use it where `signals` is too coarse (~146 Hz bins, fixed threshold): find CW / digital carriers, then `tune(carrier_hz=freq_hz)` to land one on the decoder's tone. For an intermittent signal give `secs` long enough to cover it (NCDXF beacons: 10-s slots every 3 min)."
+    )]
+    async fn spectrum(
+        &self,
+        Parameters(args): Parameters<SpectrumArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.spectrum_op(args).await?)
     }
 
     #[tool(

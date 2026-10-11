@@ -48,6 +48,7 @@ mod preset_pipeline;
 mod routes;
 mod soapy_log;
 mod source_policy;
+mod spectrum;
 mod store_persist;
 mod view_bridge;
 
@@ -491,6 +492,7 @@ async fn main() -> Result<()> {
         .route("/api/capture/iq", post(routes::post_capture_iq))
         .route("/api/capture/fft", post(routes::post_capture_fft))
         .route("/api/capture/audio", post(routes::post_capture_audio))
+        .route("/api/spectrum", post(spectrum::post_spectrum))
         .route("/api/preset", post(routes::load_preset))
         .route(
             "/api/profile",

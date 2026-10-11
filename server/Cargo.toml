@@ -34,6 +34,7 @@ ferrite-blocks = { path = "../blocks", features = ["soapysdr", "multimon", "adsb
 ferrite-runtime = { path = "../runtime" }
 ferrite-sdr-tables = { path = "../sdr-tables" }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
+rustfft = { version = "6", default-features = false }
 postcard    = { version = "1", default-features = false, features = ["alloc"] }
 soapysdr    = "0.5"
 # Used directly to reach SoapySDRDevice_getSettingInfo / writeSetting,

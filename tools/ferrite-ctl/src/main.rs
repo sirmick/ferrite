@@ -193,6 +193,28 @@ enum Cmd {
         #[arg(long)]
         max_age_ms: Option<u64>,
     },
+    /// Few-Hz-resolution spectrum of a range from live IQ (no retune):
+    /// peaks with interpolated frequency, level over the floor, width,
+    /// and whether they're keyed (CW / beacons). Feed a peak's freq_hz
+    /// to `tune --carrier`.
+    Spectrum {
+        /// Range start (Hz; `14.040M` shorthand ok).
+        lo: String,
+        /// Range end.
+        hi: String,
+        /// Seconds of IQ to analyse.
+        #[arg(long, default_value_t = 3.0)]
+        secs: f64,
+        /// Target resolution, Hz/bin.
+        #[arg(long, default_value_t = 10.0)]
+        res: f64,
+        /// Peaks to list.
+        #[arg(long, default_value_t = 25)]
+        peaks: usize,
+        /// Only keyed peaks (CW / beacons).
+        #[arg(long)]
+        keyed: bool,
+    },
     /// Capture a slice of signal to disk (IQ / audio / FFT). Blocks
     /// until the async job finishes, then prints the job record.
     #[command(subcommand)]
@@ -648,6 +670,33 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 })
                 .await
                 .map_err(op_err)?;
+            emit(&v, json)
+        }
+        Cmd::Spectrum {
+            lo,
+            hi,
+            secs,
+            res,
+            peaks,
+            keyed,
+        } => {
+            let mut v = server
+                .spectrum_op(mcp::SpectrumArgs {
+                    lo_hz: parse_si(&lo)?,
+                    hi_hz: parse_si(&hi)?,
+                    secs: Some(secs),
+                    res_hz: Some(res),
+                    max_peaks: Some(peaks),
+                    profile_points: Some(if json { 120 } else { 0 }),
+                    note: None,
+                })
+                .await
+                .map_err(op_err)?;
+            if keyed {
+                if let Some(arr) = v.get_mut("peaks").and_then(Value::as_array_mut) {
+                    arr.retain(|p| p.get("keyed").and_then(Value::as_bool) == Some(true));
+                }
+            }
             emit(&v, json)
         }
         Cmd::Signals { max_age_ms } => {
