@@ -160,6 +160,57 @@ pub async fn ws_chat(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| ws_chat_proxy(socket, upstream_url))
 }
 
+/// The sidecar's HTTP origin, from `FERRITE_AI_URL` (`ws://host:port/…`
+/// → `http://host:port`).
+fn ai_http_base() -> String {
+    let ws = std::env::var("FERRITE_AI_URL").unwrap_or_else(|_| DEFAULT_FERRITE_AI_URL.to_string());
+    let http = ws
+        .replacen("wss://", "https://", 1)
+        .replacen("ws://", "http://", 1);
+    match http.find("://").map(|i| i + 3) {
+        Some(start) => match http[start..].find('/') {
+            Some(slash) => http[..start + slash].to_string(),
+            None => http,
+        },
+        None => http,
+    }
+}
+
+/// `POST /api/ai/prompt`, `POST /api/ai/cancel`, `GET /api/ai/sessions`
+/// — the REST side of the ferrite-ai sidecar (its `/prompt`, `/cancel`,
+/// `/sessions`), passed through. A prompt started here runs like a
+/// panel's: the conversation shows on every AI panel via the `ai` kind.
+/// `{"wait": true}` holds the request until the turn ends.
+pub async fn ai_proxy(
+    method: http::Method,
+    uri: http::Uri,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let tail = uri.path().trim_start_matches("/api/ai");
+    let url = format!("{}{}", ai_http_base(), tail);
+    let client = reqwest::Client::new();
+    let req = if method == http::Method::POST {
+        client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body.to_vec())
+    } else {
+        client.get(&url)
+    };
+    match req.send().await {
+        Ok(r) => {
+            let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let bytes = r.bytes().await.unwrap_or_default();
+            (status, [(http::header::CONTENT_TYPE, "application/json")], bytes).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("ferrite-ai sidecar unreachable at {url}: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
 async fn ws_chat_proxy(mut client_ws: WebSocket, upstream_url: String) {
     let upstream = match tokio_tungstenite::connect_async(&upstream_url).await {
         Ok((s, _resp)) => s,

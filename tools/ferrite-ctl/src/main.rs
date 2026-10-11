@@ -321,6 +321,29 @@ enum Cmd {
         #[arg(long)]
         channel_detail: Option<bool>,
     },
+    /// Prompt the in-app AI (the ferrite-ai sidecar). The turn runs as
+    /// if typed into the AI panel — thinking, tool calls and replies
+    /// show on every panel. Continues the mode's latest session unless
+    /// `--session` or `--new`.
+    AiPrompt {
+        /// What to ask.
+        text: String,
+        /// `explorer` (default), `decoder`, `diagnose` or `chat`.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Model id override (e.g. `claude-sonnet-5-5`).
+        #[arg(long)]
+        model: Option<String>,
+        /// Continue this session id.
+        #[arg(long)]
+        session: Option<String>,
+        /// Start a fresh session.
+        #[arg(long)]
+        new: bool,
+        /// Wait for the turn to end and print the reply.
+        #[arg(long)]
+        wait: bool,
+    },
     /// Mirror a conversation turn into the operator's browser AI panel
     /// (so a headless driver's prompts / replies / tool calls show in
     /// every AI panel alongside the in-browser assistant, via the `ai`
@@ -974,6 +997,42 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 })
                 .await
                 .map_err(op_err)?;
+            emit(&v, json)
+        }
+        Cmd::AiPrompt {
+            text,
+            mode,
+            model,
+            session,
+            new,
+            wait,
+        } => {
+            let v = server
+                .http()
+                .ai_prompt(
+                    serde_json::json!({
+                        "text": text,
+                        "mode": mode,
+                        "model": model,
+                        "session_id": session,
+                        "new_session": new,
+                        "wait": wait,
+                    }),
+                    wait,
+                )
+                .await
+                .map_err(op_err)?;
+            if wait && !json {
+                if let Some(t) = v.get("text").and_then(Value::as_str) {
+                    println!("{t}");
+                    eprintln!(
+                        "── {} · session {}",
+                        v.get("status").and_then(Value::as_str).unwrap_or("?"),
+                        v.get("session_id").and_then(Value::as_str).unwrap_or("?")
+                    );
+                    return Ok(());
+                }
+            }
             emit(&v, json)
         }
         Cmd::ChatPost {

@@ -135,6 +135,15 @@ impl Http {
         api_response(resp, &format!("POST {path}")).await
     }
 
+    /// `POST /api/ai/prompt` — start a turn of the in-app AI (CLI only:
+    /// an agent prompting the in-app agent is not a tool). `wait` holds
+    /// the request until the turn ends.
+    pub(crate) async fn ai_prompt(&self, body: Value, wait: bool) -> Result<Value, McpError> {
+        let timeout = Duration::from_secs(if wait { 3600 } else { 120 });
+        self.post_slow("/api/ai/prompt", body, "ai-prompt", None, timeout)
+            .await
+    }
+
     /// Mutating PATCH, tagged like [`Self::post`].
     async fn patch(
         &self,

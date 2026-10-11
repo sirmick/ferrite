@@ -181,6 +181,8 @@
   function toggleTool(id: string) {
     expandedTools[id] = !expandedTools[id];
   }
+  /** Thinking blocks opened by the operator, keyed `turn:chunk`. */
+  let expandedThoughts = $state<Record<string, boolean>>({});
 
   // Setup-description text-box is collapsed by default once filled —
   // keeps the chat real estate intact. Defaults to expanded when
@@ -367,6 +369,47 @@
                    false positive against our sanitized output. -->
                 <!-- eslint-disable-next-line svelte/no-at-html-tags -->
                 <div class="ai-markdown text-slate-100">{@html renderMarkdown(chunk.text)}</div>
+              {:else if chunk.kind === 'thought'}
+                <!-- The model's summarised thinking: one line while it
+                   streams or when collapsed, the whole of it on demand. -->
+                {@const key = `${turn.id}:${idx}`}
+                <div
+                  class="my-1 border-l-2 border-violet-800 pl-1.5 text-[10px] text-violet-300/80"
+                >
+                  <button
+                    type="button"
+                    class="flex w-full items-center gap-1 text-left hover:text-violet-200"
+                    onclick={() => (expandedThoughts[key] = !expandedThoughts[key])}
+                    title="show the model's thinking"
+                  >
+                    <span class="shrink-0 whitespace-nowrap"
+                      >{expandedThoughts[key] ? '▾' : '▸'} thinking</span
+                    >
+                    {#if !expandedThoughts[key]}
+                      <span class="truncate italic opacity-70">{chunk.text.slice(-160)}</span>
+                    {:else}
+                      <span class="opacity-60">· {chunk.text.length} chars</span>
+                    {/if}
+                  </button>
+                  {#if expandedThoughts[key]}
+                    <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+                    <div class="ai-markdown italic">{@html renderMarkdown(chunk.text)}</div>
+                  {/if}
+                </div>
+              {:else if chunk.kind === 'plan'}
+                <div class="my-1 rounded border border-slate-800 px-1.5 py-1 text-[10px]">
+                  <div class="text-[color:var(--color-muted)]">plan</div>
+                  {#each chunk.entries as e, i (i)}
+                    <div
+                      class:text-emerald-400={e.status === 'completed'}
+                      class:text-amber-300={e.status === 'in_progress'}
+                      class:text-slate-400={e.status !== 'completed' && e.status !== 'in_progress'}
+                    >
+                      {e.status === 'completed' ? '☑' : e.status === 'in_progress' ? '◐' : '☐'}
+                      {e.content}
+                    </div>
+                  {/each}
+                </div>
               {:else if chunk.kind === 'tool'}
                 {@const summary = toolSummary(chunk.name, chunk.input)}
                 {@const sub = toolSubline(chunk.name, chunk.input)}

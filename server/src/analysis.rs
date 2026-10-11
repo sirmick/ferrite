@@ -70,6 +70,27 @@ fn capture_gate() -> &'static tokio::sync::Mutex<()> {
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// `snap-…` / `an-…` ids. The counter restarts with the daemon, so the
+/// ids carry a tag of the daemon's start time too — an id held from
+/// before a restart (by an agent mid-conversation) never names a
+/// different recording after it.
+fn mint_id(prefix: &str) -> String {
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let boot = BOOT.get_or_init(|| {
+        let mut n = u64::try_from(crate::capture::now_ms() / 1000).unwrap_or(0) % 36u64.pow(4);
+        let mut tag = [b'0'; 4];
+        for c in tag.iter_mut().rev() {
+            *c = b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize];
+            n /= 36;
+        }
+        String::from_utf8_lossy(&tag).into_owned()
+    });
+    format!(
+        "{prefix}-{boot}-{}",
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 fn remove_files(p: &Path) {
     let _ = std::fs::remove_file(p);
     let _ = std::fs::remove_file(crate::capture::sidecar_path_for(p));
@@ -189,7 +210,7 @@ impl AppState {
                 })?
         };
         let _gate = capture_gate().lock().await;
-        let id = format!("snap-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let id = mint_id("snap");
         let path: PathBuf =
             std::env::temp_dir().join(format!("ferrite-{id}-{}.cf32", std::process::id()));
         let start_ms = u64::try_from(crate::capture::now_ms()).unwrap_or(0);
@@ -269,7 +290,7 @@ impl AppState {
 
     /// Fold an `analysis` record (what the AI panel draws); returns its id.
     fn publish_analysis(&self, tool: &str, by: &str, snap: &SnapshotInfo, body: Value) -> String {
-        let id = format!("an-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let id = mint_id("an");
         let mut rec = json!({
             "id": id,
             "tool": tool,
