@@ -649,6 +649,14 @@ async fn ai_activity_layer(
         .get("x-ferrite-command")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    // Who called: `mcp` (an agent's tool call — its own panel card
+    // shows it), `cli` (a person at a terminal), absent (the UI).
+    let via = request
+        .headers()
+        .get("x-ferrite-via")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
 
     let method = request.method().clone();
     let path = request.uri().path().to_string();
@@ -692,6 +700,7 @@ async fn ai_activity_layer(
                 "status": status,
                 "command": command.unwrap_or_default(),
                 "note": note.unwrap_or_default(),
+                "via": via,
             }),
         );
     }

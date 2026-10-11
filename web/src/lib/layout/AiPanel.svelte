@@ -13,8 +13,9 @@
   // One timeline, by time: conversation turns, analysis records (whoever
   // ran the measurement — the AI, the CLI, the UI), and activity — the
   // store's `activity` kind, one record per mutating request (a tune, a
-  // preset load, an AI prompt over REST…). Adjacent activity collapses
-  // into one compact block.
+  // preset load, an AI prompt over REST…), minus an agent's MCP calls
+  // (its tool cards show those). Adjacent activity collapses into one
+  // compact block.
   interface Act {
     seq: number;
     t: number;
@@ -43,6 +44,8 @@
     }
     for (const r of decoders.kind('activity').recent.slice(-80)) {
       const d = (r.data ?? {}) as Record<string, unknown>;
+      // An agent's MCP tool calls already show as its tool cards.
+      if (d['via'] === 'mcp') continue;
       const status = Number(d['status'] ?? 200);
       items.push({
         k: 'activity',
