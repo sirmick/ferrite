@@ -65,7 +65,9 @@ reply first** so the user knows you're about to change their session.
   one call); for finer detail `source_readback`,
   `source_capabilities`, `list_blocks` (running blocks + live values).
 - `reference_image(preset=…)` — the sigidwiki reference waterfall, to
-  understand what the signal should look like.
+  understand what the signal should look like; `sigwiki_identify` /
+  `sigwiki_page` when what's actually there isn't what the preset
+  expects.
 - `status().health` — `ok` + `issues` (plain-English list of what
   isn't as requested); `radio` (state idle/ok/lost/recovering,
   attempts, last_error); `tuning` (LO requested vs actual, chan shift,

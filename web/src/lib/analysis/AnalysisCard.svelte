@@ -17,6 +17,11 @@
   const title = $derived.by(() => {
     const p = rec.params ?? {};
     if (rec.tool === 'envelope') return `envelope @ ${mhz(p.freq_hz ?? 0)} MHz`;
+    if (rec.tool === 'sigwiki') {
+      const q = (rec.params ?? {}) as Record<string, unknown>;
+      if (q['title']) return `sigidwiki · ${q['title']}`;
+      return `sigidwiki · what's at ${mhz(Number(q['freq_hz'] ?? 0))} MHz?`;
+    }
     if (rec.tool === 'spot_map') {
       const n = rec.result?.spots?.length ?? 0;
       return `${(rec.params as Record<string, unknown> | undefined)?.kind ?? 'ft8'} map · ${n} station${n === 1 ? '' : 's'}`;
@@ -119,6 +124,58 @@
     return { spots, rx };
   });
 
+  // ── sigidwiki ─────────────────────────────────────────────────────
+  interface SigCandidate {
+    title: string;
+    url: string;
+    score?: number;
+    why?: string[];
+    freq_min?: number;
+    freq_max?: number;
+    bw_min?: number;
+    bw_max?: number;
+    mode?: string[];
+    modulation?: string[];
+    description?: string;
+    picture?: string;
+    location?: string;
+  }
+  const sig = $derived.by(() => {
+    if (rec.tool !== 'sigwiki') return null;
+    const r = rec.result ?? {};
+    if (r.signal) {
+      return {
+        page: r.signal as SigCandidate,
+        picture: r.signal.picture
+          ? `/api/sigwiki/image?file=${encodeURIComponent(r.signal.picture)}&width=640`
+          : null,
+        audio: (r.audio_url as string | null) ?? null,
+        list: [] as SigCandidate[],
+        total: 0,
+      };
+    }
+    return {
+      page: null,
+      picture: null,
+      audio: null,
+      list: (r.candidates ?? []) as SigCandidate[],
+      total: Number(r.total ?? 0),
+    };
+  });
+  const range = (c: SigCandidate) =>
+    c.freq_min != null && c.freq_max != null && c.freq_max - c.freq_min > 1
+      ? `${(c.freq_min / 1e6).toFixed(3)}–${(c.freq_max / 1e6).toFixed(3)} MHz`
+      : c.freq_min != null
+        ? `${(c.freq_min / 1e6).toFixed(4)} MHz`
+        : '';
+  const bw = (c: SigCandidate) => {
+    const f = (b: number) => (b >= 1e3 ? `${(b / 1e3).toFixed(1)} kHz` : `${b.toFixed(0)} Hz`);
+    if (c.bw_min != null && c.bw_max != null && Math.abs(c.bw_max - c.bw_min) > 0.5)
+      return `${f(c.bw_min)}–${f(c.bw_max)}`;
+    const b = c.bw_min ?? c.bw_max;
+    return b != null ? f(b) : '';
+  };
+
   const startUtc = $derived(
     rec.snapshot?.start_ms ? new Date(rec.snapshot.start_ms).toISOString().slice(11, 19) : '',
   );
@@ -141,7 +198,7 @@
     </span>
   </div>
 
-  {#if showText || (!spec && !env && !map && !(rec.tool === 'spectrogram' && rec.cells_b64))}
+  {#if showText || (!spec && !env && !map && !sig && !(rec.tool === 'spectrogram' && rec.cells_b64))}
     <pre class="overflow-x-auto text-[9px] leading-[10px] text-slate-300">{rec.text ?? ''}</pre>
   {:else if spec}
     <svg viewBox="0 0 {W} {H}" class="h-24 w-full" preserveAspectRatio="none">
@@ -188,6 +245,71 @@
         )}</span
       >
     </div>
+  {:else if sig?.page}
+    {@const p = sig.page}
+    <div class="flex gap-2">
+      {#if sig.picture}
+        <a href={p.url} target="_blank" rel="noopener noreferrer" class="shrink-0">
+          <img
+            src={sig.picture}
+            alt={p.title}
+            class="max-h-48 max-w-[45%] rounded border border-slate-700"
+          />
+        </a>
+      {/if}
+      <div class="min-w-0 text-[10px] text-slate-300">
+        <a
+          href={p.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-[11px] text-sky-300 hover:underline">{p.title}</a
+        >
+        <div class="text-[color:var(--color-muted)]">
+          {range(p)}{bw(p) ? ` · bw ${bw(p)}` : ''} · {(p.mode ?? []).join('/')}
+          {(p.modulation ?? []).join('/')}{p.location ? ` · ${p.location}` : ''}
+        </div>
+        {#if p.description}<div class="mt-1">{p.description}</div>{/if}
+        {#if sig.audio}
+          <audio controls preload="none" src={sig.audio} class="mt-1 h-7 w-full"></audio>
+        {/if}
+      </div>
+    </div>
+  {:else if sig}
+    <div class="mb-1 text-[10px] text-[color:var(--color-muted)]">
+      {sig.total} signals cover this frequency; best {sig.list.length}
+    </div>
+    {#each sig.list as c (c.title)}
+      <div class="flex items-start gap-2 border-t border-slate-800 py-1 text-[10px]">
+        {#if c.picture}
+          <img
+            src={`/api/sigwiki/image?file=${encodeURIComponent(c.picture)}&width=160`}
+            alt=""
+            loading="lazy"
+            class="h-10 w-14 shrink-0 rounded object-cover"
+          />
+        {:else}
+          <div class="h-10 w-14 shrink-0 rounded bg-slate-900"></div>
+        {/if}
+        <div class="min-w-0 flex-1">
+          <div class="flex justify-between gap-2">
+            <a
+              href={c.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="truncate text-sky-300 hover:underline">{c.title}</a
+            >
+            <span class="shrink-0 font-mono text-slate-500">{(c.score ?? 0).toFixed(1)}</span>
+          </div>
+          <div class="truncate text-[color:var(--color-muted)]">
+            {range(c)}{bw(c) ? ` · ${bw(c)}` : ''} · {(c.mode ?? []).join('/')}
+            {(c.modulation ?? []).join('/')}
+          </div>
+          {#if c.why?.length}<div class="truncate italic text-slate-500">
+              {c.why.join(' · ')}
+            </div>{/if}
+        </div>
+      </div>
+    {/each}
   {:else if map}
     <svg viewBox="0 0 360 180" class="w-full rounded" preserveAspectRatio="xMidYMid meet">
       <image href={worldMap} x="0" y="0" width="360" height="180" preserveAspectRatio="none" />
