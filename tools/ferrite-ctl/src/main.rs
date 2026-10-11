@@ -830,7 +830,9 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                     secs: Some(secs),
                     res_hz: Some(res),
                     max_peaks: Some(peaks),
-                    profile_points: Some(if json { 120 } else { 0 }),
+                    // The UI draws the record's profile; only the CLI's
+                    // own printout drops it.
+                    profile_points: Some(120),
                     note: None,
                 })
                 .await
@@ -838,6 +840,11 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             if keyed {
                 if let Some(arr) = v.get_mut("peaks").and_then(Value::as_array_mut) {
                     arr.retain(|p| p.get("keyed").and_then(Value::as_bool) == Some(true));
+                }
+            }
+            if !json {
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("profile");
                 }
             }
             emit(&v, json)

@@ -1,6 +1,9 @@
 <script lang="ts">
   import { ai, AI_MODES, type AiMode, renderMarkdown } from '$lib/ai/store.svelte';
   import { decoders } from '$lib/decoders/store.svelte';
+  import AnalysisCard from '$lib/analysis/AnalysisCard.svelte';
+  import type { AnalysisRecord } from '$lib/analysis/types';
+  import type { Turn } from '$lib/ai/store.svelte';
   import { tick } from 'svelte';
 
   let scroller: HTMLDivElement | undefined = $state();
@@ -23,8 +26,35 @@
       })),
   );
 
+  // One timeline: conversation turns and analysis records (whoever ran
+  // the measurement — the AI, the CLI, the UI), by time.
+  type Item =
+    | { k: 'turn'; key: string; t: number; turn: Turn }
+    | { k: 'analysis'; key: string; t: number; rec: AnalysisRecord };
+  let timeline = $derived.by<Item[]>(() => {
+    const items: Item[] = ai.turns.map((turn) => ({
+      k: 'turn' as const,
+      key: `t${turn.id}`,
+      t: turn.t,
+      turn,
+    }));
+    for (const r of decoders.kind('analysis').recent.slice(-40)) {
+      items.push({
+        k: 'analysis',
+        key: `a${r.seq}`,
+        t: r.at_ms,
+        rec: r.data as unknown as AnalysisRecord,
+      });
+    }
+    // Stable: turns keep their own order; analyses slot in by time.
+    return items
+      .map((it, i) => ({ it, i }))
+      .sort((a, b) => a.it.t - b.it.t || a.i - b.i)
+      .map(({ it }) => it);
+  });
+
   $effect(() => {
-    void ai.turns.length;
+    void timeline.length;
     if (!stickToBottom || !scroller) return;
     void tick().then(() => {
       if (scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -291,126 +321,135 @@
         </ul>
       </div>
     {/if}
-    {#each ai.turns as turn (turn.id)}
-      {#if turn.role === 'user'}
-        <div class="mb-2 ml-6 rounded border border-slate-700 bg-slate-900/60 px-2 py-1">
-          <div
-            class="mb-0.5 flex items-center justify-between text-[10px] text-[color:var(--color-muted)]"
-          >
-            <span>{turn.source && turn.source !== 'ferrite-ai' ? turn.source : 'you'}</span>
-            <span class="font-mono">{fmtTime(turn.t)}</span>
-          </div>
-          <div class="whitespace-pre-wrap text-slate-100">{turn.text}</div>
-        </div>
+    {#each timeline as item (item.key)}
+      {#if item.k === 'analysis'}
+        <AnalysisCard rec={item.rec} t={item.t} />
       {:else}
-        <div class="mb-2 mr-6 rounded border border-slate-800 bg-slate-950/40 px-2 py-1">
-          <div
-            class="mb-0.5 flex items-center justify-between text-[10px] text-[color:var(--color-muted)]"
-          >
-            <span>
-              ai{#if turn.source && turn.source !== 'ferrite-ai'}<span class="ml-1 opacity-70"
-                  >· {turn.source}</span
-                >{/if}
-              {#if turn.status === 'streaming'}
-                <span class="ml-1 animate-pulse">▌</span>
-              {:else if turn.status === 'error'}
-                <span class="ml-1 text-rose-400">error</span>
-              {/if}
-            </span>
-            <span class="font-mono">{fmtTime(turn.t)}</span>
+        {@const turn = item.turn}
+        {#if turn.role === 'user'}
+          <div class="mb-2 ml-6 rounded border border-slate-700 bg-slate-900/60 px-2 py-1">
+            <div
+              class="mb-0.5 flex items-center justify-between text-[10px] text-[color:var(--color-muted)]"
+            >
+              <span>{turn.source && turn.source !== 'ferrite-ai' ? turn.source : 'you'}</span>
+              <span class="font-mono">{fmtTime(turn.t)}</span>
+            </div>
+            <div class="whitespace-pre-wrap text-slate-100">{turn.text}</div>
           </div>
-          {#if turn.status === 'error' && turn.errorMessage}
-            <div class="text-rose-400">{turn.errorMessage}</div>
-          {/if}
-          {#each turn.chunks as chunk, idx (idx)}
-            {#if chunk.kind === 'text'}
-              <!-- Render AI text as Markdown. The store's renderMarkdown
+        {:else}
+          <div class="mb-2 mr-6 rounded border border-slate-800 bg-slate-950/40 px-2 py-1">
+            <div
+              class="mb-0.5 flex items-center justify-between text-[10px] text-[color:var(--color-muted)]"
+            >
+              <span>
+                ai{#if turn.source && turn.source !== 'ferrite-ai'}<span class="ml-1 opacity-70"
+                    >· {turn.source}</span
+                  >{/if}
+                {#if turn.status === 'streaming'}
+                  <span class="ml-1 animate-pulse">▌</span>
+                {:else if turn.status === 'error'}
+                  <span class="ml-1 text-rose-400">error</span>
+                {/if}
+              </span>
+              <span class="font-mono">{fmtTime(turn.t)}</span>
+            </div>
+            {#if turn.status === 'error' && turn.errorMessage}
+              <div class="text-rose-400">{turn.errorMessage}</div>
+            {/if}
+            {#each turn.chunks as chunk, idx (idx)}
+              {#if chunk.kind === 'text'}
+                <!-- Render AI text as Markdown. The store's renderMarkdown
                    pipes through marked + DOMPurify so AI outputs like
                    `**bold**`, `# heading`, fenced code, lists, etc. show
                    correctly instead of as literal Markdown syntax. The
                    DOMPurify pass scrubs script tags / event handlers so
                    the {@html} below is safe — the eslint warning is a
                    false positive against our sanitized output. -->
-              <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-              <div class="ai-markdown text-slate-100">{@html renderMarkdown(chunk.text)}</div>
-            {:else if chunk.kind === 'tool'}
-              {@const summary = toolSummary(chunk.name, chunk.input)}
-              {@const sub = toolSubline(chunk.name, chunk.input)}
-              <div
-                class="my-1 rounded border px-1.5 py-1 font-mono text-[10px]"
-                class:border-slate-700={!chunk.error}
-                class:border-rose-700={chunk.error}
-                class:bg-slate-900={!chunk.error}
-                class:bg-rose-950={chunk.error}
-              >
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+                <div class="ai-markdown text-slate-100">{@html renderMarkdown(chunk.text)}</div>
+              {:else if chunk.kind === 'tool'}
+                {@const summary = toolSummary(chunk.name, chunk.input)}
+                {@const sub = toolSubline(chunk.name, chunk.input)}
                 <div
-                  class="flex items-center justify-between gap-2 text-[color:var(--color-muted)]"
+                  class="my-1 rounded border px-1.5 py-1 font-mono text-[10px]"
+                  class:border-slate-700={!chunk.error}
+                  class:border-rose-700={chunk.error}
+                  class:bg-slate-900={!chunk.error}
+                  class:bg-rose-950={chunk.error}
                 >
-                  <span class="flex min-w-0 flex-1 items-center gap-1.5">
-                    <span class="shrink-0 text-sky-400">⚙ {chunk.name}</span>
-                    <span class="truncate text-slate-300" title={summary}>{truncate(summary)}</span>
-                  </span>
-                  <span class="flex shrink-0 items-center gap-2">
-                    {#if chunk.result === undefined}
-                      <span class="text-amber-400">running…</span>
-                    {:else if chunk.error}
-                      <span class="text-rose-400">error</span>
-                    {:else}
-                      <span class="text-emerald-400">done</span>
-                    {/if}
-                    {#if chunk.input}
-                      <button
-                        type="button"
-                        class="rounded border border-slate-700 px-1 text-[9px] hover:border-slate-500"
-                        onclick={() => toggleTool(chunk.id)}
-                        title="show full tool input + raw result"
-                        >{expandedTools[chunk.id] ? '−' : '+'}</button
+                  <div
+                    class="flex items-center justify-between gap-2 text-[color:var(--color-muted)]"
+                  >
+                    <span class="flex min-w-0 flex-1 items-center gap-1.5">
+                      <span class="shrink-0 text-sky-400">⚙ {chunk.name}</span>
+                      <span class="truncate text-slate-300" title={summary}
+                        >{truncate(summary)}</span
                       >
-                    {/if}
-                  </span>
-                </div>
-                {#if sub}
-                  <div class="mt-0.5 truncate text-[10px] italic text-slate-400" title={sub}>
-                    {sub}
+                    </span>
+                    <span class="flex shrink-0 items-center gap-2">
+                      {#if chunk.result === undefined}
+                        <span class="text-amber-400">running…</span>
+                      {:else if chunk.error}
+                        <span class="text-rose-400">error</span>
+                      {:else}
+                        <span class="text-emerald-400">done</span>
+                      {/if}
+                      {#if chunk.input}
+                        <button
+                          type="button"
+                          class="rounded border border-slate-700 px-1 text-[9px] hover:border-slate-500"
+                          onclick={() => toggleTool(chunk.id)}
+                          title="show full tool input + raw result"
+                          >{expandedTools[chunk.id] ? '−' : '+'}</button
+                        >
+                      {/if}
+                    </span>
                   </div>
-                {/if}
-                {#if expandedTools[chunk.id] && chunk.input}
-                  <pre
-                    class="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-slate-950/60 px-1.5 py-1 text-slate-300">{(() => {
-                      try {
-                        return JSON.stringify(JSON.parse(chunk.input), null, 2);
-                      } catch {
-                        return chunk.input;
-                      }
-                    })()}</pre>
-                {/if}
-                {#if chunk.resultImages && chunk.resultImages.length}
-                  <div class="mt-1 flex flex-col gap-1">
-                    {#each chunk.resultImages as src, i (i)}
-                      <!-- Inline render of base64 data URLs returned by Read on a
+                  {#if sub}
+                    <div class="mt-0.5 truncate text-[10px] italic text-slate-400" title={sub}>
+                      {sub}
+                    </div>
+                  {/if}
+                  {#if expandedTools[chunk.id] && chunk.input}
+                    <pre
+                      class="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-slate-950/60 px-1.5 py-1 text-slate-300">{(() => {
+                        try {
+                          return JSON.stringify(JSON.parse(chunk.input), null, 2);
+                        } catch {
+                          return chunk.input;
+                        }
+                      })()}</pre>
+                  {/if}
+                  {#if chunk.resultImages && chunk.resultImages.length}
+                    <div class="mt-1 flex flex-col gap-1">
+                      {#each chunk.resultImages as src, i (i)}
+                        <!-- Inline render of base64 data URLs returned by Read on a
                            PNG/JPEG. Capped width so a large image doesn't blow
                            out the chat column; click to open the data URL in
                            a new tab for full-size. -->
-                      <a href={src} target="_blank" rel="noopener noreferrer">
-                        <img
-                          {src}
-                          alt="tool result"
-                          class="max-h-64 max-w-full rounded border border-slate-700"
-                        />
-                      </a>
-                    {/each}
-                  </div>
-                {/if}
-                {#if expandedTools[chunk.id] && chunk.result !== undefined && chunk.result}
-                  <pre
-                    class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-slate-400">{chunk.result}</pre>
-                {/if}
-              </div>
-            {:else}
-              <div class="text-[10px] italic text-[color:var(--color-muted)]">— {chunk.label}</div>
-            {/if}
-          {/each}
-        </div>
+                        <a href={src} target="_blank" rel="noopener noreferrer">
+                          <img
+                            {src}
+                            alt="tool result"
+                            class="max-h-64 max-w-full rounded border border-slate-700"
+                          />
+                        </a>
+                      {/each}
+                    </div>
+                  {/if}
+                  {#if expandedTools[chunk.id] && chunk.result !== undefined && chunk.result}
+                    <pre
+                      class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-slate-400">{chunk.result}</pre>
+                  {/if}
+                </div>
+              {:else}
+                <div class="text-[10px] italic text-[color:var(--color-muted)]">
+                  — {chunk.label}
+                </div>
+              {/if}
+            {/each}
+          </div>
+        {/if}
       {/if}
     {/each}
   </div>
