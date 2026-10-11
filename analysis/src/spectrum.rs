@@ -1,61 +1,24 @@
-//! `POST /api/spectrum` — a few-Hz-resolution look at a frequency range.
+//! Long-FFT spectrum of a range: Hz-accurate peaks, level over the
+//! floor, width, and keying (from a 20 ms envelope pass).
 //!
-//! The waterfall's FFT and the signal list run at ~146 Hz/bin over the
-//! whole span with a fixed threshold: fine for broadcast carriers, too
-//! coarse to place a CW signal on a decoder's tone and blind to keyed
-//! signals that are only on part of the time. This tool records a few
-//! seconds of raw IQ through a live tee (the source's own `record_path`
-//! on hardware — the full span; the channelizer's on a software source —
-//! the channel), then runs large FFTs over just the asked-for range:
-//!
-//! - average, max-hold and per-bin **duty** (fraction of frames above
-//!   the floor) — keyed signals (CW, beacons) show duty well below 1;
-//! - peaks with parabolic-interpolated frequency (a fraction of a bin),
-//!   level over the floor, −6 dB width and a `keyed` verdict;
-//! - a downsampled max-hold `profile` to eyeball the range.
-//!
-//! The session keeps running; nothing is retuned.
+//! Pass 1 runs large Hann FFTs (50 % overlap) and keeps only the bins
+//! inside the range → average, max-hold and floor. Peaks are local
+//! maxima with parabolic-interpolated frequency. Pass 2 mixes each peak
+//! to DC and measures its power in 20 ms windows: long FFT frames can't
+//! see CW keying, short windows can.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use num_complex::Complex;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde::Serialize;
 
-use crate::app_state::AppState;
-use crate::error::AppError;
+use crate::db;
 
-/// Widest range one call may analyse (keeps the reply and memory small).
-const MAX_RANGE_HZ: f64 = 400_000.0;
 /// Largest FFT (resolution floor ≈ rate / 2^20).
 const MAX_FFT: usize = 1 << 20;
-/// DC spur guard on a raw source tap (live: the RSPdx's LO spur
-/// flickered as a dozen "keyed" peaks within ±1 kHz).
-const DC_GUARD_HZ: f64 = 1_500.0;
 /// A bin is "on" in a frame when it's this far above the floor (9 dB).
 const ON_RATIO: f32 = 8.0;
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SpectrumReq {
-    pub lo_hz: f64,
-    pub hi_hz: f64,
-    /// Seconds of IQ to analyse (default 3, 0.5–15). Longer catches
-    /// more of an intermittent signal (a beacon's slot, a QSO's overs).
-    #[serde(default)]
-    pub secs: Option<f64>,
-    /// Target resolution, Hz per bin (default 10; floor set by the FFT cap).
-    #[serde(default)]
-    pub res_hz: Option<f64>,
-    /// Peaks to return, strongest first (default 25, max 200).
-    #[serde(default)]
-    pub max_peaks: Option<usize>,
-    /// Points in the downsampled max-hold profile (default 120, 0 = none).
-    #[serde(default)]
-    pub profile_points: Option<usize>,
-}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Peak {
@@ -75,31 +38,9 @@ pub struct Peak {
     pub keyed: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SpectrumReport {
-    pub lo_hz: f64,
-    pub hi_hz: f64,
-    pub res_hz: f64,
-    pub frames: usize,
-    pub secs: f64,
-    pub center_freq_hz: f64,
-    pub sample_rate_hz: f64,
-    /// Which tee fed it (`src` = full span, `chan` = the channel only).
-    pub tapped: String,
-    /// Peaks within this distance of `center_freq_hz` (the LO's DC spur
-    /// on a raw source tap) were dropped.
-    pub dc_guard_hz: f64,
-    /// Median average power across the range, dBFS (the floor every
-    /// `*_db` is relative to).
-    pub floor_dbfs: f32,
-    pub peaks: Vec<Peak>,
-    /// `[freq_hz, maxhold_db_over_floor]`, evenly spaced over the range.
-    pub profile: Vec<[f64; 2]>,
-}
-
-/// Analysis settings for [`analyze`].
+/// Settings for [`analyze`].
 #[derive(Debug, Clone, Copy)]
-pub struct Analysis {
+pub struct SpectrumParams {
     pub rate: f64,
     pub center: f64,
     pub lo: f64,
@@ -120,10 +61,7 @@ fn fft_size(rate: f64, res_hz: f64) -> usize {
 /// Run the analysis over interleaved cf32 IQ. `open` yields a fresh
 /// reader each call: pass 1 is the long-FFT spectrum, pass 2 measures
 /// each peak's envelope in short windows for keying.
-pub fn analyze<R: Read>(
-    open: impl Fn() -> Result<R>,
-    a: Analysis,
-) -> Result<(SpectrumReportCore, usize)> {
+pub fn analyze<R: Read>(open: impl Fn() -> Result<R>, a: SpectrumParams) -> Result<SpectrumResult> {
     let mut reader = open()?;
     let n = fft_size(a.rate, a.res_hz);
     let res = a.rate / n as f64;
@@ -196,10 +134,11 @@ pub fn analyze<R: Read>(
     }
     let nf = frames.len();
     let mut core = reduce(&frames, res, &freq_of, a.max_peaks, a.profile_points);
+    core.frames = nf;
     core.peaks
         .retain(|p| (p.freq_hz - a.center).abs() > a.dc_guard_hz);
     keying_pass(open()?, a, &mut core.peaks)?;
-    Ok((core, nf))
+    Ok(core)
 }
 
 /// Envelope p90/p10 swing above which a peak counts as keyed.
@@ -214,7 +153,7 @@ const KEY_WINDOW_S: f64 = 0.02;
 /// 10 dB; duty = windows above their geometric midpoint. (Pass 1's
 /// frames are long — up to a second at fine resolution — so every frame
 /// of a keyed signal holds some on-time; this is where keying shows.)
-fn keying_pass<R: Read>(mut reader: R, a: Analysis, peaks: &mut [Peak]) -> Result<()> {
+fn keying_pass<R: Read>(mut reader: R, a: SpectrumParams, peaks: &mut [Peak]) -> Result<()> {
     if peaks.is_empty() {
         return Ok(());
     }
@@ -288,17 +227,20 @@ fn keying_pass<R: Read>(mut reader: R, a: Analysis, peaks: &mut [Peak]) -> Resul
     Ok(())
 }
 
-/// The analysis result before the request bookkeeping is attached.
-#[derive(Debug, Clone)]
-pub struct SpectrumReportCore {
+/// What [`analyze`] measured.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpectrumResult {
+    /// Actual resolution, Hz per bin.
     pub res_hz: f64,
+    /// Long-FFT frames averaged.
+    pub frames: usize,
+    /// Median average power across the range, dBFS (the floor every
+    /// `*_db` is relative to).
     pub floor_dbfs: f32,
+    /// Strongest first.
     pub peaks: Vec<Peak>,
+    /// `[freq_hz, maxhold_db_over_floor]`, evenly spaced over the range.
     pub profile: Vec<[f64; 2]>,
-}
-
-fn db(p: f32) -> f32 {
-    10.0 * p.max(1e-30).log10()
 }
 
 fn reduce(
@@ -307,7 +249,7 @@ fn reduce(
     freq_of: &dyn Fn(usize) -> f64,
     max_peaks: usize,
     profile_points: usize,
-) -> SpectrumReportCore {
+) -> SpectrumResult {
     let nb = frames[0].len();
     let nf = frames.len() as f32;
     let mut avg = vec![0f32; nb];
@@ -394,135 +336,12 @@ fn reduce(
         }
         out
     };
-    SpectrumReportCore {
+    SpectrumResult {
         res_hz: res,
+        frames: 0,
         floor_dbfs: floor_db,
         peaks,
         profile,
-    }
-}
-
-/// `POST /api/spectrum` — see the module docs.
-pub async fn post_spectrum(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    axum::Json(req): axum::Json<SpectrumReq>,
-) -> Result<axum::Json<SpectrumReport>, AppError> {
-    state.spectrum(req).await.map(axum::Json)
-}
-
-impl AppState {
-    /// Record `secs` of IQ from the widest live tee available, analyse
-    /// `[lo_hz, hi_hz]`, clean up. See the module docs.
-    pub async fn spectrum(&self, req: SpectrumReq) -> Result<SpectrumReport, AppError> {
-        let bad = |m: String| AppError::bad_request("SPECTRUM_REJECTED", m);
-        if !(req.lo_hz.is_finite() && req.hi_hz.is_finite() && req.hi_hz > req.lo_hz) {
-            return Err(bad("need lo_hz < hi_hz".into()));
-        }
-        if req.hi_hz - req.lo_hz > MAX_RANGE_HZ {
-            return Err(bad(format!(
-                "range {:.0} Hz is wider than {MAX_RANGE_HZ:.0} Hz — split it",
-                req.hi_hz - req.lo_hz
-            )));
-        }
-        let secs = req.secs.unwrap_or(3.0).clamp(0.5, 15.0);
-        if self.status().await != crate::app_state::PipelineStatus::Running {
-            return Err(AppError::conflict(
-                "PIPELINE_STOPPED",
-                "spectrum taps the running pipeline — start it first",
-            ));
-        }
-        // Widest tee: the hardware source (full span), else the channel.
-        let block = if self.get_source().await.type_name == "SoapySource" {
-            "src".to_string()
-        } else {
-            self.get_flowgraph()
-                .await
-                .blocks
-                .iter()
-                .find(|(_, b)| b.type_name == "Channelizer")
-                .map(|(id, _)| id.clone())
-                .ok_or_else(|| {
-                    AppError::conflict(
-                        "NO_TAP",
-                        "no hardware source and no channelizer to tap in this preset",
-                    )
-                })?
-        };
-        let path: PathBuf = std::env::temp_dir().join(format!(
-            "ferrite-spectrum-{}-{}.cf32",
-            std::process::id(),
-            crate::capture::now_ms()
-        ));
-        let path_str = path.display().to_string();
-        self.apply_block_params(
-            &block,
-            json!({ "record_path": path_str, "record_max_seconds": secs }),
-        )
-        .await
-        .map_err(|e| AppError::radio_or_bad_request("SPECTRUM_FAILED", &e))?;
-        tokio::time::sleep(Duration::from_secs_f64(secs + 0.4)).await;
-        let _ = self
-            .apply_block_params(&block, json!({ "record_path": "" }))
-            .await;
-        let side = crate::capture::read_sidecar(&path).await;
-        let cleanup = |p: &Path| {
-            let _ = std::fs::remove_file(p);
-            let _ = std::fs::remove_file(crate::capture::sidecar_path_for(p));
-        };
-        let Some(side) = side else {
-            cleanup(&path);
-            return Err(AppError::internal(
-                "SPECTRUM_FAILED",
-                format!("the `{block}` tee wrote no sidecar — nothing was recorded"),
-            ));
-        };
-        let rate = side
-            .get("sample_rate_hz")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0);
-        let center = side
-            .get("center_freq_hz")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0);
-        let a = Analysis {
-            rate,
-            center,
-            lo: req.lo_hz,
-            hi: req.hi_hz,
-            res_hz: req.res_hz.unwrap_or(10.0),
-            max_peaks: req.max_peaks.unwrap_or(25).min(200),
-            profile_points: req.profile_points.unwrap_or(120).min(2_000),
-            dc_guard_hz: if block == "src" { DC_GUARD_HZ } else { 0.0 },
-        };
-        let p2 = path.clone();
-        let out = tokio::task::spawn_blocking(move || {
-            analyze(
-                || {
-                    std::fs::File::open(&p2)
-                        .map(std::io::BufReader::new)
-                        .context("open IQ")
-                },
-                a,
-            )
-        })
-        .await
-        .map_err(|e| AppError::internal("SPECTRUM_FAILED", format!("analysis panicked: {e}")))?;
-        cleanup(&path);
-        let (core, frames) = out.map_err(|e| bad(format!("{e:#}")))?;
-        Ok(SpectrumReport {
-            lo_hz: req.lo_hz,
-            hi_hz: req.hi_hz,
-            res_hz: core.res_hz,
-            frames,
-            secs,
-            center_freq_hz: center,
-            sample_rate_hz: rate,
-            tapped: block,
-            dc_guard_hz: a.dc_guard_hz,
-            floor_dbfs: core.floor_dbfs,
-            peaks: core.peaks,
-            profile: core.profile,
-        })
     }
 }
 
@@ -560,9 +379,9 @@ mod tests {
     fn finds_steady_and_keyed_carriers_to_a_few_hz() {
         let rate = 48_000.0;
         let iq = synth(rate, 6.0);
-        let (r, frames) = analyze(
+        let r = analyze(
             || Ok(std::io::Cursor::new(iq.clone())),
-            Analysis {
+            SpectrumParams {
                 rate,
                 center: 14_000_000.0,
                 lo: 13_995_000.0,
@@ -574,7 +393,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(frames > 10);
+        assert!(r.frames > 10);
         assert!(r.res_hz < 6.0);
         let near = |f: f64| {
             r.peaks
@@ -606,7 +425,7 @@ mod tests {
     fn odd_sized_reads_give_the_same_answer() {
         let rate = 48_000.0;
         let iq = synth(rate, 3.0);
-        let a = Analysis {
+        let a = SpectrumParams {
             rate,
             center: 0.0,
             lo: -3_000.0,
@@ -616,8 +435,8 @@ mod tests {
             profile_points: 0,
             dc_guard_hz: 0.0,
         };
-        let (whole, _) = analyze(|| Ok(std::io::Cursor::new(iq.clone())), a).unwrap();
-        let (drib, _) = analyze(|| Ok(Dribble(std::io::Cursor::new(iq.clone()))), a).unwrap();
+        let whole = analyze(|| Ok(std::io::Cursor::new(iq.clone())), a).unwrap();
+        let drib = analyze(|| Ok(Dribble(std::io::Cursor::new(iq.clone()))), a).unwrap();
         assert_eq!(whole.peaks, drib.peaks);
     }
 
@@ -644,7 +463,7 @@ mod tests {
             iq.extend_from_slice(&z.re.to_le_bytes());
             iq.extend_from_slice(&z.im.to_le_bytes());
         }
-        let a = Analysis {
+        let a = SpectrumParams {
             rate,
             center: 0.0,
             lo: -10_000.0,
@@ -654,7 +473,7 @@ mod tests {
             profile_points: 0,
             dc_guard_hz: 0.0,
         };
-        let (r, _) = analyze(|| Ok(std::io::Cursor::new(iq.clone())), a).unwrap();
+        let r = analyze(|| Ok(std::io::Cursor::new(iq.clone())), a).unwrap();
         let c = r
             .peaks
             .iter()
@@ -670,7 +489,7 @@ mod tests {
         let iq = synth(48_000.0, 1.0);
         let err = analyze(
             || Ok(std::io::Cursor::new(iq.clone())),
-            Analysis {
+            SpectrumParams {
                 rate: 48_000.0,
                 center: 1e6,
                 lo: 1.1e6,

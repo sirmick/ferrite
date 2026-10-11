@@ -214,6 +214,43 @@ enum Cmd {
         /// Only keyed peaks (CW / beacons).
         #[arg(long)]
         keyed: bool,
+        /// Analyse a kept snapshot instead of taking a fresh one.
+        #[arg(long)]
+        snapshot: Option<String>,
+    },
+    /// Record a few seconds of live IQ and keep it by id (no retune).
+    Snapshot {
+        #[arg(long, default_value_t = 3.0)]
+        secs: f64,
+    },
+    /// Time × frequency picture of a range (printed as text; drawn in
+    /// the AI tab).
+    Spectrogram {
+        lo: String,
+        hi: String,
+        #[arg(long)]
+        snapshot: Option<String>,
+        #[arg(long, default_value_t = 3.0)]
+        secs: f64,
+        /// Hz per column.
+        #[arg(long, default_value_t = 10.0)]
+        res: f64,
+        /// ms per row.
+        #[arg(long, default_value_t = 20.0)]
+        step: f64,
+    },
+    /// On/off timeline at one frequency (printed as a #/. strip).
+    Envelope {
+        freq: String,
+        #[arg(long)]
+        snapshot: Option<String>,
+        #[arg(long, default_value_t = 3.0)]
+        secs: f64,
+        #[arg(long, default_value_t = 200.0)]
+        bw: f64,
+        /// Window, ms.
+        #[arg(long, default_value_t = 10.0)]
+        window: f64,
     },
     /// Capture a slice of signal to disk (IQ / audio / FFT). Blocks
     /// until the async job finishes, then prints the job record.
@@ -522,7 +559,7 @@ async fn main() -> ExitCode {
     // The MCP server owns stdio for the JSON-RPC stream, so it's handled
     // before constructing the CLI-facing server (which would print).
     if matches!(cli.cmd, Cmd::Mcp) {
-        return match mcp::serve(http).await {
+        return match mcp::serve(http.via_mcp()).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("ferrite-ctl: {e:#}");
@@ -569,6 +606,26 @@ fn emit(v: &Value, compact: bool) -> Result<()> {
     };
     println!("{s}");
     Ok(())
+}
+
+/// Analysis replies: the text rendering for a person, JSON with `--json`.
+fn print_text_or_json(v: &Value, json: bool) -> Result<()> {
+    if json {
+        return emit(v, true);
+    }
+    if let Some(t) = v.get("text").and_then(Value::as_str) {
+        if let Some(s) = v.get("snapshot") {
+            println!(
+                "{} · {} · {:.1} s",
+                s.get("id").and_then(Value::as_str).unwrap_or("?"),
+                v.get("analysis_id").and_then(Value::as_str).unwrap_or("?"),
+                s.get("secs").and_then(Value::as_f64).unwrap_or(0.0)
+            );
+        }
+        print!("{t}");
+        return Ok(());
+    }
+    emit(v, false)
 }
 
 /// Adapt an op's `McpError` into the CLI's `anyhow` error channel.
@@ -763,15 +820,19 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             res,
             peaks,
             keyed,
+            snapshot,
         } => {
             let mut v = server
                 .spectrum_op(mcp::SpectrumArgs {
+                    snapshot,
                     lo_hz: parse_si(&lo)?,
                     hi_hz: parse_si(&hi)?,
                     secs: Some(secs),
                     res_hz: Some(res),
                     max_peaks: Some(peaks),
-                    profile_points: Some(if json { 120 } else { 0 }),
+                    // The UI draws the record's profile; only the CLI's
+                    // own printout drops it.
+                    profile_points: Some(120),
                     note: None,
                 })
                 .await
@@ -781,7 +842,59 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                     arr.retain(|p| p.get("keyed").and_then(Value::as_bool) == Some(true));
                 }
             }
+            if !json {
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("profile");
+                }
+            }
             emit(&v, json)
+        }
+        Cmd::Snapshot { secs } => emit(
+            &server
+                .snapshot_op(mcp::SnapshotArgs { secs: Some(secs) })
+                .await
+                .map_err(op_err)?,
+            json,
+        ),
+        Cmd::Spectrogram {
+            lo,
+            hi,
+            snapshot,
+            secs,
+            res,
+            step,
+        } => {
+            let v = server
+                .spectrogram_op(mcp::SpectrogramArgs {
+                    snapshot,
+                    secs: Some(secs),
+                    lo_hz: parse_si(&lo)?,
+                    hi_hz: parse_si(&hi)?,
+                    res_hz: Some(res),
+                    step_ms: Some(step),
+                })
+                .await
+                .map_err(op_err)?;
+            print_text_or_json(&v, json)
+        }
+        Cmd::Envelope {
+            freq,
+            snapshot,
+            secs,
+            bw,
+            window,
+        } => {
+            let v = server
+                .envelope_op(mcp::EnvelopeArgs {
+                    snapshot,
+                    secs: Some(secs),
+                    freq_hz: parse_si(&freq)?,
+                    bw_hz: Some(bw),
+                    window_ms: Some(window),
+                })
+                .await
+                .map_err(op_err)?;
+            print_text_or_json(&v, json)
         }
         Cmd::Signals { max_age_ms } => {
             let v = server

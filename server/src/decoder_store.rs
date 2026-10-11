@@ -54,6 +54,12 @@ pub enum Policy {
 /// Default cap for append logs.
 const LOG_CAP: usize = 512;
 
+/// Cap for the `analysis` log.
+const ANALYSIS_CAP: usize = 100;
+
+/// Newest `analysis` records that keep spectrogram pixels (`cells_b64`).
+const ANALYSIS_CELLS_KEEP: usize = 10;
+
 /// Cap for the `ai` session log (one agent turn is several records).
 const AI_LOG_CAP: usize = 1500;
 
@@ -118,6 +124,10 @@ fn policy_for(kind: &str) -> Policy {
         // panel renders from it; MCP reads it via `decodes ai`. Larger
         // cap than a decode log: one agent turn is several records.
         "ai" => Policy::Append { cap: AI_LOG_CAP },
+        // Toolkit measurements (spectrum / spectrogram / envelope) the AI
+        // panel draws inline; heavy spectrogram cells kept on the newest
+        // few only.
+        "analysis" => Policy::Append { cap: ANALYSIS_CAP },
         // In-flight assistant text per session (partial block, ≤4 Hz) so
         // a panel can show the reply forming. Keyed by session; the
         // finished block lands in `ai`.
@@ -163,7 +173,9 @@ pub fn is_live_kind(kind: &str) -> bool {
 /// bookkeeping logs (activity, AI transcript, jobs).
 #[must_use]
 pub fn is_decode_kind(kind: &str) -> bool {
-    !is_live_kind(kind) && !matches!(kind, "activity" | "ai" | "jobs") && !kind.starts_with("ai/")
+    !is_live_kind(kind)
+        && !matches!(kind, "activity" | "ai" | "jobs" | "analysis")
+        && !kind.starts_with("ai/")
 }
 
 /// One decoder record. `data` is the emitting block's JSON verbatim.
@@ -422,6 +434,9 @@ impl DecoderStore {
                 if kind == "ai" {
                     strip_old_images(&mut entry.recent);
                 }
+                if kind == "analysis" {
+                    strip_old_field(&mut entry.recent, "cells_b64", ANALYSIS_CELLS_KEEP);
+                }
                 DeltaOp::Add { record }
             }
             Policy::Upsert {
@@ -592,6 +607,22 @@ impl DecoderSink for DecoderStore {
     }
     fn reset(&self, kind: &str) {
         self.reset_kind(kind);
+    }
+}
+
+/// Drop `field` from all but the newest `keep` records that carry it.
+fn strip_old_field(log: &mut VecDeque<Record>, field: &str, keep: usize) {
+    let mut seen = 0usize;
+    for rec in log.iter_mut().rev() {
+        let Some(obj) = rec.data.as_object_mut() else {
+            continue;
+        };
+        if obj.contains_key(field) {
+            seen += 1;
+            if seen > keep {
+                obj.remove(field);
+            }
+        }
     }
 }
 

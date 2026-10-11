@@ -436,6 +436,13 @@ does). `POST /api/devices/reload` refuses (`409 RELOAD_UNSAFE`) while a
 leaked hung handle or an abandoned probe thread could be left pointing at
 unloaded driver code.
 
+**Analysis records.** Every toolkit measurement (`spectrum`,
+`spectrogram`, `envelope` — crate `ferrite-analysis`) also folds an
+`analysis` record `{id, tool, by: ui|cli|mcp, snapshot, params, result,
+text, cells_b64?}`; the AI panel draws them inline in its timeline, so
+whatever an agent (or a person on the CLI) measures is visible. `by`
+comes from the `x-ferrite-via` header ferrite-ctl stamps (`cli` / `mcp`).
+
 **AI session bus.** Every AI conversation — the ferrite-ai sidecar's,
 and a Claude Code session mirrored by its hooks (`ferrite-ctl
 chat-post`) — is the `ai` append kind, published through
@@ -540,7 +547,10 @@ request structs; the descriptions below are what `tools/list` returns.
 | `band_at` | `GET /api/band-plan/at?hz=` | US allocation band(s) containing a frequency. |
 | `load_preset` | `POST /api/preset` | Swap to a different preset (preserves centre freq). |
 | `tune` | `POST /api/tune` (+ `PATCH /api/source`) | Listen-frequency change with the per-driver DC-spike dodge; optionally folds in `gain_db` (+`agc=false`), `bandwidth_hz`, `sample_rate_hz`. Or `carrier_hz` (+ `tone_hz`): put an RF carrier on an audio tone — dial = carrier − tone (USB) / + tone (LSB); the tone defaults to the running decoder's `rx_freq_hz`. CLI: `tune --carrier 14.062007M`. |
-| `spectrum` | `POST /api/spectrum` | Few-Hz spectrum of a ≤ 400 kHz range from a few seconds of live IQ (the source's tee on hardware, the channel's on a software source; no retune): peaks with interpolated `freq_hz`, `avg_db`/`peak_db` over the floor, `width_hz`, `keyed` + `duty` from a 20 ms envelope, and a max-hold `profile`. CLI: `spectrum <lo> <hi> [--secs --res --keyed]`. |
+| `spectrum` | `POST /api/analysis/spectrum` (alias `/api/spectrum`) | Few-Hz spectrum of a ≤ 400 kHz range from a few seconds of live IQ (the source's tee on hardware, the channel's on a software source; no retune): peaks with interpolated `freq_hz`, `avg_db`/`peak_db` over the floor, `width_hz`, `keyed` + `duty` from a 20 ms envelope, and a max-hold `profile`. CLI: `spectrum <lo> <hi> [--secs --res --keyed]`. |
+| `snapshot` | `POST /api/analysis/snapshot` | Record a few seconds of live IQ (source tee = full span on hardware; no retune) and keep it by id (last 4) so several measurements see the same moment. |
+| `spectrogram` | `POST /api/analysis/spectrogram` | Time × frequency of a ≤ 400 kHz range (mixed to baseband + decimated first): `result {f0_hz, df_hz, dt_s, rows, cols}`, a character rendering in `text`, pixels (`cells_b64`) for the UI only. |
+| `envelope` | `POST /api/analysis/envelope` | On/off power timeline at one frequency: `segments` [{start_s, end_s}] from the snapshot's UTC `start_ms`, `duty`, `swing_db`, `keyed`, a `#`/`.` strip in `text`. |
 | `get_flowgraph` | `GET /api/flowgraph` | The running preset doc, live params folded in. CLI: `flowgraph get`. |
 | `swap_block` | `PATCH /api/flowgraph` | Replace one block's type + params, keeping id and wires (validated; a port mismatch is rejected, the running graph untouched). CLI: `flowgraph swap <block> <Type> k=v…`. |
 | `set_flowgraph` | `PATCH /api/flowgraph` | Replace the running preset with a whole doc. CLI: `flowgraph put <file>`. |
