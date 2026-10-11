@@ -449,15 +449,18 @@ chat-post`) — is the `ai` append kind, published through
 `ferrite/ingest/ai`:
 
 ```
-{type:"user"|"text"|"tool_use"|"tool_result"|"turn_end"|"reset",
+{type:"user"|"thought"|"text"|"plan"|"tool_use"|"tool_result"|"turn_end"|"reset",
  session, source, mode?, model?, t, text?, tool_id?, name?, input?,
- is_error?, images?, status?, error?, reason?}
+ is_error?, images?, analysis_id?, entries?, status?, error?, reason?}
 ```
 
-`ai_live` (keyed by `session`) carries the reply forming in real time.
-The browser's AI panel renders all sessions from these records; `/ws/chat`
-is only the control channel (prompt, stop, reset). Only the newest few
-`ai` records keep inline tool-result images.
+plus `{type:"clear"}`, which ferrited appends when the kind is reset
+(the panel hides activity/analysis older than it). `ai_live` (keyed by
+`session`) carries the reply forming in real time. The browser's AI
+panel renders all sessions from these records; control is the
+sidecar's REST surface behind `/api/ai/*` (`hello`, `prompt`, `cancel`,
+`reset`, `setup`, `sessions`), the same for the panel and the CLI. Only
+the newest few `ai` records keep inline tool-result images.
 
 **Persistence.** With `--state-dir` / `FERRITE_STATE_DIR` (run.sh:
 `.ferrite-state/`), every non-live kind — decodes, `ai`, `activity`,

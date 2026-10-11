@@ -13,9 +13,9 @@ store kind (`bus.ts`): `user`, `thought`, `text`, `tool_use`,
 forming text/thought on `ai_live`. Every AI panel renders from there,
 so a turn started over REST or from another tab shows everywhere.
 
-The browser **does not connect here directly**: ferrited proxies
-`/ws/chat` and `/api/ai/*` to this sidecar. This process listens on
-localhost only.
+The sidecar is plain HTTP on localhost. Nothing connects to it
+directly: ferrited proxies `/api/ai/*` to it, so the AI panel, the CLI
+and any REST client all use the same front door.
 
 **Auth**: your local Claude Code login (subscription billing — Pro /
 Max plans). Make sure `claude` is logged in before starting the
@@ -26,52 +26,76 @@ sidecar — no `ANTHROPIC_API_KEY` needed.
 ```sh
 cd tools/ferrite-ai
 npm install
-npm run dev
+FERRITE_CTL_CONNECT=http://127.0.0.1:12001 npm run dev
 ```
 
 Listens on `127.0.0.1:10002`. Override with `FERRITE_AI_PORT=10005`;
-if you change the port, also set `FERRITE_AI_URL=ws://127.0.0.1:10005/ws/chat`
-on ferrited so its proxies point at the right place.
+then set `FERRITE_AI_URL=http://127.0.0.1:10005` on ferrited so its
+proxy points at the right place. `FERRITE_CTL_CONNECT` is the daemon to
+drive (the same variable `ferrite-ctl --connect` reads; run.sh exports
+it). `./run.sh` starts all of this for you.
 
-## REST
+## REST — the one front door
 
 Through ferrited (`/api/ai/…`) or direct:
 
-- `POST /prompt` `{"text", "mode"?, "model"?, "session_id"?, "new_session"?, "wait"?}`
-  — run a turn exactly as if typed into the AI panel. Without
-  `session_id` it continues the mode's latest session; `new_session`
-  starts a fresh one. Returns `202 {session_id, mode, model, status:"started"}`,
-  or with `wait` the finished turn `{…, status: done|stopped|error, stop_reason, text}`.
-  `409` if that session already has a turn running.
-- `POST /cancel` `{"session_id"?}` — stop a turn (all running turns without an id).
-- `GET /sessions` — live sessions (`busy`, `latest`).
+- `GET /hello` — modes, per-mode default `models`, the `model_options`
+  a caller may pick.
+- `POST /prompt` `{"text", "mode"?, "model"?, "session_id"?, "new_session"?, "wait"?, "time_zone"?}`
+  — run a turn. Without `session_id` it continues the mode's current
+  conversation (the same one in every tab and the CLI); `new_session`
+  starts a fresh one, which becomes current. Returns
+  `202 {session_id, mode, model, status:"started"}`, or with `wait` the
+  finished turn `{…, status: done|stopped|error, stop_reason, text}`.
+  `409` if that conversation already has a turn running.
+- `POST /cancel` `{"session_id"?}` — stop a turn (every running turn
+  without an id).
+- `POST /reset` `{"mode"?, "reason"?}` — the mode's next turn (every
+  mode's, without `mode`) opens a fresh conversation; one `reset` record
+  is the banner every panel shows.
+- `GET /setup` → `{text}`, `POST /setup` `{text}` — the station notes.
+  An edit starts every mode over (the notes are in the system prompt).
+- `GET /sessions` — live sessions (`busy`, `latest`) and the current
+  conversation per mode.
 
 CLI: `ferrite-ctl ai-prompt "<text>" [--mode M] [--model ID] [--session ID | --new] [--wait]`.
 
-Sessions survive a sidecar restart: Claude Code keeps them on disk, and
-a turn naming an unknown id resumes it (`session/resume`, no replay —
-the history is already on the bus).
+Which conversation each mode continues is read back from the `ai` log
+at boot, so a sidecar restart picks it up. Claude Code keeps sessions
+on disk, and a turn naming one that isn't live resumes it
+(`session/resume`, no replay — the history is already on the bus).
 
-## WS protocol (`/ws/chat`, the panel's control channel)
+## The transcript
 
-Browser → sidecar: `{"text", "mode", "model"?, "resume_session_id"?, …per-turn context}`
-(current source, preset/block notes, local time, driver notes,
-`setup_description`), or a control envelope: `{"type":"stop"}`,
-`{"type":"request_snapshot","session_id"}`, `{"type":"reset_session","reason"}`.
+The conversation is published to ferrited's event plane as the `ai`
+store kind (`bus.ts`) — `user`, `thought`, `text`, `tool_use`,
+`tool_result` (with `analysis_id` when the call drew a graphic),
+`plan`, `turn_end`, `reset` — plus the forming text/thought on
+`ai_live`. Every AI panel renders from there: thinking (foldable),
+replies, each MCP call as a card (`⚙ tune carrier=7.0258 MHz`, its
+why, its outcome) with the graphic it drew inside — spectrum,
+spectrogram, envelope, sigwiki card, spot map, view snapshot — and a
+`signals` table. A coding agent mirrored onto the bus (below) shows
+its shell commands as `$ …` cards.
 
-Sidecar → browser: `ferrite_ai_hello` (modes, per-mode default
-`models`, `model_options`) on connect; `{"type":"system","subtype":"init","session_id"}`
-when a turn starts (the panel keeps it to continue the session);
-`ferrite_ai_done` / `ferrite_ai_stopped` / `ferrite_ai_error` when it
-ends; `conversation_snapshot` / `session_reset` in reply to the
-controls. The conversation itself comes from the bus, not this socket.
+`node test/live-e2e.mjs` checks the whole loop against a running stack
+with one cheap real turn; `npm test` covers the pure parts.
+
+### Mirroring a coding session
+
+`.claude/settings.json` wires Claude Code hooks to
+`scripts/ai-chat-mirror.sh`, which posts that session's prompts, tool
+calls and replies onto the same bus (`ferrite-ctl chat-post`). It is
+**off unless** `FERRITE_AI_MIRROR=1` is in Claude Code's environment
+(e.g. `"env": {"FERRITE_AI_MIRROR": "1"}` in
+`.claude/settings.local.json`), so ordinary coding sessions in this
+repo stay out of the radio AI's transcript.
 
 ## Modes
 
 Each mode is a different system prompt + a different tool allow-list,
-loaded from `prompts/<mode>.md`. The browser picks per turn; switching
-mode resets the conversation (different system prompt would re-prime
-prior context badly).
+loaded from `prompts/<mode>.md`, and its own conversation: switching
+mode in the panel continues that mode's conversation.
 
 - **explorer** (default) — all ferrite tools, autonomy-flavoured. Scans
   the band, captures FFT, identifies signals.
@@ -93,20 +117,20 @@ the bundled CLI defaults to, which silently lagged a generation):
 
 Override globally with `FERRITE_AI_MODEL=…`, or per mode with
 `FERRITE_AI_MODEL_<MODE>=…` (e.g. `FERRITE_AI_MODEL_CHAT=claude-opus-5-5`).
-Per turn, the browser may send `{"text": …, "mode": …, "model": "<id>"}`;
-`ferrite_ai_hello` advertises the per-mode defaults (`models`) and the ids
-the picker may choose (`model_options`). Unknown ids are ignored, not
-forwarded.
+A prompt may pick `"model": "<id>"` from `model_options` (`GET /hello`);
+unknown ids are ignored, not forwarded.
 
 ### Context
 
-A session's system prompt is fixed when it starts: the mode prompt,
-the SDR driver notes, and the operator's station notes. Station notes
-are the browser's `setup_description`; a turn without one (a headless
-driver or REST) gets `$FERRITE_AI_STATE_DIR/setup.md` (override:
-`FERRITE_AI_SETUP_FILE`). Each turn then leads with a
-`<turn-context>` block: live source state, the clock, and the preset
-and block notes whenever they changed.
+Built here from ferrited's own state (`context.ts`), so it's the same
+whoever asks. A session's system prompt is fixed when it starts: the
+mode prompt, the SDR driver notes (`web/src/lib/controls/sdr-presets/<driver>.json`),
+and the station notes (`$FERRITE_AI_STATE_DIR/setup.md`, override
+`FERRITE_AI_SETUP_FILE`; edited from the panel). Each turn then leads
+with a `<turn-context>` block: live source state, the preset and block
+notes whenever they changed, and the clock — in the caller's
+`time_zone` (the panel sends the browser's), else `FERRITE_TZ`, else
+the host's.
 
 Thinking is on (`adaptive`, summarised); `FERRITE_AI_EFFORT` sets the
 effort level.
@@ -136,5 +160,5 @@ restriction; `allowedTools` only auto-approves. Sessions run in
 ## Adding a new mode
 
 Drop `prompts/<name>.md` and add `<name>` to the `MODES` tuple in
-`index.ts`. The UI's mode dropdown reads the list from the
-`ferrite_ai_hello` event so it picks up new modes automatically.
+`index.ts`. The UI's mode dropdown reads the list from `GET /hello`, so
+it picks up new modes automatically.

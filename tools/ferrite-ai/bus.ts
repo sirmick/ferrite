@@ -12,10 +12,11 @@
 //   {type:"thought",     …, text}                       a finished thinking block
 //   {type:"text",        …, text}                       a finished reply block
 //   {type:"tool_use",    …, tool_id, name, input, kind?}
-//   {type:"tool_result", …, tool_id, text, is_error, images?}
+//   {type:"tool_result", …, tool_id, text, is_error, images?, analysis_id?}
 //   {type:"plan",        …, entries:[{content, status, priority}]}
 //   {type:"turn_end",    …, status: done|error|stopped, error?}
-//   {type:"reset",       …, reason}
+//   {type:"reset",       …, reason}                    session null = every mode
+//   {type:"clear"}                                     ferrited, on an `ai` reset
 //
 // Fed by ACP `session/update` notifications (acp.ts). Publishing is
 // best-effort: with the broker down records are dropped, not queued.
@@ -95,6 +96,19 @@ function splitToolContent(content: acp.ToolCallContent[] | undefined | null): {
     }
   }
   return { text: texts.join(""), images };
+}
+
+/** `analysis_id` from a tool's JSON result, if it has one. */
+export function analysisIdOf(raw: string): string | undefined {
+  const t = raw.trim();
+  if (!t.startsWith("{")) return undefined;
+  try {
+    const id = (JSON.parse(t) as { analysis_id?: unknown }).analysis_id;
+    return typeof id === "string" && id ? id : undefined;
+  } catch {
+    const m = /"analysis_id"\s*:\s*"([^"]+)"/.exec(t);
+    return m?.[1];
+  }
 }
 
 function hasInput(v: unknown): boolean {
@@ -187,12 +201,17 @@ export class SessionPublisher {
         if (u.status !== "completed" && u.status !== "failed") return;
         const { text, images } = splitToolContent(u.content);
         const raw = text || (u.rawOutput === undefined ? "" : typeof u.rawOutput === "string" ? u.rawOutput : JSON.stringify(u.rawOutput));
+        const analysisId = analysisIdOf(raw);
         this.emit({
           type: "tool_result",
           tool_id: u.toolCallId,
           text: clip(raw),
           is_error: u.status === "failed",
           ...(images.length ? { images } : {}),
+          // The graphic this call drew (spectrum, sigwiki card, spot
+          // map…): the panel renders it inside the tool card. Pulled out
+          // before clipping can cut it off.
+          ...(analysisId ? { analysis_id: analysisId } : {}),
         });
         return;
       }
@@ -214,7 +233,42 @@ export class SessionPublisher {
   }
 }
 
-/** A context reset (mode switch, /reset, setup edit) — a banner on every panel. */
-export function publishReset(session: string | null, mode: string, reason: string): void {
+/** A context reset (mode switch, /reset, Clear, station-notes edit) — a
+ *  banner on every panel. `mode` null = every mode. */
+export function publishReset(session: string | null, mode: string | null, reason: string): void {
   publish("ai", { type: "reset", session, source: SOURCE, mode, reason, t: Date.now() });
+}
+
+/** Which session each mode continues, read back from the `ai` log —
+ *  the log is the record, so a sidecar restart picks the conversation
+ *  up where every panel sees it. A mode's latest is its newest session
+ *  with a `user` record and no later reset for that mode (or for all). */
+export function latestFromRecords(records: Array<{ data?: Record<string, unknown> }>): Map<string, string> {
+  const latest = new Map<string, string>();
+  for (const r of records) {
+    const d = r.data ?? {};
+    if (d["type"] === "clear") {
+      latest.clear();
+      continue;
+    }
+    if (d["source"] !== SOURCE) continue;
+    const mode = typeof d["mode"] === "string" ? d["mode"] : null;
+    if (d["type"] === "reset") {
+      if (mode) latest.delete(mode);
+      else latest.clear();
+    } else if (d["type"] === "user" && mode && typeof d["session"] === "string") {
+      latest.set(mode, d["session"]);
+    }
+  }
+  return latest;
+}
+
+export async function latestFromBus(ferritedUrl: string): Promise<Map<string, string>> {
+  try {
+    const r = await fetch(`${ferritedUrl}/api/state`, { signal: AbortSignal.timeout(5000) });
+    const snap = (await r.json()) as { kinds?: { ai?: { recent?: Array<{ data?: Record<string, unknown> }> } } };
+    return latestFromRecords(snap.kinds?.ai?.recent ?? []);
+  } catch {
+    return new Map();
+  }
 }

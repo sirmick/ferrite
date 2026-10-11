@@ -7,11 +7,12 @@
 // the optimistic pending prompt) and the control channel (every reset
 // entry point tells the sidecar; banners aren't doubled).
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AiStore,
   buildTurns,
+  clearedAtMs,
   type AiRecord,
   type AssistantTurn,
   type UserTurn,
@@ -28,14 +29,26 @@ beforeEach(() => {
   localStorage.clear();
 });
 
-/** Attach a fake OPEN socket so reset paths take their online branch. */
-function attachFakeSocket(store: AiStore): { sent: string[] } {
-  const sent: string[] = [];
-  (store as unknown as { ws: unknown }).ws = {
-    readyState: WebSocket.OPEN,
-    send: (m: string) => sent.push(m),
-  };
-  return { sent };
+/** Stub fetch: record every call, answer from `route` (default `{}` 200). */
+function stubFetch(
+  route: (
+    url: string,
+    body: unknown,
+  ) =>
+    | { status?: number; body?: unknown }
+    | Promise<{ status?: number; body?: unknown }> = () => ({}),
+): { calls: { url: string; body: unknown }[] } {
+  const calls: { url: string; body: unknown }[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string, init?: { body?: string }) => {
+      const body = init?.body ? JSON.parse(init.body) : undefined;
+      calls.push({ url, body });
+      const r = await route(url, body);
+      return new Response(JSON.stringify(r.body ?? {}), { status: r.status ?? 200 });
+    }),
+  );
+  return { calls };
 }
 
 describe('buildTurns — the session-bus fold', () => {
@@ -138,6 +151,22 @@ describe('buildTurns — the session-bus fold', () => {
     expect(s.chunks.at(-1)).toEqual({ kind: 'meta', label: '── stopped' });
   });
 
+  it('a stop marks a call that never returned as interrupted', () => {
+    const s = { session: 'A', source: 'ferrite-ai' };
+    const turns = buildTurns(
+      [
+        rec({ ...s, type: 'user', text: 'survey' }),
+        rec({ ...s, type: 'tool_use', tool_id: 't1', name: 'mcp__ferrite__snapshot', input: '{}' }),
+        rec({ ...s, type: 'turn_end', status: 'stopped' }),
+      ],
+      {},
+      [],
+      null,
+    );
+    const tool = (turns[1] as AssistantTurn).chunks[0] as { interrupted?: boolean };
+    expect(tool.interrupted).toBe(true);
+  });
+
   it('a reset record is a banner; history before it stays', () => {
     const turns = buildTurns(
       [
@@ -185,54 +214,128 @@ describe('buildTurns — the session-bus fold', () => {
   });
 });
 
-describe('control channel', () => {
-  it('/reset, Clear, setMode all drop the sidecar binding (unified path)', () => {
-    const store = new AiStore();
-    const { sent } = attachFakeSocket(store);
-    store.sessionId = 'live';
+describe('control — REST to the sidecar', () => {
+  afterEach(() => vi.unstubAllGlobals());
 
-    store.resetSession({ reason: 'reset' });
-    store.clear();
+  it("a prompt goes to this mode with the tab's time zone; the sidecar builds the rest", async () => {
+    const { calls } = stubFetch();
+    const store = new AiStore();
     store.setMode('decoder');
-
-    const reasons = sent
-      .map((m) => JSON.parse(m))
-      .filter((m) => m.type === 'reset_session')
-      .map((m) => m.reason as string);
-    expect(reasons).toEqual(['reset', 'clear', expect.stringContaining('decoder')]);
-    expect(store.sessionId).toBeNull();
+    await store.send('  what is on 40m?  ');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe('/api/ai/prompt');
+    const body = calls[0].body as Record<string, unknown>;
+    expect(body.text).toBe('what is on 40m?');
+    expect(body.mode).toBe('decoder');
+    expect(typeof body.time_zone).toBe('string');
+    // No session binding and no browser-assembled context.
+    expect(Object.keys(body).sort()).toEqual(['mode', 'text', 'time_zone']);
+    expect(store.isStreaming()).toBe(true);
   });
 
-  it('a reset the sidecar published adds no local banner; an unresumable session does (once)', () => {
+  it('a refused prompt drops the optimistic turn and says why', async () => {
+    stubFetch(() => ({
+      status: 409,
+      body: { error: 'the explorer conversation is busy with a turn' },
+    }));
     const store = new AiStore();
-    store.sessionId = 'doomed';
-    store.ingestEvent({ type: 'session_reset', reason: 'reset', on_bus: true });
-    expect(store.sessionId).toBeNull();
-    expect(store.turns).toHaveLength(0);
+    await store.send('hello');
+    expect(store.isStreaming()).toBe(false);
+    const last = store.turns.at(-1) as AssistantTurn;
+    expect(last.chunks[0]).toEqual({
+      kind: 'meta',
+      label: '── the explorer conversation is busy with a turn',
+    });
+  });
 
-    store.ingestEvent({ type: 'session_reset', reason: 'no transcript on disk' });
-    store.ingestEvent({ type: 'session_reset', reason: 'no transcript on disk' });
-    expect(store.turns).toHaveLength(1);
-    expect(((store.turns[0] as AssistantTurn).chunks[0] as { label: string }).label).toContain(
-      'no transcript on disk',
+  it('/reset starts this mode over; Clear resets the store first, then every mode', async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { calls } = stubFetch(async (url) => {
+      order.push(url);
+      if (url.startsWith('/api/state/')) await gate;
+      return {};
+    });
+    const store = new AiStore();
+    await store.resetSession({ reason: 'fresh look' });
+    expect(calls[0]).toEqual({
+      url: '/api/ai/reset',
+      body: { mode: 'explorer', reason: 'fresh look' },
+    });
+
+    const done = store.clear();
+    await Promise.resolve();
+    // The banner record must not race the store reset that would wipe it.
+    expect(order.slice(1)).toEqual(['/api/state/ai/reset', '/api/state/ai_live/reset']);
+    release();
+    await done;
+    expect(calls.at(-1)).toEqual({ url: '/api/ai/reset', body: { reason: 'clear' } });
+  });
+
+  it('switching mode is not a reset — each mode keeps its own conversation', () => {
+    const { calls } = stubFetch();
+    const store = new AiStore();
+    store.setMode('chat');
+    expect(store.mode).toBe('chat');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('hello sets modes and models; station notes come from the sidecar', async () => {
+    stubFetch((url) =>
+      url.endsWith('/hello')
+        ? {
+            body: {
+              modes: ['explorer', 'chat'],
+              models: { explorer: 'claude-opus-5-5' },
+              model_options: ['claude-opus-5-5'],
+            },
+          }
+        : url.endsWith('/setup')
+          ? { body: { text: 'Antenna C: longwire' } }
+          : {},
     );
+    const store = new AiStore();
+    store.connect('/api/ai');
+    await vi.waitFor(() => expect(store.connection).toBe('connected'));
+    store.disconnect();
+    expect(store.availableModes).toEqual(['explorer', 'chat']);
+    expect(store.defaultModelFor('explorer')).toBe('claude-opus-5-5');
+    expect(store.setupDescription).toBe('Antenna C: longwire');
   });
 
-  it('offline /reset keeps history and notes the reset locally', () => {
+  it('an unreachable sidecar shows offline', async () => {
+    stubFetch(() => ({ status: 502, body: { error: 'ferrite-ai sidecar unreachable' } }));
     const store = new AiStore();
-    store.sessionId = 'doomed';
-    store.resetSession({ reason: 'reset' });
-    expect(store.sessionId).toBeNull();
-    expect(store.turns).toHaveLength(1);
-    expect(((store.turns[0] as AssistantTurn).chunks[0] as { label: string }).label).toContain(
-      'history preserved',
-    );
+    store.connect('/api/ai');
+    await vi.waitFor(() => expect(store.connection).toBe('error'));
+    store.disconnect();
+    expect(store.lastError).toContain('unreachable');
   });
 
-  it('system/init binds the session for resume and persists it', () => {
-    const store = new AiStore();
-    store.ingestEvent({ type: 'system', subtype: 'init', session_id: 'sess-9' });
-    expect(store.sessionId).toBe('sess-9');
-    expect(localStorage.getItem('ferrite-ai.session_id')).toBe('sess-9');
+  it('old localStorage keys (session, station notes) are dropped on load', () => {
+    localStorage.setItem('ferrite-ai.session_id', 'old');
+    localStorage.setItem('ferrite-ai.setup_description', 'old notes');
+    new AiStore();
+    expect(localStorage.getItem('ferrite-ai.session_id')).toBeNull();
+    expect(localStorage.getItem('ferrite-ai.setup_description')).toBeNull();
+  });
+});
+
+describe('clearedAtMs', () => {
+  it('is the newest clear record, 0 when never cleared', () => {
+    expect(clearedAtMs([])).toBe(0);
+    expect(clearedAtMs([rec({ type: 'user', text: 'x' }, 5)])).toBe(0);
+    expect(
+      clearedAtMs([
+        rec({ type: 'clear' }, 10),
+        rec({ type: 'user', text: 'x' }, 20),
+        rec({ type: 'clear' }, 30),
+      ]),
+    ).toBe(30);
+  });
+
+  it('a clear record adds no turn', () => {
+    expect(buildTurns([rec({ type: 'clear' })], {}, [], null)).toHaveLength(0);
   });
 });

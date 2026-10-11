@@ -1,9 +1,18 @@
 <script lang="ts">
-  import { ai, AI_MODES, type AiMode, renderMarkdown } from '$lib/ai/store.svelte';
+  import { ai, AI_MODES, type AiMode, clearedAtMs, renderMarkdown } from '$lib/ai/store.svelte';
   import { decoders } from '$lib/decoders/store.svelte';
   import AnalysisCard from '$lib/analysis/AnalysisCard.svelte';
   import type { AnalysisRecord } from '$lib/analysis/types';
   import type { Turn } from '$lib/ai/store.svelte';
+  import {
+    fmtHz,
+    isShell,
+    resultSummary,
+    signalsOf,
+    toolLabel,
+    toolSummary,
+    toolWhy,
+  } from '$lib/ai/toolView';
   import { tick } from 'svelte';
 
   let scroller: HTMLDivElement | undefined = $state();
@@ -27,6 +36,25 @@
     | { k: 'turn'; key: string; t: number; turn: Turn }
     | { k: 'analysis'; key: string; t: number; rec: AnalysisRecord }
     | { k: 'activity'; key: string; t: number; acts: Act[] };
+  /** Analysis records (graphics) by id, for tool cards to draw inline. */
+  let analysisById = $derived.by(() => {
+    const m = new Map<string, AnalysisRecord>();
+    for (const r of decoders.kind('analysis').recent) {
+      const d = r.data as unknown as AnalysisRecord;
+      if (d?.id) m.set(d.id, d);
+    }
+    return m;
+  });
+  /** Ids a tool card in the conversation already shows. */
+  let attached = $derived.by(() => {
+    const ids = new Set<string>();
+    for (const t of ai.turns) {
+      if (t.role !== 'assistant') continue;
+      for (const c of t.chunks) if (c.kind === 'tool' && c.analysisId) ids.add(c.analysisId);
+    }
+    return ids;
+  });
+
   let timeline = $derived.by<Item[]>(() => {
     const items: Item[] = ai.turns.map((turn) => ({
       k: 'turn' as const,
@@ -34,7 +62,14 @@
       t: turn.t,
       turn,
     }));
+    // Clear empties the `ai` kind and leaves a `clear` record; the
+    // shared activity / analysis logs stay, but this timeline starts
+    // from there.
+    const clearedAt = clearedAtMs(decoders.kind('ai').recent);
     for (const r of decoders.kind('analysis').recent.slice(-40)) {
+      if (r.at_ms < clearedAt) continue;
+      // Drawn inside the tool card of the call that made it.
+      if (attached.has(String((r.data as { id?: unknown })?.id ?? ''))) continue;
       items.push({
         k: 'analysis',
         key: `a${r.seq}`,
@@ -43,6 +78,7 @@
       });
     }
     for (const r of decoders.kind('activity').recent.slice(-80)) {
+      if (r.at_ms < clearedAt) continue;
       const d = (r.data ?? {}) as Record<string, unknown>;
       // An agent's MCP tool calls already show as its tool cards.
       if (d['via'] === 'mcp') continue;
@@ -148,54 +184,22 @@
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
   }
 
-  /** Short, tool-specific summary line for the collapsed view of a
-   *  tool call. Bash shows `$ <command>`, Read/Glob/Grep show their
-   *  primary arg, unknown tools fall back to a one-line JSON. Long
-   *  results get truncated; the full text rides on a `title` tooltip
-   *  for hover and the full JSON is still available in the
-   *  "show details" expander. */
-  function toolSummary(name: string, input: string): string {
-    const obj = tryParse(input);
-    if (obj && typeof obj === 'object') {
-      const o = obj as Record<string, unknown>;
-      if (name === 'Bash' && typeof o.command === 'string') return `$ ${o.command}`;
-      if (name === 'Read' && typeof o.file_path === 'string') return `📖 ${o.file_path}`;
-      if (name === 'Glob' && typeof o.pattern === 'string') return `🔍 ${o.pattern}`;
-      if (name === 'Grep' && typeof o.pattern === 'string') {
-        const where = typeof o.path === 'string' ? ` in ${o.path}` : '';
-        return `🔍 /${o.pattern}/${where}`;
-      }
-    }
-    return input ? input.replace(/\s+/g, ' ') : '';
-  }
-
-  /** Optional sub-line — used by Bash to show the `description` field
-   *  below the command. Returns null when there's nothing extra to
-   *  show. */
-  function toolSubline(name: string, input: string): string | null {
-    const obj = tryParse(input);
-    if (!obj || typeof obj !== 'object') return null;
-    const o = obj as Record<string, unknown>;
-    if (name === 'Bash' && typeof o.description === 'string' && o.description) {
-      return o.description;
-    }
-    return null;
-  }
-
-  /** Visible truncated form of the summary line; the full text lives
-   *  on the `title` attribute for hover-to-see. */
+  /** Visible truncated form of a line; the full text rides on `title`. */
   function truncate(s: string, max = 160): string {
-    if (s.length <= max) return s;
-    return s.slice(0, max - 1) + '…';
+    return s.length <= max ? s : s.slice(0, max - 1) + '…';
   }
 
-  function tryParse(s: string): unknown {
-    if (!s) return null;
+  function pretty(s: string): string {
     try {
-      return JSON.parse(s);
+      return JSON.stringify(JSON.parse(s), null, 2);
     } catch {
-      return null;
+      return s;
     }
+  }
+
+  /** `claude-opus-5-5` → `opus-5-5`. */
+  function shortModel(m: string | undefined): string {
+    return m ? m.replace(/^claude-/, '') : '';
   }
 
   // "Show full JSON" toggle per-chunk, keyed by chunk id. The default
@@ -211,10 +215,14 @@
   // Setup-description text-box is collapsed by default once filled —
   // keeps the chat real estate intact. Defaults to expanded when
   // empty so first-time users see the prompt.
-  let setupOpen = $state(ai.setupDescription.trim() === '');
-  let setupDraft = $state(ai.setupDescription);
+  let setupOpen = $state(false);
+  let setupDraft = $state('');
+  function openSetup() {
+    setupDraft = ai.setupDescription;
+    setupOpen = true;
+  }
   function saveSetup() {
-    ai.setSetupDescription(setupDraft);
+    void ai.setSetupDescription(setupDraft);
     setupOpen = false;
   }
   function cancelSetup() {
@@ -242,8 +250,8 @@
   class="flex h-full w-full flex-col border-r border-slate-800 bg-[color:var(--color-bg)] text-xs"
 >
   <!-- Header: mode picker + connection dot -->
-  <div class="flex items-center justify-between border-b border-slate-800 px-2 py-1">
-    <div class="flex items-center gap-2">
+  <div class="flex items-center justify-between gap-2 border-b border-slate-800 px-2 py-1">
+    <div class="flex min-w-0 items-center gap-2">
       <span class="font-semibold text-[color:var(--color-muted)]">AI</span>
       <select
         class="rounded border border-slate-700 bg-slate-900 px-1 py-0.5 text-[10px] focus:border-slate-500 focus:outline-none"
@@ -261,18 +269,24 @@
         onchange={(e) => ai.setModel((e.currentTarget as HTMLSelectElement).value || null)}
         title="Claude model for this mode (blank = the sidecar's per-mode default)"
       >
-        <option value="">{ai.defaultModelFor(ai.mode) ?? 'default'} (default)</option>
+        <option value=""
+          >{shortModel(ai.defaultModelFor(ai.mode) ?? undefined) || 'default'} · default</option
+        >
         {#each ai.modelOptions as id (id)}
-          <option value={id}>{id}</option>
+          <option value={id}>{shortModel(id)}</option>
         {/each}
       </select>
     </div>
-    <div class="flex items-center gap-2">
+    <div class="flex shrink-0 items-center gap-2">
       <span
         class="inline-block h-2 w-2 rounded-full {connectionLabel.dot}"
         title={connectionLabel.text}
       ></span>
-      <span class="text-[10px] text-[color:var(--color-muted)]">{connectionLabel.text}</span>
+      {#if ai.connection !== 'connected'}
+        <span class="max-w-40 truncate text-[10px] text-[color:var(--color-muted)]"
+          >{connectionLabel.text}</span
+        >
+      {/if}
       <button
         type="button"
         class="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] hover:border-slate-500"
@@ -291,7 +305,7 @@
     {#if setupOpen}
       <div class="mb-1 flex items-center justify-between">
         <span class="text-[10px] font-semibold text-[color:var(--color-muted)]">
-          Radio setup (sent to AI on every turn)
+          Station notes — every AI conversation starts with these
         </span>
         <div class="flex gap-1">
           <button
@@ -316,17 +330,17 @@
       <button
         type="button"
         class="flex w-full items-center justify-between gap-2 text-left text-[10px] text-[color:var(--color-muted)] hover:text-slate-200"
-        onclick={() => (setupOpen = true)}
-        title={ai.setupDescription || 'set up your radio context'}
+        onclick={openSetup}
+        title={ai.setupDescription || 'describe your station for the AI'}
       >
         <span class="flex-1 truncate">
           {#if ai.setupDescription.trim()}
-            <span class="text-slate-300">setup:</span>
+            <span class="text-slate-300">station:</span>
             {ai.setupDescription.replace(/\s+/g, ' ').slice(0, 96)}{ai.setupDescription.length > 96
               ? '…'
               : ''}
           {:else}
-            <span class="italic">+ describe your radio setup (antennas, interferers, …)</span>
+            <span class="italic">+ station notes (antennas, interferers, …)</span>
           {/if}
         </span>
         <span class="shrink-0">▾</span>
@@ -335,8 +349,12 @@
   </div>
 
   <!-- Transcript -->
-  <div class="min-h-0 flex-1 overflow-y-auto px-2 py-2" bind:this={scroller} onscroll={onScroll}>
-    {#if ai.turns.length === 0}
+  <div
+    class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-2"
+    bind:this={scroller}
+    onscroll={onScroll}
+  >
+    {#if timeline.length === 0}
       <div class="px-2 py-4 text-[11px] text-[color:var(--color-muted)]">
         Ask the AI to scan a band, identify a signal, or load a preset. Mode picker above swaps the
         system prompt; modes:
@@ -383,6 +401,9 @@
               <span>
                 ai{#if turn.source && turn.source !== 'ferrite-ai'}<span class="ml-1 opacity-70"
                     >· {turn.source}</span
+                  >{/if}{#if turn.mode}<span class="ml-1 opacity-70">· {turn.mode}</span
+                  >{/if}{#if turn.model}<span class="ml-1 opacity-50"
+                    >· {shortModel(turn.model)}</span
                   >{/if}
                 {#if turn.status === 'streaming'}
                   <span class="ml-1 animate-pulse">▌</span>
@@ -448,7 +469,11 @@
                 </div>
               {:else if chunk.kind === 'tool'}
                 {@const summary = toolSummary(chunk.name, chunk.input)}
-                {@const sub = toolSubline(chunk.name, chunk.input)}
+                {@const why = toolWhy(chunk.input)}
+                {@const outcome = resultSummary(chunk.result, !!chunk.error)}
+                {@const shell = isShell(chunk.name)}
+                {@const signals = signalsOf(chunk.name, chunk.result)}
+                {@const graphic = chunk.analysisId ? analysisById.get(chunk.analysisId) : undefined}
                 <div
                   class="my-1 rounded border px-1.5 py-1 font-mono text-[10px]"
                   class:border-slate-700={!chunk.error}
@@ -456,56 +481,79 @@
                   class:bg-slate-900={!chunk.error}
                   class:bg-rose-950={chunk.error}
                 >
-                  <div
-                    class="flex items-center justify-between gap-2 text-[color:var(--color-muted)]"
-                  >
+                  <div class="flex items-center justify-between gap-2">
                     <span class="flex min-w-0 flex-1 items-center gap-1.5">
-                      <span class="shrink-0 text-sky-400">⚙ {chunk.name}</span>
-                      <span class="truncate text-slate-300" title={summary}
-                        >{truncate(summary)}</span
-                      >
-                    </span>
-                    <span class="flex shrink-0 items-center gap-2">
-                      {#if chunk.result === undefined}
-                        <span class="text-amber-400">running…</span>
-                      {:else if chunk.error}
-                        <span class="text-rose-400">error</span>
+                      {#if shell}
+                        <span class="truncate text-amber-200" title={summary}
+                          >{truncate(summary)}</span
+                        >
                       {:else}
-                        <span class="text-emerald-400">done</span>
-                      {/if}
-                      {#if chunk.input}
-                        <button
-                          type="button"
-                          class="rounded border border-slate-700 px-1 text-[9px] hover:border-slate-500"
-                          onclick={() => toggleTool(chunk.id)}
-                          title="show full tool input + raw result"
-                          >{expandedTools[chunk.id] ? '−' : '+'}</button
+                        <span class="shrink-0 text-sky-400">⚙ {toolLabel(chunk.name)}</span>
+                        <span class="truncate text-slate-300" title={summary}
+                          >{truncate(summary)}</span
                         >
                       {/if}
                     </span>
+                    <span class="flex shrink-0 items-center gap-2">
+                      {#if chunk.interrupted}
+                        <span class="text-slate-500">interrupted</span>
+                      {:else if chunk.result === undefined}
+                        <span class="animate-pulse text-amber-400">running…</span>
+                      {:else if chunk.error}
+                        <span class="text-rose-400">failed</span>
+                      {:else}
+                        <span class="text-emerald-400">✓</span>
+                      {/if}
+                      <button
+                        type="button"
+                        class="rounded border border-slate-700 px-1 text-[9px] text-[color:var(--color-muted)] hover:border-slate-500"
+                        onclick={() => toggleTool(chunk.id)}
+                        title="show the full input and result"
+                        >{expandedTools[chunk.id] ? '−' : '+'}</button
+                      >
+                    </span>
                   </div>
-                  {#if sub}
-                    <div class="mt-0.5 truncate text-[10px] italic text-slate-400" title={sub}>
-                      {sub}
+                  {#if why}
+                    <div class="mt-0.5 truncate font-sans italic text-slate-400" title={why}>
+                      {why}
                     </div>
                   {/if}
-                  {#if expandedTools[chunk.id] && chunk.input}
-                    <pre
-                      class="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-slate-950/60 px-1.5 py-1 text-slate-300">{(() => {
-                        try {
-                          return JSON.stringify(JSON.parse(chunk.input), null, 2);
-                        } catch {
-                          return chunk.input;
-                        }
-                      })()}</pre>
+                  {#if outcome}
+                    <div
+                      class="mt-0.5 truncate"
+                      class:text-rose-300={chunk.error}
+                      class:text-slate-400={!chunk.error}
+                      title={outcome}
+                    >
+                      → {outcome}
+                    </div>
+                  {/if}
+                  {#if signals && signals.length}
+                    <table class="mt-1 w-full text-left text-[10px]">
+                      <thead class="text-[color:var(--color-muted)]">
+                        <tr
+                          ><th class="font-normal">freq</th><th class="font-normal">power</th><th
+                            class="font-normal">SNR</th
+                          ><th class="font-normal">width</th></tr
+                        >
+                      </thead>
+                      <tbody class="text-slate-300">
+                        {#each signals as r, i (i)}
+                          <tr>
+                            <td>{fmtHz(r.freq_hz)}</td>
+                            <td>{r.power_db !== undefined ? `${r.power_db.toFixed(1)} dB` : ''}</td>
+                            <td>{r.snr_db !== undefined ? `${r.snr_db.toFixed(1)} dB` : ''}</td>
+                            <td>{r.bw_hz !== undefined ? fmtHz(r.bw_hz) : ''}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
                   {/if}
                   {#if chunk.resultImages && chunk.resultImages.length}
                     <div class="mt-1 flex flex-col gap-1">
                       {#each chunk.resultImages as src, i (i)}
-                        <!-- Inline render of base64 data URLs returned by Read on a
-                           PNG/JPEG. Capped width so a large image doesn't blow
-                           out the chat column; click to open the data URL in
-                           a new tab for full-size. -->
+                        <!-- An image the tool returned (a view snapshot, a
+                             reference picture); click for full size. -->
                         <a href={src} target="_blank" rel="noopener noreferrer">
                           <img
                             {src}
@@ -516,14 +564,31 @@
                       {/each}
                     </div>
                   {/if}
-                  {#if expandedTools[chunk.id] && chunk.result !== undefined && chunk.result}
-                    <pre
-                      class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-slate-400">{chunk.result}</pre>
+                  {#if graphic}
+                    <!-- The graphic this call drew: spectrum, spectrogram,
+                         envelope, sigwiki card, spot map. -->
+                    <div class="mt-1 font-sans">
+                      <AnalysisCard rec={graphic} t={turn.t} inline />
+                    </div>
+                  {/if}
+                  {#if expandedTools[chunk.id]}
+                    {#if chunk.input}
+                      <pre
+                        class="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-slate-950/60 px-1.5 py-1 text-slate-300">{pretty(
+                          chunk.input,
+                        )}</pre>
+                    {/if}
+                    {#if chunk.result}
+                      <pre
+                        class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-slate-400">{pretty(
+                          chunk.result,
+                        )}</pre>
+                    {/if}
                   {/if}
                 </div>
               {:else}
                 <div class="text-[10px] italic text-[color:var(--color-muted)]">
-                  — {chunk.label}
+                  {chunk.label}
                 </div>
               {/if}
             {/each}

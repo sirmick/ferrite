@@ -9,15 +9,14 @@
 // those records (plus the `ai_live` partial reply and a few tab-local
 // notices). Nothing about the transcript lives only in this tab.
 //
-// `/ws/chat` (proxied to the sidecar) is the control channel: send a
-// prompt, stop, reset the reasoning context, and the sidecar's hello
-// (modes / models) + session binding (`system/init`) for `resume`.
+// Control is plain REST to the sidecar through ferrited (`/api/ai/*`):
+// prompt, cancel, reset, station notes, hello — the same front door the
+// CLI uses. The tab holds no session: each mode has one current
+// conversation, shared by every tab and driver.
 
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 
-import { pipeline } from '$lib/pipeline.svelte';
-import { aiOperatorNotesForDriver } from '$lib/controls/optionsModel';
 import { decoders } from '$lib/decoders/store.svelte';
 
 // Markdown configuration. `gfm: true` enables GitHub-Flavoured Markdown
@@ -50,6 +49,11 @@ export type Chunk =
       result?: string;
       resultImages?: string[];
       error?: boolean;
+      /** The `analysis` record this call drew (spectrum, sigwiki card,
+       *  spot map…) — rendered inside the tool card. */
+      analysisId?: string;
+      /** The turn ended (stopped / failed) before this call returned. */
+      interrupted?: boolean;
     }
   /** Out-of-band notices — resets, stops, errors. Muted in the panel. */
   | { kind: 'meta'; label: string };
@@ -79,6 +83,8 @@ export interface AssistantTurn {
   errorMessage?: string;
   source?: string;
   session?: string | null;
+  mode?: string;
+  model?: string;
 }
 
 export type Turn = UserTurn | AssistantTurn;
@@ -98,10 +104,14 @@ export interface LocalNote {
 
 const LS_MODE = 'ferrite-ai.mode';
 const LS_MODEL = 'ferrite-ai.model';
-const LS_SESSION = 'ferrite-ai.session_id';
-const LS_SETUP = 'ferrite-ai.setup_description';
-/** Pre-bus transcript cache keys — removed on load (the server keeps it). */
-const LS_LEGACY = ['ferrite-ai.turns', 'ferrite-ai.next_id'];
+/** Keys from older builds — removed on load: the transcript, the
+ *  session binding and the station notes all live server-side now. */
+const LS_LEGACY = [
+  'ferrite-ai.turns',
+  'ferrite-ai.next_id',
+  'ferrite-ai.session_id',
+  'ferrite-ai.setup_description',
+];
 
 /** A streaming turn with no record for this long ended unobserved
  *  (the sidecar died mid-turn); stop showing it as live. */
@@ -110,7 +120,31 @@ const STALE_STREAM_MS = 10 * 60_000;
 const str = (v: unknown): string => (typeof v === 'string' ? v : v == null ? '' : String(v));
 
 export function resetBannerLabel(reason: string): string {
-  return `── reasoning context reset (${reason}) — history preserved, assistant won't remember the above`;
+  // After a clear there is no history above to preserve.
+  if (reason === 'clear') return '── cleared — new conversation';
+  return `── new conversation (${reason}) — the AI won't remember the above`;
+}
+
+/** Has the optimistic prompt's own `user` record reached the bus? */
+export function pendingLanded(records: AiRecord[], pending: { text: string; t: number }): boolean {
+  return records.some(
+    (r) =>
+      r.data?.['type'] === 'user' &&
+      str(r.data['text']) === pending.text &&
+      r.at_ms >= pending.t - 5_000,
+  );
+}
+
+/** When the AI log was last cleared (the newest `clear` record the
+ *  server leaves on an `ai` reset), or 0. The panel hides activity and
+ *  analysis records older than this. */
+export function clearedAtMs(records: { at_ms: number; data?: unknown }[]): number {
+  let at = 0;
+  for (const r of records) {
+    const d = r.data as Record<string, unknown> | undefined;
+    if (d?.['type'] === 'clear' && r.at_ms > at) at = r.at_ms;
+  }
+  return at;
 }
 
 /** Fold the `ai` session-bus records (+ live partials, local notes and
@@ -142,11 +176,15 @@ export function buildTurns(
         status: 'streaming',
         source: str(d['source']) || undefined,
         session: (d['session'] as string | null | undefined) ?? null,
+        mode: str(d['mode']) || undefined,
+        model: str(d['model']) || undefined,
       };
       out.push(a);
       open.set(key, a);
     }
     lastAt.set(a, rec.at_ms);
+    // A mid-conversation model switch: the newest model wins.
+    if (str(d['model'])) a.model = str(d['model']);
     return a;
   };
 
@@ -209,10 +247,12 @@ export function buildTurns(
         const tool = a.chunks.find((c) => c.kind === 'tool' && c.id === id) as
           | Extract<Chunk, { kind: 'tool' }>
           | undefined;
+        const analysisId = str(d['analysis_id']) || undefined;
         if (tool) {
           tool.result = result;
           if (images.length) tool.resultImages = images;
           tool.error = Boolean(d['is_error']);
+          tool.analysisId = analysisId;
         } else {
           a.chunks.push({
             kind: 'tool',
@@ -222,6 +262,7 @@ export function buildTurns(
             result,
             resultImages: images.length ? images : undefined,
             error: Boolean(d['is_error']),
+            analysisId,
           });
         }
         break;
@@ -229,6 +270,10 @@ export function buildTurns(
       case 'turn_end': {
         const a = open.get(key) ?? assistantFor(rec, d);
         const status = str(d['status']);
+        // A call still waiting on its result never gets one now.
+        for (const c of a.chunks) {
+          if (c.kind === 'tool' && c.result === undefined) c.interrupted = true;
+        }
         if (status === 'error') {
           a.status = 'error';
           a.errorMessage = str(d['error']) || 'turn failed';
@@ -251,6 +296,7 @@ export function buildTurns(
           status: 'complete',
           source: str(d['source']) || undefined,
           session: (d['session'] as string | null | undefined) ?? null,
+          mode: str(d['mode']) || undefined,
         });
         break;
       }
@@ -283,13 +329,7 @@ export function buildTurns(
 
   // Optimistic prompt until the sidecar's `user` record lands.
   if (pending) {
-    const landed = records.some(
-      (r) =>
-        r.data?.['type'] === 'user' &&
-        str(r.data['text']) === pending.text &&
-        r.at_ms >= pending.t - 5_000,
-    );
-    if (!landed) {
+    if (!pendingLanded(records, pending)) {
       out.push({ id: seq--, role: 'user', text: pending.text, t: pending.t, source: 'ferrite-ai' });
       out.push({
         id: seq--,
@@ -305,36 +345,23 @@ export function buildTurns(
 }
 
 export class AiStore {
+  /** This tab's mode and model picks (view preferences). Each mode has
+   *  its own conversation, shared by every tab and the CLI. */
   mode = $state<AiMode>('explorer');
+  /** Model override for the next turns, or `null` for the sidecar's
+   *  per-mode default. */
+  model = $state<string | null>(null);
   connection = $state<ConnectionState>('idle');
   lastError = $state<string | null>(null);
-  /** Available modes from the server's hello message. Defaults to the
-   *  client-side list so the dropdown renders immediately on first
-   *  load before the WS handshake finishes. */
+  /** From the sidecar's hello; client-side defaults until it answers. */
   availableModes = $state<AiMode[]>(AI_MODES);
-  /** Operator's model override for the next turns, or `null` for the
-   *  sidecar's per-mode default. Sent as `model` on each turn; the
-   *  sidecar ignores ids outside its `model_options`. */
-  model = $state<string | null>(null);
-  /** Model ids the sidecar offers (from `ferrite_ai_hello`). Empty
-   *  until the handshake — the picker then shows only "default". */
   modelOptions = $state<string[]>([]);
-  /** Per-mode default model the sidecar reports (after its env
-   *  overrides), so the picker can label the default option. */
   modelDefaults = $state<Record<string, string>>({});
-  /** This tab's sidecar session (from `system/init`), sent back as
-   *  `resume_session_id` so the conversation continues across reloads.
-   *  Null when no conversation has happened yet. */
-  sessionId = $state<string | null>(null);
-  /** User-supplied description of the physical radio setup — antennas,
-   *  noise environment, station notes. Sent on every turn so the
-   *  sidecar appends it to the mode's system prompt. Set via
-   *  `setSetupDescription`, which resets the SDK session because the
-   *  system prompt changed and a resume would re-prime under the old
-   *  description. Persisted across reloads. */
+  /** The station notes — one copy, kept by the sidecar and read by
+   *  every session it starts. */
   setupDescription = $state<string>('');
 
-  /** Tab-local notices (slash-command output, offline banners). */
+  /** Tab-local notices (slash-command output, request errors). */
   private notes = $state<LocalNote[]>([]);
   /** The prompt this tab just sent, until its `user` record lands. */
   private pending = $state<{ text: string; t: number } | null>(null);
@@ -349,10 +376,8 @@ export class AiStore {
     ),
   );
 
-  private ws: WebSocket | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private retryCount = 0;
-  private url: string | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private base = '/api/ai';
 
   constructor() {
     this.restoreFromStorage();
@@ -363,15 +388,9 @@ export class AiStore {
     try {
       for (const k of LS_LEGACY) localStorage.removeItem(k);
       const rawMode = localStorage.getItem(LS_MODE);
-      if (rawMode && (AI_MODES as string[]).includes(rawMode)) {
-        this.mode = rawMode as AiMode;
-      }
+      if (rawMode && (AI_MODES as string[]).includes(rawMode)) this.mode = rawMode as AiMode;
       const rawModel = localStorage.getItem(LS_MODEL);
       if (rawModel) this.model = rawModel;
-      const rawSession = localStorage.getItem(LS_SESSION);
-      if (rawSession) this.sessionId = rawSession;
-      const rawSetup = localStorage.getItem(LS_SETUP);
-      if (typeof rawSetup === 'string') this.setupDescription = rawSetup;
     } catch {
       /* corrupt storage; start fresh */
     }
@@ -383,58 +402,104 @@ export class AiStore {
       localStorage.setItem(LS_MODE, this.mode);
       if (this.model) localStorage.setItem(LS_MODEL, this.model);
       else localStorage.removeItem(LS_MODEL);
-      if (this.sessionId) localStorage.setItem(LS_SESSION, this.sessionId);
-      else localStorage.removeItem(LS_SESSION);
-      if (this.setupDescription) localStorage.setItem(LS_SETUP, this.setupDescription);
-      else localStorage.removeItem(LS_SETUP);
     } catch {
-      /* quota / private mode / etc — silently degrade to non-persistent */
+      /* private mode etc. — non-persistent */
     }
   }
 
-  connect(url: string): void {
-    this.url = url;
-    this.openSocket();
+  /** POST JSON to the sidecar (via ferrited). Returns the parsed body,
+   *  or throws with the sidecar's error text. */
+  private async post(path: string, body: unknown): Promise<Record<string, unknown>> {
+    const r = await fetch(`${this.base}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const out = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!r.ok) throw new Error(str(out['error']) || `${path}: HTTP ${r.status}`);
+    return out;
+  }
+
+  /** Start talking to the sidecar: hello (modes, models), the station
+   *  notes, then a slow liveness poll. */
+  connect(base = '/api/ai'): void {
+    this.base = base;
+    if (this.connection === 'idle' || this.connection === 'closed') this.connection = 'connecting';
+    void this.poll(true);
   }
 
   disconnect(): void {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.ws) {
-      this.ws.onclose = null;
-      this.ws.close();
-      this.ws = null;
-    }
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
     this.connection = 'closed';
   }
 
-  /** Single authoritative reset path: tell the sidecar (the authority)
-   *  to drop the SDK session binding so the LLM context resets *with*
-   *  the transcript, never independently. The sidecar publishes a
-   *  `reset` record (the banner every panel shows). Returns false when
-   *  offline so the caller can fall back to a local notice. */
-  private requestSidecarReset(reason: string): boolean {
-    this.sessionId = null;
-    if (typeof localStorage !== 'undefined') localStorage.removeItem(LS_SESSION);
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'reset_session', reason }));
-      return true;
+  private async poll(first = false): Promise<void> {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    try {
+      const r = await fetch(`${this.base}/hello`);
+      const hello = (await r.json()) as Record<string, unknown>;
+      if (!r.ok) throw new Error(str(hello['error']) || `HTTP ${r.status}`);
+      this.applyHello(hello);
+      if (this.connection !== 'connected' || first) await this.loadSetup();
+      this.connection = 'connected';
+      this.lastError = null;
+    } catch (e) {
+      this.connection = 'error';
+      this.lastError = `ferrite-ai offline (${e instanceof Error ? e.message : String(e)})`;
     }
-    return false;
+    if ((this.connection as ConnectionState) === 'closed') return;
+    this.timer = setTimeout(
+      () => void this.poll(),
+      this.connection === 'connected' ? 15_000 : 3_000,
+    );
   }
 
-  /** Append a tab-local notice, skipping an identical consecutive one
-   *  (reconnect storms must not stack banners). */
+  private applyHello(hello: Record<string, unknown>): void {
+    const modes = hello['modes'];
+    if (Array.isArray(modes)) {
+      const valid = modes.filter((m): m is AiMode => AI_MODES.includes(m as AiMode));
+      if (valid.length) this.availableModes = valid;
+    }
+    const options = hello['model_options'];
+    if (Array.isArray(options)) {
+      this.modelOptions = options.filter((o): o is string => typeof o === 'string');
+      // A stored override the sidecar no longer offers falls back to default.
+      if (this.model && !this.modelOptions.includes(this.model)) this.model = null;
+    }
+    const defaults = hello['models'];
+    if (defaults && typeof defaults === 'object') {
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(defaults as Record<string, unknown>)) {
+        if (typeof v === 'string') out[k] = v;
+      }
+      this.modelDefaults = out;
+    }
+  }
+
+  private async loadSetup(): Promise<void> {
+    try {
+      const r = await fetch(`${this.base}/setup`);
+      if (r.ok) this.setupDescription = str(((await r.json()) as Record<string, unknown>)['text']);
+    } catch {
+      /* keep what we have */
+    }
+  }
+
+  private fail(e: unknown): void {
+    this.pending = null;
+    this.lastError = e instanceof Error ? e.message : String(e);
+    this.note(`── ${this.lastError}`);
+  }
+
+  /** Append a tab-local notice, skipping an identical consecutive one. */
   private note(label: string): void {
     if (this.notes.at(-1)?.label === label) return;
     this.notes = [...this.notes, { t: Date.now(), label }];
   }
 
-  /** Pick a model override (`null` = sidecar default). Takes effect on
-   *  the next turn; no session reset — the SDK resumes a conversation
-   *  under a different model fine (the system prompt is unchanged). */
+  /** Pick a model override (`null` = sidecar default) for the next turns. */
   setModel(model: string | null): void {
     const next = model && this.modelOptions.includes(model) ? model : null;
     if (this.model === next) return;
@@ -447,293 +512,111 @@ export class AiStore {
     return this.modelDefaults[mode] ?? null;
   }
 
+  /** Switch mode: the next prompt continues *that* mode's conversation. */
   setMode(mode: AiMode): void {
     if (this.mode === mode) return;
     this.mode = mode;
-    // A different mode is a different system prompt — resuming would
-    // re-prime under the wrong context, so the sidecar drops the session.
-    if (!this.requestSidecarReset(`mode → ${mode}`)) this.note(resetBannerLabel(`mode → ${mode}`));
     this.persist();
   }
 
-  /** Edit the operator-supplied radio setup description. Same
-   *  reasoning as `setMode`: the system prompt changes, so the sidecar
-   *  drops the session binding. */
-  setSetupDescription(text: string): void {
+  /** Replace the station notes. Every session's system prompt carries
+   *  them, so the sidecar starts every mode over (one banner). */
+  async setSetupDescription(text: string): Promise<void> {
     if (text === this.setupDescription) return;
+    const prev = this.setupDescription;
     this.setupDescription = text;
-    const reason = text.trim() ? 'radio setup updated' : 'radio setup cleared';
-    if (!this.requestSidecarReset(reason)) this.note(resetBannerLabel(reason));
-    this.persist();
+    try {
+      await this.post('/setup', { text });
+    } catch (e) {
+      this.setupDescription = prev;
+      this.fail(e);
+    }
   }
 
-  send(text: string): void {
+  /** Send a prompt to this mode's conversation. The sidecar builds the
+   *  AI's context (radio state, notes, clock) itself — the same for a
+   *  prompt from here, another tab or the CLI. */
+  async send(text: string): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed) return;
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.lastError = 'not connected';
-      return;
-    }
-    // Optimistic: show the prompt + a working assistant turn now; the
-    // sidecar's `user` record replaces it once the session is known.
     this.pending = { text: trimmed, t: Date.now() };
-    // `resume_session_id` lets the sidecar resume the prior Claude
-    // Agent SDK session if we still have its id from a previous
-    // exchange — the same conversation continues across browser
-    // reloads and WS reconnects.
-    const payload: Record<string, unknown> = { text: trimmed, mode: this.mode };
-    if (this.model) payload.model = this.model;
-    if (this.sessionId) payload.resume_session_id = this.sessionId;
-    if (this.setupDescription.trim()) payload.setup_description = this.setupDescription;
-    // Hand the AI the operator's local clock + IANA timezone on each
-    // turn. The TZ identifier (e.g. `America/Los_Angeles`) gives
-    // continent + region — good enough for propagation / band-plan
-    // reasoning ("PST → US west coast → trans-Pacific HF in the
-    // evening"). The ISO timestamp carries an explicit UTC offset so
-    // the AI can compute relative times without re-resolving the TZ.
-    const now = new Date();
-    payload.local_time_iso = now.toISOString();
-    payload.local_time_human = now.toLocaleString(undefined, {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-      timeZoneName: 'short',
-    });
-    payload.time_zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    // Pull driver-specific operator notes from the active source's
-    // SDR preset (sdr-presets/<driver>.json `ai_operator_notes`). The
-    // sidecar appends these to the mode prompt under a "driver-specific
-    // operator notes" heading so the AI knows antenna mapping, gain
-    // semantics, AGC interaction, etc. without us duplicating those
-    // facts in the prompt files. Skipped for non-hardware sources
-    // (file, sine) — they don't have a SoapySDR driver_key.
-    const caps = pipeline.sourceCaps;
-    if (caps && caps.kind === 'hardware') {
-      const notes = aiOperatorNotesForDriver(caps.capabilities.driver_key);
-      if (notes.trim()) payload.driver_notes = notes;
+    const body: Record<string, unknown> = {
+      text: trimmed,
+      mode: this.mode,
+      time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    };
+    if (this.model) body.model = this.model;
+    try {
+      await this.post('/prompt', body);
+    } catch (e) {
+      this.fail(e);
     }
-    // Active preset's prose note (FlowgraphDoc.ai_notes) — when the AI
-    // would pick this preset, what signal it expects, gotchas. Empty
-    // during the schema rollout (see docs/13-ai-notes-migration.md).
-    const presetNotes = (pipeline.flowgraph?.ai_notes ?? '').trim();
-    if (presetNotes) payload.preset_notes = presetNotes;
-    // Live source state — hand the AI ground truth for centre, rate,
-    // gain, antenna, AGC at the moment this turn starts. Replaces the
-    // need for the AI to call `ferrite-ctl status` mid-conversation to
-    // re-learn what ferrited is actually doing; a preset reload or
-    // another caller can mutate source state between turns and this
-    // section reflects the post-mutation reality.
-    const src = pipeline.source;
-    if (src) {
-      const p = (src.params ?? {}) as Record<string, unknown>;
-      const curr: Record<string, unknown> = { type: src.type };
-      for (const k of [
-        'center_freq_hz',
-        'sample_rate_hz',
-        'bandwidth_hz',
-        'antenna',
-        'gain_db',
-        'agc',
-      ] as const) {
-        if (p[k] !== undefined) curr[k] = p[k];
-      }
-      const caps = pipeline.sourceCaps;
-      if (caps && caps.kind === 'hardware') {
-        curr.device_label = caps.capabilities.info.label;
-      }
-      payload.current_source = curr;
-    }
-    // Per-block notes for blocks currently in the pipeline. Empty
-    // blocks (notes-not-yet-authored) are filtered out by the sidecar's
-    // renderer so this list can include everything without bloating
-    // the prompt.
-    const blockNotes = Object.values(pipeline.blocks)
-      .map((b) => ({
-        id: b.id,
-        type_name: b.type_name,
-        ai_notes: b.spec?.ai_notes ?? '',
-        params: (b.spec?.params ?? []).map((p) => ({
-          key: p.key,
-          label: p.label,
-          ai_notes: p.ai_notes ?? '',
-        })),
-      }))
-      .filter((b) => b.ai_notes.trim() || b.params.some((p) => p.ai_notes.trim()));
-    if (blockNotes.length > 0) payload.block_notes = blockNotes;
-    this.ws.send(JSON.stringify(payload));
   }
 
-  /** Hard clear: empty the AI log for *every* panel (the server's `ai`
-   *  kind) and drop the SDK context. `/reset` keeps the history; this
-   *  wipes it. */
-  clear(): void {
+  /** Hard clear: empty the AI log for every panel (the server leaves a
+   *  `clear` marker the panel uses to hide older activity / analysis)
+   *  and start every mode's conversation over. The sidecar's reset goes
+   *  out only after the store reset lands — its banner is an `ai`
+   *  record, which a later reset would wipe. */
+  async clear(): Promise<void> {
     this.notes = [];
     this.pending = null;
-    void fetch('/api/state/ai/reset', { method: 'POST' }).catch(() => {});
-    void fetch('/api/state/ai_live/reset', { method: 'POST' }).catch(() => {});
-    this.requestSidecarReset('clear');
-    this.persist();
-  }
-
-  /** `/reset` (and `/clear`, `/new`): drop the SDK context but keep
-   *  the visible history. Offline we add the banner locally. */
-  resetSession(opts: { reason?: string } = {}): void {
-    const reason = opts.reason?.trim() || 'reset';
-    if (!this.requestSidecarReset(reason)) this.note(resetBannerLabel(reason));
-    this.persist();
-  }
-
-  /** Ask the sidecar to abort the in-flight turn. The `turn_end`
-   *  (`stopped`) record closes it on every panel. No-op when idle. */
-  stop(): void {
-    if (!this.isStreaming()) return;
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'stop' }));
+    const reset = (kind: string) =>
+      fetch(`/api/state/${kind}/reset`, { method: 'POST' }).catch(() => undefined);
+    await Promise.all([reset('ai'), reset('ai_live')]);
+    try {
+      await this.post('/reset', { reason: 'clear' });
+    } catch (e) {
+      this.fail(e);
     }
   }
 
-  /** True while this tab's own conversation has a turn in flight —
-   *  gates the Stop button (another session's turn isn't ours to stop). */
-  isStreaming(): boolean {
-    if (this.pending) return true;
+  /** `/reset`: this mode's next prompt opens a fresh conversation; the
+   *  history stays visible. */
+  async resetSession(opts: { reason?: string } = {}): Promise<void> {
+    const reason = opts.reason?.trim() || 'reset';
+    try {
+      await this.post('/reset', { mode: this.mode, reason });
+    } catch (e) {
+      this.fail(e);
+    }
+  }
+
+  /** The panel's in-flight turn: this mode's newest streaming turn from
+   *  the in-app AI (another driver's turn isn't ours to stop). */
+  private streamingTurn(): AssistantTurn | null {
     for (let i = this.turns.length - 1; i >= 0; i--) {
       const t = this.turns[i];
-      if (t.role !== 'assistant' || !t.chunks || (t.source && t.source !== 'ferrite-ai')) continue;
-      if (this.sessionId && t.session && t.session !== this.sessionId) continue;
-      return t.status === 'streaming';
+      if (t.role !== 'assistant' || !t.chunks.length || t.source !== 'ferrite-ai') continue;
+      if (t.mode && t.mode !== this.mode) continue;
+      return t.status === 'streaming' ? t : null;
     }
-    return false;
+    return null;
+  }
+
+  /** Stop this mode's running turn. Its `turn_end` (`stopped`) record
+   *  closes it on every panel. */
+  async stop(): Promise<void> {
+    const t = this.streamingTurn();
+    if (!t && !this.pending) return;
+    try {
+      await this.post('/cancel', t?.session ? { session_id: t.session } : {});
+    } catch (e) {
+      this.fail(e);
+    }
+  }
+
+  /** True while this mode's conversation has a turn in flight (or this
+   *  tab's prompt hasn't reached the bus yet) — gates the Stop button. */
+  isStreaming(): boolean {
+    if (this.pending && !pendingLanded(decoders.kind('ai').recent as AiRecord[], this.pending))
+      return true;
+    return this.streamingTurn() !== null;
   }
 
   /** A UI-side notice (slash-command errors, help) — tab-local. */
   pushMeta(label: string): void {
     this.notes = [...this.notes, { t: Date.now(), label }];
-  }
-
-  private openSocket(): void {
-    if (!this.url) return;
-    this.connection = 'connecting';
-    this.lastError = null;
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(this.url);
-    } catch (e) {
-      this.connection = 'error';
-      this.lastError = String(e);
-      this.scheduleReconnect();
-      return;
-    }
-    this.ws = ws;
-    ws.addEventListener('open', () => {
-      this.retryCount = 0;
-      this.connection = 'connected';
-      // Ask the sidecar whether the session we think we're continuing
-      // is still resumable; it answers `conversation_snapshot` (yes —
-      // adopt it) or `session_reset` (no — drop the binding). The
-      // transcript itself comes from the bus either way.
-      if (this.sessionId && this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: 'request_snapshot', session_id: this.sessionId }));
-      }
-    });
-    ws.addEventListener('message', (e) => {
-      if (typeof e.data !== 'string') return;
-      try {
-        this.ingestEvent(JSON.parse(e.data) as Record<string, unknown>);
-      } catch {
-        /* non-JSON debug frames: ignore */
-      }
-    });
-    ws.addEventListener('close', () => {
-      this.ws = null;
-      // If the user explicitly disconnected (`disconnect()`), connection
-      // would be 'closed' already — don't auto-reconnect on top of that.
-      if (this.connection !== 'closed') {
-        this.connection = 'error';
-        this.scheduleReconnect();
-      }
-    });
-    ws.addEventListener('error', () => {
-      // close fires next; reconnect logic lives there.
-    });
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectTimer) return;
-    const delay = Math.min(1000 + this.retryCount * 500, 5000);
-    this.retryCount += 1;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.openSocket();
-    }, delay);
-  }
-
-  /** Control-channel messages from the sidecar. The conversation itself
-   *  (thinking, text, tool calls) renders from the bus, not from here. */
-  ingestEvent(event: Record<string, unknown>): void {
-    const t = event['type'];
-    if (t === 'system' && event['subtype'] === 'init') {
-      const sid = event['session_id'];
-      if (typeof sid === 'string' && sid !== this.sessionId) {
-        this.sessionId = sid;
-        this.persist();
-      }
-      return;
-    }
-    if (t === 'conversation_snapshot') {
-      const sid = event['session_id'];
-      if (typeof sid === 'string') this.sessionId = sid;
-      this.persist();
-      return;
-    }
-    if (t === 'session_reset') {
-      this.sessionId = null;
-      if (typeof localStorage !== 'undefined') localStorage.removeItem(LS_SESSION);
-      // A reset this tab asked for is published on the bus (`on_bus`);
-      // one the sidecar decided alone (session unresumable) is ours to show.
-      if (!event['on_bus']) {
-        const reason = typeof event['reason'] === 'string' ? event['reason'] : 'reset';
-        this.note(resetBannerLabel(reason));
-      }
-      this.persist();
-      return;
-    }
-    if (t === 'ferrite_ai_hello') {
-      const modes = event['modes'];
-      if (Array.isArray(modes)) {
-        const valid = modes.filter((m): m is AiMode => AI_MODES.includes(m as AiMode));
-        if (valid.length) this.availableModes = valid;
-      }
-      const options = event['model_options'];
-      if (Array.isArray(options)) {
-        this.modelOptions = options.filter((o): o is string => typeof o === 'string');
-        // A persisted override the sidecar no longer offers falls back
-        // to the default rather than 400ing every turn.
-        if (this.model && !this.modelOptions.includes(this.model)) this.model = null;
-      }
-      const defaults = event['models'];
-      if (defaults && typeof defaults === 'object') {
-        const out: Record<string, string> = {};
-        for (const [k, v] of Object.entries(defaults as Record<string, unknown>)) {
-          if (typeof v === 'string') out[k] = v;
-        }
-        this.modelDefaults = out;
-      }
-      return;
-    }
-    if (t === 'ferrite_ai_done' || t === 'ferrite_ai_stopped') {
-      this.pending = null;
-      return;
-    }
-    if (t === 'ferrite_ai_error') {
-      // A turn failure also lands as a `turn_end` record; this covers
-      // the control channel itself (sidecar unreachable, bad envelope).
-      this.pending = null;
-      this.lastError = String(event['message'] ?? 'unknown error');
-      this.note(`── ${this.lastError}`);
-    }
   }
 }
 

@@ -38,8 +38,10 @@ const DEFAULT_CONNECT: &str = "http://127.0.0.1:10001";
     long_about = None,
 )]
 struct Cli {
-    /// Base URL of the ferrited to drive.
-    #[arg(long, default_value = DEFAULT_CONNECT, global = true)]
+    /// Base URL of the ferrited to drive. `FERRITE_CTL_CONNECT` sets it
+    /// for every caller at once (run.sh exports it; the AI sidecar and
+    /// the chat-mirror hook read the same variable).
+    #[arg(long, env = "FERRITE_CTL_CONNECT", default_value = DEFAULT_CONNECT, global = true)]
     connect: String,
 
     /// Emit compact one-line JSON instead of the pretty-printed

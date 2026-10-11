@@ -507,8 +507,8 @@ how the driver names them. Always read it before swapping antennas
 or settings.
 
 **Don't guess what's physically connected.** If the operator's
-`setup_description` doesn't say what's hooked to which port — or
-isn't filled in at all — **ask**. Cycling antennas blind ("antenna C
+radio setup notes (in your system prompt) don't say what's hooked to
+which port — or aren't there at all — **ask**. Cycling antennas blind ("antenna C
 has nothing useful → try A → try B") wastes turns and produces wrong
 conclusions ("nothing on this band"). A one-line question
 ("which antenna is your HF wire on?") is faster.

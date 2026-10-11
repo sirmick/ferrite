@@ -330,9 +330,10 @@ cargo run -p ferrited --release -- \
 # once (`pnpm wasm:build`, or ./build.sh).
 cd web && FERRITE_HTTPS=1 pnpm dev --host 0.0.0.0 --port 10000
 
-# AI sidecar — ferrited reverse-proxies /ws/chat to it. Needs `claude`
+# AI sidecar — ferrited proxies /api/ai/* to it. Needs `claude`
 # logged in once on this host (subscription auth, no API key).
-cd tools/ferrite-ai && npm install && FERRITE_AI_PORT=10002 npm start
+cd tools/ferrite-ai && npm install && \
+  FERRITE_AI_PORT=10002 FERRITE_CTL_CONNECT=http://127.0.0.1:10001 npm start
 ```
 
 ### `ferrited` CLI args
