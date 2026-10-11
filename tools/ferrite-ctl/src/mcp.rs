@@ -1137,11 +1137,19 @@ impl FerriteServer {
             .or_else(|| entry_f64("center_freq_hz"))
             .unwrap_or(0.0);
         let loop_playback = args.loop_playback.unwrap_or(true);
+        // The block takes `ssb` + a `sideband`; the verb also accepts the
+        // sideband itself (`usb` / `lsb`), which it used to pass through
+        // verbatim and the block rejected at start.
+        let (modulation, sideband) = match modulation.to_ascii_lowercase().as_str() {
+            "usb" => ("ssb".to_string(), Some("usb")),
+            "lsb" => ("ssb".to_string(), Some("lsb")),
+            other => (other.to_string(), None),
+        };
 
-        // Only the keys we resolve; the rest (sideband, offset_hz,
-        // deviation_hz, mod_depth, output_rate_hz) fall back to the
-        // block's `#[serde(default)]`.
-        let params = json!({
+        // Only the keys we resolve; the rest (offset_hz, deviation_hz,
+        // mod_depth, output_rate_hz) fall back to the block's
+        // `#[serde(default)]`.
+        let mut params = json!({
             "path": path,
             "kind": kind,
             "modulation": modulation,
@@ -1149,6 +1157,9 @@ impl FerriteServer {
             "center_freq_hz": center,
             "loop_playback": loop_playback,
         });
+        if let Some(sb) = sideband {
+            params["sideband"] = json!(sb);
+        }
         self.http
             .patch(
                 "/api/source",
