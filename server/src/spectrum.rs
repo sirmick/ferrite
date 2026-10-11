@@ -32,6 +32,9 @@ use crate::error::AppError;
 const MAX_RANGE_HZ: f64 = 400_000.0;
 /// Largest FFT (resolution floor ≈ rate / 2^20).
 const MAX_FFT: usize = 1 << 20;
+/// DC spur guard on a raw source tap (live: the RSPdx's LO spur
+/// flickered as a dozen "keyed" peaks within ±1 kHz).
+const DC_GUARD_HZ: f64 = 1_500.0;
 /// A bin is "on" in a frame when it's this far above the floor (9 dB).
 const ON_RATIO: f32 = 8.0;
 
@@ -83,6 +86,9 @@ pub struct SpectrumReport {
     pub sample_rate_hz: f64,
     /// Which tee fed it (`src` = full span, `chan` = the channel only).
     pub tapped: String,
+    /// Peaks within this distance of `center_freq_hz` (the LO's DC spur
+    /// on a raw source tap) were dropped.
+    pub dc_guard_hz: f64,
     /// Median average power across the range, dBFS (the floor every
     /// `*_db` is relative to).
     pub floor_dbfs: f32,
@@ -101,6 +107,9 @@ pub struct Analysis {
     pub res_hz: f64,
     pub max_peaks: usize,
     pub profile_points: usize,
+    /// Ignore peaks within this many Hz of `center` — on a raw source tap
+    /// the LO's DC spur / leakage flickers there and reads as "keyed".
+    pub dc_guard_hz: f64,
 }
 
 fn fft_size(rate: f64, res_hz: f64) -> usize {
@@ -187,6 +196,8 @@ pub fn analyze<R: Read>(
     }
     let nf = frames.len();
     let mut core = reduce(&frames, res, &freq_of, a.max_peaks, a.profile_points);
+    core.peaks
+        .retain(|p| (p.freq_hz - a.center).abs() > a.dc_guard_hz);
     keying_pass(open()?, a, &mut core.peaks)?;
     Ok((core, nf))
 }
@@ -473,6 +484,7 @@ impl AppState {
             res_hz: req.res_hz.unwrap_or(10.0),
             max_peaks: req.max_peaks.unwrap_or(25).min(200),
             profile_points: req.profile_points.unwrap_or(120).min(2_000),
+            dc_guard_hz: if block == "src" { DC_GUARD_HZ } else { 0.0 },
         };
         let p2 = path.clone();
         let out = tokio::task::spawn_blocking(move || {
@@ -498,6 +510,7 @@ impl AppState {
             center_freq_hz: center,
             sample_rate_hz: rate,
             tapped: block,
+            dc_guard_hz: a.dc_guard_hz,
             floor_dbfs: core.floor_dbfs,
             peaks: core.peaks,
             profile: core.profile,
@@ -549,6 +562,7 @@ mod tests {
                 res_hz: 5.0,
                 max_peaks: 10,
                 profile_points: 50,
+                dc_guard_hz: 0.0,
             },
         )
         .unwrap();
@@ -592,6 +606,7 @@ mod tests {
             res_hz: 10.0,
             max_peaks: 5,
             profile_points: 0,
+            dc_guard_hz: 0.0,
         };
         let (whole, _) = analyze(|| Ok(std::io::Cursor::new(iq.clone())), a).unwrap();
         let (drib, _) = analyze(|| Ok(Dribble(std::io::Cursor::new(iq.clone()))), a).unwrap();
@@ -611,6 +626,7 @@ mod tests {
                 res_hz: 10.0,
                 max_peaks: 5,
                 profile_points: 0,
+                dc_guard_hz: 0.0,
             },
         )
         .unwrap_err();
