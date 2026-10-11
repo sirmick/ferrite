@@ -202,6 +202,9 @@ pub fn analyze<R: Read>(
     Ok((core, nf))
 }
 
+/// Envelope p90/p10 swing above which a peak counts as keyed.
+const KEY_SWING_DB: f64 = 18.0;
+
 /// Envelope window for the keying pass (20 ms: shorter than a CW dit at
 /// 40 WPM's 30 ms would smear; longer blurs dits together).
 const KEY_WINDOW_S: f64 = 0.02;
@@ -273,7 +276,11 @@ fn keying_pass<R: Read>(mut reader: R, a: Analysis, peaks: &mut [Peak]) -> Resul
         let mid = (p10 * p90).sqrt();
         let on = e.iter().filter(|&&v| v > mid).count() as f32 / e.len() as f32;
         let swing_db = 10.0 * (p90 / p10).log10();
-        p.keyed = swing_db > 10.0 && on > 0.03 && on < 0.95;
+        // Noise alone swings ~13 dB (p90/p10 of an exponential power
+        // distribution = ln10/ln(10/9)); real keying is on/off by the
+        // signal's SNR. 18 dB keeps noise out (live: a whole band of
+        // noise bins read as "keyed" at the old 10 dB).
+        p.keyed = swing_db > KEY_SWING_DB && on > 0.03 && on < 0.95;
         if p.keyed {
             p.duty = on;
         }
@@ -345,8 +352,9 @@ fn reduce(
         } else {
             0.0
         };
-        // −6 dB width on the average.
-        let edge = avg_db[i] - 6.0;
+        // −6 dB width on the average — but never below 3 dB over the
+        // floor, or a weak peak's "width" runs out across the whole range.
+        let edge = (avg_db[i] - 6.0).max(3.0);
         let mut l = i;
         while l > 0 && avg_db[l - 1] > edge {
             l -= 1;
@@ -611,6 +619,50 @@ mod tests {
         let (whole, _) = analyze(|| Ok(std::io::Cursor::new(iq.clone())), a).unwrap();
         let (drib, _) = analyze(|| Ok(Dribble(std::io::Cursor::new(iq.clone()))), a).unwrap();
         assert_eq!(whole.peaks, drib.peaks);
+    }
+
+    /// A weak *steady* carrier: clearly a peak on the long FFT, but in a
+    /// 20 ms window it sits near the noise, so its envelope swings like
+    /// noise (~13 dB p90/p10). It must not read as keyed (live, a band's
+    /// worth of weak steady signals did at the old 10 dB swing bar).
+    #[test]
+    fn a_weak_steady_carrier_is_not_keyed() {
+        let rate = 48_000.0;
+        let n = (rate * 6.0) as usize;
+        let mut seed: u32 = 99;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed as f32 / u32::MAX as f32) - 0.5
+        };
+        let mut iq = Vec::with_capacity(n * 8);
+        for i in 0..n {
+            let t = i as f64 / rate;
+            let mut z = Complex::new(rnd() * 0.02, rnd() * 0.02);
+            z += Complex::from_polar(0.0003, (2.0 * std::f64::consts::PI * 3_000.0 * t) as f32);
+            iq.extend_from_slice(&z.re.to_le_bytes());
+            iq.extend_from_slice(&z.im.to_le_bytes());
+        }
+        let a = Analysis {
+            rate,
+            center: 0.0,
+            lo: -10_000.0,
+            hi: 10_000.0,
+            res_hz: 5.0,
+            max_peaks: 50,
+            profile_points: 0,
+            dc_guard_hz: 0.0,
+        };
+        let (r, _) = analyze(|| Ok(std::io::Cursor::new(iq.clone())), a).unwrap();
+        let c = r
+            .peaks
+            .iter()
+            .find(|p| (p.freq_hz - 3_000.0).abs() < 10.0)
+            .expect("weak carrier found");
+        assert!(c.avg_db > 6.0 && c.avg_db < 20.0, "{c:?}");
+        assert!(!c.keyed, "{c:?}");
+        assert!(r.peaks.iter().all(|p| p.width_hz < 1_000.0));
     }
 
     #[test]
