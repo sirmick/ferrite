@@ -205,7 +205,7 @@ impl FldigiCore {
 
         let raw = self.modem.take_text();
         let text = self.assemble(&raw, src.len());
-        if !text.trim().is_empty() {
+        if !text.is_empty() {
             tracing::info!(target: "decoder::fldigi", mode = %self.label, "{}", text);
             // Mirror onto the `events` port as one newline-terminated
             // JSON record (serde_json handles escaping). `t:"fldigi"`
@@ -869,6 +869,11 @@ mod tests {
             core.assemble("E", 10),
             "E",
             "char mode passes chunks through"
+        );
+        assert_eq!(
+            core.assemble(" ", 10),
+            " ",
+            "a lone space is text too (RTTY word gaps)"
         );
     }
 
