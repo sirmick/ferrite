@@ -252,6 +252,9 @@ enum Cmd {
         #[arg(long, default_value_t = 10.0)]
         window: f64,
     },
+    /// Signal Identification Guide (sigidwiki.com) lookups.
+    #[command(subcommand)]
+    Sigwiki(SigwikiCmd),
     /// Where the FT8 / FT4 / WSPR stations heard are: distance + bearing
     /// table (and a map card in the AI tab).
     SpotMap {
@@ -401,6 +404,37 @@ enum Cmd {
     /// every ferrite-ctl verb as a discrete tool to any MCP-enabled
     /// client. See tools/ferrite-ctl/src/mcp.rs and docs/02-protocol.md.
     Mcp,
+}
+
+#[derive(Subcommand, Debug)]
+enum SigwikiCmd {
+    /// Rank candidates for a signal: `sigwiki identify 7.0362M --bw 60 --mode CW`.
+    Identify {
+        freq: String,
+        /// Occupied bandwidth, Hz.
+        #[arg(long)]
+        bw: Option<f64>,
+        /// CW / USB / LSB / AM / NFM / WFM …
+        #[arg(long)]
+        mode: Option<String>,
+        /// OOK / FSK / MFSK / PSK / AFSK / FM …
+        #[arg(long)]
+        modulation: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Find signals by words.
+    Search {
+        query: Vec<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// One signal's entry; `--picture <path>` saves its waterfall image.
+    Page {
+        title: Vec<String>,
+        #[arg(long)]
+        picture: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -938,6 +972,60 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 })
                 .await
                 .map_err(op_err)?;
+            print_text_or_json(&v, json)
+        }
+        Cmd::Sigwiki(SigwikiCmd::Identify {
+            freq,
+            bw,
+            mode,
+            modulation,
+            limit,
+        }) => {
+            let v = server
+                .sigwiki_identify_op(mcp::SigwikiIdentifyArgs {
+                    freq_hz: parse_si(&freq)?,
+                    bandwidth_hz: bw,
+                    mode,
+                    modulation,
+                    limit: Some(limit),
+                })
+                .await
+                .map_err(op_err)?;
+            print_text_or_json(&v, json)
+        }
+        Cmd::Sigwiki(SigwikiCmd::Search { query, limit }) => {
+            let v = server
+                .sigwiki_search_op(mcp::SigwikiSearchArgs {
+                    query: query.join(" "),
+                    limit: Some(limit),
+                })
+                .await
+                .map_err(op_err)?;
+            if json {
+                return emit(&v, true);
+            }
+            for r in v
+                .get("results")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("");
+                println!("{} — {} · bw {}", s("title"), s("freq"), s("bw"));
+            }
+            Ok(())
+        }
+        Cmd::Sigwiki(SigwikiCmd::Page { title, picture }) => {
+            let (v, image) = server
+                .sigwiki_page_op(mcp::SigwikiPageArgs {
+                    title: title.join(" "),
+                })
+                .await
+                .map_err(op_err)?;
+            if let (Some(path), Some((bytes, _))) = (picture, image) {
+                std::fs::write(&path, bytes)?;
+                eprintln!("picture → {path}");
+            }
             print_text_or_json(&v, json)
         }
         Cmd::SpotMap {

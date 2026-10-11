@@ -47,6 +47,7 @@ mod frame_bus;
 mod log_stream;
 mod preset_pipeline;
 mod routes;
+mod sigwiki;
 mod soapy_log;
 mod source_policy;
 mod store_persist;
@@ -415,6 +416,7 @@ async fn main() -> Result<()> {
     // snapshot both include it. Live kinds (graph/status/…) are rebuilt
     // just below, never restored.
     if let Some(dir) = &args.state_dir {
+        sigwiki::set_cache_dir(dir.join("sigwiki"));
         store_persist::restore_from(&state.decoder_store(), dir);
         state.captures().reseed_from_store();
         store_persist::spawn_saver(state.decoder_store(), store_persist::store_path(dir));
@@ -521,6 +523,10 @@ async fn main() -> Result<()> {
         )
         .route("/api/analysis/envelope", post(analysis::post_envelope))
         .route("/api/analysis/spot_map", post(analysis::post_spot_map))
+        .route("/api/sigwiki/identify", get(sigwiki::get_identify))
+        .route("/api/sigwiki/search", get(sigwiki::get_search))
+        .route("/api/sigwiki/page", get(sigwiki::get_page))
+        .route("/api/sigwiki/image", get(sigwiki::get_image))
         .route("/api/preset", post(routes::load_preset))
         .route(
             "/api/profile",

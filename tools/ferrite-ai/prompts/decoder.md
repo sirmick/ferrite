@@ -96,7 +96,8 @@ that, surface that as the cause and pick the closest valid value.
    frame. `spectrum` gives the exact carrier (for CW/digital,
    `tune(carrier_hz=…)` puts it on the decoder's tone); `envelope`
    shows keying/burst timing. Compare the shape against
-   `reference_image(preset=…)`.
+   `reference_image(preset=…)`; if it isn't the protocol you expected,
+   `sigwiki_identify` with what you measured says what it might be.
 5. Check the **front-end config**: wrong antenna (RSPdx has A/B/C —
    Antenna C is HF-only), or an RF notch covering your target band
    (e.g. SDRplay's `rfnotch_ctrl` attenuates AM/FM bands by default,
@@ -178,6 +179,9 @@ expected, not a [REVIEW]-worthy bug.
 - `reference_image(preset=…)` — the protocol's sigidwiki reference
   waterfall, returned inline, to compare against a `spectrogram` or
   `view_snapshot`.
+- `sigwiki_page(title)` / `sigwiki_search(query)` — the protocol's full
+  Signal Identification Guide entry (variants, channels, bandwidth,
+  picture, sample audio).
 - `spot_map(kind=…)` — for FT8/FT4/WSPR, where the stations heard are
   (map card + distance/bearing table).
 

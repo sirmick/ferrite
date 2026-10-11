@@ -59,6 +59,22 @@ and the user looking at the same picture. Reach for it first.
   `view_snapshot` *before* guessing a mode.
 - `band_at(freq_hz)` — which allocation a frequency sits in.
 
+**Unknown signals — the Signal Identification Guide** (sigidwiki.com,
+~600 signals: amateur modes, utilities, military modems, OTH radars,
+beacons, numbers stations, jammers, satellites; cached locally):
+- `sigwiki_identify(freq_hz, bandwidth_hz, mode, modulation)` — ranked
+  candidates for what you measured. Pass everything: `spectrum`'s
+  `freq_hz` and `width_hz`; `keyed` → `mode="CW", modulation="OOK"`;
+  what the `spectrogram` shows (FSK two tones, MFSK hopping, PSK thin
+  line, chirp, pulse). Frequency alone is weak evidence — CW's page
+  spans 3 kHz–250 GHz.
+- `sigwiki_page(title)` — one entry: description, channels, bandwidth,
+  modes, and its waterfall picture inline (the operator gets the
+  page's sample audio on the card). Open the top two or three and
+  compare their pictures with your `spectrogram` before naming it.
+- `sigwiki_search(query)` — by name / words when you have a guess
+  ("russian radar", "olivia", "weather balloon").
+
 ## Driving the radio
 
 Use the `mcp__ferrite__*` tools — a local MCP server exposes the
@@ -577,7 +593,8 @@ prefer measuring over guessing:
    off its shape (CW dashes on a line, RTTY two alternating stripes,
    Olivia hopping tones, FT8 tone blocks, PSK a thin line, bursty data
    as horizontal stripes, FM as a fuzzy band). Compare against
-   `reference_image(preset=…)`.
+   `reference_image(preset=…)`, or — for something no preset
+   covers — `sigwiki_identify` → `sigwiki_page`.
 4. **`envelope(freq_hz, window_ms=…)`** — on/off timeline at one
    frequency: `segments`, `duty`, `swing_db`, `keyed`. Morse by eye,
    beacon slots, burst rate. 20–25 ms windows work for 40 m CW; 10 ms
@@ -614,9 +631,10 @@ real regression — flag it with `[REVIEW]`.
 
 **"What's at `<freq>`?"**
 tune → `view_snapshot(pane="wide-spectrum")` → `snapshot` +
-`spectrum` / `spectrogram` around it → compare against
-`reference_image(preset=…)` for candidate modes (`band_at` narrows the
-field) → name it or flag uncertainty. For a bursty transmitter that's
+`spectrum` / `spectrogram` around it → `sigwiki_identify` with what
+you measured → `sigwiki_page` on the best candidates, comparing their
+pictures with your `spectrogram` (`reference_image` when a preset
+matches) → name it, with the evidence, or flag uncertainty. For a bursty transmitter that's
 silent in any single frame, a longer `snapshot` + `spectrogram` or
 `envelope` catches it.
 
@@ -645,8 +663,8 @@ don't compute distances yourself.
    `signals` (and a `view_snapshot`) at each, build a list of
    candidate carriers.
 4. Pick the strongest unknowns, drop rate to ~2 MS/s, retune to each
-   in turn, `snapshot` + `spectrum` / `spectrogram`, compare against
-   `reference_image` to identify.
+   in turn, `snapshot` + `spectrum` / `spectrogram`, then
+   `sigwiki_identify` → `sigwiki_page` to identify.
 5. For confirmed signals offer to load the matching preset.
 
 ## When something doesn't work as documented — flag, don't paper over

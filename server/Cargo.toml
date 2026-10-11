@@ -45,8 +45,9 @@ soapysdr-sys = "0.8"
 # so the browser only ever talks to ferrited's port. Sidecar URL
 # defaults to `ws://127.0.0.1:10002/ws/chat`; override with FERRITE_AI_URL.
 tokio-tungstenite = "0.24"
-# REST side of the same sidecar: /api/ai/{prompt,cancel,sessions}.
-reqwest           = { version = "0.12", default-features = false, features = ["json"] }
+# REST side of the same sidecar (/api/ai/{prompt,cancel,sessions}), and
+# sigidwiki.com lookups (sigwiki.rs).
+reqwest           = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 futures-util      = "0.3"
 # Used by `view_bridge.rs` to decode base64 PNGs the browser sends in
 # response to `GET /api/ui-views/:pane` snapshot requests.

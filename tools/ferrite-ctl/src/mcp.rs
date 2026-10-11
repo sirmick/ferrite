@@ -431,6 +431,19 @@ fn ok_json(value: &Value) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![Content::text(s)]))
 }
 
+/// Percent-encode a query-string value (RFC 3986 unreserved kept).
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// [`ok_json`] plus an inline image — the agent sees the picture, and
 /// the operator sees it on the tool's card in the AI tab.
 fn ok_json_image(value: &Value, bytes: &[u8], mime: &str) -> Result<CallToolResult, McpError> {
@@ -587,6 +600,42 @@ pub struct TranscribeArgs {
 pub struct ReferenceImageArgs {
     /// Preset name (`cw`, `ft8`, `pager`, … — see `list_presets`).
     pub preset: String,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SigwikiIdentifyArgs {
+    /// The signal's frequency, Hz (a `spectrum` peak's `freq_hz`).
+    pub freq_hz: f64,
+    /// Its occupied bandwidth, Hz (`spectrum`'s `width_hz`, or read off
+    /// a `spectrogram`).
+    #[serde(default)]
+    pub bandwidth_hz: Option<f64>,
+    /// How it's received: `CW`, `USB`, `LSB`, `AM`, `NFM`, `WFM`, …
+    /// (`keyed:true` from `spectrum` → `CW`).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// What you saw: `OOK` (keyed carrier), `FSK`, `MFSK`, `PSK`,
+    /// `AFSK`, `FM`, `OFDM`, `chirp`, `pulse`, …
+    #[serde(default)]
+    pub modulation: Option<String>,
+    /// Candidates to return (default 10).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SigwikiSearchArgs {
+    /// Words that must all appear (title, description, mode, modulation,
+    /// location, categories): `olivia`, `russian radar`, `pager`.
+    pub query: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SigwikiPageArgs {
+    /// Signal page title (from `sigwiki_identify` / `sigwiki_search`).
+    pub title: String,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -1755,6 +1804,71 @@ impl FerriteServer {
         Ok((info, bytes, mime))
     }
 
+    pub(crate) async fn sigwiki_identify_op(
+        &self,
+        args: SigwikiIdentifyArgs,
+    ) -> Result<Value, McpError> {
+        let mut q = vec![format!("freq_hz={}", args.freq_hz)];
+        if let Some(b) = args.bandwidth_hz {
+            q.push(format!("bw_hz={b}"));
+        }
+        if let Some(m) = &args.mode {
+            q.push(format!("mode={}", urlencode(m)));
+        }
+        if let Some(m) = &args.modulation {
+            q.push(format!("modulation={}", urlencode(m)));
+        }
+        if let Some(n) = args.limit {
+            q.push(format!("limit={n}"));
+        }
+        self.http
+            .get(&format!("/api/sigwiki/identify?{}", q.join("&")))
+            .await
+    }
+
+    pub(crate) async fn sigwiki_search_op(
+        &self,
+        args: SigwikiSearchArgs,
+    ) -> Result<Value, McpError> {
+        let limit = args.limit.unwrap_or(20);
+        self.http
+            .get(&format!(
+                "/api/sigwiki/search?q={}&limit={limit}",
+                urlencode(&args.query)
+            ))
+            .await
+    }
+
+    /// The page, plus its picture when it has one (bytes, mime).
+    pub(crate) async fn sigwiki_page_op(
+        &self,
+        args: SigwikiPageArgs,
+    ) -> Result<(Value, Option<(Vec<u8>, String)>), McpError> {
+        let v = self
+            .http
+            .get(&format!(
+                "/api/sigwiki/page?title={}",
+                urlencode(&args.title)
+            ))
+            .await?;
+        let picture = v
+            .pointer("/result/signal/picture")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let image = match picture {
+            Some(f) => self
+                .http
+                .get_bytes(&format!(
+                    "/api/sigwiki/image?file={}&width=640",
+                    urlencode(&f)
+                ))
+                .await
+                .ok(),
+            None => None,
+        };
+        Ok((v, image))
+    }
+
     pub(crate) async fn spot_map_op(&self, args: SpotMapArgs) -> Result<Value, McpError> {
         self.http
             .post(
@@ -2266,6 +2380,40 @@ impl FerriteServer {
     }
 
     #[tool(
+        description = "What could this signal be? Ranks the Signal Identification Guide (sigidwiki.com, ~600 signals: amateur modes, utilities, military modems, radars, beacons, numbers stations, jammers, satellites…) against what you measured: `freq_hz` gates (in the page's range, or on one of its listed channels), then `bandwidth_hz`, `mode` and `modulation` rank — pass everything you know (from `spectrum`: `freq_hz`, `width_hz`, `keyed` → mode `CW`/modulation `OOK`; from `spectrogram`: FSK / MFSK / PSK / chirp…), and the band plan adds context (amateur bands favour amateur modes). Returns `result.candidates` [{title, score, why, freq_min/max, bw_min/max, mode, modulation, description, picture, url}] and a `text` table; the operator sees the candidates as a card. Follow up with `sigwiki_page` on the best few and compare their pictures with your `spectrogram`."
+    )]
+    async fn sigwiki_identify(
+        &self,
+        Parameters(args): Parameters<SigwikiIdentifyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.sigwiki_identify_op(args).await?)
+    }
+
+    #[tool(
+        description = "Search the Signal Identification Guide (sigidwiki.com) by words — every term must appear in a signal's title, description, mode, modulation, location or categories (`olivia`, `russian radar`, `pager`, `weather balloon`). Returns titles with frequency range, bandwidth, mode/modulation and a short description; open one with `sigwiki_page`."
+    )]
+    async fn sigwiki_search(
+        &self,
+        Parameters(args): Parameters<SigwikiSearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.sigwiki_search_op(args).await?)
+    }
+
+    #[tool(
+        description = "One Signal Identification Guide entry: description, frequency range / listed channels, bandwidth, mode, modulation, location, categories, the page URL — and its waterfall picture returned as an image (you see it; the operator sees it on the card, with the page's sample audio to play). Compare the picture with your `spectrogram` / `view_snapshot` to confirm an identification."
+    )]
+    async fn sigwiki_page(
+        &self,
+        Parameters(args): Parameters<SigwikiPageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let (v, image) = self.sigwiki_page_op(args).await?;
+        match image {
+            Some((bytes, mime)) => ok_json_image(&v, &bytes, &mime),
+            None => ok_json(&v),
+        }
+    }
+
+    #[tool(
         description = "Where the stations an FT8 / FT4 / WSPR decoder heard are: one spot per callsign over the last `minutes` (default 30) — grid → lat/lon, distance (km) and bearing from the receive grid (`rx_grid`, default the daemon's `FERRITE_RX_GRID`), latest SNR, decode count; farthest first. The operator sees it drawn as a world map in the AI tab; you get `result.spots` and a `text` table. Needs decodes with grids — run the `ft8` / `wspr` preset for a few slots first."
     )]
     async fn spot_map(
@@ -2347,6 +2495,11 @@ Find and measure signals — every result is drawn in the AI tab
 - `envelope` — on/off timeline at one frequency: Morse elements, beacon slots, bursts.
 - `reference_image` — a preset's sigidwiki reference waterfall, to compare by eye.
 
+Identify — the Signal Identification Guide (sigidwiki.com, ~600 signals), cached locally
+- `sigwiki_identify` — rank candidates for what you measured (freq, bandwidth, mode, modulation); drawn as a card.
+- `sigwiki_search` — find signals by words (name, description, location).
+- `sigwiki_page` — one entry: description, frequencies, bandwidth, modes, its waterfall picture inline, sample audio on the card.
+
 Decode
 - `decodes` — structured decoder output by kind (ft8, wspr, aprs, adsb, ais, pager, cw, fldigi, rds, transcribe, …); `reset_decodes` after retuning.
 - `await_events` — block until the next record of a kind lands (event plane; no polling or sleeping); also `jobs/<id>` for captures.
@@ -2365,7 +2518,7 @@ Record and replay
 Conversation
 - `chat_post` — mirror a headless agent's turn into the operator's AI panel.
 
-Habits: `status` before acting; `snapshot` once, then measure it several ways; tune with `carrier_hz` from a `spectrum` peak; confirm hardware changes with `source_readback`; wait with `await_events`, never sleep. Source: tools/ferrite-ctl/src/mcp.rs; REST in docs/02-protocol.md."#;
+Habits: `status` before acting; `snapshot` once, then measure it several ways; unknown signal → `spectrum` + `spectrogram` → `sigwiki_identify` with everything you measured → `sigwiki_page` on the best candidates; tune with `carrier_hz` from a `spectrum` peak; confirm hardware changes with `source_readback`; wait with `await_events`, never sleep. Source: tools/ferrite-ctl/src/mcp.rs; REST in docs/02-protocol.md."#;
 
 #[tool_handler]
 impl ServerHandler for FerriteServer {
