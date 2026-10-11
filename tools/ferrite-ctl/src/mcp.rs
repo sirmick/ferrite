@@ -56,6 +56,9 @@ pub(crate) struct Http {
     /// Applied as `x-ferrite-note` on mutating calls when the per-call
     /// note is `None`. `None` = no default annotation.
     default_note: Option<String>,
+    /// `x-ferrite-via`: who is calling — `cli` (a person at a terminal)
+    /// or `mcp` (an agent). Lets the UI label analyses and activity.
+    via: &'static str,
 }
 
 impl Http {
@@ -64,7 +67,15 @@ impl Http {
             client,
             base,
             default_note,
+            via: "cli",
         }
+    }
+
+    /// The same shim, marked as driven by an agent over MCP.
+    #[must_use]
+    pub(crate) fn via_mcp(mut self) -> Self {
+        self.via = "mcp";
+        self
     }
 
     /// Read. Never logged to the activity panel (GET is filtered out by
@@ -153,7 +164,9 @@ impl Http {
         cmd: &str,
         note: Option<&str>,
     ) -> reqwest::RequestBuilder {
-        let mut req = req.header("x-ferrite-command", cmd);
+        let mut req = req
+            .header("x-ferrite-command", cmd)
+            .header("x-ferrite-via", self.via);
         let note = note.or(self.default_note.as_deref());
         if let Some(n) = note {
             if let Ok(v) = reqwest::header::HeaderValue::from_str(n) {
@@ -588,7 +601,51 @@ pub struct SavePresetArgs {
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SnapshotArgs {
+    /// Seconds of IQ to record (default 3, 0.5–15).
+    #[serde(default)]
+    pub secs: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SpectrogramArgs {
+    /// Analyse this kept snapshot (from `snapshot`); omit to take a fresh one.
+    #[serde(default)]
+    pub snapshot: Option<String>,
+    /// Seconds for a fresh snapshot (default 3).
+    #[serde(default)]
+    pub secs: Option<f64>,
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    /// Hz per column (default 10).
+    #[serde(default)]
+    pub res_hz: Option<f64>,
+    /// ms per row (default 20).
+    #[serde(default)]
+    pub step_ms: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct EnvelopeArgs {
+    #[serde(default)]
+    pub snapshot: Option<String>,
+    #[serde(default)]
+    pub secs: Option<f64>,
+    /// Signal frequency, Hz.
+    pub freq_hz: f64,
+    /// Bandwidth around it (default 200 Hz).
+    #[serde(default)]
+    pub bw_hz: Option<f64>,
+    /// Integration window, ms (default 10).
+    #[serde(default)]
+    pub window_ms: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct SpectrumArgs {
+    /// Analyse this kept snapshot (from `snapshot`); omit to take a fresh one.
+    #[serde(default)]
+    pub snapshot: Option<String>,
     /// Range start, Hz (≤ 400 kHz wide, inside the radio's current span).
     pub lo_hz: f64,
     /// Range end, Hz.
@@ -1155,8 +1212,9 @@ impl FerriteServer {
         let secs = args.secs.unwrap_or(3.0).clamp(0.5, 15.0);
         self.http
             .post_slow(
-                "/api/spectrum",
+                "/api/analysis/spectrum",
                 json!({
+                    "snapshot": args.snapshot,
                     "lo_hz": args.lo_hz,
                     "hi_hz": args.hi_hz,
                     "secs": secs,
@@ -1169,6 +1227,69 @@ impl FerriteServer {
                 Duration::from_secs_f64(secs + 30.0),
             )
             .await
+    }
+
+    pub(crate) async fn snapshot_op(&self, args: SnapshotArgs) -> Result<Value, McpError> {
+        let secs = args.secs.unwrap_or(3.0).clamp(0.5, 15.0);
+        self.http
+            .post_slow(
+                "/api/analysis/snapshot",
+                json!({ "secs": secs }),
+                "snapshot",
+                None,
+                Duration::from_secs_f64(secs + 30.0),
+            )
+            .await
+    }
+
+    /// Spectrogram; the reply drops the raw pixels (`cells_b64` — the UI
+    /// draws them from the `analysis` record) and keeps the text view.
+    pub(crate) async fn spectrogram_op(&self, args: SpectrogramArgs) -> Result<Value, McpError> {
+        let secs = args.secs.unwrap_or(3.0).clamp(0.5, 15.0);
+        let mut v = self
+            .http
+            .post_slow(
+                "/api/analysis/spectrogram",
+                json!({
+                    "snapshot": args.snapshot, "secs": secs,
+                    "lo_hz": args.lo_hz, "hi_hz": args.hi_hz,
+                    "res_hz": args.res_hz, "step_ms": args.step_ms,
+                }),
+                "spectrogram",
+                None,
+                Duration::from_secs_f64(secs + 60.0),
+            )
+            .await?;
+        if let Some(o) = v.as_object_mut() {
+            o.remove("cells_b64");
+        }
+        Ok(v)
+    }
+
+    /// Envelope; the reply drops the per-window power series (the UI
+    /// draws it) and keeps segments + the text strip.
+    pub(crate) async fn envelope_op(&self, args: EnvelopeArgs) -> Result<Value, McpError> {
+        let secs = args.secs.unwrap_or(3.0).clamp(0.5, 15.0);
+        let mut v = self
+            .http
+            .post_slow(
+                "/api/analysis/envelope",
+                json!({
+                    "snapshot": args.snapshot, "secs": secs,
+                    "freq_hz": args.freq_hz, "bw_hz": args.bw_hz, "window_ms": args.window_ms,
+                }),
+                "envelope",
+                None,
+                Duration::from_secs_f64(secs + 60.0),
+            )
+            .await?;
+        if let Some(r) = v.get_mut("result").and_then(Value::as_object_mut) {
+            r.remove("power_db");
+            if let Some(Value::Array(seg)) = r.get_mut("segments") {
+                seg.truncate(300);
+            }
+        }
+        Ok(v)
     }
 
     pub(crate) async fn signals_op(&self, args: SignalsArgs) -> Result<Value, McpError> {
@@ -1838,6 +1959,36 @@ impl FerriteServer {
         Parameters(args): Parameters<SavePresetArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_json(&self.save_preset_op(args).await?)
+    }
+
+    #[tool(
+        description = "Record a few seconds of live IQ (no retune — a tap on the source, full span on hardware) and keep it by id. Then run `spectrum` / `spectrogram` / `envelope` on the same `snapshot` so every measurement looks at the same moment of radio. The last 4 are kept. Returns `{id, center_hz, rate_hz, start_ms (UTC ms), secs, tapped}`."
+    )]
+    async fn snapshot(
+        &self,
+        Parameters(args): Parameters<SnapshotArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.snapshot_op(args).await?)
+    }
+
+    #[tool(
+        description = "Time × frequency picture of a range (≤ 400 kHz; for a single signal use a few kHz around it). The operator sees it drawn in the AI tab; you get `text` — a character-cell spectrogram (time downward, ' .:-=+*#%@' = weak→strong) — plus `result {f0_hz, df_hz, dt_s, rows, cols, floor_dbfs}`. Read modes off it: RTTY = two alternating vertical stripes ~170 Hz apart; Olivia/MFSK = one short dash at a time hopping among evenly spaced tones; CW = dashes on one line; PSK31 = one thin steady line; FT8 = 8 tones over ~50 Hz in 13-s bursts on 15-s boundaries. Use a `snapshot` id to look at the same moment as a `spectrum`."
+    )]
+    async fn spectrogram(
+        &self,
+        Parameters(args): Parameters<SpectrogramArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.spectrogram_op(args).await?)
+    }
+
+    #[tool(
+        description = "On/off power timeline at one frequency (default 200 Hz bandwidth, 10 ms windows): `result.segments` [{start_s, end_s}] from the snapshot start (`snapshot.start_ms` is UTC ms), `duty`, `swing_db`, `keyed`, and `text` — a '#'/'.' strip, 100 windows per line. Morse by eye, beacon slot timing (NCDXF: 10-s slots in a 3-min cycle), burst detection. The operator sees it drawn in the AI tab."
+    )]
+    async fn envelope(
+        &self,
+        Parameters(args): Parameters<EnvelopeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.envelope_op(args).await?)
     }
 
     #[tool(
