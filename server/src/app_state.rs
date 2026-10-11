@@ -162,6 +162,16 @@ struct Inner {
     health_kick: tokio::sync::Notify,
 }
 
+/// What `tune` with a carrier chose (see [`AppState::dial_for_carrier`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CarrierTune {
+    pub carrier_hz: f64,
+    pub tone_hz: f64,
+    pub tone_from: &'static str,
+    pub sideband: String,
+    pub dial_hz: f64,
+}
+
 #[path = "app_state_supervisor.rs"]
 mod supervisor;
 
@@ -1222,6 +1232,69 @@ impl AppState {
     /// is acceptable (a tune is an explicit operator action, not a
     /// continuous control loop). Returns the channelizer-side plan when
     /// it applied, else the source plan, else `None`.
+    /// The dial that puts RF `carrier_hz` on audio tone `tone_hz` —
+    /// `carrier − tone` on USB, `carrier + tone` on LSB (sideband from
+    /// the preset's `SsbDemod`). Without `tone_hz`, the tone is the
+    /// decoder's own `rx_freq_hz` (CwDemod / fldigi blocks) as running.
+    pub async fn dial_for_carrier(
+        &self,
+        carrier_hz: f64,
+        tone_hz: Option<f64>,
+    ) -> Result<CarrierTune> {
+        if !carrier_hz.is_finite() || carrier_hz <= 0.0 {
+            return Err(anyhow!("carrier_hz must be a positive frequency"));
+        }
+        let doc = self.get_flowgraph().await;
+        let param = |ty: &str, key: &str| {
+            doc.blocks
+                .values()
+                .filter(|b| b.type_name == ty || ty.is_empty())
+                .find_map(|b| b.params.as_ref()?.get(key).cloned())
+        };
+        let sideband = doc
+            .blocks
+            .values()
+            .find(|b| b.type_name == "SsbDemod")
+            .map(|b| {
+                b.params
+                    .as_ref()
+                    .and_then(|p| p.get("sideband"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("usb")
+                    .to_ascii_lowercase()
+            })
+            .ok_or_else(|| {
+                anyhow!("the preset has no SsbDemod — tuning a carrier onto a tone needs an SSB/CW receive chain")
+            })?;
+        let (tone, from) = match tone_hz {
+            Some(t) => (t, "request"),
+            None => {
+                let t = param("", "rx_freq_hz")
+                    .and_then(|v| v.as_f64())
+                    .filter(|t| *t > 0.0)
+                    .ok_or_else(|| {
+                        anyhow!("no tone given and no decoder in the preset sets rx_freq_hz — pass tone_hz")
+                    })?;
+                (t, "decoder rx_freq_hz")
+            }
+        };
+        if !(tone.is_finite() && tone > 0.0 && tone < 4_000.0) {
+            return Err(anyhow!("tone_hz must be between 0 and 4000 Hz, got {tone}"));
+        }
+        let dial_hz = if sideband == "lsb" {
+            carrier_hz + tone
+        } else {
+            carrier_hz - tone
+        };
+        Ok(CarrierTune {
+            carrier_hz,
+            tone_hz: tone,
+            tone_from: from,
+            sideband,
+            dial_hz,
+        })
+    }
+
     pub async fn tune(
         &self,
         freq_hz: f64,
@@ -1727,6 +1800,40 @@ mod tests {
     }
 
     // `driver_arg` moved to `ferrite-sdr-tables` and is tested there.
+
+    fn repo_preset(name: &str) -> FlowgraphDoc {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../flowgraphs")
+            .join(format!("{name}.json"));
+        FlowgraphDoc::from_json(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn carrier_tune_puts_the_carrier_on_the_decoder_tone() {
+        // The cw preset: USB, CwDemod rx_freq_hz 700.
+        let st = AppState::new(repo_preset("cw"), test_source(), Duration::from_millis(5));
+        let t = st.dial_for_carrier(14_062_007.0, None).await.unwrap();
+        assert_eq!(t.sideband, "usb");
+        assert!((t.tone_hz - 700.0).abs() < 1e-9);
+        assert!((t.dial_hz - 14_061_307.0).abs() < 1e-6);
+        let t = st
+            .dial_for_carrier(14_062_007.0, Some(600.0))
+            .await
+            .unwrap();
+        assert!((t.dial_hz - 14_061_407.0).abs() < 1e-6);
+        // LSB flips the sign; a preset without a decoder tone needs one.
+        let st = AppState::new(repo_preset("lsb"), test_source(), Duration::from_millis(5));
+        assert!(st.dial_for_carrier(7_074_000.0, None).await.is_err());
+        let t = st
+            .dial_for_carrier(7_074_000.0, Some(1_000.0))
+            .await
+            .unwrap();
+        assert_eq!(t.sideband, "lsb");
+        assert!((t.dial_hz - 7_075_000.0).abs() < 1e-6);
+        // No SSB chain at all → a clear error.
+        let st = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        assert!(st.dial_for_carrier(1e6, Some(700.0)).await.is_err());
+    }
 
     fn test_source() -> SourceConfig {
         SourceConfig {

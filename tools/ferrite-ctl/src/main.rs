@@ -75,9 +75,17 @@ enum Cmd {
     /// bandwidth / sample-rate / gain). Routes through the dodge-aware
     /// tune path.
     Tune {
-        /// Centre frequency in Hz. Accepts plain integers or the
-        /// `123.45M` / `915k` shorthand.
-        freq: String,
+        /// Listen (dial) frequency in Hz. Accepts plain integers or the
+        /// `123.45M` / `915k` shorthand. Omit with `--carrier`.
+        freq: Option<String>,
+        /// Put this RF carrier on an audio tone instead: dial = carrier
+        /// − tone (USB) / + tone (LSB). For CW: the decoder's tone is
+        /// used unless `--tone` is given.
+        #[arg(long)]
+        carrier: Option<String>,
+        /// Tone (Hz) for `--carrier`; default = the decoder's rx_freq_hz.
+        #[arg(long)]
+        tone: Option<f64>,
         /// Optional bandwidth (Hz, with same shorthand).
         #[arg(long)]
         bw: Option<String>,
@@ -548,6 +556,8 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
         }
         Cmd::Tune {
             freq,
+            carrier,
+            tone,
             bw,
             rate,
             gain,
@@ -555,8 +565,13 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             offset,
             keep_lo,
         } => {
+            if freq.is_none() && carrier.is_none() {
+                bail!("give a frequency or --carrier");
+            }
             let args = TuneArgs {
-                freq_hz: parse_si(&freq)?,
+                freq_hz: parse_si_opt(freq.as_deref())?,
+                carrier_hz: parse_si_opt(carrier.as_deref())?,
+                tone_hz: tone,
                 span_hz: parse_si_opt(span.as_deref())?,
                 offset_ratio: offset,
                 gain_db: gain,

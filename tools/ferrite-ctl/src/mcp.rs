@@ -407,8 +407,21 @@ pub struct TuneArgs {
     /// Listen frequency in Hz (the operator-visible tune target). For
     /// zero-IF radios the server places the source LO off-target per
     /// the per-driver dodge ratio and pulls this freq back through
-    /// the channelizer — see D29 in docs/09-decisions.md.
-    pub freq_hz: f64,
+    /// the channelizer — see D29 in docs/09-decisions.md. Omit when
+    /// giving `carrier_hz`.
+    #[serde(default)]
+    pub freq_hz: Option<f64>,
+    /// Put this RF carrier on an audio tone instead of naming the dial:
+    /// the daemon sets dial = carrier − tone (USB) / + tone (LSB) from
+    /// the preset's SSB demod. Use for CW and digital modes — e.g. a CW
+    /// carrier found with `spectrum` → `tune(carrier_hz=…)` lands it on
+    /// the CW decoder's `rx_freq_hz`.
+    #[serde(default)]
+    pub carrier_hz: Option<f64>,
+    /// Tone for `carrier_hz`, Hz. Omit to use the running decoder's own
+    /// `rx_freq_hz` (CwDemod / fldigi blocks).
+    #[serde(default)]
+    pub tone_hz: Option<f64>,
     /// Optional sample-rate floor in Hz. When given and larger than
     /// the current source rate, the source rate is raised (the driver
     /// clamps to its rate ladder).
@@ -1163,6 +1176,8 @@ impl FerriteServer {
                 "/api/tune",
                 json!({
                     "freq_hz": args.freq_hz,
+                    "carrier_hz": args.carrier_hz,
+                    "tone_hz": args.tone_hz,
                     "span_hz": args.span_hz,
                     // Pass the Option through: `null` lets the daemon apply
                     // the per-driver dodge default; `Some` overrides it.
