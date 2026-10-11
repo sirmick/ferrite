@@ -94,6 +94,9 @@ export function resultSummary(result: string | undefined, error: boolean): strin
     if (typeof o.status === 'string') return o.status;
     return null;
   }
+  // Structured data (possibly clipped, so unparseable) belongs in the
+  // card's graphic or the expander, not on the outcome line.
+  if (t.startsWith('{') || t.startsWith('[')) return null;
   const first = t.split('\n')[0];
   return first.length > 160 ? `${first.slice(0, 159)}…` : first;
 }

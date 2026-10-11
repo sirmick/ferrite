@@ -151,6 +151,22 @@ describe('buildTurns — the session-bus fold', () => {
     expect(s.chunks.at(-1)).toEqual({ kind: 'meta', label: '── stopped' });
   });
 
+  it('a stop marks a call that never returned as interrupted', () => {
+    const s = { session: 'A', source: 'ferrite-ai' };
+    const turns = buildTurns(
+      [
+        rec({ ...s, type: 'user', text: 'survey' }),
+        rec({ ...s, type: 'tool_use', tool_id: 't1', name: 'mcp__ferrite__snapshot', input: '{}' }),
+        rec({ ...s, type: 'turn_end', status: 'stopped' }),
+      ],
+      {},
+      [],
+      null,
+    );
+    const tool = (turns[1] as AssistantTurn).chunks[0] as { interrupted?: boolean };
+    expect(tool.interrupted).toBe(true);
+  });
+
   it('a reset record is a banner; history before it stays', () => {
     const turns = buildTurns(
       [

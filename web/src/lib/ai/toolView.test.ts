@@ -51,6 +51,8 @@ describe('resultSummary', () => {
     expect(resultSummary('{"peaks":[]}', false)).toBeNull();
     expect(resultSummary('{"status":"running"}', false)).toBe('running');
     expect(resultSummary(undefined, false)).toBeNull();
+    // A result clipped mid-JSON never leaks onto the outcome line.
+    expect(resultSummary('{"analysis_id":"sw-1","result":{"candidates":[…', false)).toBeNull();
   });
 });
 

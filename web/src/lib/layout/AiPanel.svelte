@@ -250,8 +250,8 @@
   class="flex h-full w-full flex-col border-r border-slate-800 bg-[color:var(--color-bg)] text-xs"
 >
   <!-- Header: mode picker + connection dot -->
-  <div class="flex items-center justify-between border-b border-slate-800 px-2 py-1">
-    <div class="flex items-center gap-2">
+  <div class="flex items-center justify-between gap-2 border-b border-slate-800 px-2 py-1">
+    <div class="flex min-w-0 items-center gap-2">
       <span class="font-semibold text-[color:var(--color-muted)]">AI</span>
       <select
         class="rounded border border-slate-700 bg-slate-900 px-1 py-0.5 text-[10px] focus:border-slate-500 focus:outline-none"
@@ -269,18 +269,24 @@
         onchange={(e) => ai.setModel((e.currentTarget as HTMLSelectElement).value || null)}
         title="Claude model for this mode (blank = the sidecar's per-mode default)"
       >
-        <option value="">{ai.defaultModelFor(ai.mode) ?? 'default'} (default)</option>
+        <option value=""
+          >{shortModel(ai.defaultModelFor(ai.mode) ?? undefined) || 'default'} · default</option
+        >
         {#each ai.modelOptions as id (id)}
-          <option value={id}>{id}</option>
+          <option value={id}>{shortModel(id)}</option>
         {/each}
       </select>
     </div>
-    <div class="flex items-center gap-2">
+    <div class="flex shrink-0 items-center gap-2">
       <span
         class="inline-block h-2 w-2 rounded-full {connectionLabel.dot}"
         title={connectionLabel.text}
       ></span>
-      <span class="text-[10px] text-[color:var(--color-muted)]">{connectionLabel.text}</span>
+      {#if ai.connection !== 'connected'}
+        <span class="max-w-40 truncate text-[10px] text-[color:var(--color-muted)]"
+          >{connectionLabel.text}</span
+        >
+      {/if}
       <button
         type="button"
         class="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] hover:border-slate-500"
@@ -343,7 +349,11 @@
   </div>
 
   <!-- Transcript -->
-  <div class="min-h-0 flex-1 overflow-y-auto px-2 py-2" bind:this={scroller} onscroll={onScroll}>
+  <div
+    class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-2"
+    bind:this={scroller}
+    onscroll={onScroll}
+  >
     {#if timeline.length === 0}
       <div class="px-2 py-4 text-[11px] text-[color:var(--color-muted)]">
         Ask the AI to scan a band, identify a signal, or load a preset. Mode picker above swaps the
@@ -485,7 +495,9 @@
                       {/if}
                     </span>
                     <span class="flex shrink-0 items-center gap-2">
-                      {#if chunk.result === undefined}
+                      {#if chunk.interrupted}
+                        <span class="text-slate-500">interrupted</span>
+                      {:else if chunk.result === undefined}
                         <span class="animate-pulse text-amber-400">running…</span>
                       {:else if chunk.error}
                         <span class="text-rose-400">failed</span>
@@ -576,7 +588,7 @@
                 </div>
               {:else}
                 <div class="text-[10px] italic text-[color:var(--color-muted)]">
-                  — {chunk.label}
+                  {chunk.label}
                 </div>
               {/if}
             {/each}

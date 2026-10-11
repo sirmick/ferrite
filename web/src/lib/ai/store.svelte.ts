@@ -52,6 +52,8 @@ export type Chunk =
       /** The `analysis` record this call drew (spectrum, sigwiki card,
        *  spot map…) — rendered inside the tool card. */
       analysisId?: string;
+      /** The turn ended (stopped / failed) before this call returned. */
+      interrupted?: boolean;
     }
   /** Out-of-band notices — resets, stops, errors. Muted in the panel. */
   | { kind: 'meta'; label: string };
@@ -268,6 +270,10 @@ export function buildTurns(
       case 'turn_end': {
         const a = open.get(key) ?? assistantFor(rec, d);
         const status = str(d['status']);
+        // A call still waiting on its result never gets one now.
+        for (const c of a.chunks) {
+          if (c.kind === 'tool' && c.result === undefined) c.interrupted = true;
+        }
         if (status === 'error') {
           a.status = 'error';
           a.errorMessage = str(d['error']) || 'turn failed';
