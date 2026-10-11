@@ -181,8 +181,8 @@
   function toggleTool(id: string) {
     expandedTools[id] = !expandedTools[id];
   }
-  /** Thinking blocks opened by the operator, keyed `turn:chunk`. */
-  let expandedThoughts = $state<Record<string, boolean>>({});
+  /** Thinking blocks the operator folded, keyed `turn:chunk` (open by default). */
+  let collapsedThoughts = $state<Record<string, boolean>>({});
 
   // Setup-description text-box is collapsed by default once filled —
   // keeps the chat real estate intact. Defaults to expanded when
@@ -370,28 +370,27 @@
                 <!-- eslint-disable-next-line svelte/no-at-html-tags -->
                 <div class="ai-markdown text-slate-100">{@html renderMarkdown(chunk.text)}</div>
               {:else if chunk.kind === 'thought'}
-                <!-- The model's summarised thinking: one line while it
-                   streams or when collapsed, the whole of it on demand. -->
+                <!-- The model's summarised thinking, open by default; folds
+                   to one line. -->
                 {@const key = `${turn.id}:${idx}`}
+                {@const open = !collapsedThoughts[key]}
                 <div
                   class="my-1 border-l-2 border-violet-800 pl-1.5 text-[10px] text-violet-300/80"
                 >
                   <button
                     type="button"
                     class="flex w-full items-center gap-1 text-left hover:text-violet-200"
-                    onclick={() => (expandedThoughts[key] = !expandedThoughts[key])}
-                    title="show the model's thinking"
+                    onclick={() => (collapsedThoughts[key] = open)}
+                    title={open ? 'fold the thinking' : "show the model's thinking"}
                   >
-                    <span class="shrink-0 whitespace-nowrap"
-                      >{expandedThoughts[key] ? '▾' : '▸'} thinking</span
-                    >
-                    {#if !expandedThoughts[key]}
+                    <span class="shrink-0 whitespace-nowrap">{open ? '▾' : '▸'} thinking</span>
+                    {#if !open}
                       <span class="truncate italic opacity-70">{chunk.text.slice(-160)}</span>
                     {:else}
                       <span class="opacity-60">· {chunk.text.length} chars</span>
                     {/if}
                   </button>
-                  {#if expandedThoughts[key]}
+                  {#if open}
                     <!-- eslint-disable-next-line svelte/no-at-html-tags -->
                     <div class="ai-markdown italic">{@html renderMarkdown(chunk.text)}</div>
                   {/if}
