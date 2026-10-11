@@ -875,6 +875,7 @@ dependencies = [
  "http 1.4.0",
  "num-complex",
  "postcard",
+ "reqwest",
  "rumqttc",
  "rumqttd",
  "serde",

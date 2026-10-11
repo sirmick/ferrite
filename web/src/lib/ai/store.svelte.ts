@@ -35,6 +35,10 @@ export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'closed' | '
 
 export type Chunk =
   | { kind: 'text'; text: string }
+  /** The model's (summarised) thinking — collapsed by default. */
+  | { kind: 'thought'; text: string }
+  /** The agent's todo plan; a newer `plan` record replaces it. */
+  | { kind: 'plan'; entries: PlanEntry[] }
   /** A tool call. `result` fills in when the matching `tool_result`
    *  record arrives; `resultImages` are `data:` URLs (only the newest
    *  few records keep them — older ones carry a count). */
@@ -49,6 +53,12 @@ export type Chunk =
     }
   /** Out-of-band notices — resets, stops, errors. Muted in the panel. */
   | { kind: 'meta'; label: string };
+
+export interface PlanEntry {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed' | string;
+  priority?: string;
+}
 
 export interface UserTurn {
   id: number;
@@ -164,6 +174,19 @@ export function buildTurns(
         a.chunks.push({ kind: 'text', text: str(d['text']) });
         break;
       }
+      case 'thought': {
+        const a = assistantFor(rec, d);
+        a.chunks.push({ kind: 'thought', text: str(d['text']) });
+        break;
+      }
+      case 'plan': {
+        const a = assistantFor(rec, d);
+        const entries = (Array.isArray(d['entries']) ? d['entries'] : []) as PlanEntry[];
+        const at = a.chunks.findIndex((c) => c.kind === 'plan');
+        if (at >= 0) a.chunks.splice(at, 1);
+        a.chunks.push({ kind: 'plan', entries });
+        break;
+      }
       case 'tool_use': {
         const a = assistantFor(rec, d);
         a.chunks.push({
@@ -240,7 +263,8 @@ export function buildTurns(
   for (const [key, a] of open) {
     if (a.status !== 'streaming') continue;
     const partial = str(live[key]?.data?.['text']);
-    if (partial) a.chunks = [...a.chunks, { kind: 'text', text: partial }];
+    const kind = live[key]?.data?.['kind'] === 'thought' ? 'thought' : 'text';
+    if (partial) a.chunks = [...a.chunks, { kind, text: partial }];
     else if (now - (lastAt.get(a) ?? a.t) > STALE_STREAM_MS) a.status = 'complete';
   }
 
@@ -646,9 +670,8 @@ export class AiStore {
     }, delay);
   }
 
-  /** Control-channel messages from the sidecar. The SDK's stream
-   *  (`stream_event` / `assistant` / `user` / done) still arrives here
-   *  but is ignored: the conversation renders from the bus. */
+  /** Control-channel messages from the sidecar. The conversation itself
+   *  (thinking, text, tool calls) renders from the bus, not from here. */
   ingestEvent(event: Record<string, unknown>): void {
     const t = event['type'];
     if (t === 'system' && event['subtype'] === 'init') {

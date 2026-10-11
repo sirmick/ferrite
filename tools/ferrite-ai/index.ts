@@ -1,20 +1,31 @@
 #!/usr/bin/env node
-// Ferrite AI sidecar — wraps Claude Code (via @anthropic-ai/claude-agent-sdk)
-// and exposes a chat WebSocket the SvelteKit UI hooks into. Each WS
-// message from the UI becomes a turn; the SDK keeps conversation
-// context across turns via session-resume.
+// Ferrite AI sidecar — runs Claude Code through the ACP adapter
+// (`claude-agent-acp`, see acp.ts) and exposes:
 //
-// Auth: uses the local Claude Code login the SDK inherits from your
-// `claude` CLI session — subscription billing, not per-token API. Make
-// sure `claude` is logged in before starting the sidecar.
+//   /ws/chat       the AI panel's control channel (send a prompt, stop,
+//                  reset; hello with modes/models; the session binding)
+//   POST /prompt   start a turn over REST (ferrited proxies it as
+//                  /api/ai/prompt; `ferrite-ctl ai-prompt`)
+//   POST /cancel   stop a turn
+//   GET  /sessions the live sessions
+//
+// The conversation itself — user prompts, thinking, reply text, tool
+// calls and results, plans — is published to ferrited's event plane
+// (bus.ts) and every AI panel renders from there, whoever started the
+// turn.
+//
+// Auth: the local Claude Code login the adapter inherits from your
+// `claude` CLI session — subscription billing, not per-token API.
 
-import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { createServer, type IncomingMessage as HttpRequest, type ServerResponse } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer } from "node:http";
-import { WebSocketServer } from "ws";
-import { connectBus, publishReset, TurnPublisher } from "./bus.js";
+import { WebSocketServer, type WebSocket } from "ws";
+import type * as acpTypes from "@agentclientprotocol/sdk";
+
+import { AcpHost } from "./acp.js";
+import { connectBus, publishReset, SessionPublisher } from "./bus.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = join(__dirname, "prompts");
@@ -36,21 +47,16 @@ const FT8_WORLDMAP = resolve(FERRITE_HOME, "tools/ft8_worldmap.py");
 console.log(`[ferrite-ai] FERRITE_HOME=${FERRITE_HOME}`);
 console.log(`[ferrite-ai] FERRITE_CTL=${FERRITE_CTL}`);
 
-// Single state directory for everything the sidecar is the authority
-// for: the per-session raw event transcripts (`<session_id>.jsonl`,
-// the conversation-state single source of truth) and the human-
-// readable per-turn log. Mirrors the FERRITE_SCREENSHOTS_DIR
-// convention — run.sh points this at a repo-local, gitignored dir so
-// it survives reboots; default falls back to /tmp for a bare
-// `npm start`. The session files are co-located with the SDK session
-// they key off (both keyed by `session_id`) so the visible transcript
-// and the LLM context reset and resume together by construction.
+// State directory: the readable transcript log and the operator's
+// station notes. run.sh points it at a repo-local, gitignored dir.
+// (Conversations themselves live in Claude Code's session store, which
+// the adapter resumes from, and on the event plane.)
 const STATE_DIR = process.env.FERRITE_AI_STATE_DIR ?? "/tmp/ferrite-ai-state";
 // Station notes the operator keeps on disk (antenna ports, local
 // interference, operating rules). The browser sends its own
-// `setup_description` per turn from localStorage; a headless driver
-// has none, so fall back to this file. Read per turn so edits land
-// without a sidecar restart.
+// `setup_description` from localStorage; a headless driver has none,
+// so fall back to this file. Read per session so edits land without a
+// sidecar restart.
 const SETUP_FILE = process.env.FERRITE_AI_SETUP_FILE ?? join(STATE_DIR, "setup.md");
 function defaultSetupDescription(): string | undefined {
   try {
@@ -67,64 +73,11 @@ try {
 console.log(`[ferrite-ai] state=${STATE_DIR}`);
 
 // Human-readable record of what the AI said + what tools it ran, for
-// grepping when the user reports "the AI did something weird." Now
-// lives under the state dir by default (one gitignored place) instead
-// of a separate /tmp file; still overridable. Tail with:
+// grepping when the user reports "the AI did something weird." Tail with:
 //   tail -F "$FERRITE_AI_STATE_DIR/transcript.log"
 const TRANSCRIPT_PATH =
   process.env.FERRITE_AI_TRANSCRIPT ?? join(STATE_DIR, "transcript.log");
 console.log(`[ferrite-ai] transcript=${TRANSCRIPT_PATH}`);
-
-/** Per-session raw event transcript path. The browser-bound event
- *  stream for one SDK `session_id`, one JSON value per line. This is
- *  the conversation-state authority: ferrited proxies /ws/chat
- *  transparently and the browser is a pure view, so this file (next to
- *  the SDK session it shares a `session_id` with) is the only place
- *  the full transcript lives off the browser. */
-function sessionFile(id: string): string {
-  return join(STATE_DIR, `${id}.jsonl`);
-}
-
-/** Append a turn's browser-bound events to its session file. Called
- *  once per turn (the turn is the unit) keyed by the SDK session id —
- *  so a new session (mode change, /clear, fresh conversation) rolls a
- *  new file by construction. A logging miss must not crash the turn. */
-function recordSession(id: string, events: unknown[]): void {
-  if (!id || events.length === 0) return;
-  try {
-    appendFileSync(
-      sessionFile(id),
-      events.map((e) => JSON.stringify(e)).join("\n") + "\n",
-    );
-  } catch (e) {
-    console.warn(`[ferrite-ai] session record failed for ${id}:`, e);
-  }
-}
-
-/** Read back the complete recorded event stream for a session, or
- *  `null` when there is no (readable) transcript on disk for that id —
- *  the caller treats `null` as "unresumable → session_reset". */
-function readSession(id: string): unknown[] | null {
-  if (!id) return null;
-  const f = sessionFile(id);
-  if (!existsSync(f)) return null;
-  try {
-    return readFileSync(f, "utf-8")
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .map((l) => {
-        try {
-          return JSON.parse(l) as unknown;
-        } catch {
-          return null;
-        }
-      })
-      .filter((x): x is unknown => x !== null);
-  } catch (e) {
-    console.warn(`[ferrite-ai] session read failed for ${id}:`, e);
-    return null;
-  }
-}
 
 function logLine(line: string): void {
   const ts = new Date().toISOString().slice(11, 23);
@@ -138,132 +91,11 @@ function logLine(line: string): void {
   }
 }
 
-/// Turn-scoped state that walks the SDK event stream and emits a
-/// readable transcript. The same events still forward to the WS
-/// client unchanged — this is purely an observability tap.
-class TurnTranscript {
-  private pendingText = "";
-  private pendingTool: { id: string; name: string; input: string } | null = null;
-
-  constructor(mode: string, userText: string) {
-    logLine(`──── turn  mode=${mode}`);
-    logLine(`USER:    ${oneLine(userText)}`);
-  }
-
-  ingest(event: Record<string, unknown>): void {
-    const t = event["type"];
-    if (t === "stream_event") {
-      const inner = event["event"] as Record<string, unknown> | undefined;
-      if (inner) this.ingestStreamEvent(inner);
-      return;
-    }
-    if (t === "user" || t === "assistant") {
-      const msg = event["message"] as Record<string, unknown> | undefined;
-      const content = msg?.["content"];
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          this.ingestContentBlock(block as Record<string, unknown>);
-        }
-      }
-    }
-  }
-
-  private ingestStreamEvent(inner: Record<string, unknown>): void {
-    const it = inner["type"];
-    if (it === "content_block_start") {
-      const block = inner["content_block"] as Record<string, unknown> | undefined;
-      if (block?.["type"] === "tool_use") {
-        this.flushText();
-        this.pendingTool = {
-          id: String(block["id"] ?? ""),
-          name: String(block["name"] ?? "?"),
-          input: "",
-        };
-      }
-      // text blocks just lazily start collecting on the first delta.
-      return;
-    }
-    if (it === "content_block_delta") {
-      const delta = inner["delta"] as Record<string, unknown> | undefined;
-      if (!delta) return;
-      const dt = delta["type"];
-      if (dt === "text_delta") {
-        this.pendingText += String(delta["text"] ?? "");
-      } else if (dt === "input_json_delta" && this.pendingTool) {
-        this.pendingTool.input += String(delta["partial_json"] ?? "");
-      }
-      return;
-    }
-    if (it === "content_block_stop") {
-      if (this.pendingTool) {
-        const input = prettyToolInput(this.pendingTool.input);
-        logLine(`TOOL:    ${this.pendingTool.name}  ${input}`);
-        this.pendingTool = null;
-      } else {
-        this.flushText();
-      }
-    }
-  }
-
-  private ingestContentBlock(block: Record<string, unknown>): void {
-    if (block["type"] !== "tool_result") return;
-    const id = String(block["tool_use_id"] ?? "");
-    const text = renderToolResult(block["content"]);
-    const trimmed = text.length > 240 ? text.slice(0, 240) + "…" : text;
-    const errored = block["is_error"] === true;
-    const tag = errored ? "ERR " : "OK  ";
-    logLine(`RESULT:  ${tag}${id.slice(0, 8)}…  ${oneLine(trimmed)}`);
-  }
-
-  private flushText(): void {
-    if (!this.pendingText) return;
-    logLine(`AI:      ${oneLine(this.pendingText)}`);
-    this.pendingText = "";
-  }
-
-  finish(status: "done" | "error", errorMessage?: string): void {
-    this.flushText();
-    if (this.pendingTool) {
-      logLine(`TOOL:    ${this.pendingTool.name}  ${prettyToolInput(this.pendingTool.input)}  [stream cut]`);
-      this.pendingTool = null;
-    }
-    if (status === "error") {
-      logLine(`ERROR:   ${errorMessage ?? "?"}`);
-    }
-    logLine(`──── ${status}`);
-  }
-}
-
-function oneLine(s: string): string {
+function oneLine(s: string, max = 240): string {
   // Collapse newlines + runs of whitespace so each transcript line is
-  // grep-friendly; full text still sits in the WS stream / browser.
-  return s.replace(/\s+/g, " ").trim();
-}
-
-function prettyToolInput(raw: string): string {
-  if (!raw) return "{}";
-  try {
-    return oneLine(JSON.stringify(JSON.parse(raw)));
-  } catch {
-    return oneLine(raw);
-  }
-}
-
-function renderToolResult(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part: unknown) => {
-        if (typeof part === "string") return part;
-        if (typeof part === "object" && part !== null) {
-          const text = (part as Record<string, unknown>)["text"];
-          if (typeof text === "string") return text;
-        }
-        return JSON.stringify(part);
-      })
-      .join("");
-  }
-  return JSON.stringify(content);
+  // grep-friendly; the full text is on the bus.
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
 // Modes pre-loaded once; per-turn we pick by name. Adding a new mode
@@ -366,11 +198,12 @@ const FERRITE_CTL_CONNECT =
 // plane (`ai` kind) so all panels — and agents — see every session.
 void connectBus(FERRITE_CTL_CONNECT);
 
-function ferriteMcpServer(): { command: string; args: string[]; env: Record<string, string> } {
+function ferriteMcpServer(): acpTypes.McpServer {
   return {
+    name: "ferrite",
     command: FERRITE_CTL,
     args: [...FERRITE_MCP_ARGS, "--connect", FERRITE_CTL_CONNECT],
-    env: { RUST_LOG: process.env.FERRITE_AI_MCP_LOG ?? "info" },
+    env: [{ name: "RUST_LOG", value: process.env.FERRITE_AI_MCP_LOG ?? "info" }],
   };
 }
 
@@ -538,320 +371,269 @@ function renderCurrentSource(s: CurrentSource | undefined): string {
     `${lines.join("\n")}\n`
   );
 }
-
-/** Glue caller-supplied prompt extensions onto the mode's system
- *  prompt. Order is: base mode prompt → driver-specific operator notes
- *  (capabilities) → live source state (what the SDR is *doing right
- *  now*) → active preset notes → active-pipeline block notes →
- *  operator-supplied setup (this rig's physical reality) → local
- *  clock / TZ. Each section is wrapped in a heading so the AI can
- *  tell them apart from the base prompt. */
-function appendPromptExtras(
-  systemPrompt: string,
-  driverNotes: string | undefined,
-  currentSource: CurrentSource | undefined,
-  presetNotes: string | undefined,
-  blockNotes: BlockNote[] | undefined,
-  setup: string | undefined,
-  localTimeHuman: string | undefined,
-  localTimeIso: string | undefined,
-  timeZone: string | undefined,
-): string {
-  let out = systemPrompt;
+/** The session's standing instructions: mode prompt → driver notes
+ *  (what the SDR can do) → the operator's station notes. Fixed for the
+ *  session's life; a change starts a new session. */
+function systemPromptFor(mode: Mode, driverNotes: string | undefined, setup: string | undefined): string {
+  let out = SYSTEM_PROMPTS[mode];
   const driver = (driverNotes ?? "").trim();
-  if (driver) {
-    out = `${out}\n\n## Active SDR — driver-specific operator notes\n\n${driver}\n`;
-  }
-  out += renderCurrentSource(currentSource);
-  const preset = (presetNotes ?? "").trim();
-  if (preset) {
-    out = `${out}\n\n## Active preset — AI notes\n\n${preset}\n`;
-  }
-  out += renderBlockNotes(blockNotes);
+  if (driver) out += `\n\n## Active SDR — driver-specific operator notes\n\n${driver}\n`;
   const op = (setup ?? "").trim();
-  if (op) {
-    out = `${out}\n\n## Operator-supplied radio setup\n\n${op}\n`;
-  }
-  const tz = (timeZone ?? "").trim();
-  const human = (localTimeHuman ?? "").trim();
-  const iso = (localTimeIso ?? "").trim();
-  if (tz || human || iso) {
-    out =
-      `${out}\n\n## Local clock + region\n\n` +
-      (human ? `- Operator's local time: ${human}\n` : "") +
-      (iso ? `- ISO (UTC): ${iso}\n` : "") +
-      (tz
-        ? `- IANA timezone: ${tz} (gives approximate region — e.g. ` +
-          `\`America/Los_Angeles\` → US west coast → use for propagation, ` +
-          `MUF, broadcast-band makeup, and band-condition reasoning)\n`
-        : "");
-  }
+  if (op) out += `\n\n## Operator-supplied radio setup\n\n${op}\n`;
   return out;
 }
 
-const httpServer = createServer((_req, res) => {
-  res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-  res.end(
-    `ferrite-ai\n\nWS endpoint:  ws://127.0.0.1:${PORT}/ws/chat\nModes:        ${MODES.join(", ")}\n`,
-  );
-});
+/** Per-turn context, sent as a text block ahead of the user's words:
+ *  the live source state, the clock, and the preset / block notes when
+ *  they changed since the session last saw them. */
+function turnContext(m: IncomingMessage, seen: { notes?: string }): string {
+  let out = renderCurrentSource(m.current_source);
+  const notes =
+    ((m.preset_notes ?? "").trim() ? `\n\n## Active preset — AI notes\n\n${m.preset_notes!.trim()}\n` : "") +
+    renderBlockNotes(m.block_notes);
+  if (notes && notes !== seen.notes) {
+    out += notes;
+    seen.notes = notes;
+  }
+  const tz = (m.time_zone ?? "").trim();
+  const human = (m.local_time_human ?? "").trim();
+  const iso = (m.local_time_iso ?? new Date().toISOString()).trim();
+  out +=
+    `\n\n## Local clock + region\n\n` +
+    (human ? `- Operator's local time: ${human}\n` : "") +
+    `- ISO (UTC): ${iso}\n` +
+    (tz
+      ? `- IANA timezone: ${tz} (gives approximate region — e.g. ` +
+        `\`America/Los_Angeles\` → US west coast → use for propagation, ` +
+        `MUF, broadcast-band makeup, and band-condition reasoning)\n`
+      : "");
+  return `<turn-context>\n${out.trim()}\n</turn-context>`;
+}
 
-const wss = new WebSocketServer({ server: httpServer, path: "/ws/chat" });
+// ── sessions ───────────────────────────────────────────────────────────
 
-wss.on("connection", (ws) => {
-  // Per-connection session id, picked up from the SDK's first
-  // system/init event of each turn. `null` until the first turn lands.
-  let sessionId: string | null = null;
-  // Mode is sticky once the client picks one — they can override per
-  // message but the default for the connection is the first mode seen
-  // (or DEFAULT_MODE).
-  let currentMode: Mode = DEFAULT_MODE;
-  // AbortController for the currently-running turn (null when idle).
-  // The client can send `{type: "stop"}` to abort the in-flight
-  // query; we call `.abort()` on this and the SDK terminates the
-  // event stream. The for-await loop sees the rejection and falls
-  // through into a `ferrite_ai_stopped` envelope.
-  let activeAbort: AbortController | null = null;
+const host = new AcpHost();
 
-  console.log(`[ferrite-ai] client connected (mode default=${currentMode})`);
-  ws.send(
-    JSON.stringify({
-      type: "ferrite_ai_hello",
-      modes: MODES,
-      mode: currentMode,
-      // Per-mode default model (after env overrides) + the ids the UI
-      // picker offers. Keep the list short and current-generation; the
-      // sidecar runs on the operator's Claude subscription.
-      models: Object.fromEntries(MODES.map((m) => [m, modelFor(m)])),
-      model_options: MODEL_OPTIONS,
-    }),
-  );
+interface Session {
+  id: string;
+  mode: Mode;
+  model: string;
+  pub: SessionPublisher;
+  /** The running turn, if any (one at a time). */
+  turn: Promise<TurnResult> | null;
+  /** This turn's reply text, for REST callers that wait. */
+  reply: string;
+  seen: { notes?: string };
+}
 
-  ws.on("message", async (raw) => {
-    const parsed = parseIncoming(raw);
-    // Control envelopes don't carry `text`. `{type: "stop"}` aborts
-    // the in-flight turn; anything else with no text is an error.
-    if (!parsed.text) {
-      if (parsed.type === "stop") {
-        if (activeAbort) {
-          activeAbort.abort();
-        } else {
-          send(ws, { type: "ferrite_ai_stopped", reason: "idle" });
-        }
-        return;
-      }
-      // The sidecar is the conversation-state authority. On connect
-      // (or an explicit ask) the browser hands back the session id it
-      // *thinks* it's continuing; we replay the complete recorded
-      // transcript so the browser's view matches our record — or, if
-      // that session has no transcript on disk (sidecar restarted, file
-      // gone, never existed), tell it to clear coherently instead of
-      // showing its stale localStorage log.
-      if (parsed.type === "request_snapshot") {
-        const want = parsed.session_id ?? sessionId;
-        const events = want ? readSession(want) : null;
-        if (want && events) {
-          // Adopt as the connection binding so the next turn resumes
-          // this same session even without a caller-supplied id.
-          sessionId = want;
-          send(ws, {
-            type: "conversation_snapshot",
-            session_id: want,
-            events,
-          });
-        } else {
-          sessionId = null;
-          send(ws, {
-            type: "session_reset",
-            reason: want
-              ? "no transcript on disk for the prior session"
-              : "no prior session",
-          });
-        }
-        return;
-      }
-      // Unified reset: drop the SDK session binding so the next turn
-      // starts fresh (a new session id rolls a new transcript file by
-      // construction — log + context reset together). Echo a
-      // session_reset so the UI clears coherently with an honest
-      // banner instead of a now-orphaned log.
-      if (parsed.type === "reset_session") {
-        publishReset(sessionId, currentMode, parsed.reason ?? "reset");
-        sessionId = null;
-        send(ws, {
-          type: "session_reset",
-          reason: parsed.reason ?? "reset",
-          // The banner is on the session bus (every panel); the
-          // requesting tab must not add a local one too.
-          on_bus: true,
-        });
-        return;
-      }
-      send(ws, {
-        type: "ferrite_ai_error",
-        message:
-          "expected JSON {text, mode?} or a control {type: stop|request_snapshot|reset_session}",
-      });
+interface TurnResult {
+  session_id: string;
+  mode: Mode;
+  model: string;
+  status: "done" | "stopped" | "error";
+  stop_reason?: string;
+  error?: string;
+  /** The reply text of the turn (all text blocks, joined). */
+  text: string;
+}
+
+const sessions = new Map<string, Session>();
+/** The session a caller with no binding continues, per mode — the last
+ *  one used. REST prompts land here by default. */
+const latest = new Map<Mode, string>();
+
+function sessionSpec(mode: Mode, model: string, m: IncomingMessage) {
+  const options: Record<string, unknown> = {
+    model,
+    tools: builtinToolsFor(mode),
+    allowedTools: allowedToolsFor(mode),
+    // SDK isolation. The bundled CLI otherwise behaves like the
+    // operator's interactive `claude`: it loads ~/.claude settings,
+    // project .mcp.json, plugins — and (CLI ≥ 2.1) the account's
+    // claude.ai cloud connectors. That handed a "tools-free" chat
+    // session Google Drive write/share/trash tools under
+    // bypassPermissions. The radio sidecar gets exactly what this
+    // file declares and nothing else.
+    settingSources: [],
+    strictMcpConfig: true,
+    settings: { disableClaudeAiConnectors: true },
+    // Thinking on, summarised so it streams as readable text
+    // (`agent_thought_chunk`) — the AI panel shows it.
+    thinking: { type: "adaptive", display: "summarized" },
+    ...(process.env.FERRITE_AI_EFFORT ? { effort: process.env.FERRITE_AI_EFFORT } : {}),
+  };
+  return {
+    cwd: FERRITE_HOME,
+    systemPrompt: systemPromptFor(
+      mode,
+      m.driver_notes,
+      m.setup_description?.trim() || defaultSetupDescription(),
+    ),
+    options,
+    // The local `ferrite` MCP server — the radio's control surface.
+    // Skipped for chat mode (tools-free).
+    mcpServers: mode === "chat" ? [] : [ferriteMcpServer()],
+  };
+}
+
+function track(id: string, mode: Mode, model: string): Session {
+  const s: Session = {
+    id,
+    mode,
+    model,
+    pub: new SessionPublisher(id, mode, model),
+    turn: null,
+    reply: "",
+    seen: {},
+  };
+  sessions.set(id, s);
+  latest.set(mode, id);
+  return s;
+}
+
+/** Route a session's stream to its publisher + the transcript log. */
+function listenerFor(id: string): (u: acpTypes.SessionNotification["update"]) => void {
+  return (u) => {
+    const s = sessions.get(id);
+    if (!s) return;
+    if ((u._meta as { ferriteAdapterExited?: boolean } | undefined)?.ferriteAdapterExited) {
+      // The adapter died; the session is gone with it (a later turn
+      // naming it resumes from Claude Code's store).
+      sessions.delete(id);
       return;
     }
-    const mode = (parsed.mode && MODES.includes(parsed.mode as Mode)
-      ? parsed.mode
-      : currentMode) as Mode;
-    if (mode !== currentMode) {
-      // Mode switch resets the session — different system prompt means
-      // the old conversation history would re-prime under wrong context.
-      if (sessionId) publishReset(sessionId, currentMode, `mode → ${mode}`);
-      sessionId = null;
-      currentMode = mode;
+    if (u.sessionUpdate === "agent_message_chunk" && u.content.type === "text") s.reply += u.content.text;
+    // Text blocks either side of a tool call are separate paragraphs.
+    if (u.sessionUpdate === "tool_call" && s.reply && !s.reply.endsWith("\n")) s.reply += "\n\n";
+    if (u.sessionUpdate === "tool_call") logLine(`TOOL:    ${u.title}  ${oneLine(JSON.stringify(u.rawInput ?? {}))}`);
+    if (u.sessionUpdate === "tool_call_update" && (u.status === "completed" || u.status === "failed")) {
+      logLine(`RESULT:  ${u.status === "failed" ? "ERR " : "OK  "}${u.toolCallId.slice(0, 8)}…`);
     }
+    s.pub.update(u);
+  };
+}
 
-    const transcript = new TurnTranscript(mode, parsed.text);
-
-    // Buffer this turn's browser-bound events so we can persist them
-    // once (the turn is the unit) under the SDK session id. The
-    // leading synthetic `ferrite_ai_user_turn` lets a snapshot replay
-    // reconstruct the user's prompt + a fresh assistant turn through
-    // the browser's existing reducer; it is NOT sent live (the browser
-    // already shows the prompt optimistically), so the proxied live
-    // stream is byte-identical to before.
-    const turnRecords: unknown[] = [
-      { type: "ferrite_ai_user_turn", text: parsed.text, t: Date.now() },
-    ];
-    const emit = (payload: unknown): void => {
-      send(ws, payload);
-      turnRecords.push(payload);
-    };
-
-    // Per-turn AbortController. The SDK's `abortController` option
-    // is the supported way to cancel mid-query for non-streaming
-    // input (the streaming-input `.interrupt()` method requires a
-    // bigger refactor — async-iterable prompts).
-    const turnAbort = new AbortController();
-    activeAbort = turnAbort;
-
-    const opts: Options = {
-      abortController: turnAbort,
-      systemPrompt: appendPromptExtras(
-        SYSTEM_PROMPTS[mode],
-        parsed.driver_notes,
-        parsed.current_source,
-        parsed.preset_notes,
-        parsed.block_notes,
-        parsed.setup_description?.trim() || defaultSetupDescription(),
-        parsed.local_time_human,
-        parsed.local_time_iso,
-        parsed.time_zone,
-      ),
-      model: modelFor(mode, parsed.model),
-      tools: builtinToolsFor(mode),
-      allowedTools: allowedToolsFor(mode),
-      // Local `ferrite` MCP server. Spawned per session by the SDK;
-      // talks to the same running ferrited the human CLI does (env
-      // var `FERRITE_CTL_CONNECT` overrides the daemon URL). Skipped
-      // for chat mode (tools-free).
-      ...(mode === "chat"
-        ? {}
-        : { mcpServers: { ferrite: ferriteMcpServer() } }),
-      // User opted into autonomy; bypassPermissions skips the SDK's
-      // confirmation prompts entirely. The activity-log middleware on
-      // ferrited still surfaces every API call to the UI panel.
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
-      // SDK isolation. The bundled CLI otherwise behaves like the
-      // operator's interactive `claude`: it loads ~/.claude settings,
-      // project .mcp.json, plugins — and (CLI ≥ 2.1) the account's
-      // claude.ai cloud connectors. That handed a "tools-free" chat
-      // session Google Drive write/share/trash tools under
-      // bypassPermissions. The radio sidecar gets exactly what this
-      // file declares and nothing else.
-      settingSources: [],
-      strictMcpConfig: true,
-      settings: { disableClaudeAiConnectors: true },
-      // Stream every token + tool event so the UI can show live
-      // progress instead of a long blank pause.
-      includePartialMessages: true,
-    };
-    // Prefer a caller-supplied resume id over the connection-local
-    // one. Lets the browser persist `session_id` across reloads and
-    // hand it back on the first turn after a reconnect — the SDK
-    // picks the conversation up from disk.
-    const resumeId = parsed.resume_session_id ?? sessionId;
-    if (resumeId) {
-      (opts as Options & { resume?: string }).resume = resumeId;
-      // Adopt the caller-supplied id as our connection-local one so a
-      // subsequent turn without an explicit resume still continues
-      // the same conversation.
-      sessionId = resumeId;
-    }
-
-    // Session-bus publisher for this turn (records wait for the SDK's
-    // session id, which a resumed session already has).
-    const bus = new TurnPublisher(mode, opts.model ?? modelFor(mode), resumeId ?? null);
-    bus.user(parsed.text);
-
+/** The session a turn runs in: the named one if it's ours (or Claude
+ *  Code can resume it), else a fresh one. A mode mismatch is a fresh
+ *  session — a different system prompt. */
+async function sessionFor(m: IncomingMessage, mode: Mode, fresh: boolean): Promise<Session> {
+  const model = modelFor(mode, m.model);
+  const want = fresh ? undefined : (m.resume_session_id ?? m.session_id ?? undefined);
+  let s = want ? sessions.get(want) : undefined;
+  if (s && s.mode !== mode) {
+    publishReset(s.id, s.mode, `mode → ${mode}`);
+    s = undefined;
+  } else if (!s && want) {
+    // Not live here (sidecar restart): Claude Code keeps the session
+    // on disk — pick it up without replaying (the bus has the history).
     try {
-      for await (const event of query({ prompt: parsed.text, options: opts })) {
-        const e = event as Record<string, unknown>;
-        // First event of a turn is `system/init` with the session id;
-        // capture it so the next turn can `resume`.
-        if (e.type === "system" && e["subtype"] === "init") {
-          const sid = e["session_id"];
-          if (typeof sid === "string") sessionId = sid;
-        }
-        // Tap the event stream for the readable transcript before
-        // forwarding to the WS client unchanged.
-        transcript.ingest(e);
-        bus.ingest(e);
-        send(ws, event);
-        turnRecords.push(event);
-      }
-      if (turnAbort.signal.aborted) {
-        transcript.finish("error", "stopped by user");
-        bus.finish("stopped");
-        emit({ type: "ferrite_ai_stopped", reason: "user" });
-      } else {
-        transcript.finish("done");
-        bus.finish("done");
-        emit({ type: "ferrite_ai_done", mode });
-      }
-    } catch (err) {
-      if (turnAbort.signal.aborted) {
-        // The SDK surfaces aborts as thrown errors. Treat as a clean
-        // stop, not a fatal error.
-        transcript.finish("error", "stopped by user");
-        bus.finish("stopped");
-        emit({ type: "ferrite_ai_stopped", reason: "user" });
-      } else {
-        const msg = String(err);
-        transcript.finish("error", msg);
-        bus.finish("error", msg);
-        console.error("[ferrite-ai] turn failed:", err);
-        emit({
-          type: "ferrite_ai_error",
-          message: msg,
-        });
-      }
-    } finally {
-      if (activeAbort === turnAbort) activeAbort = null;
-      // Persist the turn under its session id. A turn that errored
-      // before `system/init` has no session to key by (nothing
-      // resumable anyway) — skip it.
-      recordSession(sessionId ?? "", turnRecords);
+      const spec = sessionSpec(mode, model, m);
+      const conn = await host.connection();
+      await conn.resumeSession({
+        sessionId: want,
+        cwd: spec.cwd,
+        mcpServers: spec.mcpServers,
+        _meta: { systemPrompt: spec.systemPrompt, claudeCode: { options: spec.options } },
+      });
+      host.listen(want, listenerFor(want));
+      await host.bypassPermissions(want);
+      s = track(want, mode, model);
+      console.log(`[ferrite-ai] resumed session ${want}`);
+    } catch (e) {
+      console.warn(`[ferrite-ai] could not resume ${want}: ${String(e)}; starting fresh`);
     }
-  });
+  }
+  if (s) {
+    if (s.model !== model) {
+      try {
+        const conn = await host.connection();
+        await conn.setSessionConfigOption({ sessionId: s.id, configId: "model", value: model });
+        s.model = model;
+        s.pub = new SessionPublisher(s.id, mode, model);
+      } catch (e) {
+        console.warn(`[ferrite-ai] model switch → ${model} refused: ${String(e)}`);
+      }
+    }
+    latest.set(mode, s.id);
+    return s;
+  }
+  let id = "";
+  id = await host.newSession(sessionSpec(mode, model, m), (u) => listenerFor(id)(u));
+  console.log(`[ferrite-ai] new session ${id} (mode=${mode} model=${model})`);
+  return track(id, mode, model);
+}
 
-  ws.on("close", () => {
-    console.log("[ferrite-ai] client disconnected");
-    // Cancel any in-flight turn so it doesn't hang forever on a
-    // disconnected client. The SDK won't have anywhere to send
-    // events anyway.
-    if (activeAbort) {
-      activeAbort.abort();
-      activeAbort = null;
+class BusyError extends Error {}
+
+/** Run one turn. Resolves once the session is known (`started`) and
+ *  again when the turn ends (`done`). */
+async function startTurn(
+  m: IncomingMessage,
+  opts: { fresh?: boolean } = {},
+): Promise<{ session: Session; done: Promise<TurnResult> }> {
+  const text = (m.text ?? "").trim();
+  const mode = (m.mode && MODES.includes(m.mode as Mode) ? m.mode : DEFAULT_MODE) as Mode;
+  const s = await sessionFor(m, mode, opts.fresh ?? false);
+  if (s.turn) throw new BusyError(`session ${s.id} is busy with a turn`);
+  s.reply = "";
+  logLine(`──── turn  mode=${mode} model=${s.model} session=${s.id.slice(0, 8)}`);
+  logLine(`USER:    ${oneLine(text)}`);
+  s.pub.user(text);
+  const blocks: acpTypes.ContentBlock[] = [
+    { type: "text", text: turnContext(m, s.seen) },
+    { type: "text", text },
+  ];
+  const done = (async (): Promise<TurnResult> => {
+    const base = { session_id: s.id, mode, model: s.model };
+    try {
+      const stop = await host.prompt(s.id, blocks);
+      const status = stop === "cancelled" ? "stopped" : "done";
+      s.pub.finish(status);
+      logLine(`──── ${status} (${stop})`);
+      return { ...base, status, stop_reason: stop, text: s.reply };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : JSON.stringify(e);
+      s.pub.finish("error", msg);
+      logLine(`ERROR:   ${msg}`);
+      console.error("[ferrite-ai] turn failed:", e);
+      return { ...base, status: "error", error: msg, text: s.reply };
+    } finally {
+      s.turn = null;
     }
-    sessionId = null;
-  });
-});
+  })();
+  s.turn = done;
+  return { session: s, done };
+}
+
+async function cancel(id: string | undefined): Promise<string[]> {
+  const ids = id ? [id] : [...sessions.values()].filter((s) => s.turn).map((s) => s.id);
+  const hit: string[] = [];
+  for (const sid of ids) {
+    if (!sessions.get(sid)?.turn) continue;
+    await host.cancel(sid).catch((e) => console.warn(`[ferrite-ai] cancel ${sid}: ${String(e)}`));
+    hit.push(sid);
+  }
+  return hit;
+}
+
+// ── WebSocket: the AI panel's control channel ──────────────────────────
+
+function hello() {
+  return {
+    type: "ferrite_ai_hello",
+    modes: MODES,
+    mode: DEFAULT_MODE,
+    // Per-mode default model (after env overrides) + the ids the UI
+    // picker offers.
+    models: Object.fromEntries(MODES.map((m) => [m, modelFor(m)])),
+    model_options: MODEL_OPTIONS,
+  };
+}
+
+function send(ws: WebSocket, payload: unknown): void {
+  if (ws.readyState !== ws.OPEN) return;
+  ws.send(JSON.stringify(payload));
+}
 
 function parseIncoming(raw: unknown): IncomingMessage {
   const text = String(raw).trim();
@@ -862,9 +644,7 @@ function parseIncoming(raw: unknown): IncomingMessage {
   if (text.startsWith("{")) {
     try {
       const parsed = JSON.parse(text);
-      if (typeof parsed === "object" && parsed !== null) {
-        return parsed as IncomingMessage;
-      }
+      if (typeof parsed === "object" && parsed !== null) return parsed as IncomingMessage;
     } catch {
       /* fall through to plain text */
     }
@@ -872,13 +652,150 @@ function parseIncoming(raw: unknown): IncomingMessage {
   return { text };
 }
 
-function send(ws: import("ws").WebSocket, payload: unknown): void {
-  if (ws.readyState !== ws.OPEN) return;
-  ws.send(JSON.stringify(payload));
+const httpServer = createServer((req, res) => {
+  void handleHttp(req, res);
+});
+const wss = new WebSocketServer({ server: httpServer, path: "/ws/chat" });
+
+wss.on("connection", (ws) => {
+  // The session this panel is bound to (its last turn's), for stop.
+  let bound: string | null = null;
+  console.log("[ferrite-ai] client connected");
+  send(ws, hello());
+
+  ws.on("message", async (raw) => {
+    const m = parseIncoming(raw);
+    if (!m.text) {
+      if (m.type === "stop") {
+        const hit = bound ? await cancel(bound) : [];
+        if (!hit.length) send(ws, { type: "ferrite_ai_stopped", reason: "idle" });
+        return;
+      }
+      // The panel names the session it thinks it's continuing. Claude
+      // Code keeps sessions on disk, so any id is resumable on the
+      // next turn — adopt it. (The transcript itself is on the bus.)
+      if (m.type === "request_snapshot") {
+        bound = m.session_id ?? bound;
+        if (bound) send(ws, { type: "conversation_snapshot", session_id: bound, events: [] });
+        else send(ws, { type: "session_reset", reason: "no prior session" });
+        return;
+      }
+      if (m.type === "reset_session") {
+        const mode = (m.mode && MODES.includes(m.mode as Mode) ? m.mode : DEFAULT_MODE) as Mode;
+        publishReset(bound, (bound && sessions.get(bound)?.mode) || mode, m.reason ?? "reset");
+        if (bound && latest.get(sessions.get(bound)?.mode ?? mode) === bound) {
+          latest.delete(sessions.get(bound)!.mode);
+        }
+        bound = null;
+        // The banner is on the session bus (every panel); the
+        // requesting tab must not add a local one too.
+        send(ws, { type: "session_reset", reason: m.reason ?? "reset", on_bus: true });
+        return;
+      }
+      send(ws, {
+        type: "ferrite_ai_error",
+        message: "expected JSON {text, mode?} or a control {type: stop|request_snapshot|reset_session}",
+      });
+      return;
+    }
+    try {
+      // A panel with no binding starts its own conversation.
+      const { session, done } = await startTurn(m, { fresh: !m.resume_session_id });
+      bound = session.id;
+      send(ws, { type: "system", subtype: "init", session_id: session.id });
+      const r = await done;
+      if (r.status === "stopped") send(ws, { type: "ferrite_ai_stopped", reason: "user" });
+      else if (r.status === "error") send(ws, { type: "ferrite_ai_error", message: r.error });
+      else send(ws, { type: "ferrite_ai_done", mode: r.mode });
+    } catch (e) {
+      send(ws, { type: "ferrite_ai_error", message: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  ws.on("close", () => {
+    // Turns run on without the panel: the bus carries them to every
+    // other panel, and this one picks the session back up on reconnect.
+    console.log("[ferrite-ai] client disconnected");
+  });
+});
+
+// ── REST ───────────────────────────────────────────────────────────────
+
+function reply(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+
+async function readJson(req: HttpRequest): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c as Buffer);
+  const raw = Buffer.concat(chunks).toString("utf-8").trim();
+  if (!raw) return {};
+  const v = JSON.parse(raw) as unknown;
+  if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error("body must be a JSON object");
+  return v as Record<string, unknown>;
+}
+
+async function handleHttp(req: HttpRequest, res: ServerResponse): Promise<void> {
+  const path = (req.url ?? "/").split("?")[0];
+  try {
+    if (req.method === "POST" && path === "/prompt") {
+      // {text, mode?, model?, session_id?, new_session?, wait?} — the
+      // turn runs exactly as a panel's does (same bus records), so it
+      // shows on every AI panel. Without `session_id` it continues the
+      // mode's latest session; `new_session` starts a fresh one.
+      const body = await readJson(req);
+      const m = body as IncomingMessage & { new_session?: boolean; wait?: boolean };
+      if (!(m.text ?? "").trim()) return reply(res, 400, { error: "text is required" });
+      const mode = (m.mode && MODES.includes(m.mode as Mode) ? m.mode : DEFAULT_MODE) as Mode;
+      const sid = m.session_id ?? (m.new_session ? undefined : latest.get(mode));
+      const { session, done } = await startTurn(
+        { ...m, mode, resume_session_id: sid },
+        { fresh: Boolean(m.new_session) || !sid },
+      );
+      if (m.wait) return reply(res, 200, await done);
+      return reply(res, 202, {
+        session_id: session.id,
+        mode: session.mode,
+        model: session.model,
+        status: "started",
+      });
+    }
+    if (req.method === "POST" && path === "/cancel") {
+      const body = await readJson(req);
+      const hit = await cancel(typeof body.session_id === "string" ? body.session_id : undefined);
+      return reply(res, 200, { cancelled: hit });
+    }
+    if (req.method === "GET" && path === "/sessions") {
+      return reply(res, 200, {
+        sessions: [...sessions.values()].map((s) => ({
+          session_id: s.id,
+          mode: s.mode,
+          model: s.model,
+          busy: Boolean(s.turn),
+          latest: latest.get(s.mode) === s.id,
+        })),
+      });
+    }
+    if (req.method === "GET" && (path === "/" || path === "/hello")) {
+      return reply(res, 200, { ...hello(), ws: "/ws/chat", rest: ["POST /prompt", "POST /cancel", "GET /sessions"] });
+    }
+    reply(res, 404, { error: `no route ${req.method} ${path}` });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    reply(res, e instanceof BusyError ? 409 : e instanceof SyntaxError ? 400 : 500, { error: msg });
+  }
 }
 
 httpServer.listen(PORT, () => {
   console.log(
-    `ferrite-ai listening on http://127.0.0.1:${PORT}/ws/chat (modes: ${MODES.join(", ")})`,
+    `ferrite-ai listening on http://127.0.0.1:${PORT} (ws /ws/chat, POST /prompt; modes: ${MODES.join(", ")})`,
   );
 });
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    host.stop();
+    process.exit(0);
+  });
+}

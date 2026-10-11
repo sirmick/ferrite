@@ -87,6 +87,26 @@ describe('buildTurns — the session-bus fold', () => {
     expect(bySession['B'].source).toBe('claude-code');
   });
 
+  it('folds thinking and keeps only the newest plan', () => {
+    const s = { session: 'A', source: 'ferrite-ai' };
+    const turns = buildTurns(
+      [
+        rec({ ...s, type: 'user', text: 'find CW' }),
+        rec({ ...s, type: 'thought', text: 'Snapshot first, then spectrum.' }),
+        rec({ ...s, type: 'plan', entries: [{ content: 'snapshot', status: 'in_progress' }] }),
+        rec({ ...s, type: 'tool_use', tool_id: 't1', name: 'snapshot', input: '{}' }),
+        rec({ ...s, type: 'plan', entries: [{ content: 'snapshot', status: 'completed' }] }),
+      ],
+      { A: { data: { session: 'A', kind: 'thought', text: 'Now the env' } } },
+      [],
+      null,
+    );
+    const a = turns[1] as AssistantTurn;
+    expect(a.chunks.map((c) => c.kind)).toEqual(['thought', 'tool', 'plan', 'thought']);
+    expect((a.chunks[2] as { entries: { status: string }[] }).entries[0].status).toBe('completed');
+    expect(a.chunks[3]).toEqual({ kind: 'thought', text: 'Now the env' });
+  });
+
   it('shows the live partial on the open turn only', () => {
     const turns = buildTurns(
       [rec({ session: 'A', type: 'user', text: 'q' })],

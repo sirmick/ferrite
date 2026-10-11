@@ -3,14 +3,15 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Claude Code sidecar for Ferrite SDR. Exposes /ws/chat to the UI; AI drives ferrite-ctl via Bash.",
+  "description": "Claude Code (over ACP) sidecar for Ferrite SDR: /ws/chat + REST /prompt; the AI drives the radio via the ferrite MCP server.",
   "scripts": {
     "dev": "node --import tsx/esm index.ts",
     "start": "node --import tsx/esm index.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.296",
+    "@agentclientprotocol/claude-agent-acp": "0.89.1",
+    "@agentclientprotocol/sdk": "1.8.0",
     "mqtt": "5.16.0",
     "ws": "^8.18.0"
   },

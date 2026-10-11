@@ -1,19 +1,25 @@
 # ferrite-ai
 
-WebSocket sidecar that exposes Claude Code (via
-`@anthropic-ai/claude-agent-sdk`) to the Ferrite UI. Each WS message
-from the browser becomes a chat turn; the AI uses the Bash tool to
-drive `ferrite-ctl`, captures FFT snapshots via `tools/fft_to_png.py`,
-and reads catalog references from `samples/sigidwiki/`.
+The in-app AI. Runs Claude Code through the ACP adapter
+([`claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp),
+Agent Client Protocol over stdio — see `acp.ts`), the way wash drives
+agents. ACP gives the full session stream: summarised thinking, reply
+text, tool calls with input and status, and plans. The AI drives the
+radio through the `ferrite` MCP server (`ferrite-ctl mcp`).
 
-The browser **does not connect here directly** — ferrited reverse-
-proxies `/ws/chat` to this sidecar so the operator only ever talks to
-one port. This process listens on localhost only; ferrited does the
-public-facing accept.
+The conversation is published to ferrited's event plane as the `ai`
+store kind (`bus.ts`): `user`, `thought`, `text`, `tool_use`,
+`tool_result`, `plan`, `turn_end` and `reset` records, plus the
+forming text/thought on `ai_live`. Every AI panel renders from there,
+so a turn started over REST or from another tab shows everywhere.
 
-**Auth**: the SDK uses your local Claude Code login (subscription
-billing — Pro / Max plans). Make sure `claude` is logged in before
-starting the sidecar — no `ANTHROPIC_API_KEY` needed.
+The browser **does not connect here directly**: ferrited proxies
+`/ws/chat` and `/api/ai/*` to this sidecar. This process listens on
+localhost only.
+
+**Auth**: your local Claude Code login (subscription billing — Pro /
+Max plans). Make sure `claude` is logged in before starting the
+sidecar — no `ANTHROPIC_API_KEY` needed.
 
 ## Run
 
@@ -23,35 +29,42 @@ npm install
 npm run dev
 ```
 
-Listens on `ws://127.0.0.1:10002/ws/chat`. Override with
-`FERRITE_AI_PORT=10005 npm run dev`; if you change the port, also set
-`FERRITE_AI_URL=ws://127.0.0.1:10005/ws/chat` on ferrited so its
-proxy points at the right place.
+Listens on `127.0.0.1:10002`. Override with `FERRITE_AI_PORT=10005`;
+if you change the port, also set `FERRITE_AI_URL=ws://127.0.0.1:10005/ws/chat`
+on ferrited so its proxies point at the right place.
 
-## WS protocol
+## REST
 
-Browser → server (one of):
-```json
-{"text": "what's at 100.5 MHz?", "mode": "explorer"}
-```
-or just plain text:
-```
-what's at 100.5 MHz?
-```
-or a control envelope to abort the in-flight turn:
-```json
-{"type": "stop"}
-```
+Through ferrited (`/api/ai/…`) or direct:
 
-Server → browser: forwards every Agent SDK event verbatim (text
-deltas, tool uses, tool results) plus a few `ferrite_ai_*`-typed
-envelope events:
-- `ferrite_ai_hello` — sent on connect with the available modes.
-- `ferrite_ai_done` — turn complete.
-- `ferrite_ai_stopped` — turn aborted; `reason` is `"user"` (a
-  `{type:"stop"}` arrived mid-turn) or `"idle"` (stop with nothing
-  running).
-- `ferrite_ai_error` — turn failed; `message` field has the cause.
+- `POST /prompt` `{"text", "mode"?, "model"?, "session_id"?, "new_session"?, "wait"?}`
+  — run a turn exactly as if typed into the AI panel. Without
+  `session_id` it continues the mode's latest session; `new_session`
+  starts a fresh one. Returns `202 {session_id, mode, model, status:"started"}`,
+  or with `wait` the finished turn `{…, status: done|stopped|error, stop_reason, text}`.
+  `409` if that session already has a turn running.
+- `POST /cancel` `{"session_id"?}` — stop a turn (all running turns without an id).
+- `GET /sessions` — live sessions (`busy`, `latest`).
+
+CLI: `ferrite-ctl ai-prompt "<text>" [--mode M] [--model ID] [--session ID | --new] [--wait]`.
+
+Sessions survive a sidecar restart: Claude Code keeps them on disk, and
+a turn naming an unknown id resumes it (`session/resume`, no replay —
+the history is already on the bus).
+
+## WS protocol (`/ws/chat`, the panel's control channel)
+
+Browser → sidecar: `{"text", "mode", "model"?, "resume_session_id"?, …per-turn context}`
+(current source, preset/block notes, local time, driver notes,
+`setup_description`), or a control envelope: `{"type":"stop"}`,
+`{"type":"request_snapshot","session_id"}`, `{"type":"reset_session","reason"}`.
+
+Sidecar → browser: `ferrite_ai_hello` (modes, per-mode default
+`models`, `model_options`) on connect; `{"type":"system","subtype":"init","session_id"}`
+when a turn starts (the panel keeps it to continue the session);
+`ferrite_ai_done` / `ferrite_ai_stopped` / `ferrite_ai_error` when it
+ends; `conversation_snapshot` / `session_reset` in reply to the
+controls. The conversation itself comes from the bus, not this socket.
 
 ## Modes
 
@@ -85,25 +98,30 @@ Per turn, the browser may send `{"text": …, "mode": …, "model": "<id>"}`;
 the picker may choose (`model_options`). Unknown ids are ignored, not
 forwarded.
 
-### Station notes
+### Context
 
-The browser sends the operator's `setup_description` (antenna ports,
-station facts) with every turn. When a turn carries none — a headless
-driver, or an empty field in the UI — the sidecar reads
-`$FERRITE_AI_STATE_DIR/setup.md` (override: `FERRITE_AI_SETUP_FILE`),
-re-read per turn so edits apply without a restart.
+A session's system prompt is fixed when it starts: the mode prompt,
+the SDR driver notes, and the operator's station notes. Station notes
+are the browser's `setup_description`; a turn without one (a headless
+driver or REST) gets `$FERRITE_AI_STATE_DIR/setup.md` (override:
+`FERRITE_AI_SETUP_FILE`). Each turn then leads with a
+`<turn-context>` block: live source state, the clock, and the preset
+and block notes whenever they changed.
+
+Thinking is on (`adaptive`, summarised); `FERRITE_AI_EFFORT` sets the
+effort level.
 
 ### Isolation
 
-The sidecar runs the Agent SDK in isolation mode: no `~/.claude` or
+Sessions run in isolation mode (passed through ACP's `_meta.claudeCode.options`): no `~/.claude` or
 project settings (`settingSources: []`), only the MCP servers declared
 in `index.ts` (`strictMcpConfig`), and the account's claude.ai cloud
 connectors disabled (`disableClaudeAiConnectors`). Without this the
 bundled CLI behaves like the operator's interactive `claude` and — under
 `bypassPermissions` — a "tools-free" chat session inherits things like
 Google Drive write/share/trash tools. `tools` (the built-in set) is the
-restriction; `allowedTools` only auto-approves.
-  Use this when burning a tool call would be overkill.
+restriction; `allowedTools` only auto-approves. Sessions run in
+`bypassPermissions`; any permission request is auto-allowed.
 
 ## Adding a new mode
 
