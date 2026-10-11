@@ -9,9 +9,20 @@
 #   ai-chat-mirror.sh tool    # PostToolUse:      {tool_name, tool_input, tool_response}
 #   ai-chat-mirror.sh stop    # Stop:             {transcript_path}
 #
+# Opt-in: it only runs with FERRITE_AI_MIRROR=1 in Claude Code's
+# environment (e.g. `"env": {"FERRITE_AI_MIRROR": "1"}` in
+# .claude/settings.local.json). Off by default, so ordinary coding
+# sessions in this repo don't write into the radio AI's transcript.
+#
+# Harness messages that arrive as "user prompts" (background-task
+# notifications, slash-command echoes) are not mirrored, and
+# <system-reminder> blocks are stripped from real ones.
+#
 # Best-effort glue: never fail a hook (always exit 0), and stay quiet
 # when ferrited / jq / the binary aren't around (e.g. CI).
 set -u
+
+[ "${FERRITE_AI_MIRROR:-0}" = 1 ] || exit 0
 
 # Resolve the binary relative to this script (the repo may live
 # anywhere) and dial the daemon on run.sh's default port. Both were
@@ -33,8 +44,16 @@ post() { "$CTL" --connect "$CONNECT" chat-post "$@" ${session:+--session "$sessi
 
 case "$EVENT" in
   user)
-    text="$(printf '%s' "$payload" | jq -r '.prompt // empty')"
-    [ -n "$text" ] && post user "$text"
+    # Drop <system-reminder> blocks; skip prompts that are only harness
+    # envelopes (<task-notification>, <local-command-…>, <command-…>).
+    text="$(printf '%s' "$payload" | jq -r '
+        (.prompt // "")
+        | gsub("(?s)<system-reminder>.*?</system-reminder>"; "")
+        | gsub("^\\s+|\\s+$"; "")')"
+    case "$text" in
+      ""|"<task-notification>"*|"<local-command-"*|"<command-name>"*|"<command-message>"*) exit 0 ;;
+    esac
+    post user "$text"
     ;;
   tool)
     name="$(printf '%s' "$payload" | jq -r '.tool_name // empty')"

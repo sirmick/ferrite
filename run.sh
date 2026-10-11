@@ -38,6 +38,9 @@ FERRITE_SHERPA_PORT="${FERRITE_SHERPA_PORT:-10003}"  # sherpa-onnx ASR sidecar (
 # vite proxies /api + /ws here; the sidecar's internal ferrite-ctl drives
 # the same daemon (without this it defaults to 10001 → wrong/dead daemon).
 FERRITED_URL="${FERRITED_URL:-http://127.0.0.1:${FERRITED_PORT}}"
+# One variable for every ferrite-ctl caller under this stack: the AI
+# sidecar, the MCP server it spawns, and anything you run from here.
+export FERRITE_CTL_CONNECT="${FERRITE_CTL_CONNECT:-$FERRITED_URL}"
 
 # Plain HTTP by default — localhost is a secure context, so AudioWorklet +
 # SharedArrayBuffer work without TLS. Set FERRITE_HTTPS=1 for LAN / mobile
@@ -75,7 +78,7 @@ prefix() {
 
 echo "[run] ferrited → http://0.0.0.0:${FERRITED_PORT}/   (REST + WS, plain HTTP on loopback)"
 echo "[run] mqtt     → tcp://0.0.0.0:$((FERRITED_PORT + 1))  ws://0.0.0.0:$((FERRITED_PORT + 2))  (event plane; browser uses /mqtt)"
-echo "[run] ai       → ws://0.0.0.0:${FERRITE_AI_PORT}/ws/chat  (Claude Code sidecar; ferrited reverse-proxies /ws/chat here)"
+echo "[run] ai       → http://127.0.0.1:${FERRITE_AI_PORT}/  (Claude Code sidecar; ferrited proxies /api/ai/* here)"
 echo "[run] vite     → ${UI_SCHEME}://0.0.0.0:${FERRITE_UI_PORT}/  (UI; proxies /api and /ws → ${FERRITED_URL})"
 echo "[run] open the vite URL in a browser; pick preset + source from the UI"
 [ "$FERRITE_HTTPS" = 1 ] && echo "[run] first visit will show a self-signed cert warning — bypass once per browser profile"
@@ -133,11 +136,10 @@ else
   echo "[run] sherpa-asr not provisioned — server-side transcription off (run tools/sherpa-asr/setup.sh)" >&2
 fi
 
-# ferrite-ai sidecar on FERRITE_AI_PORT (default 10002). ferrited's
-# /ws/chat handler reverse-proxies to this; the UI never connects
-# directly so single-port architecture holds end-to-end.
+# ferrite-ai sidecar on FERRITE_AI_PORT (default 10002). ferrited
+# proxies /api/ai/* to it; the UI never connects directly, so the
+# single-port architecture holds end-to-end.
 ( cd tools/ferrite-ai && FERRITE_AI_PORT="$FERRITE_AI_PORT" \
-    FERRITE_CTL_CONNECT="$FERRITED_URL" \
     FERRITE_AI_STATE_DIR="$FERRITE_AI_STATE_DIR" npm start --silent ) \
     > >(prefix '[ai      ]') 2> >(prefix '[ai      ]' >&2) &
 AI_PID=$!
