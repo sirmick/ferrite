@@ -252,6 +252,27 @@ enum Cmd {
         #[arg(long, default_value_t = 10.0)]
         window: f64,
     },
+    /// Where the FT8 / FT4 / WSPR stations heard are: distance + bearing
+    /// table (and a map card in the AI tab).
+    SpotMap {
+        /// `ft8`, `ft4` or `wspr`.
+        #[arg(long, default_value = "ft8")]
+        kind: String,
+        /// Look back this many minutes.
+        #[arg(long, default_value_t = 30.0)]
+        minutes: f64,
+        /// Receive grid (default: the daemon's FERRITE_RX_GRID).
+        #[arg(long)]
+        rx_grid: Option<String>,
+    },
+    /// Save a preset's sigidwiki reference waterfall to a file; print
+    /// its refs.
+    ReferenceImage {
+        preset: String,
+        /// Output path (default /tmp/ferrite-ref-<preset>.<ext>).
+        #[arg(long)]
+        out: Option<String>,
+    },
     /// Capture a slice of signal to disk (IQ / audio / FFT). Blocks
     /// until the async job finishes, then prints the job record.
     #[command(subcommand)]
@@ -918,6 +939,38 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 .await
                 .map_err(op_err)?;
             print_text_or_json(&v, json)
+        }
+        Cmd::SpotMap {
+            kind,
+            minutes,
+            rx_grid,
+        } => {
+            let v = server
+                .spot_map_op(mcp::SpotMapArgs {
+                    kind: Some(kind),
+                    minutes: Some(minutes),
+                    rx_grid,
+                })
+                .await
+                .map_err(op_err)?;
+            print_text_or_json(&v, json)
+        }
+        Cmd::ReferenceImage { preset, out } => {
+            let (mut info, bytes, mime) = server
+                .reference_image_op(mcp::ReferenceImageArgs {
+                    preset: preset.clone(),
+                })
+                .await
+                .map_err(op_err)?;
+            let ext = mime
+                .rsplit('/')
+                .next()
+                .unwrap_or("img")
+                .replace("jpeg", "jpg");
+            let path = out.unwrap_or_else(|| format!("/tmp/ferrite-ref-{preset}.{ext}"));
+            std::fs::write(&path, &bytes)?;
+            info["path"] = Value::String(path);
+            emit(&info, json)
         }
         Cmd::Signals { max_age_ms } => {
             let v = server

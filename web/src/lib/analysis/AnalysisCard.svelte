@@ -5,6 +5,9 @@
   // character rendering the agent sees) is one toggle away.
   import type { AnalysisRecord, Peak } from './types';
   import { decodeCells, heat } from './types';
+  // NASA Blue Marble, equirectangular (public domain) — the spot map's
+  // basemap; x = lon + 180, y = 90 − lat in its 360 × 180 frame.
+  import worldMap from '../../../../tools/assets/bluemarble_2048.jpg';
 
   let { rec, t }: { rec: AnalysisRecord; t: number } = $props();
   let showText = $state(false);
@@ -14,6 +17,10 @@
   const title = $derived.by(() => {
     const p = rec.params ?? {};
     if (rec.tool === 'envelope') return `envelope @ ${mhz(p.freq_hz ?? 0)} MHz`;
+    if (rec.tool === 'spot_map') {
+      const n = rec.result?.spots?.length ?? 0;
+      return `${(rec.params as Record<string, unknown> | undefined)?.kind ?? 'ft8'} map · ${n} station${n === 1 ? '' : 's'}`;
+    }
     return `${rec.tool} ${mhz(p.lo_hz ?? 0)}–${mhz(p.hi_hz ?? 0)} MHz`;
   });
 
@@ -95,6 +102,23 @@
       segs: rec.result?.segments ?? [],
     };
   });
+  // ── spot map ──────────────────────────────────────────────────────
+  interface Spot {
+    call: string;
+    grid: string;
+    lat: number;
+    lon: number;
+    km?: number;
+    bearing?: number;
+    snr?: number;
+  }
+  const map = $derived.by(() => {
+    if (rec.tool !== 'spot_map') return null;
+    const spots: Spot[] = rec.result?.spots ?? [];
+    const rx: { lat: number; lon: number; grid?: string } | null = rec.result?.rx ?? null;
+    return { spots, rx };
+  });
+
   const startUtc = $derived(
     rec.snapshot?.start_ms ? new Date(rec.snapshot.start_ms).toISOString().slice(11, 19) : '',
   );
@@ -117,7 +141,7 @@
     </span>
   </div>
 
-  {#if showText || (!spec && !env && !(rec.tool === 'spectrogram' && rec.cells_b64))}
+  {#if showText || (!spec && !env && !map && !(rec.tool === 'spectrogram' && rec.cells_b64))}
     <pre class="overflow-x-auto text-[9px] leading-[10px] text-slate-300">{rec.text ?? ''}</pre>
   {:else if spec}
     <svg viewBox="0 0 {W} {H}" class="h-24 w-full" preserveAspectRatio="none">
@@ -164,6 +188,82 @@
         )}</span
       >
     </div>
+  {:else if map}
+    <svg viewBox="0 0 360 180" class="w-full rounded" preserveAspectRatio="xMidYMid meet">
+      <image href={worldMap} x="0" y="0" width="360" height="180" preserveAspectRatio="none" />
+      <clipPath id="map-frame-{rec.id}"><rect x="0" y="0" width="360" height="180" /></clipPath>
+      {#if map.rx}
+        <g clip-path="url(#map-frame-{rec.id})">
+          {#each map.spots as s (s.call)}
+            <!-- The short way round: past ±180° the path leaves one edge
+               and re-enters the other (the svg clips the overhang). -->
+            {@const x1 = map.rx.lon + 180}
+            {@const x2 = s.lon + 180}
+            {@const wrap = x2 - x1 > 180 ? -360 : x1 - x2 > 180 ? 360 : 0}
+            {#each wrap ? [0, 1] : [0] as k (k)}
+              <line
+                x1={k ? x1 - wrap : x1}
+                y1={90 - map.rx.lat}
+                x2={k ? x2 : x2 + wrap}
+                y2={90 - s.lat}
+                stroke="#fbbf24"
+                stroke-opacity="0.7"
+                stroke-width="0.7"
+              />
+            {/each}
+          {/each}
+        </g>
+      {/if}
+      {#each map.spots as s (s.call)}
+        <circle
+          cx={s.lon + 180}
+          cy={90 - s.lat}
+          r="3"
+          fill="#fbbf24"
+          stroke="#000"
+          stroke-width="0.6"
+        >
+          <title
+            >{s.call}
+            {s.grid}{s.km ? ` · ${s.km.toFixed(0)} km` : ''}{s.snr != null
+              ? ` · ${s.snr} dB`
+              : ''}</title
+          >
+        </circle>
+      {/each}
+      {#if map.rx}
+        <circle
+          cx={map.rx.lon + 180}
+          cy={90 - map.rx.lat}
+          r="3.6"
+          fill="#38bdf8"
+          stroke="#fff"
+          stroke-width="0.8"
+        />
+      {/if}
+    </svg>
+    {#if map.spots.length}
+      <table class="mt-1 w-full text-[10px]">
+        <thead class="text-[color:var(--color-muted)]">
+          <tr><th class="text-left">call</th><th>grid</th><th>km</th><th>°</th><th>SNR</th></tr>
+        </thead>
+        <tbody>
+          {#each map.spots.slice(0, 8) as s (s.call)}
+            <tr>
+              <td class="font-mono text-slate-200">{s.call}</td>
+              <td class="text-center font-mono">{s.grid}</td>
+              <td class="text-center">{s.km != null ? s.km.toFixed(0) : ''}</td>
+              <td class="text-center">{s.bearing != null ? s.bearing.toFixed(0) : ''}</td>
+              <td class="text-center">{s.snr != null ? s.snr : ''}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {:else}
+      <div class="text-[10px] text-[color:var(--color-muted)]">
+        no stations with a grid in the window
+      </div>
+    {/if}
   {:else if env}
     <svg viewBox="0 0 {W} {H}" class="h-20 w-full" preserveAspectRatio="none">
       {#each env.bars as v, i (i)}

@@ -11,7 +11,7 @@ Pull from general SDR / DSP / amateur-radio knowledge. When the
 question is Ferrite-specific (e.g. "why does packet.json tee through
 the channelizer twice?") and you don't know the answer, **say so**
 and suggest the user switch to **explorer** or **diagnose** mode so
-the AI can actually read the file.
+the AI can inspect the running preset with its tools.
 
 ## Style
 

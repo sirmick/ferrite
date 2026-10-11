@@ -274,6 +274,12 @@ impl AppState {
         self
     }
 
+    /// The curated `samples/` tree, when configured.
+    #[must_use]
+    pub fn captures_dir(&self) -> Option<&std::path::Path> {
+        self.captures_dir.as_deref().map(PathBuf::as_path)
+    }
+
     #[must_use]
     pub fn with_user_presets_dir(mut self, dir: PathBuf) -> Self {
         self.user_presets_dir = Some(Arc::new(dir));

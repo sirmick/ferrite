@@ -90,6 +90,33 @@ impl Http {
         api_response(resp, &format!("GET {path}")).await
     }
 
+    /// Read a binary body (an image): bytes + content type.
+    async fn get_bytes(&self, path: &str) -> Result<(Vec<u8>, String), McpError> {
+        let ctx = format!("GET {path}");
+        let resp = self
+            .client
+            .get(format!("{}{}", self.base, path))
+            .send()
+            .await
+            .map_err(|e| http_err(&ctx, e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(http_err(&ctx, format!("{status}: {body}")));
+        }
+        let mime = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| http_err(&ctx, format!("read body: {e}")))?;
+        Ok((bytes.to_vec(), mime))
+    }
+
     /// Mutating POST, tagged with `cmd` (the verb kebab-id) + an
     /// optional per-call note so the daemon surfaces it under
     /// `ai::activity`.
@@ -404,6 +431,19 @@ fn ok_json(value: &Value) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![Content::text(s)]))
 }
 
+/// [`ok_json`] plus an inline image — the agent sees the picture, and
+/// the operator sees it on the tool's card in the AI tab.
+fn ok_json_image(value: &Value, bytes: &[u8], mime: &str) -> Result<CallToolResult, McpError> {
+    use base64::Engine as _;
+    let s = serde_json::to_string(value)
+        .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(CallToolResult::success(vec![
+        Content::text(s),
+        Content::image(data, mime.to_string()),
+    ]))
+}
+
 /// The store's single-current slot key for `Replace`/`Merge` kinds —
 /// matches `decoder_store::REPLACE_KEY` server-side.
 const STORE_REPLACE_KEY: &str = "current";
@@ -541,6 +581,46 @@ pub struct TranscribeArgs {
     /// Optional "why" note surfaced in the UI's activity transcript.
     #[serde(default)]
     pub note: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct ReferenceImageArgs {
+    /// Preset name (`cw`, `ft8`, `pager`, … — see `list_presets`).
+    pub preset: String,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SpotMapArgs {
+    /// `ft8` (default), `ft4` or `wspr`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// How far back, minutes (default 30).
+    #[serde(default)]
+    pub minutes: Option<f64>,
+    /// The receive station's Maidenhead grid (default: the daemon's
+    /// `FERRITE_RX_GRID`). Gives distances + bearings.
+    #[serde(default)]
+    pub rx_grid: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct LogsArgs {
+    /// Tracing-target prefix (default `decoder`; `ferrited` for the
+    /// daemon itself, `decoder::ft8`, `driver`, …; `""` for everything).
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Only entries after this unix-ms watermark (pass back `now`).
+    #[serde(default)]
+    pub since_ms: Option<u64>,
+    /// Only the last N seconds.
+    #[serde(default)]
+    pub lookback_secs: Option<f64>,
+    /// Keep the newest N (after the level filter).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Lowest level to keep: `ERROR`, `WARN`, `INFO` (default: all).
+    #[serde(default)]
+    pub min_level: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -1633,25 +1713,7 @@ impl FerriteServer {
                 None,
             ));
         }
-        // The server returns raw image/png bytes, so go through the bare
-        // client rather than the JSON-parsing `Http::get`.
-        let url = format!("{}/api/ui-views/{}", self.http.base, args.pane);
-        let resp = self
-            .http
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_err(&format!("GET {url}"), e.to_string()))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(http_err(&format!("GET {url}"), format!("{status}: {body}")));
-        }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| http_err(&format!("GET {url}"), format!("read body: {e}")))?;
+        let (bytes, _) = self.view_png(&args.pane).await?;
         let dir = std::path::PathBuf::from("/tmp/ferrite-views");
         std::fs::create_dir_all(&dir)
             .map_err(|e| http_err("mkdir /tmp/ferrite-views", e.to_string()))?;
@@ -1663,6 +1725,45 @@ impl FerriteServer {
             "bytes": bytes.len(),
             "pane": args.pane,
         }))
+    }
+
+    /// One UI canvas as PNG bytes (`GET /api/ui-views/<pane>`).
+    async fn view_png(&self, pane: &str) -> Result<(Vec<u8>, String), McpError> {
+        self.http.get_bytes(&format!("/api/ui-views/{pane}")).await
+    }
+
+    /// `GET /api/presets/<name>` refs + the reference image bytes.
+    pub(crate) async fn reference_image_op(
+        &self,
+        args: ReferenceImageArgs,
+    ) -> Result<(Value, Vec<u8>, String), McpError> {
+        let doc = self
+            .http
+            .get(&format!("/api/presets/{}", args.preset))
+            .await?;
+        let (bytes, mime) = self
+            .http
+            .get_bytes(&format!("/api/presets/{}/reference-image", args.preset))
+            .await?;
+        let info = json!({
+            "preset": args.preset,
+            "label": doc.get("label"),
+            "signal_wiki_url": doc.get("signal_wiki_url"),
+            "image": doc.get("signal_wiki_image"),
+            "bytes": bytes.len(),
+        });
+        Ok((info, bytes, mime))
+    }
+
+    pub(crate) async fn spot_map_op(&self, args: SpotMapArgs) -> Result<Value, McpError> {
+        self.http
+            .post(
+                "/api/analysis/spot_map",
+                json!({ "kind": args.kind, "minutes": args.minutes, "rx_grid": args.rx_grid }),
+                "spot-map",
+                None,
+            )
+            .await
     }
 
     pub(crate) async fn view_state_op(&self) -> Result<Value, McpError> {
@@ -2106,13 +2207,72 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Snapshot one of the four spectrum/waterfall canvases the browser is currently rendering. Writes the PNG to `/tmp/ferrite-views/<pane>-<unix_ms>.png` and returns the path + byte count — band-plan overlay, VFO marker, contrast, pause state, and zoom are all baked in (no re-render from raw FFT). Read the returned path with the `Read` tool to see the image. Requires a UI tab connected to /ws/ui-views; 503 when none. Note: `wide-*` panes are only rendered while `main_pane=wide`; `channel-*` panes only when the active preset has a Channelizer AND `channel_detail_visible=true`. Check via `view_state` if a snapshot returns 404 (canvas not mounted)."
+        description = "Snapshot one of the four spectrum/waterfall canvases the browser is currently rendering and return it as an image (you see it; so does the operator, on this tool's card) — band-plan overlay, VFO marker, contrast, pause state, and zoom are all baked in (no re-render from raw FFT). Also saved under `/tmp/ferrite-views/`. Requires a UI tab connected to /ws/ui-views; 503 when none. Note: `wide-*` panes are only rendered while `main_pane=wide`; `channel-*` panes only when the active preset has a Channelizer AND `channel_detail_visible=true`. Check via `view_state` if a snapshot returns 404 (canvas not mounted)."
     )]
     async fn view_snapshot(
         &self,
         Parameters(args): Parameters<ViewSnapshotArgs>,
     ) -> Result<CallToolResult, McpError> {
-        ok_json(&self.view_snapshot_op(args).await?)
+        let pane = args.pane.clone();
+        let info = self.view_snapshot_op(args).await?;
+        let (bytes, mime) = self.view_png(&pane).await?;
+        ok_json_image(&info, &bytes, &mime)
+    }
+
+    #[tool(
+        description = "The daemon's recent log lines for a tracing-target prefix (default `decoder`; e.g. `decoder::ft8`, `decoder::cw`, `ferrited` for the daemon itself) — raw decoder output and diagnostics, oldest first: `{entries:[{at_ms, target, level, message}], now}`. The ring holds the last 4096 lines (the signal list logs several a second, so it reaches back minutes, not hours). `lookback_secs` for a recent window, `since_ms` (pass back `now`) for exactly what's new, `limit` for the last N, `min_level: \"WARN\"` for just the trouble. Structured decodes are better read with `decodes` / `await_events`; this is for what the daemon *said* — errors, warnings, raw decoder text."
+    )]
+    async fn logs(
+        &self,
+        Parameters(args): Parameters<LogsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let rank = |l: &str| match l.to_ascii_uppercase().as_str() {
+            "ERROR" => 0,
+            "WARN" => 1,
+            "INFO" => 2,
+            "DEBUG" => 3,
+            _ => 4,
+        };
+        let floor = args.min_level.as_deref().map(rank);
+        let mut v = self
+            .recent_decodes_op(RecentDecodesArgs {
+                category: args.category,
+                since_ms: args.since_ms,
+                lookback_secs: args.lookback_secs,
+                // The level filter runs here, so cap after it.
+                limit: if floor.is_some() { None } else { args.limit },
+            })
+            .await?;
+        if let (Some(floor), Some(entries)) =
+            (floor, v.get_mut("entries").and_then(Value::as_array_mut))
+        {
+            entries.retain(|e| rank(e.get("level").and_then(Value::as_str).unwrap_or("")) <= floor);
+            if let Some(n) = args.limit.filter(|n| *n > 0 && entries.len() > *n) {
+                entries.drain(..entries.len() - n);
+            }
+        }
+        ok_json(&v)
+    }
+
+    #[tool(
+        description = "A preset's reference picture — the sigidwiki waterfall of the signal it decodes (CW dashes, FT8 tone blocks, POCSAG bursts, RTTY's two tones…) — returned as an image (you see it; the operator sees it on this tool's card), with the sigidwiki page URL. Compare against `spectrogram` / `view_snapshot` to identify a signal by eye. Presets without one: 404."
+    )]
+    async fn reference_image(
+        &self,
+        Parameters(args): Parameters<ReferenceImageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let (info, bytes, mime) = self.reference_image_op(args).await?;
+        ok_json_image(&info, &bytes, &mime)
+    }
+
+    #[tool(
+        description = "Where the stations an FT8 / FT4 / WSPR decoder heard are: one spot per callsign over the last `minutes` (default 30) — grid → lat/lon, distance (km) and bearing from the receive grid (`rx_grid`, default the daemon's `FERRITE_RX_GRID`), latest SNR, decode count; farthest first. The operator sees it drawn as a world map in the AI tab; you get `result.spots` and a `text` table. Needs decodes with grids — run the `ft8` / `wspr` preset for a few slots first."
+    )]
+    async fn spot_map(
+        &self,
+        Parameters(args): Parameters<SpotMapArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.spot_map_op(args).await?)
     }
 
     #[tool(
@@ -2133,7 +2293,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Start an async FFT-byte-stream capture against the post-`logmag` u8 spectrum (block `logmag`). Non-disruptive — the UI's waterfall keeps painting while the byte stream side-tees to `output_path`. **Returns immediately** with a `job_id`; wait for it with `await_events(kind=\"jobs/<job_id>\", include_retained=true, filter={\"status\":[\"done\",\"failed\",\"interrupted\"]})` — the record carries `output_path` and the sidecar. Same live args / defaults as `start_capture_iq` (no wideband) but writes raw `u8` frame bytes (`bin`) plus a sidecar JSON the AI's `find_fft_peaks` / `fft_to_png` python wrappers consume."
+        description = "Start an async FFT-byte-stream capture against the post-`logmag` u8 spectrum (block `logmag`). Non-disruptive — the UI's waterfall keeps painting while the byte stream side-tees to `output_path`. **Returns immediately** with a `job_id`; wait for it with `await_events(kind=\"jobs/<job_id>\", include_retained=true, filter={\"status\":[\"done\",\"failed\",\"interrupted\"]})` — the record carries `output_path` and the sidecar. Same live args / defaults as `start_capture_iq` (no wideband) but writes raw `u8` frame bytes (`bin`) plus a sidecar JSON — a recording for offline tools, not something to read here: to *look* at the spectrum use `snapshot` + `spectrum` / `spectrogram` (drawn in the AI tab) or `view_snapshot`."
     )]
     async fn start_capture_fft(
         &self,
@@ -2163,32 +2323,57 @@ impl FerriteServer {
     }
 }
 
+/// What a client learns on connect (`initialize.instructions`): what
+/// Ferrite is, how to work it, and every tool by purpose. A test keeps
+/// it naming every registered tool.
+const INSTRUCTIONS: &str = r#"Ferrite is a software-defined radio: a running `ferrited` daemon drives a real SDR (or a recorded/test source) through a preset flowgraph of DSP blocks — source → channelizer → demod → decoders → audio/UI. These tools are its whole control and measurement surface; they wrap ferrited's REST API, act on the live session the operator is watching, and show up in the operator's AI tab (activity lines, analysis cards, images on tool cards). Nothing here needs a shell.
+
+Orient
+- `status` — first call: pipeline state + `ready`, source (driver/freq/rate/gain/antenna), active preset, `health` (radio liveness, rate/LO mismatches, decoder warnings).
+- `view_state` — what the operator is looking at; `view_snapshot` — a picture of a spectrum/waterfall canvas as they see it; `set_view_state` — put them on the right pane.
+- `band_at` — which allocation (ham sub-band, broadcast, aviation, …) a frequency is in.
+
+Set up the radio
+- `list_devices` → `select_device`; `source_capabilities` (antennas, gain ladder, driver settings); `source_readback` (what the hardware actually applied); `reload_drivers` (recover a wedged SoapySDR).
+- `list_presets` / `preset_detail` (ai_notes, block graph, canonical frequencies) → `load_preset`; `start` / `stop`.
+- `tune` — move the listen frequency (dodge-aware; `carrier_hz` lands a CW/digital carrier on the decoder's tone; also gain/bw/rate).
+- `set_block_param` — any live block parameter (`src` gain/antenna/AGC/settings, demod, filters, decoders).
+
+Find and measure signals — every result is drawn in the AI tab
+- `signals` — coarse strongest-signal watchlist over the whole span (live, ~146 Hz bins).
+- `snapshot` — record a few seconds of live IQ, kept by id, so several measurements look at the same moment.
+- `spectrum` — Hz-accurate peaks over a ≤400 kHz range: level over the floor, width, duty, `keyed`.
+- `spectrogram` — time × frequency of a range: read the mode off its shape (CW dashes, RTTY's two tones, FT8 tone blocks, PSK31's thin line).
+- `envelope` — on/off timeline at one frequency: Morse elements, beacon slots, bursts.
+- `reference_image` — a preset's sigidwiki reference waterfall, to compare by eye.
+
+Decode
+- `decodes` — structured decoder output by kind (ft8, wspr, aprs, adsb, ais, pager, cw, fldigi, rds, transcribe, …); `reset_decodes` after retuning.
+- `await_events` — block until the next record of a kind lands (event plane; no polling or sleeping); also `jobs/<id>` for captures.
+- `spot_map` — where FT8/FT4/WSPR stations heard are: map card + distance/bearing table.
+- `transcribe` — speech-to-text on a voice preset.
+- `logs` — the daemon's recent log lines (raw decoder text, warnings, errors) by target.
+
+Change the graph
+- `list_blocks` (the running blocks, specs, live values) / `list_block_types` (every block type) / `get_flowgraph` → `swap_block` (replace one block in place) or `set_flowgraph` (any edit); `save_preset` keeps the result as a user preset.
+- `flowdiag` — per-block throughput and ring fill: are samples actually moving?
+
+Record and replay
+- `start_capture_iq` / `start_capture_fft` / `start_capture_audio` — live-tee recordings; wait with `await_events(kind="jobs/<job_id>")`.
+- `list_captures` → `replay_capture` — run the full chain on a recorded fixture (deterministic; no SDR).
+
+Conversation
+- `chat_post` — mirror a headless agent's turn into the operator's AI panel.
+
+Habits: `status` before acting; `snapshot` once, then measure it several ways; tune with `carrier_hz` from a `spectrum` peak; confirm hardware changes with `source_readback`; wait with `await_events`, never sleep. Source: tools/ferrite-ctl/src/mcp.rs; REST in docs/02-protocol.md."#;
+
 #[tool_handler]
 impl ServerHandler for FerriteServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2025_03_26)
-            .with_instructions(
-                "Ferrite SDR control via MCP. Tools wrap the running ferrited's REST API: \
-             `status` first (cheap snapshot with `ready`), `list_devices` / `list_presets` for \
-             inventory, `source_capabilities` / `list_blocks` to introspect the bound SDR + \
-             active pipeline, `select_device` + `load_preset` to set up, `start`/`stop` for \
-             lifecycle, `tune` for the dodge-aware listen-frequency change (now also folds in \
-             gain/bw/rate), `set_block_param` for everything else, `flowdiag` + \
-             `source_readback` to confirm samples are flowing and a gain/AGC change landed, \
-             `decodes` to read structured decoder state and `await_events` to block until the \
-             next record of a kind lands (the event plane — no polling; `filter` narrows to \
-             matching records), `status().health` for whether you're getting what you asked \
-             for (radio liveness, rate/LO mismatches, decoder warnings), \
-             `start_capture_{iq,fft,audio}` + `await_events(kind=\"jobs/<id>\")` for \
-             recordings, `list_captures` + `replay_capture` to drive the \
-             full RX chain from a recorded fixture (deterministic testing, no SDR), \
-             `view_snapshot` / `view_state` / `set_view_state` to see and steer what the \
-             operator is looking at. Source: tools/ferrite-ctl/src/mcp.rs; behaviour matches \
-             the REST endpoints in docs/02-protocol.md."
-                    .to_string(),
-            )
+            .with_instructions(INSTRUCTIONS.to_string())
     }
 }
 
@@ -2212,4 +2397,48 @@ pub async fn serve(http: Http) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("mcp serve: {e}"))?;
     service.waiting().await.ok();
     Ok(())
+}
+
+#[cfg(test)]
+mod instructions_tests {
+    use super::*;
+
+    /// The connect-time overview names every tool, so a new tool can't
+    /// ship undiscoverable.
+    #[test]
+    fn instructions_name_every_tool() {
+        let server =
+            FerriteServer::from_http(Http::new(Client::new(), "http://127.0.0.1:1".into(), None));
+        let missing: Vec<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .filter(|n| !INSTRUCTIONS.contains(&format!("`{n}`")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "tools missing from INSTRUCTIONS: {missing:?}"
+        );
+    }
+
+    /// The agent has no shell: no tool may tell it to use one.
+    #[test]
+    fn no_tool_points_at_a_shell() {
+        let server =
+            FerriteServer::from_http(Http::new(Client::new(), "http://127.0.0.1:1".into(), None));
+        for t in server.tool_router.list_all() {
+            let d = t.description.as_deref().unwrap_or_default();
+            for bad in [
+                "`Read`",
+                "Read tool",
+                "Bash",
+                "python",
+                "fft_to_png",
+                "fft_peaks",
+            ] {
+                assert!(!d.contains(bad), "tool {} mentions {bad}", t.name);
+            }
+        }
+    }
 }

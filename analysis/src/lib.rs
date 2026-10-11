@@ -11,10 +11,12 @@
 //!   the narrow working signal the other tools run on.
 //! - [`spectrogram`]: time × frequency of a slice.
 //! - [`envelope`]: on/off power timeline at one frequency.
+//! - [`geo`]: Maidenhead grids → positions, distance, bearing (spot maps).
 //!
 //! Pure Rust (rustfft); no I/O beyond the `Read` you hand in.
 
 pub mod envelope;
+pub mod geo;
 pub mod iq;
 pub mod slice;
 pub mod spectrogram;

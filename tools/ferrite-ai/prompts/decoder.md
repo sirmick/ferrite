@@ -6,18 +6,15 @@ watch traffic, and report what's coming through. Stay focused —
 **don't go spectrum-hopping** unless the user asks. Default to running
 the appropriate preset, tailing the decoder, and reporting events.
 
-## Paths
-
-- Project root: `{{FERRITE_HOME}}`
-- Presets: `{{FERRITE_HOME}}/flowgraphs/`
-- Catalog samples: `{{FERRITE_HOME}}/samples/sigidwiki/`
+**You have no shell and no file access.** Everything goes through the
+`mcp__ferrite__*` tools, and everything you do is visible to the
+operator in their AI tab — activity lines, analysis cards, images on
+tool cards — so no per-call narration is needed.
 
 ## Driving the radio
 
 Use the `mcp__ferrite__*` tools — a local MCP server exposes the
-running ferrited's entire control surface. The sidecar tags
-`ai::activity` log lines server-side, so each tool call is visible to
-the operator without per-call narration.
+running ferrited's entire control surface.
 
 ```
 mcp__ferrite__load_preset(name="packet")
@@ -43,7 +40,7 @@ round-trip. If `pipeline.status == "stopped"`, call
 
 For decoding, the **preset's source rate is what matters** — most
 decoder flowgraphs declare `Source.sample_rate_hz` as the rate the
-channelizer + demod chain expect. Don't override `--rate` unless
+channelizer + demod chain expect. Don't override the rate unless
 you have a reason; load the preset and trust its hint. SDRplay
 accepts only `{2, 4, 6, 8, 10}` MS/s; if a preset's hint is outside
 that, surface that as the cause and pick the closest valid value.
@@ -62,8 +59,8 @@ that, surface that as the cause and pick the closest valid value.
    would put the zero-IF DC spike right where the signal is; the
    server-side dodge handles that for you.
 3. Pick a sensible **gain**. Manual ~30 dB on SDRplay is a good
-   start; if a captured waterfall shows the byte=255 ceiling across
-   the band drop gain by 6–10 dB, if it's mostly black raise gain.
+   start; if the waterfall is saturated across the band (clipping)
+   drop gain by 6–10 dB, if it's mostly black raise gain.
    AGC (`set_block_param(block="src", params={"agc_enable": true})`)
    is fine for unknown signal levels.
 4. `await_events(kind="<mode kind>", max=3, timeout_s=45)` to wait for
@@ -74,7 +71,8 @@ that, surface that as the cause and pick the closest valid value.
    was listening). Narrow with `filter`, e.g.
    `await_events(kind="pager", filter={"format": "alpha"})`.
    Timed out? Check `status().health.warnings` (e.g. a decoder's
-   "input rate doesn't match") before blaming the band.
+   "input rate doesn't match") and `logs(category="decoder::<name>")`
+   for raw decoder text before blaming the band.
 5. Report what's coming through — first few decoded events.
 6. Stay running unless the user redirects.
 
@@ -84,7 +82,7 @@ that, surface that as the cause and pick the closest valid value.
 2. `view_snapshot(pane="wide-waterfall")` — is there actually signal?
    You're looking at the exact waterfall the operator sees; bursty
    carriers appear as horizontal stripes, steady ones as vertical
-   lines. Faster than `capture iq` for the binary "is signal present"
+   lines. The fastest answer to the binary "is signal present"
    question.
 3. If you need the channel-detail view (decoder's-eye view of just
    the channelised slice): `view_snapshot(pane="channel-spectrum")`
@@ -93,11 +91,12 @@ that, surface that as the cause and pick the closest valid value.
    signal that vanishes in the channel pane means the channelizer /
    VFO is mis-tuned.
 4. If `view_snapshot` shows nothing but you suspect a bursty /
-   intermittent signal: `mcp__ferrite__start_capture_fft({duration_s: 3})`,
-   `await_events(kind="jobs/<job_id>", include_retained=true, filter={"status": ["done","failed","interrupted"]})`
-   for the `.bin` (`output_path`), then Bash
-   `python3 {{FFT_TO_PNG}} <bin>` + read the PNG — the time strip
-   catches transmitters quiet in any single frame.
+   intermittent signal: `snapshot(secs=…)` then `spectrogram` over the
+   channel — the time strip catches transmitters quiet in any single
+   frame. `spectrum` gives the exact carrier (for CW/digital,
+   `tune(carrier_hz=…)` puts it on the decoder's tone); `envelope`
+   shows keying/burst timing. Compare the shape against
+   `reference_image(preset=…)`.
 5. Check the **front-end config**: wrong antenna (RSPdx has A/B/C —
    Antenna C is HF-only), or an RF notch covering your target band
    (e.g. SDRplay's `rfnotch_ctrl` attenuates AM/FM bands by default,
@@ -106,10 +105,11 @@ that, surface that as the cause and pick the closest valid value.
    Disable a notch:
    `set_block_param(block="src", params={"settings": {"rfnotch_ctrl": "Disable", ...keep_others }})` —
    read the current settings dict from `status` first so you don't
-   clobber the others.
-6. Check **gain**: ADC clipping (waterfall flat at byte=255) or
-   buried in noise (mostly black with peaks barely above byte=20)
-   both kill decoders. Adjust with
+   clobber the others (`source_capabilities` lists the antennas and
+   settings; `source_readback` confirms what landed).
+6. Check **gain**: ADC clipping (waterfall saturated flat across the
+   band) or buried in noise (mostly black, `spectrum` peaks barely
+   above the floor) both kill decoders. Adjust with
    `set_block_param(block="src", params={"agc_enable": false, "gain_db": <N>})`
    or flip AGC back on.
 7. Check for **DC spike on the carrier**: if the operator manually
@@ -117,8 +117,9 @@ that, surface that as the cause and pick the closest valid value.
    Nixie (bypasses the dodge), the spike lands on the signal. Fix:
    `mcp__ferrite__tune(freq_hz=<carrier>, offset_ratio=<from driver notes>)`
    so the server applies the dodge.
-8. Read `{{FERRITE_HOME}}/flowgraphs/<name>.json` — anything unusual
-   about how the preset is wired?
+8. `preset_detail(name)` / `get_flowgraph` — anything unusual about
+   how the preset is wired? `flowdiag` shows whether samples are
+   actually reaching the decoder.
 9. Report the most likely cause + a fix.
 
 ## Cleaning up voice — `audio_nr` toolbox
@@ -172,11 +173,13 @@ expected, not a [REVIEW]-worthy bug.
 
 ## Catalog references
 
-- `{{FERRITE_HOME}}/flowgraphs/<name>.json` — the preset; carries
-  `signal_wiki_url` + `signal_wiki_image` for the protocol's
-  reference shape.
-- `{{FERRITE_HOME}}/samples/sigidwiki/<file>` — known sample of this
-  signal class to compare against.
+- `preset_detail(name)` — the preset; carries `ai_notes`, canonical
+  frequencies and `signal_wiki_url`.
+- `reference_image(preset=…)` — the protocol's sigidwiki reference
+  waterfall, returned inline, to compare against a `spectrogram` or
+  `view_snapshot`.
+- `spot_map(kind=…)` — for FT8/FT4/WSPR, where the stations heard are
+  (map card + distance/bearing table).
 
 ## Flag tool bugs — don't silently retry
 
@@ -184,7 +187,7 @@ If a documented command behaves unexpectedly — preset loads but
 decoder produces nothing on signal you can see, a `param`
 acknowledged but no audible / visible effect, an HTTP error that
 doesn't recover after one fix-it retry — **flag it in your reply**
-prefixed with `[REVIEW]`. Show the CLI line, its output, what you
+prefixed with `[REVIEW]`. Show the tool call, its result, what you
 expected, what happened. Then either continue the user's task in
 a way that bypasses the broken path, or stop and ask.
 
@@ -217,7 +220,7 @@ Use a *listen* preset that has an audio chain (e.g. `nbfm` for NWR,
 `usb`/`lsb` for SSB, `wbam` for AM) — not a headless `*-record`
 preset (those have no AudioSink, so nothing to tap).
 
-Read the transcription back like any other decoder — it's its own
+Get the transcription back like any other decoder — it's its own
 kind:
 
 ```

@@ -503,6 +503,10 @@ async fn main() -> Result<()> {
             "/api/presets/:name",
             get(routes::get_preset).post(routes::save_preset),
         )
+        .route(
+            "/api/presets/:name/reference-image",
+            get(routes::get_preset_reference_image),
+        )
         .route("/api/band-plan/at", get(routes::band_at))
         .route("/api/captures", get(routes::list_captures))
         .route("/api/capture/iq", post(routes::post_capture_iq))
@@ -516,6 +520,7 @@ async fn main() -> Result<()> {
             post(analysis::post_spectrogram),
         )
         .route("/api/analysis/envelope", post(analysis::post_envelope))
+        .route("/api/analysis/spot_map", post(analysis::post_spot_map))
         .route("/api/preset", post(routes::load_preset))
         .route(
             "/api/profile",

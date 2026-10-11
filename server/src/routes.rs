@@ -884,6 +884,54 @@ pub async fn get_preset(
         .map_err(|e| AppError::not_found("PRESET_NOT_FOUND", format!("{e:#}")))
 }
 
+/// `GET /api/presets/:name/reference-image` — the preset's reference
+/// waterfall (`signal_wiki_image`, a sigidwiki picture under `samples/`):
+/// what the signal it decodes looks like, for matching by eye.
+pub async fn get_preset_reference_image(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    let doc = state
+        .read_preset_doc(&name)
+        .await
+        .map_err(|e| AppError::not_found("PRESET_NOT_FOUND", format!("{e:#}")))?;
+    let rel = doc
+        .get("signal_wiki_image")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            AppError::not_found(
+                "NO_REFERENCE_IMAGE",
+                format!("preset {name:?} has no reference image"),
+            )
+        })?;
+    let root = state
+        .captures_dir()
+        .ok_or_else(|| AppError::unavailable("NO_SAMPLES", "no samples/ tree configured"))?;
+    // `samples/sigidwiki/images/x.jpg` → under the samples root; never
+    // outside it.
+    let under = rel.strip_prefix("samples/").unwrap_or(rel);
+    let root = std::fs::canonicalize(root)
+        .map_err(|e| AppError::unavailable("NO_SAMPLES", format!("samples/: {e}")))?;
+    let path = std::fs::canonicalize(root.join(under))
+        .ok()
+        .filter(|p| p.starts_with(&root))
+        .ok_or_else(|| AppError::not_found("NO_REFERENCE_IMAGE", format!("{rel} not found")))?;
+    let mime = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+    {
+        Some(e) if e == "png" => "image/png",
+        Some(e) if e == "gif" => "image/gif",
+        Some(e) if e == "webp" => "image/webp",
+        _ => "image/jpeg",
+    };
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| AppError::internal("READ_FAILED", format!("{rel}: {e}")))?;
+    Ok(([(http::header::CONTENT_TYPE, mime)], bytes).into_response())
+}
+
 /// `GET /api/captures` — enumerate replayable IQ/audio fixtures under
 /// the `samples/` tree (with `*.json` sidecar metadata) so the File
 /// source tab can list them instead of asking for a server path.
