@@ -110,7 +110,21 @@ const STALE_STREAM_MS = 10 * 60_000;
 const str = (v: unknown): string => (typeof v === 'string' ? v : v == null ? '' : String(v));
 
 export function resetBannerLabel(reason: string): string {
+  // After a clear there is no history above to preserve.
+  if (reason === 'clear') return '── cleared — new conversation';
   return `── reasoning context reset (${reason}) — history preserved, assistant won't remember the above`;
+}
+
+/** When the AI log was last cleared (the newest `clear` record the
+ *  server leaves on an `ai` reset), or 0. The panel hides activity and
+ *  analysis records older than this. */
+export function clearedAtMs(records: { at_ms: number; data?: unknown }[]): number {
+  let at = 0;
+  for (const r of records) {
+    const d = r.data as Record<string, unknown> | undefined;
+    if (d?.['type'] === 'clear' && r.at_ms > at) at = r.at_ms;
+  }
+  return at;
 }
 
 /** Fold the `ai` session-bus records (+ live partials, local notes and
@@ -567,13 +581,20 @@ export class AiStore {
   }
 
   /** Hard clear: empty the AI log for *every* panel (the server's `ai`
-   *  kind) and drop the SDK context. `/reset` keeps the history; this
-   *  wipes it. */
-  clear(): void {
+   *  kind, which leaves a `clear` marker the panel uses to hide older
+   *  activity / analysis) and drop the SDK context. `/reset` keeps the
+   *  history; this wipes it.
+   *
+   *  The sidecar reset goes out only after the store reset lands: its
+   *  "context reset" banner is an `ai` record, and a reset that arrived
+   *  after it would wipe the banner too. */
+  async clear(): Promise<void> {
     this.notes = [];
     this.pending = null;
-    void fetch('/api/state/ai/reset', { method: 'POST' }).catch(() => {});
-    void fetch('/api/state/ai_live/reset', { method: 'POST' }).catch(() => {});
+    this.persist();
+    const reset = (kind: string) =>
+      fetch(`/api/state/${kind}/reset`, { method: 'POST' }).catch(() => undefined);
+    await Promise.all([reset('ai'), reset('ai_live')]);
     this.requestSidecarReset('clear');
     this.persist();
   }

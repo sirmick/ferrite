@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ai, AI_MODES, type AiMode, renderMarkdown } from '$lib/ai/store.svelte';
+  import { ai, AI_MODES, type AiMode, clearedAtMs, renderMarkdown } from '$lib/ai/store.svelte';
   import { decoders } from '$lib/decoders/store.svelte';
   import AnalysisCard from '$lib/analysis/AnalysisCard.svelte';
   import type { AnalysisRecord } from '$lib/analysis/types';
@@ -34,7 +34,12 @@
       t: turn.t,
       turn,
     }));
+    // Clear empties the `ai` kind and leaves a `clear` record; the
+    // shared activity / analysis logs stay, but this timeline starts
+    // from there.
+    const clearedAt = clearedAtMs(decoders.kind('ai').recent);
     for (const r of decoders.kind('analysis').recent.slice(-40)) {
+      if (r.at_ms < clearedAt) continue;
       items.push({
         k: 'analysis',
         key: `a${r.seq}`,
@@ -43,6 +48,7 @@
       });
     }
     for (const r of decoders.kind('activity').recent.slice(-80)) {
+      if (r.at_ms < clearedAt) continue;
       const d = (r.data ?? {}) as Record<string, unknown>;
       // An agent's MCP tool calls already show as its tool cards.
       if (d['via'] === 'mcp') continue;

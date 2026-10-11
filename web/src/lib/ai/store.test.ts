@@ -7,11 +7,12 @@
 // the optimistic pending prompt) and the control channel (every reset
 // entry point tells the sidecar; banners aren't doubled).
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AiStore,
   buildTurns,
+  clearedAtMs,
   type AiRecord,
   type AssistantTurn,
   type UserTurn,
@@ -186,13 +187,19 @@ describe('buildTurns — the session-bus fold', () => {
 });
 
 describe('control channel', () => {
-  it('/reset, Clear, setMode all drop the sidecar binding (unified path)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('/reset, Clear, setMode all drop the sidecar binding (unified path)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{}')),
+    );
     const store = new AiStore();
     const { sent } = attachFakeSocket(store);
     store.sessionId = 'live';
 
     store.resetSession({ reason: 'reset' });
-    store.clear();
+    await store.clear();
     store.setMode('decoder');
 
     const reasons = sent
@@ -201,6 +208,36 @@ describe('control channel', () => {
       .map((m) => m.reason as string);
     expect(reasons).toEqual(['reset', 'clear', expect.stringContaining('decoder')]);
     expect(store.sessionId).toBeNull();
+  });
+
+  it('Clear resets the store before asking the sidecar for its banner', async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        order.push(`fetch ${url}`);
+        await gate;
+        return new Response('{}');
+      }),
+    );
+    const store = new AiStore();
+    const fake = attachFakeSocket(store);
+    const origPush = fake.sent.push.bind(fake.sent);
+    fake.sent.push = (m: string) => {
+      order.push(`ws ${JSON.parse(m).type}`);
+      return origPush(m);
+    };
+
+    const done = store.clear();
+    await Promise.resolve();
+    // Resets in flight, sidecar not told yet: its banner record would
+    // otherwise land first and be wiped by the reset.
+    expect(order).toEqual(['fetch /api/state/ai/reset', 'fetch /api/state/ai_live/reset']);
+    release();
+    await done;
+    expect(order.at(-1)).toBe('ws reset_session');
   });
 
   it('a reset the sidecar published adds no local banner; an unresumable session does (once)', () => {
@@ -234,5 +271,23 @@ describe('control channel', () => {
     store.ingestEvent({ type: 'system', subtype: 'init', session_id: 'sess-9' });
     expect(store.sessionId).toBe('sess-9');
     expect(localStorage.getItem('ferrite-ai.session_id')).toBe('sess-9');
+  });
+});
+
+describe('clearedAtMs', () => {
+  it('is the newest clear record, 0 when never cleared', () => {
+    expect(clearedAtMs([])).toBe(0);
+    expect(clearedAtMs([rec({ type: 'user', text: 'x' }, 5)])).toBe(0);
+    expect(
+      clearedAtMs([
+        rec({ type: 'clear' }, 10),
+        rec({ type: 'user', text: 'x' }, 20),
+        rec({ type: 'clear' }, 30),
+      ]),
+    ).toBe(30);
+  });
+
+  it('a clear record adds no turn', () => {
+    expect(buildTurns([rec({ type: 'clear' })], {}, [], null)).toHaveLength(0);
   });
 });

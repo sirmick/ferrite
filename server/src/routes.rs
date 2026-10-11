@@ -621,11 +621,21 @@ pub async fn get_state(State(state): State<AppState>) -> Json<crate::decoder_sto
 
 /// `POST /api/state/:kind/reset` — clear one store kind (operator /
 /// MCP "clear"). Broadcasts a reset delta to mirrors.
+///
+/// Resetting `ai` also appends one `{type:"clear"}` record. The AI panel
+/// interleaves the `activity` and `analysis` kinds with the
+/// conversation; it hides anything older than the newest `clear`
+/// record, so a clear empties the whole timeline for every panel (and
+/// survives a reload or restart) without wiping those shared logs.
 pub async fn reset_state_kind(
     State(state): State<AppState>,
     Path(kind): Path<String>,
 ) -> Json<serde_json::Value> {
-    state.decoder_store().reset_kind(&kind);
+    let store = state.decoder_store();
+    store.reset_kind(&kind);
+    if kind == "ai" {
+        store.apply("ai", serde_json::json!({ "type": "clear" }));
+    }
     Json(serde_json::json!({ "ok": true, "kind": kind }))
 }
 
