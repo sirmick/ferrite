@@ -134,37 +134,17 @@ async fn ws_mqtt_proxy(client_ws: WebSocket, upstream: std::net::SocketAddr) {
     }
 }
 
-/// Default location of the ferrite-ai sidecar — TCP on localhost. The
-/// sidecar holds an Anthropic Claude Agent SDK session per browser
-/// connection; ferrited reverse-proxies its WS so the browser only
-/// ever talks to a single port. Override with the `FERRITE_AI_URL`
-/// env var (e.g. point at a unix-socket-fronting proxy or a different
-/// machine on a trusted LAN).
-const DEFAULT_FERRITE_AI_URL: &str = "ws://127.0.0.1:10002/ws/chat";
+/// Default location of the ferrite-ai sidecar — HTTP on localhost.
+/// ferrited proxies `/api/ai/*` to it so the browser only ever talks to
+/// one port. Override with `FERRITE_AI_URL` (`http://host:port`; a legacy
+/// `ws://…/ws/chat` value is accepted and reduced to its origin).
+const DEFAULT_FERRITE_AI_URL: &str = "http://127.0.0.1:10002";
 
-/// `GET /ws/chat` — reverse-proxy to the ferrite-ai sidecar. The
-/// browser opens this WS to ferrited; we open a second WS upstream to
-/// the sidecar and pump frames bidirectionally until either side
-/// closes. If the sidecar isn't reachable, we surface a structured
-/// error event the UI's chat panel renders, then close the client
-/// socket so the front end can show "ferrite-ai offline" cleanly.
-///
-/// This is the AI *control* channel only (prompts, stop, reset, the
-/// sidecar's hello + session binding). The conversation itself — every
-/// session, whichever client drives it — is the `ai` store kind: the
-/// sidecar and headless drivers publish records through the event
-/// plane's ingest door, and every panel renders from the mirror.
-pub async fn ws_chat(ws: WebSocketUpgrade) -> impl IntoResponse {
-    let upstream_url =
-        std::env::var("FERRITE_AI_URL").unwrap_or_else(|_| DEFAULT_FERRITE_AI_URL.to_string());
-    ws.on_upgrade(move |socket| ws_chat_proxy(socket, upstream_url))
-}
-
-/// The sidecar's HTTP origin, from `FERRITE_AI_URL` (`ws://host:port/…`
-/// → `http://host:port`).
+/// The sidecar's HTTP origin.
 fn ai_http_base() -> String {
-    let ws = std::env::var("FERRITE_AI_URL").unwrap_or_else(|_| DEFAULT_FERRITE_AI_URL.to_string());
-    let http = ws
+    let raw =
+        std::env::var("FERRITE_AI_URL").unwrap_or_else(|_| DEFAULT_FERRITE_AI_URL.to_string());
+    let http = raw
         .replacen("wss://", "https://", 1)
         .replacen("ws://", "http://", 1);
     match http.find("://").map(|i| i + 3) {
@@ -176,27 +156,32 @@ fn ai_http_base() -> String {
     }
 }
 
-/// `POST /api/ai/prompt`, `POST /api/ai/cancel`, `GET /api/ai/sessions`
-/// — the REST side of the ferrite-ai sidecar (its `/prompt`, `/cancel`,
-/// `/sessions`), passed through. A prompt started here runs like a
-/// panel's: the conversation shows on every AI panel via the `ai` kind.
-/// `{"wait": true}` holds the request until the turn ends.
+/// `/api/ai/*` — the ferrite-ai sidecar's REST surface, passed through
+/// verbatim (method, path, query, JSON body): `hello`, `prompt`,
+/// `cancel`, `reset`, `setup`, `sessions`. It is the AI's one front door
+/// for every driver — the AI panel, `ferrite-ctl ai-prompt`, any REST
+/// client. The conversation itself is the `ai` store kind, which the
+/// sidecar publishes and every panel renders. `POST /api/ai/prompt`
+/// with `{"wait": true}` holds the request until the turn ends.
 pub async fn ai_proxy(
     method: http::Method,
     uri: http::Uri,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
-    let tail = uri.path().trim_start_matches("/api/ai");
+    let tail = uri
+        .path_and_query()
+        .map_or("", http::uri::PathAndQuery::as_str)
+        .trim_start_matches("/api/ai");
     let url = format!("{}{}", ai_http_base(), tail);
-    let client = reqwest::Client::new();
-    let req = if method == http::Method::POST {
-        client
-            .post(&url)
-            .header("content-type", "application/json")
-            .body(body.to_vec())
-    } else {
-        client.get(&url)
+    let Ok(m) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
+        return (StatusCode::METHOD_NOT_ALLOWED, "unsupported method").into_response();
     };
+    let mut req = reqwest::Client::new().request(m, &url);
+    if !body.is_empty() {
+        req = req
+            .header("content-type", "application/json")
+            .body(body.to_vec());
+    }
     match req.send().await {
         Ok(r) => {
             let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -208,72 +193,6 @@ pub async fn ai_proxy(
             Json(serde_json::json!({ "error": format!("ferrite-ai sidecar unreachable at {url}: {e}") })),
         )
             .into_response(),
-    }
-}
-
-async fn ws_chat_proxy(mut client_ws: WebSocket, upstream_url: String) {
-    let upstream = match tokio_tungstenite::connect_async(&upstream_url).await {
-        Ok((s, _resp)) => s,
-        Err(e) => {
-            // Mirror the sidecar's `ferrite_ai_error` envelope shape so
-            // the UI's chat store renders this in the same red-banner
-            // path it'd use for an upstream-side error.
-            let body = serde_json::json!({
-                "type": "ferrite_ai_error",
-                "message": format!("ferrite-ai unreachable at {upstream_url}: {e}"),
-            });
-            let _ = client_ws.send(Message::Text(body.to_string())).await;
-            let _ = client_ws.close().await;
-            return;
-        }
-    };
-
-    let (mut up_tx, mut up_rx) = upstream.split();
-    let (mut cli_tx, mut cli_rx) = client_ws.split();
-
-    // Browser → sidecar: text/binary forward, close on Close. We don't
-    // attempt to translate ping/pong — both sides exchange them via
-    // their own keepalives.
-    let c2u = async move {
-        while let Some(msg) = cli_rx.next().await {
-            let Ok(msg) = msg else { break };
-            let upstream_msg = match msg {
-                Message::Text(t) => TungMessage::Text(t),
-                Message::Binary(b) => TungMessage::Binary(b),
-                Message::Close(_) => break,
-                Message::Ping(_) | Message::Pong(_) => continue,
-            };
-            if up_tx.send(upstream_msg).await.is_err() {
-                break;
-            }
-        }
-        // Politely close the upstream when the browser hangs up so the
-        // sidecar's per-connection session state can be freed.
-        let _ = up_tx.close().await;
-    };
-
-    // Sidecar → browser.
-    let u2c = async move {
-        while let Some(Ok(msg)) = up_rx.next().await {
-            let client_msg = match msg {
-                TungMessage::Text(t) => Message::Text(t),
-                TungMessage::Binary(b) => Message::Binary(b),
-                TungMessage::Close(_) => break,
-                TungMessage::Ping(_) | TungMessage::Pong(_) | TungMessage::Frame(_) => continue,
-            };
-            if cli_tx.send(client_msg).await.is_err() {
-                break;
-            }
-        }
-        let _ = cli_tx.close().await;
-    };
-
-    // First side to finish closes the bridge — `select!` cancels the
-    // other branch when one resolves. Avoids leaking a pump task on
-    // an asymmetric disconnect.
-    tokio::select! {
-        () = c2u => {},
-        () = u2c => {},
     }
 }
 

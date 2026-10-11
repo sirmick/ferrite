@@ -18,7 +18,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
 use clap::Parser;
@@ -544,10 +544,7 @@ async fn main() -> Result<()> {
         )
         .route("/ws/preset", get(routes::ws_preset))
         .route("/mqtt", get(routes::ws_mqtt))
-        .route("/ws/chat", get(routes::ws_chat))
-        .route("/api/ai/prompt", post(routes::ai_proxy))
-        .route("/api/ai/cancel", post(routes::ai_proxy))
-        .route("/api/ai/sessions", get(routes::ai_proxy))
+        .route("/api/ai/*rest", any(routes::ai_proxy))
         .route("/api/ui-views/:pane", get(routes::get_ui_view))
         .route("/api/view", get(routes::get_view_state))
         .route("/api/ui-view/set", post(routes::set_view_state))
@@ -671,7 +668,11 @@ async fn ai_activity_layer(
 
     let method = request.method().clone();
     let path = request.uri().path().to_string();
-    let should_log = (note.is_some() || command.is_some()) && method != axum::http::Method::GET;
+    // `/api/ai/*` is the conversation's own front door: the turn it
+    // starts is already on the panel as the user's prompt.
+    let should_log = (note.is_some() || command.is_some())
+        && method != axum::http::Method::GET
+        && !path.starts_with("/api/ai/");
 
     // Run the handler first, log after — so the `ai::activity` event
     // reflects a *completed* mutation. The UI's refresh-on-activity

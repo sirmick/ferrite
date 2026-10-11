@@ -9,7 +9,9 @@
   // basemap; x = lon + 180, y = 90 − lat in its 360 × 180 frame.
   import worldMap from '../../../../tools/assets/bluemarble_2048.jpg';
 
-  let { rec, t }: { rec: AnalysisRecord; t: number } = $props();
+  // `inline`: drawn inside the tool card of the call that made it, which
+  // already says who ran it and when.
+  let { rec, t, inline = false }: { rec: AnalysisRecord; t: number; inline?: boolean } = $props();
   let showText = $state(false);
 
   const mhz = (f: number) => (f / 1e6).toFixed(5);
@@ -181,11 +183,13 @@
   );
 </script>
 
-<div class="mb-2 rounded border border-sky-900 bg-slate-950/60 px-2 py-1">
+<div class="rounded border border-sky-900 bg-slate-950/60 px-2 py-1" class:mb-2={!inline}>
   <div class="mb-1 flex items-center justify-between text-[10px] text-[color:var(--color-muted)]">
     <span>
       <span class="text-sky-300">{title}</span>
-      <span class="ml-1 opacity-70">· {byLabel} · {rec.snapshot?.id}</span>
+      {#if !inline}<span class="ml-1 opacity-70"
+          >· {byLabel}{rec.snapshot?.id ? ` · ${rec.snapshot.id}` : ''}</span
+        >{/if}
     </span>
     <span class="flex items-center gap-2">
       <button
@@ -194,7 +198,7 @@
         onclick={() => (showText = !showText)}
         title="the text rendering the agent sees">{showText ? 'chart' : 'text'}</button
       >
-      <span class="font-mono">{new Date(t).toLocaleTimeString()}</span>
+      {#if !inline}<span class="font-mono">{new Date(t).toLocaleTimeString()}</span>{/if}
     </span>
   </div>
 
