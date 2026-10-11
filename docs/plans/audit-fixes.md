@@ -25,7 +25,7 @@ and RdsDemod on 10M samples with an exact decimation count (no timeline slip).
 | 4.2 — replay smoke test | ✅ done | ADS-B IQ → DecoderStore (`server/tests/replay_smoke.rs`) |
 | 4.3 — RealF32Resamp sweep + nx_cap | ✅ done | starved-dst timeline-slip fix + rate sweep |
 | 5 — RDS H2 (delay) + H4 (backpressure) | ✅ done | decode now works at 200/240/250 kHz |
-| 5 — RDS H3 (symbol timing) | ⏸ deferred | larger; plan marks optional |
+| 5 — RDS H3 (symbol timing) | ✅ done | Costas derotation + early–late symbol-timing PI loop in `BitSync`; off-air 98.5 MHz fixture 2.6 → 9.4 groups/s (0 zero-group seconds), ±300 ppm / drift tests verified to fail without it |
 | 6.1 — delete client-side graph derivation | ✅ done | browser-half authoritative; −228 lines |
 | 6.4 — extract `plan_tune()` | ✅ done | pure fn in `source_policy` + 9 dodge-math tests |
 | 6.5 — sdr-tables consolidation | ✅ done | per-driver policy + driver-arg parser into `ferrite-sdr-tables` |

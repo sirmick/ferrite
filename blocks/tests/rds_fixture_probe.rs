@@ -30,7 +30,9 @@ const FS: f32 = 240_000.0;
 fn read_cf32(path: &str) -> Vec<Complex<f32>> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     bytes
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|c| {
             Complex::new(
                 f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
@@ -41,13 +43,29 @@ fn read_cf32(path: &str) -> Vec<Complex<f32>> {
 }
 
 fn resample(iq: &[Complex<f32>], ppm: f64) -> Vec<Complex<f32>> {
+    // Windowed-sinc (Blackman, 2·HALF taps) fractional interpolator —
+    // linear interpolation would smear the 57 kHz subcarrier enough to
+    // confound the clock-error measurement with SNR loss.
+    const HALF: i64 = 16;
     let step = 1.0 + ppm * 1e-6;
     let mut out = Vec::with_capacity(iq.len());
-    let mut t = 0.0_f64;
-    while (t as usize) + 1 < iq.len() {
-        let i = t as usize;
-        let f = (t - i as f64) as f32;
-        out.push(iq[i] * (1.0 - f) + iq[i + 1] * f);
+    let mut t = HALF as f64;
+    while (t as i64) + HALF < iq.len() as i64 {
+        let i0 = t.floor() as i64;
+        let frac = t - i0 as f64;
+        let mut acc = Complex::new(0.0_f32, 0.0);
+        for k in (1 - HALF)..=HALF {
+            let x = k as f64 - frac;
+            let sinc = if x.abs() < 1e-9 {
+                1.0
+            } else {
+                (core::f64::consts::PI * x).sin() / (core::f64::consts::PI * x)
+            };
+            let w = x / (HALF as f64) * core::f64::consts::PI;
+            let win = 0.42 + 0.5 * w.cos() + 0.08 * (2.0 * w).cos();
+            acc += iq[(i0 + k) as usize] * (sinc * win) as f32;
+        }
+        out.push(acc);
         t += step;
     }
     out
@@ -139,17 +157,21 @@ fn rds_fixture_group_rate() {
     let mut prev = rds.diag();
     let mut per_sec = Vec::new();
     let mut events = 0usize;
-    eprintln!(" sec  groups  blocks  losses  I/Q(dB)");
+    eprintln!(" sec  groups  blocks  losses  rawI/Q(dB)  clock(ppm)");
     for (s, chunk) in mpx.chunks(FS as usize).enumerate() {
         let ev = rds_feed(&mut rds, chunk);
         events += ev.iter().filter(|&&b| b == b'\n').count();
+        if std::env::var_os("FERRITE_RDS_EVENTS").is_some() {
+            eprint!("{}", String::from_utf8_lossy(&ev));
+        }
         let d = rds.diag();
         let g = d.groups - prev.groups;
         let iq_db = 10.0 * (rds.i_power() / rds.q_power().max(1e-20)).log10();
         eprintln!(
-            "{s:4}  {g:6}  {:6}  {:6}  {iq_db:7.1}",
+            "{s:4}  {g:6}  {:6}  {:6}  {iq_db:10.1}  {:9.1}",
             d.blocks_ok - prev.blocks_ok,
-            d.sync_losses - prev.sync_losses
+            d.sync_losses - prev.sync_losses,
+            d.clock_ppm
         );
         if chunk.len() == FS as usize {
             per_sec.push(g);
