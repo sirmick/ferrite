@@ -130,11 +130,80 @@ impl DeviceInfo {
     }
 }
 
+/// SoapyRemote endpoints (`tcp://host:port`) this process has seen —
+/// from a discovery result, a source's `remote=` arg, or
+/// `FERRITE_SOAPY_REMOTES` (comma-separated). A blank enumerate finds
+/// remote servers by SSDP multicast, which in a long-lived process
+/// intermittently comes back empty; every known endpoint is therefore
+/// also enumerated explicitly, so a radio the daemon has used never
+/// drops out of the device list.
+fn known_remotes() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
+    static KNOWN: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    KNOWN.get_or_init(|| {
+        let seed = std::env::var("FERRITE_SOAPY_REMOTES")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        std::sync::Mutex::new(seed)
+    })
+}
+
+/// Remember the `remote=` endpoint in a Soapy args string, if any.
+pub fn note_remote_args(args: &str) {
+    if let Some(ep) = ferrite_blocks::soapy_retry::remote_endpoint(args) {
+        known_remotes()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ep);
+    }
+}
+
 /// Enumerate every device `SoapySDR` plugins can see. Empty vec when
 /// no hardware is attached — that's a clean success, not an error.
 pub(crate) fn list_devices() -> Result<Vec<DeviceInfo>> {
     let entries = soapysdr::enumerate("").context("SoapySDR enumerate failed")?;
-    Ok(entries.iter().map(device_info_from_args).collect())
+    let mut out: Vec<DeviceInfo> = entries.iter().map(device_info_from_args).collect();
+    for d in &out {
+        if let Some(ep) = d.args.get("remote") {
+            note_remote_args(&format!("remote={ep}"));
+        }
+    }
+    let known: Vec<String> = known_remotes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .cloned()
+        .collect();
+    for ep in known {
+        if out.iter().any(|d| d.args.get("remote") == Some(&ep)) {
+            continue;
+        }
+        match soapysdr::enumerate(format!("driver=remote,remote={ep}").as_str()) {
+            Ok(found) => out.extend(found.iter().map(device_info_from_args)),
+            Err(e) => tracing::debug!(%ep, error = %e, "known remote not answering"),
+        }
+    }
+    Ok(merge_remote_duplicates(out))
+}
+
+/// The same radio can come back from blank discovery and from an
+/// explicit enumerate; keep one entry per (remote, serial|label).
+fn merge_remote_duplicates(devs: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    let mut seen = std::collections::HashSet::new();
+    devs.into_iter()
+        .filter(|d| {
+            let key = (
+                d.args.get("remote").cloned().unwrap_or_default(),
+                d.serial.clone().unwrap_or_else(|| d.label.clone()),
+                d.driver.clone(),
+            );
+            seen.insert(key)
+        })
+        .collect()
 }
 
 /// Same as [`list_devices`], but returns a clear timeout error rather
@@ -1083,6 +1152,41 @@ mod tests {
     #[test]
     fn list_devices_does_not_panic() {
         let _ = list_devices();
+    }
+
+    fn dev(remote: &str, serial: &str) -> DeviceInfo {
+        let mut args = BTreeMap::new();
+        args.insert("driver".into(), "remote".into());
+        args.insert("remote".into(), remote.into());
+        args.insert("serial".into(), serial.into());
+        DeviceInfo {
+            driver: "remote".into(),
+            label: "SDRplay".into(),
+            serial: Some(serial.into()),
+            args,
+        }
+    }
+
+    #[test]
+    fn discovery_and_explicit_enumerate_of_one_radio_merge() {
+        let a = "tcp://172.16.16.159:55132";
+        let out = merge_remote_duplicates(vec![dev(a, "X1"), dev(a, "X1"), dev(a, "X2")]);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn remote_endpoints_are_remembered_from_args() {
+        note_remote_args("driver=remote,remote=tcp://127.0.0.1:9,remote:driver=sdrplay");
+        assert!(known_remotes()
+            .lock()
+            .unwrap()
+            .contains("tcp://127.0.0.1:9"));
+        note_remote_args("driver=sdrplay,serial=X");
+        assert!(!known_remotes()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.contains("sdrplay")));
     }
 
     #[test]

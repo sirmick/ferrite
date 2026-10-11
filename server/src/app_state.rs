@@ -880,6 +880,9 @@ impl AppState {
         if args.is_empty() {
             return;
         }
+        // A radio the operator selected stays in the device list even
+        // when SoapyRemote's multicast discovery comes back empty.
+        crate::device::note_remote_args(&args);
         // Cached after warm-up; a probe error/timeout must NOT block a
         // tune — skip the policy and keep the caller's params.
         let caps = match self.inner.device_cache.ensure_args(&args).await {
