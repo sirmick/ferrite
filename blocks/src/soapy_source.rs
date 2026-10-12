@@ -1260,7 +1260,11 @@ fn run_reader<S: RxStreamLike>(
                 // markers UP FRONT so a *full* ring (downstream
                 // backpressure) is never mistaken for a hung driver, which
                 // would spuriously leak the device handle on Drop.
-                let now_ns = start_instant.elapsed().as_nanos() as u64;
+                // 0 is the "never delivered" sentinel (`stalled_ns`), and a
+                // delivery in the same clock tick as the reader's start
+                // reads 0 elapsed on a coarse clock (seen on CI VMs) —
+                // clamp so a real delivery always counts.
+                let now_ns = (start_instant.elapsed().as_nanos() as u64).max(1);
                 counters.last_sample_at_ns.store(now_ns, Ordering::Relaxed);
                 last_progress = std::time::Instant::now();
                 counters.hung.store(false, Ordering::Relaxed);
