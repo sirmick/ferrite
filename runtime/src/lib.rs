@@ -39,7 +39,7 @@ pub use doc::{BlockInstanceDecl, Environment, FlowgraphDoc, VariantDecl, Wire};
 pub use env_split::{split_for_environment, SplitError, CROSS_ENV_STREAM_BASE};
 pub use inject_dc_block::inject_dc_block_taps;
 pub use inject_narrow_fft::inject_narrow_fft_taps;
-pub use inject_signal_list::inject_signal_list_taps;
+pub use inject_signal_list::{floor_span_for_bandwidth, inject_signal_list_taps};
 pub use inject_voice_transcribe::inject_voice_transcribe;
 pub use instantiate::{instantiate_flowgraph, SpecMap, SpecRegistry};
 pub use reconfigure::{

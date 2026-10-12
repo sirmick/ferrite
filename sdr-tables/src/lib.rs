@@ -326,6 +326,20 @@ pub fn dc_block_default_enabled(driver_key: &str) -> bool {
     !driver_key.eq_ignore_ascii_case("sdrplay")
 }
 
+/// Driver settings (`writeSetting` keys) whose value *is* a realised gain
+/// element's readback, so the daemon can tell a settings write that the
+/// hardware already satisfies (skip it — a settings change costs a source
+/// restart) and notice when a later `gain_db` write moved the element away
+/// from a stored setting. SDRplay: `rfgain_sel` is the LNA state, read back
+/// as the `RFGR` element (an index, not dB).
+#[must_use]
+pub fn setting_gain_element(driver_key: &str, setting: &str) -> Option<&'static str> {
+    match (driver_key.to_ascii_lowercase().as_str(), setting) {
+        ("sdrplay", "rfgain_sel") => Some("RFGR"),
+        _ => None,
+    }
+}
+
 /// SDRplay hardware broadcast-notch passbands (Hz). The RF notch covers the
 /// AM **and** FM broadcast bands (two disjoint ranges); the DAB notch covers
 /// Band III. Fixed in hardware, locale-independent. Mirrors the rules in
@@ -518,6 +532,13 @@ mod tests {
         assert_eq!(tune_offset_ratio_for("rtlsdr"), 0.0);
         assert_eq!(tune_offset_ratio_for("airspy"), 0.0);
         assert_eq!(tune_offset_ratio_for(""), 0.0);
+    }
+
+    #[test]
+    fn rfgain_sel_maps_to_rfgr_on_sdrplay_only() {
+        assert_eq!(setting_gain_element("SDRplay", "rfgain_sel"), Some("RFGR"));
+        assert_eq!(setting_gain_element("sdrplay", "agc_setpoint"), None);
+        assert_eq!(setting_gain_element("hackrf", "rfgain_sel"), None);
     }
 
     #[test]

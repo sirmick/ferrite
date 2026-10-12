@@ -1,0 +1,43 @@
+name: Analysis
+
+# tools/analysis (`ferrite-analyze`): the offline Python analysis package.
+# Its conformance test pins the numpy port to the same golden the Rust
+# `ferrite-analysis` crate is checked against in the Rust workflow
+# (analysis/tests/conformance.rs), so the two can't drift.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/analysis/**"
+      - "analysis/**"
+      - "samples/**"
+      - ".github/workflows/analysis.yml"
+  pull_request:
+    paths:
+      - "tools/analysis/**"
+      - "analysis/**"
+      - "samples/**"
+      - ".github/workflows/analysis.yml"
+
+concurrency:
+  group: analysis-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install numpy / scipy / matplotlib (system, like the dev box)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-numpy python3-scipy python3-matplotlib
+
+      - name: Conformance (Python vs the Rust golden)
+        run: python3 -I tools/analysis/tests/test_conformance.py -v
+
+      - name: Tools (readers, compare, ladder, report, CLI)
+        run: python3 -I tools/analysis/tests/test_tools.py -v

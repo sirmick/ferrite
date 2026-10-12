@@ -15,11 +15,13 @@
 //!
 //! ### Algorithm (per emitted frame)
 //!
-//! 1. **Noise floor** — `p10` of the row's bytes (via
-//!    [`compute_spectrum_stats`](crate::render::compute_spectrum_stats)),
-//!    the level cleared by 90% of bins. Robust against a band packed with
+//! 1. **Noise floor** — `p10` of the bytes inside the analog passband
+//!    (`floor_span_hz` around centre, the DC mask excluded), the level
+//!    cleared by 90% of in-band bins. Robust against a band packed with
 //!    carriers because the gaps between them still pull the 10th percentile
-//!    down to the true floor.
+//!    down to the true floor. Passband-only because a filter narrower than
+//!    the sample rate leaves the outer bins at the ADC floor, which would
+//!    otherwise *be* the 10th percentile regardless of antenna or gain.
 //! 2. **Threshold** — `floor + threshold_db`, converted to byte units
 //!    (the server quantises a fixed [−160, 0] dBFS window into 0..255, so
 //!    one byte ≈ 0.627 dB).
@@ -124,7 +126,27 @@ pub struct SignalListParams {
     /// detected. The trade is staleness: a signal lingers in the list up
     /// to this long after it stops. ~8 s is a good band-survey value.
     pub peak_hold_secs: f32,
+    /// Span around the tuned centre (Hz) the noise floor is estimated
+    /// over — the radio's analog passband. A filter narrower than the
+    /// sample rate (RSPdx: 1.536 MHz at 2.4 MS/s) leaves the outer bins at
+    /// the ADC floor; a percentile over *all* bins then reads that
+    /// stopband instead of the antenna's floor, so the floor stops moving
+    /// with gain and every SNR scales with the gain setting. The server
+    /// sets this from the source's `bandwidth_hz`. `0` = unknown → the
+    /// central [`FALLBACK_FLOOR_FRACTION`] of the span.
+    pub floor_span_hz: f32,
+    /// Mask bins within ±this many Hz of the tuned centre (the LO/DC
+    /// spike). The injected IQ `DcBlock` is off on SDRplay and a 200 Hz
+    /// high-pass can't remove an LO pedestal anyway, so the detector masks
+    /// it itself. Masked bins are also left out of the floor estimate.
+    /// `0` disables the mask.
+    pub dc_mask_hz: f32,
 }
+
+/// Fraction of the span (centred) used for the floor when the passband
+/// is unknown (`floor_span_hz = 0`). Every supported radio's anti-alias
+/// filter covers at least this much of its sample rate.
+pub const FALLBACK_FLOOR_FRACTION: f64 = 0.6;
 
 impl Default for SignalListParams {
     fn default() -> Self {
@@ -139,6 +161,8 @@ impl Default for SignalListParams {
             track_bucket_hz: 2_500.0,
             emit_interval_ms: 250.0,
             peak_hold_secs: 0.0,
+            floor_span_hz: 0.0,
+            dc_mask_hz: 25_000.0,
         }
     }
 }
@@ -248,6 +272,101 @@ impl SignalList {
         self.center_freq_hz + offset
     }
 
+    /// Hz per FFT bin, or 0 before the input rate is known.
+    #[inline]
+    fn bin_hz(&self) -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let n = self.params.size as f64;
+        if n > 0.0 {
+            self.sample_rate_hz / n
+        } else {
+            0.0
+        }
+    }
+
+    /// Inclusive bin range masked around DC (bin `n/2`), or `None` when
+    /// the mask is off / the rate is unknown.
+    fn dc_mask_bins(&self, n: usize) -> Option<(usize, usize)> {
+        let bin_hz = self.bin_hz();
+        if self.params.dc_mask_hz <= 0.0 || bin_hz <= 0.0 || n == 0 {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let half = (f64::from(self.params.dc_mask_hz) / bin_hz).round() as usize;
+        let c = n / 2;
+        Some((c.saturating_sub(half), (c + half).min(n - 1)))
+    }
+
+    /// Half-open bin range `[lo, hi)` the floor is estimated over: the
+    /// analog passband (`floor_span_hz`) centred on DC, clamped to the
+    /// span, or the central [`FALLBACK_FLOOR_FRACTION`] when unknown.
+    fn floor_bins(&self, n: usize) -> (usize, usize) {
+        let bin_hz = self.bin_hz();
+        #[allow(clippy::cast_precision_loss)]
+        let nf = n as f64;
+        let frac = if self.params.floor_span_hz > 0.0 && bin_hz > 0.0 {
+            (f64::from(self.params.floor_span_hz) / self.sample_rate_hz).min(1.0)
+        } else {
+            FALLBACK_FLOOR_FRACTION
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let width = ((nf * frac).round() as usize).clamp(1, n);
+        let lo = (n - width) / 2;
+        (lo, lo + width)
+    }
+
+    /// The span the floor is actually estimated over (Hz) — reported in
+    /// the payload so a reader can see whether the passband was known.
+    fn floor_span_effective_hz(&self) -> f64 {
+        let n = self.params.size;
+        let (lo, hi) = self.floor_bins(n);
+        #[allow(clippy::cast_precision_loss)]
+        let w = (hi - lo) as f64;
+        w * self.bin_hz()
+    }
+
+    /// 10th-percentile byte over the passband bins, DC mask excluded —
+    /// the per-frame floor reading. Same percentile convention as
+    /// [`compute_spectrum_stats`] (first byte whose cumulative count
+    /// reaches `max(1, ⌊0.1·n⌋)`), just over the in-band bins only.
+    fn passband_floor_byte(&self, spectrum: &[u8]) -> u8 {
+        let n = self.params.size.min(spectrum.len());
+        if n == 0 {
+            return 0;
+        }
+        let (lo, hi) = self.floor_bins(n);
+        let mask = self.dc_mask_bins(n);
+        let mut hist = [0u32; 256];
+        let mut count: u64 = 0;
+        for (i, &b) in spectrum.iter().enumerate().take(hi).skip(lo) {
+            if mask.is_some_and(|(mlo, mhi)| i >= mlo && i <= mhi) {
+                continue;
+            }
+            hist[usize::from(b)] += 1;
+            count += 1;
+        }
+        if count == 0 {
+            // Mask swallowed the whole passband (absurd settings) — fall
+            // back to the plain all-bin percentile rather than report 0.
+            return compute_spectrum_stats(&spectrum[..n]).p10;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        let t10 = ((count as f64 * 0.1) as u64).max(1);
+        let mut cum = 0u64;
+        for (v, &h) in hist.iter().enumerate() {
+            cum += u64::from(h);
+            if cum >= t10 {
+                #[allow(clippy::cast_possible_truncation)]
+                return v as u8;
+            }
+        }
+        255
+    }
+
     /// Fold one frame into the per-bin max-hold accumulator: each bin
     /// decays toward 0 by the time elapsed since the last frame (a full-
     /// scale peak fades over `peak_hold_secs`), then takes the max with the
@@ -298,16 +417,19 @@ impl SignalList {
         let thresh_byte = (f32::from(floor_byte) + self.params.threshold_db / DB_PER_BYTE)
             .clamp(0.0, 255.0) as u8;
         let threshold_db = byte_to_dbfs(thresh_byte);
-        let bin_hz = self.sample_rate_hz / self.params.size as f64;
+        let bin_hz = self.bin_hz();
 
-        // The zero-IF DC spike at the tuned centre is removed upstream by
-        // the injected complex `DcBlock` (one source of truth for the
-        // artifact), so the detector trusts the spectrum as-is — no
-        // per-detector frequency notch here.
+        // LO/DC mask: the injected IQ `DcBlock` is disabled on SDRplay and
+        // can't remove an LO pedestal wider than its ~200 Hz corner, so the
+        // centre spike would otherwise rank as the top "signal" on every
+        // spot. The mask also breaks a run, so a carrier straddling DC
+        // splits rather than swallowing the spike.
+        let mask = self.dc_mask_bins(n);
+        let in_mask = |idx: usize| mask.is_some_and(|(lo, hi)| idx >= lo && idx <= hi);
         let mut out = Vec::new();
         let mut i = 0;
         while i < n {
-            if row[i] < thresh_byte {
+            if row[i] < thresh_byte || in_mask(i) {
                 i += 1;
                 continue;
             }
@@ -315,7 +437,7 @@ impl SignalList {
             let start = i;
             let mut peak = row[i];
             let mut peak_idx = i;
-            while i < n && row[i] >= thresh_byte {
+            while i < n && row[i] >= thresh_byte && !in_mask(i) {
                 if row[i] > peak {
                     peak = row[i];
                     peak_idx = i;
@@ -466,6 +588,10 @@ impl SignalList {
             // floor well below threshold = quiet band; close = raise sensitivity.
             "noise_floor_dbfs": round2(self.last_noise_floor_db),
             "threshold_dbfs": round2(self.last_threshold_db),
+            // What the floor was measured over (Hz, centred) and the LO
+            // hole, so a reader knows ±dc_mask_hz around centre is blind.
+            "floor_span_hz": self.floor_span_effective_hz().round(),
+            "dc_mask_hz": self.params.dc_mask_hz,
         })
     }
 
@@ -689,8 +815,34 @@ impl Block for SignalList {
                     reconfig_scope: ReconfigureScope::SelfBlock,
                     ai_notes: "Detect on a decaying per-bin max-hold over this window instead of the instantaneous frame. 0 = off. Set ~8 s to catch bursty/transient signals (APRS chirps, FT8, packet, pagers) a snapshot would miss — at the cost of a signal lingering in the list up to this long after it stops.",
                 },
+                ParamSpec {
+                    key: "floor_span_hz",
+                    label: "Floor span",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 100_000_000.0,
+                        step: 1_000.0,
+                        default: 0.0,
+                        unit: "Hz",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Span around centre the noise floor is estimated over — the radio's analog passband. Set automatically from the source's bandwidth_hz; 0 = unknown (central 60% of the span). Don't normally touch.",
+                },
+                ParamSpec {
+                    key: "dc_mask_hz",
+                    label: "DC mask",
+                    kind: ParamKind::Range {
+                        min: 0.0,
+                        max: 200_000.0,
+                        step: 1_000.0,
+                        default: 25_000.0,
+                        unit: "Hz",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Ignore ±this around the tuned centre so the LO/DC spike is never listed. Signals inside the hole are invisible to the list — retune (or use `spectrum`) to see a carrier at the LO. 0 disables.",
+                },
             ],
-            ai_notes: "Strongest-signal detector on the wideband FFT byte stream. Inline pass-through (FftU8 in → FftU8 out, like RssiProbe): splice it between LogMagU8 and the ui:fft sink — logmag.out → signals.in → ui:fft, with the watchlist on signals.events → ui:signals. NativeOnly (node-side). Emits a ranked list of {id, freq_hz, power_db, bw_hz, snr_db} JSON events ~4 Hz, driving the UI's 'Strongest Signals' panel and the `signals` MCP verb; click/tune a row to retune there. The zero-IF DC/LO spike at the tuned centre is removed upstream by the injected complex `DcBlock`, so it isn't reported here — no per-detector notch.",
+            ai_notes: "Strongest-signal detector on the wideband FFT byte stream. Inline pass-through (FftU8 in → FftU8 out, like RssiProbe): splice it between LogMagU8 and the ui:fft sink — logmag.out → signals.in → ui:fft, with the watchlist on signals.events → ui:signals. NativeOnly (node-side). Emits a ranked list of {id, freq_hz, power_db, bw_hz, snr_db} JSON events ~4 Hz, driving the UI's 'Strongest Signals' panel and the `signals` MCP verb; click/tune a row to retune there. The noise floor is the 10th percentile over the analog passband (`floor_span_hz`, set from the source bandwidth), so it tracks gain/antenna; ±`dc_mask_hz` around the tuned centre is masked so the LO spike is never listed.",
         }
     }
 
@@ -737,6 +889,41 @@ impl Block for SignalList {
             }
         }
         Ok(())
+    }
+
+    /// `floor_span_hz` / `dc_mask_hz` apply in place — the server pushes
+    /// the span on every source bandwidth change and a rebuild would blank
+    /// the watchlist for `persist_hits` frames each time. The smoothed
+    /// floor re-converges from the new span. Anything else rebuilds.
+    fn apply_live_params(&mut self, delta: &serde_json::Value) -> Result<bool> {
+        let Some(obj) = delta.as_object() else {
+            return Ok(false);
+        };
+        const LIVE: &[&str] = &["floor_span_hz", "dc_mask_hz"];
+        if obj.is_empty() || !obj.keys().all(|k| LIVE.contains(&k.as_str())) {
+            return Ok(false);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let read = |k: &str| {
+            obj.get(k)
+                .and_then(serde_json::Value::as_f64)
+                .map(|v| v as f32)
+        };
+        if let Some(v) = read("floor_span_hz") {
+            if !(v.is_finite() && v >= 0.0) {
+                bail!("signal_list floor_span_hz must be >= 0 (got {v})");
+            }
+            self.params.floor_span_hz = v;
+            self.floor_byte_ema = None;
+        }
+        if let Some(v) = read("dc_mask_hz") {
+            if !(v.is_finite() && v >= 0.0) {
+                bail!("signal_list dc_mask_hz must be >= 0 (got {v})");
+            }
+            self.params.dc_mask_hz = v;
+            self.floor_byte_ema = None;
+        }
+        Ok(true)
     }
 
     fn output_capacity_hints(&self) -> [usize; MAX_PORTS] {
@@ -804,7 +991,9 @@ impl Block for SignalList {
         // Smooth the per-frame floor percentile across frames (EMA) so the
         // detection threshold is stable — reset to the raw value on the first
         // frame / after a retune (floor_byte_ema == None).
-        let floor_byte_raw = compute_spectrum_stats(spectrum).p10;
+        // Floor over the analog passband only (DC mask excluded) — the
+        // stopband bins sit at the ADC floor and would pin the estimate.
+        let floor_byte_raw = self.passband_floor_byte(spectrum);
         let smoothed = self
             .floor_byte_ema
             .map_or(f32::from(floor_byte_raw), |prev| {
@@ -813,8 +1002,11 @@ impl Block for SignalList {
         self.floor_byte_ema = Some(smoothed);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let floor_byte = smoothed.round().clamp(0.0, 255.0) as u8;
-        let (cands, floor_db, threshold_db) = self.detect(spectrum, floor_byte);
-        self.last_noise_floor_db = floor_db;
+        let (cands, _floor_db, threshold_db) = self.detect(spectrum, floor_byte);
+        // Report the smoothed (fractional-byte) floor, not the rounded
+        // byte detection uses — otherwise the reported floor moves in
+        // 0.63 dB steps and the same values recur across spots.
+        self.last_noise_floor_db = smoothed * DB_PER_BYTE + SERVER_FLOOR_DBFS;
         self.last_threshold_db = threshold_db;
         self.update_tracks(&cands);
 
@@ -1315,6 +1507,173 @@ mod tests {
         let v = push(&mut b, &row).unwrap();
         let sigs = v["signals"].as_array().unwrap();
         assert_eq!(sigs.len(), 1, "split carrier coalesces to one track");
+    }
+
+    /// RSPdx at 2.4 MS/s: a 1.536 MHz analog filter, so the outer 36% of
+    /// bins sit at the ADC floor whatever the antenna/gain does. Build that
+    /// shape with the passband at `inband_db`.
+    fn filtered_row(n: usize, inband_db: f32, bumps: &[(usize, usize, f32)]) -> Vec<u8> {
+        let mut row = make_row(n, inband_db, bumps);
+        let pass = (n as f64 * 1_536_000.0 / 2_400_000.0).round() as usize;
+        let lo = (n - pass) / 2;
+        let hi = lo + pass;
+        for (i, cell) in row.iter_mut().enumerate() {
+            if i < lo || i >= hi {
+                *cell = dbfs_to_byte(-150.0);
+            }
+        }
+        row
+    }
+
+    fn floor_after(b: &mut SignalList, row: &[u8]) -> f64 {
+        let mut v = None;
+        for _ in 0..60 {
+            v = push(b, row);
+        }
+        v.unwrap()["noise_floor_dbfs"].as_f64().unwrap()
+    }
+
+    #[test]
+    fn floor_tracks_the_passband_not_the_stopband() {
+        // The characterization defect: with p10 over all bins the floor
+        // read the stopband (here −150) on every antenna at every gain.
+        // Passband-aware, it must follow the in-band level 20 → 35 → 50
+        // dB-style steps.
+        let n = 4096;
+        for span in [1_536_000.0_f32, 0.0] {
+            let mut floors = Vec::new();
+            for inband in [-115.0_f32, -100.0, -85.0] {
+                let mut b = block(
+                    n,
+                    SignalListParams {
+                        emit_interval_ms: 0.0,
+                        floor_span_hz: span,
+                        ..Default::default()
+                    },
+                );
+                let f = floor_after(&mut b, &filtered_row(n, inband, &[]));
+                assert!(
+                    (f - f64::from(inband)).abs() < 1.5,
+                    "span {span}: floor {f} should track the in-band {inband}, not the -150 stopband"
+                );
+                floors.push(f);
+            }
+            assert!(floors[1] - floors[0] > 13.0 && floors[2] - floors[1] > 13.0);
+        }
+    }
+
+    #[test]
+    fn snr_is_against_the_passband_floor() {
+        // A carrier 30 dB over a −100 in-band floor reads ~30 dB SNR, not
+        // 80 dB over the stopband.
+        let n = 4096;
+        let mut b = block(
+            n,
+            SignalListParams {
+                emit_interval_ms: 0.0,
+                persist_hits: 1,
+                floor_span_hz: 1_536_000.0,
+                ..Default::default()
+            },
+        );
+        let row = filtered_row(n, -100.0, &[(2600, 4, -70.0)]);
+        let mut v = None;
+        for _ in 0..30 {
+            v = push(&mut b, &row);
+        }
+        let v = v.unwrap();
+        let snr = v["signals"][0]["snr_db"].as_f64().unwrap();
+        assert!((snr - 30.0).abs() < 2.0, "snr {snr} ≈ 30 dB");
+        assert!((v["floor_span_hz"].as_f64().unwrap() - 1_536_000.0).abs() < 2_000.0);
+    }
+
+    #[test]
+    fn reported_floor_is_not_byte_quantised() {
+        // One frame at a +10 dB floor after converging: the smoothed floor
+        // lands between byte steps (≈ +1 dB), and the report keeps it.
+        let n = 2048;
+        let mut b = block(
+            n,
+            SignalListParams {
+                emit_interval_ms: 0.0,
+                ..Default::default()
+            },
+        );
+        for _ in 0..30 {
+            push(&mut b, &make_row(n, -110.0, &[]));
+        }
+        let f = push(&mut b, &make_row(n, -100.0, &[])).unwrap()["noise_floor_dbfs"]
+            .as_f64()
+            .unwrap();
+        let steps = (f - f64::from(SERVER_FLOOR_DBFS)) / f64::from(super::DB_PER_BYTE);
+        assert!(
+            (steps - steps.round()).abs() > 0.05,
+            "floor {f} sits on a byte step ({steps})"
+        );
+    }
+
+    #[test]
+    fn dc_spike_at_centre_is_masked_but_real_signal_survives() {
+        // The LO/DC spike at bin n/2 plus a real carrier off-centre: only
+        // the real one is reported, with the default ±25 kHz mask.
+        let n = 4096;
+        let mut b = block(
+            n,
+            SignalListParams {
+                persist_hits: 1,
+                emit_interval_ms: 0.0,
+                threshold_db: 8.0,
+                ..Default::default()
+            },
+        );
+        let row = make_row(n, -120.0, &[(2048, 30, -40.0), (3200, 15, -80.0)]);
+        let v = push(&mut b, &row).unwrap();
+        let sigs = v["signals"].as_array().unwrap();
+        assert_eq!(sigs.len(), 1, "DC spike masked, only the real signal");
+        let f = sigs[0]["freq_hz"].as_f64().unwrap();
+        assert!((f - b.center_freq_hz).abs() > 50_000.0);
+        assert_eq!(v["dc_mask_hz"].as_f64(), Some(25_000.0));
+
+        // Mask off → the spike is listed (and ranks first).
+        let mut off = block(
+            n,
+            SignalListParams {
+                persist_hits: 1,
+                emit_interval_ms: 0.0,
+                threshold_db: 8.0,
+                dc_mask_hz: 0.0,
+                ..Default::default()
+            },
+        );
+        let v = push(&mut off, &row).unwrap();
+        let f0 = v["signals"][0]["freq_hz"].as_f64().unwrap();
+        assert!((f0 - off.center_freq_hz).abs() < 5_000.0);
+    }
+
+    #[test]
+    fn floor_span_and_dc_mask_apply_live() {
+        let n = 4096;
+        let mut b = block(
+            n,
+            SignalListParams {
+                emit_interval_ms: 0.0,
+                ..Default::default()
+            },
+        );
+        assert!(b
+            .apply_live_params(
+                &serde_json::json!({"floor_span_hz": 1_536_000.0, "dc_mask_hz": 10_000.0})
+            )
+            .unwrap());
+        assert!((b.params.floor_span_hz - 1_536_000.0).abs() < 1.0);
+        assert!((b.params.dc_mask_hz - 10_000.0).abs() < 1.0);
+        // Any other key falls back to a rebuild.
+        assert!(!b
+            .apply_live_params(&serde_json::json!({"threshold_db": 6.0}))
+            .unwrap());
+        assert!(b
+            .apply_live_params(&serde_json::json!({"floor_span_hz": -1.0}))
+            .is_err());
     }
 
     #[test]

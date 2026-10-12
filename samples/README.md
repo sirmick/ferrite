@@ -37,7 +37,10 @@ Every capture gets a JSON sidecar (`<basename>.json`) with rate, centre
 frequency, license, and upstream source. Audio captures additionally
 record the full signal chain so the result can be reproduced. Keep
 sidecars in lock-step with the WAV — WAV headers do not carry centre
-freq or provenance.
+freq or provenance. `tools/analysis/ferrite-analyze sidecars` backfills a
+minimal sidecar for any served file that lacks one (non-destructive), and
+`ferrite-analyze info|spectrum|spectrogram <file>` reads every format
+here.
 
 ## Inventory
 

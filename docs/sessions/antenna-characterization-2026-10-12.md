@@ -283,3 +283,50 @@ Conclusions:
 FM filter on A and the choke on C, and if the longwire can be re-routed
 away from the 400 kV line that is the only thing left that lowers C's
 HF floor.
+
+## Follow-up — tool fixes and re-check (03:15–03:45 UTC)
+
+Branch `feat/signal-floor` fixed open defects 3, 4, 6 and 7. In the same
+order, the fixes are:
+
+- **Passband floor.** The `signals` floor is the p10 over the analog
+  passband, set from the source `bandwidth_hz` and re-pushed when it
+  changes.
+- **LO mask.** A ±25 kHz LO mask is back in SignalList.
+- **Unknown keys.** An unknown `src` key returns 400 with the valid list.
+- **Settings writes.** They merge per key and skip no-ops, a hardware
+  no-op included. They list `settings.<key>` in `changes`, and the reply
+  says when `gain_db` overrode `rfgain_sel`.
+
+Health now reads `starting` until samples flow, and `snapshot` waits for
+them. `tools/analysis` (`ferrite-analyze`) rebuilds these tables from
+captures.
+
+The driver re-ran three spots. Every `signals` floor below is the AI's
+own reading:
+
+| Spot | Floor at gain 20 / 35 / 50 / 60 (dBFS) | LO row |
+|---|---|---|
+| 40 m, C | −118.0 / −102.9 / −87.8 / −77.8 | none |
+| FM 98, A (FM bandstop fitted) | −117.3 / −102.9 / −88.5 / −66.5 | none |
+| NOAA 162, A | −117.3 / −110.4 / −96.6 / −86.0 | none |
+
+The AI used `signals` for floors and SNR on its own, which it couldn't do
+before.
+
+What it found:
+
+- On FM broadcast, A with its new bandstop is clean at RFGR 0 up to
+  gain 50, while B and C still overload at gain 40.
+- At 162 MHz, A beat B on most NOAA channels in this run. Last night B
+  won by 17 dB on 162.425, and that channel was missing on B tonight.
+  Treat the NOAA verdict as unsettled until a longer capture repeats it.
+
+Remaining items it raised:
+
+- After a preset load and tune, `health` briefly reported the previous
+  LO. The driver's frequency getter lags over SoapyRemote; the readback
+  is a live query.
+- A stored `rfgain_sel` is re-applied when a preset load restarts the
+  source. That is intended, but surprising. A same-value `gain_db` write
+  now goes through when the readback disagrees.

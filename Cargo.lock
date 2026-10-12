@@ -691,6 +691,7 @@ dependencies = [
  "num-complex",
  "rustfft",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

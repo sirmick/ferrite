@@ -182,9 +182,139 @@ pub fn all_block_schemas() -> Vec<BlockSchemaDto> {
     out
 }
 
+/// Param keys a source block accepts that its `BlockSpec` doesn't list as
+/// a control: nested maps (`settings` — driver `writeSetting` pairs whose
+/// sub-keys are driver-specific and passed through unchecked;
+/// `gain_elements` — per-stage gains) and serde-only fields. Kept next to
+/// the validator; `accepted_keys_cover_soapy_struct` guards the
+/// SoapySource row against drift.
+const EXTRA_ACCEPTED_KEYS: &[(&str, &[&str])] = &[
+    ("SoapySource", &["settings", "gain_elements"]),
+    ("SineSource", &["throttle"]),
+    (
+        "ModulatedFileSource",
+        &["rate_hz_hint", "center_freq_hz", "loop_playback"],
+    ),
+];
+
+/// Every param key `type_name` accepts: its schema keys plus
+/// [`EXTRA_ACCEPTED_KEYS`]. `None` for an unregistered type.
+#[must_use]
+pub fn accepted_param_keys(type_name: &str) -> Option<Vec<&'static str>> {
+    let spec = registry::find(type_name)?.spec();
+    let mut keys: Vec<&'static str> = spec.params.iter().map(|p| p.key).collect();
+    if let Some((_, extra)) = EXTRA_ACCEPTED_KEYS.iter().find(|(t, _)| *t == type_name) {
+        keys.extend_from_slice(extra);
+    }
+    Some(keys)
+}
+
+/// A param-delta key the block type doesn't accept, with the valid list
+/// and a near-miss suggestion (`agc_enable` → `agc`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownParam {
+    pub key: String,
+    pub suggestion: Option<&'static str>,
+    pub valid: Vec<&'static str>,
+}
+
+impl std::fmt::Display for UnknownParam {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown param `{}`", self.key)?;
+        if let Some(s) = self.suggestion {
+            write!(f, " (did you mean `{s}`?)")?;
+        }
+        write!(f, "; valid: {}", self.valid.join(", "))
+    }
+}
+
+/// First key in `delta` that `type_name` doesn't accept, or `None` when
+/// every key is valid (or the type isn't registered — nothing to check
+/// against). Accepting an unknown key used to force a full source restart
+/// with an empty `changes` list, which looked like success.
+#[must_use]
+pub fn find_unknown_param(
+    type_name: &str,
+    delta: &serde_json::Map<String, serde_json::Value>,
+) -> Option<UnknownParam> {
+    let valid = accepted_param_keys(type_name)?;
+    let key = delta.keys().find(|k| !valid.contains(&k.as_str()))?;
+    let suggestion = valid
+        .iter()
+        .copied()
+        .filter(|v| key.starts_with(v) || v.starts_with(key.as_str()) || edit_distance(key, v) <= 2)
+        .min_by_key(|v| edit_distance(key, v));
+    Some(UnknownParam {
+        key: key.clone(),
+        suggestion,
+        valid,
+    })
+}
+
+/// Plain Levenshtein distance — keys are short, so O(n·m) is nothing.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != *cb);
+            cur[j + 1] = sub.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_src_key_is_named_with_suggestion_and_valid_list() {
+        let delta = serde_json::json!({ "gain_db": 20, "agc_enable": false });
+        let u = find_unknown_param("SoapySource", delta.as_object().unwrap())
+            .expect("agc_enable is not a SoapySource param");
+        assert_eq!(u.key, "agc_enable");
+        assert_eq!(u.suggestion, Some("agc"));
+        assert!(u.valid.contains(&"agc") && u.valid.contains(&"settings"));
+        let msg = u.to_string();
+        assert!(msg.contains("agc_enable") && msg.contains("did you mean `agc`"));
+    }
+
+    #[test]
+    fn settings_gain_elements_and_record_keys_are_accepted() {
+        let delta = serde_json::json!({
+            "settings": { "rfgain_sel": "4", "anything_driver_specific": "x" },
+            "gain_elements": { "LNA": 10 },
+            "record_path": "/tmp/x.cf32",
+            "record_max_seconds": 3,
+            "agc": false,
+        });
+        assert_eq!(
+            find_unknown_param("SoapySource", delta.as_object().unwrap()),
+            None
+        );
+        // Unregistered type → nothing to validate against.
+        assert_eq!(
+            find_unknown_param("NoSuchBlock", delta.as_object().unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn accepted_keys_cover_soapy_struct() {
+        // Every field SoapySourceParams deserializes must be accepted, or
+        // a legitimate write would be rejected as unknown.
+        let v = serde_json::to_value(ferrite_blocks::SoapySourceParams::default()).unwrap();
+        let accepted = accepted_param_keys("SoapySource").unwrap();
+        for k in v.as_object().unwrap().keys() {
+            assert!(
+                accepted.contains(&k.as_str()),
+                "SoapySource field {k} not accepted"
+            );
+        }
+    }
 
     #[test]
     fn every_registered_block_appears_once() {

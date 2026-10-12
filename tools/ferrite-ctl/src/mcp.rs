@@ -1155,7 +1155,7 @@ impl FerriteServer {
 
     /// One-shot world snapshot: pipeline status, source config, the full
     /// active flowgraph, its name, UI sinks, and a hoisted `ready`
-    /// boolean (`pipeline.status == "running"`).
+    /// boolean (pipeline running and, per `health.ready`, samples flowing).
     pub(crate) async fn status_op(&self) -> Result<Value, McpError> {
         let pipeline = self.http.get("/api/pipeline").await?;
         let source = self.http.get("/api/source").await.unwrap_or(Value::Null);
@@ -1171,7 +1171,14 @@ impl FerriteServer {
             .map(|snap| store_current(&snap, "health"))
             .unwrap_or(Value::Null);
         let preset = flowgraph.get("name").cloned().unwrap_or(Value::Null);
-        let ready = pipeline.get("status").and_then(Value::as_str) == Some("running");
+        // `health.ready` = running *and* samples flowing (a just-restarted
+        // radio reads false until its first sample); fall back to the bare
+        // pipeline status against an older daemon without it.
+        let running = pipeline.get("status").and_then(Value::as_str) == Some("running");
+        let ready = health
+            .get("ready")
+            .and_then(Value::as_bool)
+            .map_or(running, |r| r && running);
         // Explicit hardware-vs-software flag so a blind caller can't mistake
         // a SineSource/File (a restart's fallback, or a `param src args=` that
         // never changed the type) for real RF. Authority is the server's
@@ -2040,7 +2047,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "One-shot snapshot of the running ferrited: pipeline status (running/stopped) with a hoisted `ready` boolean, the active source config (driver/freq/rate/gain), the full active flowgraph + its `preset` name, the set of UI sinks, and `health` — `health.ok` / `health.issues` say in plain words whether you are getting what you asked for (radio lost/recovering, preset-declared vs configured vs actual sample rate, requested vs actual LO, decoder/driver warnings such as a rate mismatch), with `health.tuning.listen_hz` the real listen frequency. Check `health.ok` before trusting an empty decode result. Cheap; call this first."
+        description = "One-shot snapshot of the running ferrited: pipeline status (running/stopped) with a hoisted `ready` boolean (true only once samples flow — false for a few seconds after any source restart; wait for it before measuring), the active source config (driver/freq/rate/gain), the full active flowgraph + its `preset` name, the set of UI sinks, and `health` — `health.ok` / `health.issues` say in plain words whether you are getting what you asked for (radio lost/recovering, preset-declared vs configured vs actual sample rate, requested vs actual LO, decoder/driver warnings such as a rate mismatch), with `health.tuning.listen_hz` the real listen frequency. Check `health.ok` before trusting an empty decode result. Cheap; call this first."
     )]
     async fn status(&self) -> Result<CallToolResult, McpError> {
         ok_json(&self.status_op().await?)
@@ -2061,7 +2068,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Per-block flow diagnostics for the running pipeline — sample throughput, process-time, and ring-buffer fill for every block, or `null` when stopped. The 'are samples actually moving?' health check that `status.ready` (just 'the pipeline is up') can't answer: after `start`, poll this to confirm the source is delivering frames downstream before you wait on a decode."
+        description = "Per-block flow diagnostics for the running pipeline — sample throughput, process-time, and ring-buffer fill for every block, or `null` when stopped. Per-block detail behind `status.ready` (which says whether the source delivers at all): after `start`, poll this to confirm the source is delivering frames downstream before you wait on a decode."
     )]
     async fn flowdiag(&self) -> Result<CallToolResult, McpError> {
         ok_json(&self.flowdiag_op().await?)
@@ -2287,7 +2294,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "PATCH a parameter delta onto one block in the running pipeline — the **advanced/direct** control surface. `block` is the block id (e.g. `src`, `chan`, `demod`, `audio_nr`); `params` is a JSON object of key→new_value pairs. Live-tunable keys hot-apply (no rebuild); others rebuild the block. The src block aliases to PATCH /api/source — its settable keys include gain_db, gain_mode, gain_elements, agc, antenna, bandwidth_hz, dc_offset_correction, and the driver-specific `settings` map (discover via `source_capabilities`). Same surface the UI's <BlockParams> component uses.\n\n⚠️ PREFER THE CONVENIENCE PATHS where one exists — they apply smart composition this raw PATCH skips, so a direct param can silently misbehave:\n- **Frequency:** use the `tune` tool, NOT `param src center_freq_hz` or `param chan freq_shift_hz`. `tune` applies the per-driver DC-spike dodge (offsets the LO so the carrier doesn't land on DC) and sets the channelizer shift together; setting center_freq_hz directly parks the carrier on the DC spike on a zero-IF radio (HackRF) and it won't decode.\n- **Gain:** use the single `gain_db` auto dial (it splits across stages footgun-free on HackRF), NOT `gain_mode=manual` + `gain_elements` — reach for manual per-stage only when you specifically need it.\nOnly drop to the raw param when there's no convenience equivalent (driver `settings`, decoder knobs, etc.) or you deliberately want the un-composed behaviour."
+        description = "PATCH a parameter delta onto one block in the running pipeline — the **advanced/direct** control surface. `block` is the block id (e.g. `src`, `chan`, `demod`, `audio_nr`); `params` is a JSON object of key→new_value pairs. Live-tunable keys hot-apply (no rebuild); others rebuild the block. The src block aliases to PATCH /api/source — its settable keys include gain_db, gain_mode, gain_elements, agc, antenna, bandwidth_hz, dc_offset_correction, and the driver-specific `settings` map (discover via `source_capabilities`; it merges per key — `null` removes a key, a value the radio already has is skipped without a restart, and the reply's `changes` / `notes` say what happened). Unknown src keys are rejected with the valid list. Same surface the UI's <BlockParams> component uses.\n\n⚠️ PREFER THE CONVENIENCE PATHS where one exists — they apply smart composition this raw PATCH skips, so a direct param can silently misbehave:\n- **Frequency:** use the `tune` tool, NOT `param src center_freq_hz` or `param chan freq_shift_hz`. `tune` applies the per-driver DC-spike dodge (offsets the LO so the carrier doesn't land on DC) and sets the channelizer shift together; setting center_freq_hz directly parks the carrier on the DC spike on a zero-IF radio (HackRF) and it won't decode.\n- **Gain:** use the single `gain_db` auto dial (it splits across stages footgun-free on HackRF), NOT `gain_mode=manual` + `gain_elements` — reach for manual per-stage only when you specifically need it.\nOnly drop to the raw param when there's no convenience equivalent (driver `settings`, decoder knobs, etc.) or you deliberately want the un-composed behaviour."
     )]
     async fn set_block_param(
         &self,
@@ -2575,6 +2582,22 @@ mod instructions_tests {
         );
     }
 
+    /// Shell-only tooling the in-app agent must never be pointed at: it
+    /// has no shell, and the offline analysis package
+    /// (`tools/analysis`, `ferrite-analyze`) is for operators / CI /
+    /// Claude Code — the agent gets the same numbers from `spectrum`.
+    const SHELL_ONLY: &[&str] = &[
+        "`Read`",
+        "Read tool",
+        "Bash",
+        "python",
+        "fft_to_png",
+        "fft_peaks",
+        "ferrite-analyze",
+        "ferrite_analyze",
+        "tools/analysis",
+    ];
+
     /// The agent has no shell: no tool may tell it to use one.
     #[test]
     fn no_tool_points_at_a_shell() {
@@ -2582,16 +2605,17 @@ mod instructions_tests {
             FerriteServer::from_http(Http::new(Client::new(), "http://127.0.0.1:1".into(), None));
         for t in server.tool_router.list_all() {
             let d = t.description.as_deref().unwrap_or_default();
-            for bad in [
-                "`Read`",
-                "Read tool",
-                "Bash",
-                "python",
-                "fft_to_png",
-                "fft_peaks",
-            ] {
+            for bad in SHELL_ONLY {
                 assert!(!d.contains(bad), "tool {} mentions {bad}", t.name);
             }
+        }
+    }
+
+    /// Nor may the server instructions (the agent's tool primer).
+    #[test]
+    fn instructions_never_point_at_shell_tooling() {
+        for bad in SHELL_ONLY {
+            assert!(!INSTRUCTIONS.contains(bad), "INSTRUCTIONS mention {bad}");
         }
     }
 }

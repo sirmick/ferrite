@@ -1,0 +1,28 @@
+[
+  {
+    "name": "aprs_spectrum",
+    "tool": "spectrum",
+    "fixture": "samples/vhf/aprs_145.070mhz_iq-s16.wav",
+    "lo_hz": 145052000, "hi_hz": 145088000, "res_hz": 5,
+    "max_peaks": 25, "profile_points": 120, "dc_guard_hz": 0
+  },
+  {
+    "name": "adsb_spectrum",
+    "tool": "spectrum",
+    "fixture": "samples/uhf/adsb_1090mhz_iq-f32-2ms.iq",
+    "lo_hz": 1089800000, "hi_hz": 1090200000, "res_hz": 500,
+    "max_peaks": 25, "profile_points": 120, "dc_guard_hz": 1500
+  },
+  {
+    "name": "aprs_envelope",
+    "tool": "envelope",
+    "fixture": "samples/vhf/aprs_145.070mhz_iq-s16.wav",
+    "freq_hz": 145070000, "bw_hz": 2000, "window_ms": 10
+  },
+  {
+    "name": "aprs_spectrogram",
+    "tool": "spectrogram",
+    "fixture": "samples/vhf/aprs_145.070mhz_iq-s16.wav",
+    "lo_hz": 145065000, "hi_hz": 145075000, "res_hz": 10, "step_ms": 20
+  }
+]

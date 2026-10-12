@@ -116,8 +116,11 @@ One app, in the browser, out of the box:
   client-side and stretched to the palette; manual slider for
   pixel-peeping.
 - **Live captures that don't disrupt the session.** Side-tee the FFT or
-  demod audio mid-session; render PNG strips with `tools/fft_to_png.py`;
-  pull peaks with `tools/fft_peaks.py`. The AI uses the same tools.
+  demod audio mid-session, then analyse offline with
+  [`tools/analysis/ferrite-analyze`](tools/analysis/README.md) (spectrum,
+  spectrogram, envelope, antenna compare, gain ladder, markdown report).
+  Its numbers match the daemon's `spectrum` tool, which the in-app AI
+  uses live.
 - **Signal catalog + band ribbon.** Sigidwiki-derived metadata,
   searchable, one-click tune; US band-allocation ribbon under the
   spectrum.

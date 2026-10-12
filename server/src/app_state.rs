@@ -14,7 +14,7 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use ferrite_blocks::{registry, SoapyReadback};
 use ferrite_runtime::{
     apply_profile, compose_source, inject_dc_block_taps, inject_narrow_fft_taps,
@@ -621,6 +621,136 @@ impl AppState {
         Ok(out)
     }
 
+    /// Apply a params delta to the `src` block, returning the plan plus
+    /// operator-facing notes about what was skipped or overridden.
+    ///
+    /// `settings` (driver `writeSetting` pairs) is merged **per key** into
+    /// the stored map (a `null` value deletes a key; numbers/bools are
+    /// stringified, the SoapySDR convention) instead of replacing it, and
+    /// no-op keys are dropped before the patch: a key already stored with
+    /// that value, or — for settings that mirror a gain element
+    /// ([`ferrite_sdr_tables::setting_gain_element`], e.g. SDRplay
+    /// `rfgain_sel` ↔ `RFGR`) — a key the hardware already reads back at
+    /// that value. A settings change costs a full source restart, so a
+    /// no-op one used to cost seconds of dead air for nothing. A write
+    /// that ends up empty returns a no-op plan without touching the radio.
+    pub async fn apply_src_params(
+        &self,
+        mut delta: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(Option<ReconfigurePlan>, Vec<String>)> {
+        let current = self.inner.source_config.read().await.clone();
+        let mut notes = Vec::new();
+        if let Some(new_settings) = delta.remove("settings") {
+            let serde_json::Value::Object(new_settings) = new_settings else {
+                bail!("settings must be an object of writeSetting key → string value");
+            };
+            let cur_settings = current
+                .params
+                .get("settings")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let driver = ferrite_sdr_tables::driver_key(
+                current
+                    .params
+                    .get("args")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+            );
+            let needs_readback = new_settings
+                .keys()
+                .any(|k| ferrite_sdr_tables::setting_gain_element(&driver, k).is_some());
+            let readback = if needs_readback {
+                self.source_readback().await
+            } else {
+                None
+            };
+            let (merged, mut skipped) = merge_source_settings(
+                &cur_settings,
+                new_settings,
+                &driver,
+                readback.as_ref().map(|rb| &rb.gain_elements),
+            )?;
+            notes.append(&mut skipped);
+            if merged != cur_settings {
+                delta.insert("settings".into(), serde_json::Value::Object(merged));
+            }
+        }
+        // Drop keys whose value is already stored — same rule as settings,
+        // so a pure no-op write never reaches the runtime — unless the
+        // hardware disagrees with the stored value (a stored `rfgain_sel`
+        // re-applied on a restart moves the dial's LNA state, so `gain_db
+        // 40` stored can read back 36): then the write is the operator
+        // re-asserting it, and it goes through.
+        if let Some(cur) = current.params.as_object() {
+            let stale = if delta.keys().any(|k| HW_CHECKED_KEYS.contains(&k.as_str())) {
+                self.source_readback().await
+            } else {
+                None
+            };
+            delta.retain(|k, v| {
+                cur.get(k) != Some(v) || stale.as_ref().is_some_and(|rb| hardware_differs(rb, k, v))
+            });
+        }
+        if delta.is_empty() {
+            let running = self.inner.pipeline.lock().await.is_some();
+            let plan = running.then(|| ReconfigurePlan {
+                changes: Vec::new(),
+                structural: Vec::new(),
+                overall: ferrite_blocks::ReconfigureScope::SelfBlock,
+            });
+            return Ok((plan, notes));
+        }
+        let merged = merge_into_params(current, delta);
+        let plan = self.patch_source(merged).await?;
+        Ok((plan, notes))
+    }
+
+    /// Notes for settings the hardware no longer honours: a stored setting
+    /// that mirrors a gain element (SDRplay `rfgain_sel` ↔ `RFGR`) but
+    /// reads back different — the `gain_db` dial picks the LNA state
+    /// itself, so a later dial write silently overrides an explicit
+    /// `rfgain_sel`. Surfaced in write responses so the caller sees it.
+    pub async fn source_setting_notes(&self, readback: Option<&SoapyReadback>) -> Vec<String> {
+        let Some(rb) = readback else {
+            return Vec::new();
+        };
+        let src = self.inner.source_config.read().await.clone();
+        let driver = ferrite_sdr_tables::driver_key(
+            src.params
+                .get("args")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        );
+        let Some(settings) = src
+            .params
+            .get("settings")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Vec::new();
+        };
+        let mut notes = Vec::new();
+        for (k, v) in settings {
+            let Some(elem) = ferrite_sdr_tables::setting_gain_element(&driver, k) else {
+                continue;
+            };
+            let (Some(want), Some(have)) = (
+                v.as_str().and_then(|s| s.trim().parse::<f64>().ok()),
+                rb.gain_elements.get(elem).copied(),
+            ) else {
+                continue;
+            };
+            if (want - have).abs() >= 0.5 {
+                notes.push(format!(
+                    "settings.{k}={want} is stored but hardware {elem} reads {have}: the gain_db dial \
+                     sets the LNA state itself and overrode it. Write settings.{k} alone after gain_db \
+                     to pin it, or pick the gain_db that lands the {elem} you want."
+                ));
+            }
+        }
+        notes
+    }
+
     /// Apply a params delta to one block by id. Dispatches by id:
     ///
     /// - `id == "src"` — merge delta into `SourceConfig.params` and
@@ -658,11 +788,7 @@ impl AppState {
             .clone();
 
         if id == SOURCE_ID {
-            let merged = {
-                let current = self.inner.source_config.read().await.clone();
-                merge_into_params(current, delta_obj)
-            };
-            return self.patch_source(merged).await;
+            return Ok(self.apply_src_params(delta_obj).await?.0);
         }
 
         // Is this block on the browser half? Cross-env presets place
@@ -943,9 +1069,20 @@ impl AppState {
             let pipeline = self.inner.pipeline.lock().await;
             if let Some(mount) = pipeline.as_ref() {
                 let delta_for_record = delta.clone();
+                let bw_changed = delta.contains_key("bandwidth_hz");
                 let plan = mount
                     .live_reconfigure_block(SOURCE_ID, serde_json::Value::Object(delta))
                     .await?;
+                // The source-only path never recomposes, so the injected
+                // SignalList would keep the old passband: push the new
+                // floor span to it (a live, in-place param).
+                if bw_changed {
+                    let bw = new_source
+                        .params
+                        .get("bandwidth_hz")
+                        .and_then(serde_json::Value::as_f64);
+                    sync_signal_floor_span(mount, bw).await;
+                }
                 drop(pipeline);
                 *self.inner.source_config.write().await = new_source;
                 // The source is part of the graph record; a live retune
@@ -1599,6 +1736,83 @@ fn overlay_live_params(base: &mut FlowgraphDoc, applied: &FlowgraphDoc) {
         if let Some(live) = applied.blocks.get(id) {
             decl.params.clone_from(&live.params);
         }
+    }
+}
+
+/// Source keys whose stored value can drift from the hardware (see
+/// [`hardware_differs`]).
+const HW_CHECKED_KEYS: &[&str] = &["gain_db", "agc", "antenna"];
+
+/// Does the driver readback disagree with `v` for source key `k`? Only
+/// the keys the readback reports; anything else counts as agreeing.
+fn hardware_differs(rb: &SoapyReadback, k: &str, v: &serde_json::Value) -> bool {
+    match k {
+        "gain_db" => matches!((rb.gain_db, v.as_f64()), (Some(h), Some(w)) if (h - w).abs() >= 0.5),
+        "agc" => matches!((rb.agc, v.as_bool()), (Some(h), Some(w)) if h != w),
+        "antenna" => matches!((rb.antenna.as_deref(), v.as_str()), (Some(h), Some(w)) if h != w),
+        _ => false,
+    }
+}
+
+/// Merge a `settings` write into the stored map, per key: `null` deletes,
+/// numbers/bools stringify, and no-op keys are dropped with a note — a key
+/// already stored at that value, or one not stored yet whose mirrored gain
+/// element (`gain_elements`, the readback) already sits there. Pure so the
+/// SDRplay `rfgain_sel` ↔ `RFGR` rule is testable without a radio.
+fn merge_source_settings(
+    cur: &serde_json::Map<String, serde_json::Value>,
+    new: serde_json::Map<String, serde_json::Value>,
+    driver: &str,
+    gain_elements: Option<&std::collections::BTreeMap<String, f64>>,
+) -> Result<(serde_json::Map<String, serde_json::Value>, Vec<String>)> {
+    let mut merged = cur.clone();
+    let mut notes = Vec::new();
+    for (k, v) in new {
+        let v = match v {
+            serde_json::Value::Null => {
+                merged.remove(&k);
+                continue;
+            }
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            other => bail!("settings.{k} must be a string (got {other})"),
+        };
+        if cur.get(&k).and_then(serde_json::Value::as_str) == Some(v.as_str()) {
+            notes.push(format!("settings.{k}={v} unchanged (already set)"));
+            continue;
+        }
+        // Not stored yet, but the hardware is already there (the gain dial
+        // picked this LNA state): nothing to do. A stored *different* value
+        // still applies — it would be re-written on the next restart.
+        if !cur.contains_key(&k) {
+            let elem = ferrite_sdr_tables::setting_gain_element(driver, &k);
+            let have = elem.and_then(|e| gain_elements?.get(e).copied());
+            if let (Some(elem), Some(h), Ok(w)) = (elem, have, v.trim().parse::<f64>()) {
+                if (w - h).abs() < 0.5 {
+                    notes.push(format!(
+                        "settings.{k}={v} skipped: hardware {elem} already reads {h} (no source restart)"
+                    ));
+                    continue;
+                }
+            }
+        }
+        merged.insert(k, serde_json::Value::String(v));
+    }
+    Ok((merged, notes))
+}
+
+/// Push `floor_span_hz` for source bandwidth `bw` to the running
+/// `signals` block, if the graph has one. `0` (unknown) restores the
+/// block's central-fraction fallback. Best-effort: a graph without the
+/// injected tap, or a refused push, only costs floor accuracy.
+async fn sync_signal_floor_span(mount: &crate::preset_pipeline::PresetMount, bw: Option<f64>) {
+    let span = ferrite_runtime::floor_span_for_bandwidth(bw).unwrap_or(0.0);
+    if let Err(e) = mount
+        .live_reconfigure_block("signals", serde_json::json!({ "floor_span_hz": span }))
+        .await
+    {
+        tracing::debug!(error = %format!("{e:#}"), "signals floor_span sync skipped");
     }
 }
 
@@ -2295,6 +2509,171 @@ mod tests {
             .expect("events advertised as a decoder kind");
         assert_eq!(ev.payload_type, "decodes");
         assert_eq!(ev.stream_id, 0);
+    }
+
+    /// A running waterfall preset: src → fft → logmag → ui:fft, so the
+    /// compose pass injects the `signals` SignalList.
+    fn waterfall_preset() -> FlowgraphDoc {
+        serde_json::from_value(json!({
+            "name": "wf",
+            "environments": ["node"],
+            "blocks": {
+                "src":    { "type": "Source", "placement": "node",
+                            "params": { "center_freq_hz": 0.0, "sample_rate_hz": 1000.0 } },
+                "fft":    { "type": "FFT", "placement": "node",
+                            "params": { "size": 64, "window": "hann" } },
+                "logmag": { "type": "LogMagU8", "placement": "node",
+                            "params": { "size": 64 } }
+            },
+            "wires": [["src.out", "fft.in"], ["fft.out", "logmag.in"], ["logmag.out", "ui:fft"]]
+        }))
+        .unwrap()
+    }
+
+    async fn applied_signals_param(state: &AppState, key: &str) -> Option<serde_json::Value> {
+        let doc = state.applied_doc_if_running().await?;
+        doc.blocks
+            .get("signals")?
+            .params
+            .as_ref()?
+            .get(key)
+            .cloned()
+    }
+
+    #[tokio::test]
+    async fn bandwidth_change_on_live_source_path_resyncs_signal_floor_span() {
+        // The source-only patch path never recomposes; the SignalList must
+        // still learn the new passband (defect: floor pinned to stopband).
+        let mut src = test_source();
+        src.params["bandwidth_hz"] = json!(400.0);
+        let state = AppState::new(waterfall_preset(), src.clone(), Duration::from_millis(5));
+        state.start().await.unwrap();
+        assert_eq!(
+            applied_signals_param(&state, "floor_span_hz").await,
+            Some(json!(360.0)),
+            "compose stamps 0.9 × bandwidth"
+        );
+        src.params["bandwidth_hz"] = json!(200.0);
+        state.patch_source(src.clone()).await.unwrap();
+        assert_eq!(
+            applied_signals_param(&state, "floor_span_hz").await,
+            Some(json!(180.0)),
+            "live source path pushed the new span"
+        );
+        state.stop().await;
+    }
+
+    #[test]
+    fn settings_merge_is_per_key_and_skips_noops() {
+        let cur = json!({ "rfgain_sel": "4", "rfnotch_ctrl": "true" });
+        let cur = cur.as_object().unwrap();
+        // Per-key merge: an unrelated key survives, numbers stringify,
+        // null deletes.
+        let new = json!({ "biasT_ctrl": false, "rfgain_sel": 2, "rfnotch_ctrl": null });
+        let (m, notes) =
+            merge_source_settings(cur, new.as_object().unwrap().clone(), "sdrplay", None).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(m),
+            json!({ "rfgain_sel": "2", "biasT_ctrl": "false" })
+        );
+        assert!(notes.is_empty());
+        // Same value as stored → dropped with a note.
+        let (m, notes) = merge_source_settings(
+            cur,
+            json!({ "rfgain_sel": "4" }).as_object().unwrap().clone(),
+            "sdrplay",
+            None,
+        )
+        .unwrap();
+        assert_eq!(&m, cur);
+        assert!(notes[0].contains("unchanged"), "{notes:?}");
+        // Not stored, hardware already at RFGR 0 → skipped, no restart.
+        let none = serde_json::Map::new();
+        let rb: std::collections::BTreeMap<String, f64> =
+            [("RFGR".to_string(), 0.0), ("IFGR".to_string(), 46.0)].into();
+        let (m, notes) = merge_source_settings(
+            &none,
+            json!({ "rfgain_sel": "0" }).as_object().unwrap().clone(),
+            "sdrplay",
+            Some(&rb),
+        )
+        .unwrap();
+        assert!(m.is_empty(), "hardware no-op not stored: {m:?}");
+        assert!(notes[0].contains("RFGR already reads 0"), "{notes:?}");
+        // Hardware elsewhere → applied.
+        let (m, _) = merge_source_settings(
+            &none,
+            json!({ "rfgain_sel": "4" }).as_object().unwrap().clone(),
+            "sdrplay",
+            Some(&rb),
+        )
+        .unwrap();
+        assert_eq!(m.get("rfgain_sel"), Some(&json!("4")));
+        // Objects aren't valid writeSetting values.
+        assert!(merge_source_settings(
+            &none,
+            json!({ "x": {} }).as_object().unwrap().clone(),
+            "sdrplay",
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn stored_equal_write_still_applies_when_hardware_differs() {
+        let rb = SoapyReadback {
+            gain_db: Some(36.0),
+            agc: Some(false),
+            antenna: Some("Antenna A".into()),
+            ..Default::default()
+        };
+        assert!(
+            hardware_differs(&rb, "gain_db", &json!(40)),
+            "dial moved by rfgain_sel"
+        );
+        assert!(!hardware_differs(&rb, "gain_db", &json!(36)));
+        assert!(!hardware_differs(&rb, "agc", &json!(false)));
+        assert!(hardware_differs(&rb, "antenna", &json!("Antenna B")));
+        assert!(!hardware_differs(&rb, "settings", &json!({})));
+    }
+
+    #[tokio::test]
+    async fn src_settings_write_lists_changes_and_noop_skips_restart() {
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5));
+        state.start().await.unwrap();
+        let obj = |v: serde_json::Value| v.as_object().unwrap().clone();
+
+        // A real settings change: listed per key (was: empty `changes`).
+        let (plan, _) = state
+            .apply_src_params(obj(json!({ "settings": { "x": "1" } })))
+            .await
+            .unwrap();
+        let plan = plan.unwrap();
+        let keys: Vec<_> = plan.changes.iter().map(|c| c.param_key.clone()).collect();
+        assert_eq!(keys, ["settings.x"], "{plan:?}");
+
+        // Writing it again (plus an already-stored scalar) is a no-op: no
+        // rebuild (epoch unchanged), empty changes, a note says why.
+        let epoch = state.epoch();
+        let (plan, notes) = state
+            .apply_src_params(obj(json!({ "settings": { "x": "1" }, "amplitude": 0.5 })))
+            .await
+            .unwrap();
+        let plan = plan.unwrap();
+        assert!(plan.is_noop(), "{plan:?}");
+        assert_eq!(state.epoch(), epoch, "no-op write must not rebuild");
+        assert!(notes.iter().any(|n| n.contains("settings.x=1 unchanged")));
+
+        // Another key merges in beside the first rather than replacing it.
+        state
+            .apply_src_params(obj(json!({ "settings": { "y": "2" } })))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.get_source().await.params["settings"],
+            json!({ "x": "1", "y": "2" })
+        );
+        state.stop().await;
     }
 
     #[tokio::test]

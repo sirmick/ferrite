@@ -1,25 +1,20 @@
-#!/usr/bin/env python3
-"""Backfill consistent `<file>.json` sidecars for every sample the
-sample picker (`GET /api/captures`) serves.
+"""Backfill consistent ``<file>.json`` sidecars for every sample the
+sample picker (``GET /api/captures``) serves (was samples/gen_sidecars.py).
 
 Re-runnable and non-destructive: a sidecar that already exists is left
-as-is (the hand-curated rich ones — aprs/ctcss/wspr — win), except that
-a missing `name` key is patched in so the picker always has a label.
+as-is (the hand-curated rich ones — aprs/ctcss/wspr — win), except that a
+missing ``name`` key is patched in so the picker always has a label.
 
 The picker only reads {name, format, sample_rate_hz, center_freq_hz,
-modulation}; the rest is for humans. `modulation` is the *carrier to
+modulation}; the rest is for humans. ``modulation`` is the *carrier to
 replay the clip on* (am|fm|ssb), i.e. the ModulatedFileSource default.
-
-This is the "minimal: unblock picker" pass — it does NOT rewrite preset
-links or move files; preset/e2e slug unification is a later arc.
 """
 from __future__ import annotations
+
 import json
-import sys
 import wave
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
 SIGWIKI = "https://www.sigidwiki.com/wiki/"
 
 # stem-substring → (display name, sigwiki slug, carrier modulation, mode)
@@ -74,15 +69,17 @@ def lookup(stem: str):
     return None
 
 
-def main() -> int:
+def backfill(root: Path) -> int:
+    """Write missing sidecars under ``root``; returns 0."""
+    base = Path(root).resolve()
     served = sorted(
         p
-        for p in ROOT.rglob("*")
+        for p in base.rglob("*")
         if p.is_file() and p.suffix in (".wav", ".iq", ".cf32")
     )
     wrote, patched, skipped = 0, 0, 0
     for p in served:
-        rel = p.relative_to(ROOT)
+        rel = p.relative_to(base)
         sidecar = p.with_suffix(p.suffix + ".json")
         legacy = p.with_suffix(".json")  # `<stem>.json` form
         existing = sidecar if sidecar.exists() else (legacy if legacy.exists() else None)
@@ -100,7 +97,7 @@ def main() -> int:
             if "name" not in doc:
                 doc["name"] = doc.get("description", disp)
                 existing.write_text(json.dumps(doc, indent=2) + "\n")
-                print(f"patched name  {existing.relative_to(ROOT)}")
+                print(f"patched name  {existing.relative_to(base)}")
                 patched += 1
             else:
                 skipped += 1
@@ -135,12 +132,8 @@ def main() -> int:
             },
         }
         sidecar.write_text(json.dumps(doc, indent=2) + "\n")
-        print(f"wrote  {sidecar.relative_to(ROOT)}  ({kind}, {rate} Hz, carrier={carrier})")
+        print(f"wrote  {sidecar.relative_to(base)}  ({kind}, {rate} Hz, carrier={carrier})")
         wrote += 1
 
     print(f"\n{wrote} written, {patched} name-patched, {skipped} left untouched")
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

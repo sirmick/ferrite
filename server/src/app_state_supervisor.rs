@@ -59,6 +59,10 @@ pub enum RadioPhase {
     /// No hardware source running.
     #[default]
     Idle,
+    /// The source is open but hasn't delivered a sample since it last
+    /// (re)opened — a settings change / rate change / recovery restart.
+    /// Not `ready`: a snapshot taken now records nothing.
+    Starting,
     /// Delivering samples.
     Ok,
     /// Detected dead; recovery about to start.
@@ -210,6 +214,31 @@ pub fn lost_reason(h: &SourceHealth) -> Option<String> {
     }
 }
 
+/// Is the stream delivering right now? At least one sample since the
+/// source opened, and the last delivery is fresh. `samples_pushed` resets
+/// with the block, so a restarted source reads "not yet" until its first
+/// sample — which is exactly the window health used to call ok.
+#[must_use]
+pub fn delivering(h: &SourceHealth) -> bool {
+    !h.reader_ended && h.samples_pushed > 0 && h.stalled_ms.is_some_and(|ms| ms < DELIVERY_FRESH_MS)
+}
+
+/// The radio phase outside a recovery: no source → idle; a lost one →
+/// lost; open but not yet delivering → starting; else ok.
+#[must_use]
+pub fn steady_phase(src: Option<&SourceHealth>, lost: bool) -> RadioPhase {
+    match src {
+        None => RadioPhase::Idle,
+        Some(_) if lost => RadioPhase::Lost,
+        Some(h) if !delivering(h) => RadioPhase::Starting,
+        Some(_) => RadioPhase::Ok,
+    }
+}
+
+/// A delivery older than this doesn't count as "delivering" for
+/// readiness (loss is a separate, longer threshold).
+const DELIVERY_FRESH_MS: u64 = 1_500;
+
 /// Turn a raw start/patch failure into something an operator can act
 /// on. Remote transport failures name the endpoint.
 #[must_use]
@@ -356,11 +385,7 @@ impl AppState {
         // Phase bookkeeping for the steady states; recovery drives the rest.
         let phase = self.radio_snapshot().state;
         if !matches!(phase, RadioPhase::Lost | RadioPhase::Recovering) {
-            let next = match (&src, &lost) {
-                (Some(_), None) => RadioPhase::Ok,
-                (Some(_), Some(_)) => RadioPhase::Lost,
-                (None, _) => RadioPhase::Idle,
-            };
+            let next = steady_phase(src.as_ref(), lost.is_some());
             self.set_radio(|r| r.state = next);
         }
         let radio = self.radio_snapshot();
@@ -392,10 +417,28 @@ impl AppState {
             _ => {}
         }
         if let Some(why) = &lost {
-            if radio.state == RadioPhase::Ok || radio.state == RadioPhase::Idle {
+            if matches!(
+                radio.state,
+                RadioPhase::Ok | RadioPhase::Idle | RadioPhase::Starting
+            ) {
                 issues.push(why.clone());
             }
         }
+        if radio.state == RadioPhase::Starting && lost.is_none() {
+            #[allow(clippy::cast_precision_loss)]
+            let age = src.as_ref().map_or(0.0, |h| h.age_ms as f64 / 1000.0);
+            issues.push(format!(
+                "radio starting: no samples yet {age:.1} s after the source (re)opened — \
+                 wait for health.ready before measuring"
+            ));
+        }
+        // Samples are flowing end to end: running, and a hardware source
+        // (if any) is delivering. Software sources are ready once running.
+        let ready = running
+            && match &src {
+                Some(h) => radio.state == RadioPhase::Ok && delivering(h),
+                None => radio.state != RadioPhase::Recovering,
+            };
         if hw {
             if let (Some(d), Some(c)) = (declared, cfg_rate) {
                 if (d - c).abs() > 0.5 {
@@ -439,6 +482,7 @@ impl AppState {
             "health",
             json!({
                 "ok": issues.is_empty(),
+                "ready": ready,
                 "issues": issues,
                 "pipeline": pipeline,
                 "epoch": self.epoch(),
@@ -606,13 +650,22 @@ impl AppState {
     /// After a recovery start: wait for real samples (a remote can accept
     /// the open and still never stream). Software sources pass at once.
     async fn verify_delivering(&self) -> bool {
-        let deadline = tokio::time::Instant::now() + VERIFY_WINDOW;
+        self.wait_delivering(VERIFY_WINDOW).await
+    }
+
+    /// Wait up to `window` for the running source to deliver (see
+    /// [`delivering`]). `true` at once for a software source or a radio
+    /// already streaming; `false` when stopped, on a dead reader, or on
+    /// timeout. Measurement paths (snapshot) gate on this so a source
+    /// restart reads as "not yet" instead of an empty recording.
+    pub(crate) async fn wait_delivering(&self, window: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + window;
         loop {
             let (running, src, _) = self.mount_health().await;
             match src {
                 None => return running,
                 Some(h) if h.reader_ended => return false,
-                Some(h) if h.samples_pushed > 0 => return true,
+                Some(h) if delivering(&h) => return true,
                 Some(_) => {}
             }
             if tokio::time::Instant::now() >= deadline {
@@ -654,6 +707,33 @@ mod tests {
             "still starting"
         );
         assert!(lost_reason(&health(false, None, NEVER_DELIVERED_MS + 1)).is_some());
+    }
+
+    #[test]
+    fn delivering_needs_a_fresh_sample() {
+        let mut h = health(false, None, 500);
+        h.samples_pushed = 0;
+        assert!(!delivering(&h), "restarted source, nothing yet");
+        let mut h = health(false, Some(20), 3_000);
+        assert!(delivering(&h));
+        h.stalled_ms = Some(DELIVERY_FRESH_MS + 1);
+        assert!(!delivering(&h), "stale delivery isn't 'flowing'");
+        assert!(!delivering(&health(true, Some(5), 3_000)), "dead reader");
+    }
+
+    #[test]
+    fn restarted_source_is_starting_not_ok_until_first_sample() {
+        // Defect: health said ok before samples flowed after a restart, so
+        // the first snapshot failed with "src tee wrote no sidecar".
+        let mut fresh = health(false, None, 1_200);
+        fresh.samples_pushed = 0;
+        assert_eq!(steady_phase(Some(&fresh), false), RadioPhase::Starting);
+        assert_eq!(
+            steady_phase(Some(&health(false, Some(30), 4_000)), false),
+            RadioPhase::Ok
+        );
+        assert_eq!(steady_phase(Some(&fresh), true), RadioPhase::Lost);
+        assert_eq!(steady_phase(None, false), RadioPhase::Idle);
     }
 
     #[test]
