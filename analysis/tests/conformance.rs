@@ -165,7 +165,7 @@ fn close(path: &str, a: &Value, b: &Value, errs: &mut Vec<String>) {
             // Spectrogram cell means: a cell sitting on a quantisation
             // boundary can round differently between debug and release
             // float codegen (±1 of 255 in one cell ≈ 0.003 on a mean).
-            let base = if path.contains("_mean[") { 0.05 } else { 1e-3 };
+            let base: f64 = if path.contains("_mean[") { 0.05 } else { 1e-3 };
             let tol = base.max(1e-6 * x.abs().max(y.abs()));
             if (x - y).abs() > tol {
                 errs.push(format!("{path}: {x} vs {y}"));
