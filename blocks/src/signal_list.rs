@@ -1002,8 +1002,11 @@ impl Block for SignalList {
         self.floor_byte_ema = Some(smoothed);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let floor_byte = smoothed.round().clamp(0.0, 255.0) as u8;
-        let (cands, floor_db, threshold_db) = self.detect(spectrum, floor_byte);
-        self.last_noise_floor_db = floor_db;
+        let (cands, _floor_db, threshold_db) = self.detect(spectrum, floor_byte);
+        // Report the smoothed (fractional-byte) floor, not the rounded
+        // byte detection uses — otherwise the reported floor moves in
+        // 0.63 dB steps and the same values recur across spots.
+        self.last_noise_floor_db = smoothed * DB_PER_BYTE + SERVER_FLOOR_DBFS;
         self.last_threshold_db = threshold_db;
         self.update_tracks(&cands);
 
@@ -1582,6 +1585,31 @@ mod tests {
         let snr = v["signals"][0]["snr_db"].as_f64().unwrap();
         assert!((snr - 30.0).abs() < 2.0, "snr {snr} ≈ 30 dB");
         assert!((v["floor_span_hz"].as_f64().unwrap() - 1_536_000.0).abs() < 2_000.0);
+    }
+
+    #[test]
+    fn reported_floor_is_not_byte_quantised() {
+        // One frame at a +10 dB floor after converging: the smoothed floor
+        // lands between byte steps (≈ +1 dB), and the report keeps it.
+        let n = 2048;
+        let mut b = block(
+            n,
+            SignalListParams {
+                emit_interval_ms: 0.0,
+                ..Default::default()
+            },
+        );
+        for _ in 0..30 {
+            push(&mut b, &make_row(n, -110.0, &[]));
+        }
+        let f = push(&mut b, &make_row(n, -100.0, &[])).unwrap()["noise_floor_dbfs"]
+            .as_f64()
+            .unwrap();
+        let steps = (f - f64::from(SERVER_FLOOR_DBFS)) / f64::from(super::DB_PER_BYTE);
+        assert!(
+            (steps - steps.round()).abs() > 0.05,
+            "floor {f} sits on a byte step ({steps})"
+        );
     }
 
     #[test]

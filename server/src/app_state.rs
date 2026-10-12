@@ -677,9 +677,20 @@ impl AppState {
             }
         }
         // Drop keys whose value is already stored — same rule as settings,
-        // so a pure no-op write never reaches the runtime.
+        // so a pure no-op write never reaches the runtime — unless the
+        // hardware disagrees with the stored value (a stored `rfgain_sel`
+        // re-applied on a restart moves the dial's LNA state, so `gain_db
+        // 40` stored can read back 36): then the write is the operator
+        // re-asserting it, and it goes through.
         if let Some(cur) = current.params.as_object() {
-            delta.retain(|k, v| cur.get(k) != Some(v));
+            let stale = if delta.keys().any(|k| HW_CHECKED_KEYS.contains(&k.as_str())) {
+                self.source_readback().await
+            } else {
+                None
+            };
+            delta.retain(|k, v| {
+                cur.get(k) != Some(v) || stale.as_ref().is_some_and(|rb| hardware_differs(rb, k, v))
+            });
         }
         if delta.is_empty() {
             let running = self.inner.pipeline.lock().await.is_some();
@@ -1728,6 +1739,21 @@ fn overlay_live_params(base: &mut FlowgraphDoc, applied: &FlowgraphDoc) {
     }
 }
 
+/// Source keys whose stored value can drift from the hardware (see
+/// [`hardware_differs`]).
+const HW_CHECKED_KEYS: &[&str] = &["gain_db", "agc", "antenna"];
+
+/// Does the driver readback disagree with `v` for source key `k`? Only
+/// the keys the readback reports; anything else counts as agreeing.
+fn hardware_differs(rb: &SoapyReadback, k: &str, v: &serde_json::Value) -> bool {
+    match k {
+        "gain_db" => matches!((rb.gain_db, v.as_f64()), (Some(h), Some(w)) if (h - w).abs() >= 0.5),
+        "agc" => matches!((rb.agc, v.as_bool()), (Some(h), Some(w)) if h != w),
+        "antenna" => matches!((rb.antenna.as_deref(), v.as_str()), (Some(h), Some(w)) if h != w),
+        _ => false,
+    }
+}
+
 /// Merge a `settings` write into the stored map, per key: `null` deletes,
 /// numbers/bools stringify, and no-op keys are dropped with a note — a key
 /// already stored at that value, or one not stored yet whose mirrored gain
@@ -2591,6 +2617,24 @@ mod tests {
             None
         )
         .is_err());
+    }
+
+    #[test]
+    fn stored_equal_write_still_applies_when_hardware_differs() {
+        let rb = SoapyReadback {
+            gain_db: Some(36.0),
+            agc: Some(false),
+            antenna: Some("Antenna A".into()),
+            ..Default::default()
+        };
+        assert!(
+            hardware_differs(&rb, "gain_db", &json!(40)),
+            "dial moved by rfgain_sel"
+        );
+        assert!(!hardware_differs(&rb, "gain_db", &json!(36)));
+        assert!(!hardware_differs(&rb, "agc", &json!(false)));
+        assert!(hardware_differs(&rb, "antenna", &json!("Antenna B")));
+        assert!(!hardware_differs(&rb, "settings", &json!({})));
     }
 
     #[tokio::test]
