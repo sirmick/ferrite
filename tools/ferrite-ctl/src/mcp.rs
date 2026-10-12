@@ -1155,7 +1155,7 @@ impl FerriteServer {
 
     /// One-shot world snapshot: pipeline status, source config, the full
     /// active flowgraph, its name, UI sinks, and a hoisted `ready`
-    /// boolean (`pipeline.status == "running"`).
+    /// boolean (pipeline running and, per `health.ready`, samples flowing).
     pub(crate) async fn status_op(&self) -> Result<Value, McpError> {
         let pipeline = self.http.get("/api/pipeline").await?;
         let source = self.http.get("/api/source").await.unwrap_or(Value::Null);
@@ -1171,7 +1171,14 @@ impl FerriteServer {
             .map(|snap| store_current(&snap, "health"))
             .unwrap_or(Value::Null);
         let preset = flowgraph.get("name").cloned().unwrap_or(Value::Null);
-        let ready = pipeline.get("status").and_then(Value::as_str) == Some("running");
+        // `health.ready` = running *and* samples flowing (a just-restarted
+        // radio reads false until its first sample); fall back to the bare
+        // pipeline status against an older daemon without it.
+        let running = pipeline.get("status").and_then(Value::as_str) == Some("running");
+        let ready = health
+            .get("ready")
+            .and_then(Value::as_bool)
+            .map_or(running, |r| r && running);
         // Explicit hardware-vs-software flag so a blind caller can't mistake
         // a SineSource/File (a restart's fallback, or a `param src args=` that
         // never changed the type) for real RF. Authority is the server's
@@ -2040,7 +2047,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "One-shot snapshot of the running ferrited: pipeline status (running/stopped) with a hoisted `ready` boolean, the active source config (driver/freq/rate/gain), the full active flowgraph + its `preset` name, the set of UI sinks, and `health` — `health.ok` / `health.issues` say in plain words whether you are getting what you asked for (radio lost/recovering, preset-declared vs configured vs actual sample rate, requested vs actual LO, decoder/driver warnings such as a rate mismatch), with `health.tuning.listen_hz` the real listen frequency. Check `health.ok` before trusting an empty decode result. Cheap; call this first."
+        description = "One-shot snapshot of the running ferrited: pipeline status (running/stopped) with a hoisted `ready` boolean (true only once samples flow — false for a few seconds after any source restart; wait for it before measuring), the active source config (driver/freq/rate/gain), the full active flowgraph + its `preset` name, the set of UI sinks, and `health` — `health.ok` / `health.issues` say in plain words whether you are getting what you asked for (radio lost/recovering, preset-declared vs configured vs actual sample rate, requested vs actual LO, decoder/driver warnings such as a rate mismatch), with `health.tuning.listen_hz` the real listen frequency. Check `health.ok` before trusting an empty decode result. Cheap; call this first."
     )]
     async fn status(&self) -> Result<CallToolResult, McpError> {
         ok_json(&self.status_op().await?)
@@ -2061,7 +2068,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Per-block flow diagnostics for the running pipeline — sample throughput, process-time, and ring-buffer fill for every block, or `null` when stopped. The 'are samples actually moving?' health check that `status.ready` (just 'the pipeline is up') can't answer: after `start`, poll this to confirm the source is delivering frames downstream before you wait on a decode."
+        description = "Per-block flow diagnostics for the running pipeline — sample throughput, process-time, and ring-buffer fill for every block, or `null` when stopped. Per-block detail behind `status.ready` (which says whether the source delivers at all): after `start`, poll this to confirm the source is delivering frames downstream before you wait on a decode."
     )]
     async fn flowdiag(&self) -> Result<CallToolResult, McpError> {
         ok_json(&self.flowdiag_op().await?)

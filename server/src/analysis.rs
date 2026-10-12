@@ -39,6 +39,8 @@ const MAX_RANGE_HZ: f64 = 400_000.0;
 const DC_GUARD_HZ: f64 = 1_500.0;
 /// Snapshots kept (each is rate × secs × 8 bytes on disk).
 const SNAPSHOT_KEEP: usize = 4;
+/// How long a snapshot waits for a just-(re)started source to deliver.
+const SNAPSHOT_READY_WAIT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SnapshotInfo {
@@ -210,6 +212,20 @@ impl AppState {
                 })?
         };
         let _gate = capture_gate().lock().await;
+        // A source that just restarted (settings / rate change, recovery)
+        // takes 2–8 s to deliver its first sample; arming the tee before
+        // then recorded nothing and failed with "wrote no sidecar". Wait
+        // for samples to flow instead.
+        if !self.wait_delivering(SNAPSHOT_READY_WAIT).await {
+            return Err(AppError::conflict(
+                "RADIO_NOT_READY",
+                format!(
+                    "the radio delivered no samples within {} s — check `health` \
+                     (radio.state / issues) and retry",
+                    SNAPSHOT_READY_WAIT.as_secs()
+                ),
+            ));
+        }
         let id = mint_id("snap");
         let path: PathBuf =
             std::env::temp_dir().join(format!("ferrite-{id}-{}.cf32", std::process::id()));
