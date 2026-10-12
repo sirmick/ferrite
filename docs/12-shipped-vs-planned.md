@@ -107,16 +107,15 @@ recording explicitly deferred (D08).
 **Shipped.** A server-side `Recorder` block lineage
 ([`blocks/src/record.rs`](../blocks/src/record.rs)) writes `.bin` byte
 streams + `.json` sidecars (sample_rate, frame_size, center_freq,
-capture_duration). Python tools render and analyse:
-- [`tools/fft_to_png.py`](../tools/fft_to_png.py) — strip PNG with
-  dark-theme styling matching the UI, frequency + time axes, axis
-  labels.
-- [`tools/fft_peaks.py`](../tools/fft_peaks.py) — histogram-based peak
-  finder with sigma threshold and minimum-gap-kHz filtering, JSON or
-  text output.
+capture_duration). [`tools/analysis/`](../tools/analysis/README.md)
+(`ferrite-analyze`) renders and analyses them: `fft-png` (strip PNG
+matching the UI), `fft-peaks` (sigma-threshold peak finder), plus IQ
+`spectrum` / `spectrogram` / `envelope` / `compare` / `ladder` / `report`
+on the same definitions as the daemon's analysis routes.
 
-These tools are used by **both** the human operator (via the shell) and
-the AI (via Bash). Same code path.
+The in-app AI has no shell; it gets the same measurements live through
+the MCP `spectrum` / `spectrogram` / `envelope` tools. `ferrite-analyze`
+is for operators, CI and Claude Code sessions.
 
 ## Signal catalog vs. spectrum explorer
 

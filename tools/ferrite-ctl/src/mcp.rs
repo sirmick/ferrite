@@ -2582,6 +2582,22 @@ mod instructions_tests {
         );
     }
 
+    /// Shell-only tooling the in-app agent must never be pointed at: it
+    /// has no shell, and the offline analysis package
+    /// (`tools/analysis`, `ferrite-analyze`) is for operators / CI /
+    /// Claude Code — the agent gets the same numbers from `spectrum`.
+    const SHELL_ONLY: &[&str] = &[
+        "`Read`",
+        "Read tool",
+        "Bash",
+        "python",
+        "fft_to_png",
+        "fft_peaks",
+        "ferrite-analyze",
+        "ferrite_analyze",
+        "tools/analysis",
+    ];
+
     /// The agent has no shell: no tool may tell it to use one.
     #[test]
     fn no_tool_points_at_a_shell() {
@@ -2589,16 +2605,17 @@ mod instructions_tests {
             FerriteServer::from_http(Http::new(Client::new(), "http://127.0.0.1:1".into(), None));
         for t in server.tool_router.list_all() {
             let d = t.description.as_deref().unwrap_or_default();
-            for bad in [
-                "`Read`",
-                "Read tool",
-                "Bash",
-                "python",
-                "fft_to_png",
-                "fft_peaks",
-            ] {
+            for bad in SHELL_ONLY {
                 assert!(!d.contains(bad), "tool {} mentions {bad}", t.name);
             }
+        }
+    }
+
+    /// Nor may the server instructions (the agent's tool primer).
+    #[test]
+    fn instructions_never_point_at_shell_tooling() {
+        for bad in SHELL_ONLY {
+            assert!(!INSTRUCTIONS.contains(bad), "INSTRUCTIONS mention {bad}");
         }
     }
 }

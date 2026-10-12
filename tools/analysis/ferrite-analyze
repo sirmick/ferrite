@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Entry point: `tools/analysis/ferrite-analyze <cmd> …`.
+
+`python3 -I` friendly — the package directory is put on sys.path
+explicitly (from this file's real location), never the CWD, so a
+`json.py` sitting next to a capture can't shadow the stdlib.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from ferrite_analyze.cli import main  # noqa: E402
+
+sys.exit(main())

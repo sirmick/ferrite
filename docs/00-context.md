@@ -27,8 +27,9 @@ Source layout that mirrors this split:
 - [`tools/ferrite-ai/`](../tools/ferrite-ai) — Claude Code sidecar.
 - [`tools/ferrite-ctl/`](../tools/ferrite-ctl) — thin CLI that drives
   `ferrited` via REST. Used by humans and by the AI.
-- [`tools/fft_to_png.py`](../tools/fft_to_png.py),
-  [`tools/fft_peaks.py`](../tools/fft_peaks.py) — capture analysis tools.
+- [`tools/analysis/`](../tools/analysis/README.md) — `ferrite-analyze`,
+  offline capture analysis (operators / CI / Claude Code; not the in-app
+  AI, which uses the MCP `spectrum` tools).
 - [`web/`](../web/) — SvelteKit app served by `ferrited`'s static layer.
 - [`flowgraphs/`](../flowgraphs/) — 21 JSON presets the runtime
   instantiates (listening modes, decoder chains, capture helpers).

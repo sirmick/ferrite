@@ -89,8 +89,9 @@ End-to-end, working today against live RF:
 - `tools/ferrite-ctl/` — thin Rust CLI driving `ferrited` via REST,
   used by the AI (and by humans). Atomic `--gain` implies
   `agc=false` so the SDR side doesn't reject a manual gain.
-- `tools/fft_to_png.py`, `tools/fft_peaks.py` — capture analysis
-  tools. AI reads the same PNGs the human does.
+- `tools/analysis/` (`ferrite-analyze`) — offline capture analysis for
+  operators / CI; the in-app AI measures live via the MCP `spectrum`
+  tools (same definitions).
 - Per-driver operator notes (`web/src/lib/controls/sdr-presets/*.json`
   → `ai_operator_notes` field) merged into the AI system prompt so it
   knows e.g. RSPdx antenna A is HF-and-VHF SMA, antenna C is BNC

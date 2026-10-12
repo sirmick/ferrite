@@ -16,3 +16,6 @@ anyhow      = "1"
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 rustfft     = { version = "6", default-features = false }
 serde       = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

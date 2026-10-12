@@ -5,8 +5,7 @@
 //! browser. `ferrite-ctl view <pane>` is the AI's way to grab one as a
 //! rendered PNG — same content the operator is looking at, with the
 //! band-plan overlay / VFO marker / contrast / pause state all baked
-//! in by the live renderer rather than rebuilt from raw bins via
-//! `fft_to_png.py`.
+//! in by the live renderer rather than rebuilt offline from raw bins.
 //!
 //! Round-trip:
 //!

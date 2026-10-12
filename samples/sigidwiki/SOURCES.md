@@ -58,7 +58,7 @@ keep provenance obvious.
 | `POCSAG_Waterfallthmb.png` | POCSAG | `pager` |
 | `Nfm.jpg` | NFM Voice | `nbfm` |
 | `USB_Waterfall.png` | Single Sideband Voice | `usb`, `lsb` (LSB shows the same wedge mirrored) |
-| `FT8_Waterfall.png` | FT8 (rendered locally from `FT8_websdr_test.wav` via `tools/fft_to_png.py`-style spectrogram, not from sigidwiki) | `ft8` |
+| `FT8_Waterfall.png` | FT8 (rendered locally from `FT8_websdr_test.wav` via a local spectrogram render, not from sigidwiki) | `ft8` |
 | `AM_Waterfall.jpg` | Amplitude Modulation | `wbam` |
 | `Broadcast_FM.jpg` | FM Broadcast Radio | `wbfm` |
 | `Stereo_left_right_fmbroadcast.jpg` | FM Broadcast Radio | `wbfm_stereo` |
