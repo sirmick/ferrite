@@ -99,16 +99,52 @@ pub fn inject_signal_list_taps(doc: &mut FlowgraphDoc) {
         UI_SIGNALS.to_string(),
     ));
 
+    // Passband-aware floor: the source's analog filter width, when the
+    // composed source declares one (see `floor_span_for_source`).
+    let mut params = json!({ "size": size });
+    if let Some(span) = floor_span_for_source(doc) {
+        params["floor_span_hz"] = json!(span);
+    }
+
     // NativeOnly node-side block; env_split bridges ui:signals to the browser.
     doc.blocks.insert(
         SIGNALS_ID.to_string(),
         BlockInstanceDecl {
             type_name: "SignalList".into(),
-            params: Some(json!({ "size": size })),
+            params: Some(params),
             placement: Some(Environment::Node),
             ..Default::default()
         },
     );
+}
+
+/// Fraction of the analog filter width the floor is estimated over: the
+/// filter's skirts sit below the in-band floor and would otherwise become
+/// the 10th percentile.
+pub const FLOOR_SPAN_OF_BANDWIDTH: f64 = 0.9;
+
+/// `SignalList.floor_span_hz` for a source `bandwidth_hz` (Hz) — `None`
+/// when the bandwidth is unknown/zero, which leaves the block on its
+/// central-fraction fallback. Shared by compose-time injection and the
+/// daemon's live sync on a bandwidth change, so both agree.
+#[must_use]
+pub fn floor_span_for_bandwidth(bandwidth_hz: Option<f64>) -> Option<f64> {
+    bandwidth_hz
+        .filter(|bw| bw.is_finite() && *bw > 0.0)
+        .map(|bw| (bw * FLOOR_SPAN_OF_BANDWIDTH).round())
+}
+
+/// The composed source's `bandwidth_hz` mapped through
+/// [`floor_span_for_bandwidth`]. The source block is the compose-time
+/// `src`; software sources declare no bandwidth and get the fallback.
+fn floor_span_for_source(doc: &FlowgraphDoc) -> Option<f64> {
+    let bw = doc
+        .blocks
+        .get(crate::compose::SOURCE_ID)
+        .and_then(|b| b.params.as_ref())
+        .and_then(|p| p.get("bandwidth_hz"))
+        .and_then(serde_json::Value::as_f64);
+    floor_span_for_bandwidth(bw)
 }
 
 #[cfg(test)]
@@ -173,6 +209,28 @@ mod tests {
             .wires
             .iter()
             .any(|w| w.src == "signals.events" && w.dst == "ui:signals"));
+    }
+
+    #[test]
+    fn floor_span_comes_from_source_bandwidth() {
+        let mut doc = wideband();
+        doc.blocks.get_mut("src").unwrap().params = Some(json!({
+            "sample_rate_hz": 2_400_000.0, "bandwidth_hz": 1_536_000.0
+        }));
+        inject_signal_list_taps(&mut doc);
+        let p = doc.blocks["signals"].params.as_ref().unwrap();
+        assert_eq!(p["floor_span_hz"].as_f64(), Some(1_382_400.0));
+
+        // No/zero bandwidth → no override, the block falls back.
+        let mut doc = wideband();
+        inject_signal_list_taps(&mut doc);
+        assert!(doc.blocks["signals"]
+            .params
+            .as_ref()
+            .unwrap()
+            .get("floor_span_hz")
+            .is_none());
+        assert_eq!(floor_span_for_bandwidth(Some(0.0)), None);
     }
 
     #[test]

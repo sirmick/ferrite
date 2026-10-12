@@ -943,9 +943,20 @@ impl AppState {
             let pipeline = self.inner.pipeline.lock().await;
             if let Some(mount) = pipeline.as_ref() {
                 let delta_for_record = delta.clone();
+                let bw_changed = delta.contains_key("bandwidth_hz");
                 let plan = mount
                     .live_reconfigure_block(SOURCE_ID, serde_json::Value::Object(delta))
                     .await?;
+                // The source-only path never recomposes, so the injected
+                // SignalList would keep the old passband: push the new
+                // floor span to it (a live, in-place param).
+                if bw_changed {
+                    let bw = new_source
+                        .params
+                        .get("bandwidth_hz")
+                        .and_then(serde_json::Value::as_f64);
+                    sync_signal_floor_span(mount, bw).await;
+                }
                 drop(pipeline);
                 *self.inner.source_config.write().await = new_source;
                 // The source is part of the graph record; a live retune
@@ -1599,6 +1610,20 @@ fn overlay_live_params(base: &mut FlowgraphDoc, applied: &FlowgraphDoc) {
         if let Some(live) = applied.blocks.get(id) {
             decl.params.clone_from(&live.params);
         }
+    }
+}
+
+/// Push `floor_span_hz` for source bandwidth `bw` to the running
+/// `signals` block, if the graph has one. `0` (unknown) restores the
+/// block's central-fraction fallback. Best-effort: a graph without the
+/// injected tap, or a refused push, only costs floor accuracy.
+async fn sync_signal_floor_span(mount: &crate::preset_pipeline::PresetMount, bw: Option<f64>) {
+    let span = ferrite_runtime::floor_span_for_bandwidth(bw).unwrap_or(0.0);
+    if let Err(e) = mount
+        .live_reconfigure_block("signals", serde_json::json!({ "floor_span_hz": span }))
+        .await
+    {
+        tracing::debug!(error = %format!("{e:#}"), "signals floor_span sync skipped");
     }
 }
 
@@ -2295,6 +2320,58 @@ mod tests {
             .expect("events advertised as a decoder kind");
         assert_eq!(ev.payload_type, "decodes");
         assert_eq!(ev.stream_id, 0);
+    }
+
+    /// A running waterfall preset: src → fft → logmag → ui:fft, so the
+    /// compose pass injects the `signals` SignalList.
+    fn waterfall_preset() -> FlowgraphDoc {
+        serde_json::from_value(json!({
+            "name": "wf",
+            "environments": ["node"],
+            "blocks": {
+                "src":    { "type": "Source", "placement": "node",
+                            "params": { "center_freq_hz": 0.0, "sample_rate_hz": 1000.0 } },
+                "fft":    { "type": "FFT", "placement": "node",
+                            "params": { "size": 64, "window": "hann" } },
+                "logmag": { "type": "LogMagU8", "placement": "node",
+                            "params": { "size": 64 } }
+            },
+            "wires": [["src.out", "fft.in"], ["fft.out", "logmag.in"], ["logmag.out", "ui:fft"]]
+        }))
+        .unwrap()
+    }
+
+    async fn applied_signals_param(state: &AppState, key: &str) -> Option<serde_json::Value> {
+        let doc = state.applied_doc_if_running().await?;
+        doc.blocks
+            .get("signals")?
+            .params
+            .as_ref()?
+            .get(key)
+            .cloned()
+    }
+
+    #[tokio::test]
+    async fn bandwidth_change_on_live_source_path_resyncs_signal_floor_span() {
+        // The source-only patch path never recomposes; the SignalList must
+        // still learn the new passband (defect: floor pinned to stopband).
+        let mut src = test_source();
+        src.params["bandwidth_hz"] = json!(400.0);
+        let state = AppState::new(waterfall_preset(), src.clone(), Duration::from_millis(5));
+        state.start().await.unwrap();
+        assert_eq!(
+            applied_signals_param(&state, "floor_span_hz").await,
+            Some(json!(360.0)),
+            "compose stamps 0.9 × bandwidth"
+        );
+        src.params["bandwidth_hz"] = json!(200.0);
+        state.patch_source(src.clone()).await.unwrap();
+        assert_eq!(
+            applied_signals_param(&state, "floor_span_hz").await,
+            Some(json!(180.0)),
+            "live source path pushed the new span"
+        );
+        state.stop().await;
     }
 
     #[tokio::test]

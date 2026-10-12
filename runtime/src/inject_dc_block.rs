@@ -4,8 +4,10 @@
 //! permanent DC spike at the tuned centre from LO self-mixing + I/Q
 //! offset. The honest fix is to remove the *artifact* once, at the IQ
 //! stream, **before** the FFT tap splits — then it's gone from the
-//! wideband waterfall, the narrow channel FFT, captures, and the
-//! `SignalList` watchlist consistently. That's a cross-cutting concern
+//! wideband waterfall, the narrow channel FFT and captures consistently.
+//! (The `SignalList` watchlist does *not* rely on it: the blocker is off
+//! by default on SDRplay and its ~200 Hz corner can't remove an LO
+//! pedestal, so SignalList masks ±`dc_mask_hz` itself.) That's a cross-cutting concern
 //! every hardware-fed preset wants, so we synthesise it at compose time
 //! the same way [`inject_signal_list`](crate::inject_signal_list) and
 //! [`inject_narrow_fft`](crate::inject_narrow_fft) synthesise their taps,
