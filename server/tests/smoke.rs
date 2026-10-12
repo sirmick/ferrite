@@ -133,6 +133,10 @@ async fn spawn_app(auto_start: bool) -> SocketAddr {
         .route("/api/pipeline", get(routes::pipeline_status))
         .route("/api/pipeline/start", post(routes::pipeline_start))
         .route("/api/pipeline/stop", post(routes::pipeline_stop))
+        .route(
+            "/api/pipeline/blocks/:id/params",
+            post(routes::patch_pipeline_block),
+        )
         .route("/api/ui-sinks", get(routes::list_ui_sinks))
         .route("/api/blocks", get(routes::list_block_schemas))
         .route("/api/view", get(routes::get_view_state))
@@ -276,6 +280,28 @@ async fn patch_source_rate_change_triggers_source_restart() {
         .expect("ws stream open")
         .expect("ws ok");
     assert!(matches!(msg, Message::Binary(_)), "got {msg:?}");
+}
+
+#[tokio::test]
+async fn unknown_src_param_is_rejected_with_key_and_valid_list() {
+    // Defect: `param src agc_enable=false` was accepted, merged into the
+    // source config and forced a source restart with empty `changes`.
+    let addr = spawn_app(true).await;
+    let url = format!("http://{addr}/api/pipeline/blocks/src/params");
+    let (status, body) = raw_request_with_status(&url, "POST", r#"{"tone_freq_hz":250}"#).await;
+    assert_eq!(status, 400, "body: {body}");
+    assert!(body.contains("UNKNOWN_PARAM"), "body: {body}");
+    assert!(body.contains("tone_freq_hz"), "names the key: {body}");
+    assert!(
+        body.contains("tone_freq_abs_hz"),
+        "lists/suggests valid keys: {body}"
+    );
+    // Stored source untouched.
+    let after = http_get(&format!("http://{addr}/api/source")).await;
+    assert!(!after.contains("tone_freq_hz\""), "after: {after}");
+    // A known key still applies.
+    let (status, body) = raw_request_with_status(&url, "POST", r#"{"tone_freq_abs_hz":250}"#).await;
+    assert_eq!(status, 200, "body: {body}");
 }
 
 #[tokio::test]

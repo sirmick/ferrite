@@ -178,7 +178,7 @@ impl RxStreamLike for SoapyRx {
 
 /// Construction-time params. All fields are optional in the JSON preset;
 /// missing fields fall back to [`Default`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct SoapySourceParams {
     /// `SoapySDR` device args (e.g. `driver=rtlsdr,serial=0000001`).

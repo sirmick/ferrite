@@ -666,6 +666,21 @@ pub async fn patch_pipeline_block(
 ) -> Result<Json<ReconfigureResponse>, AppError> {
     let is_src = id == ferrite_runtime::SOURCE_ID;
     tracing::info!(block_id = %id, delta = ?delta, "POST /api/pipeline/blocks/.../params");
+    // Source keys are checked against the source type's schema: an unknown
+    // key (`agc_enable` for `agc`) used to merge into the source config and
+    // force a full restart with an empty `changes` list — a silent no-op
+    // that cost the radio seconds and looked like success.
+    if is_src {
+        if let Some(obj) = delta.as_object() {
+            let type_name = state.get_source().await.type_name;
+            if let Some(u) = crate::block_schema::find_unknown_param(&type_name, obj) {
+                return Err(AppError::bad_request(
+                    "UNKNOWN_PARAM",
+                    format!("src ({type_name}): {u}"),
+                ));
+            }
+        }
+    }
     let plan = state
         .apply_block_params(&id, delta)
         .await
