@@ -208,7 +208,7 @@ Catalog (browser-visible, picked from the Signal Catalog panel):
 | [`flowgraphs/cw.json`](../flowgraphs/cw.json)                                         | CW with multimon-ng Morse decoder                                                      |
 | [`flowgraphs/packet.json`](../flowgraphs/packet.json)                                 | AX.25 packet — AFSK1200 + 2400 variants + FSK9600 in parallel; APRS at 144.39 MHz is the typical payload |
 | [`flowgraphs/packet-debug.json`](../flowgraphs/packet-debug.json)                     | Packet with audio fan-out to WAV for offline A/B against `analyze-packet-wav`          |
-| [`flowgraphs/pager.json`](../flowgraphs/pager.json)                                   | POCSAG (3 baud) + FLEX + FLEX_NEXT in parallel                                         |
+| [`flowgraphs/pager.json`](../flowgraphs/pager.json)                                   | POCSAG (3 baud) + FLEX (multimon's `FLEX_NEXT`) in parallel; main pane: Pager Journal  |
 | [`flowgraphs/nwr.json`](../flowgraphs/nwr.json)                                       | NOAA Weather Radio (NBFM + EAS)                                                        |
 | [`flowgraphs/adsb.json`](../flowgraphs/adsb.json)                                     | ADS-B / Mode S — vendored dump1090, 1090 MHz                                           |
 | [`flowgraphs/dtmf-e2e.json`](../flowgraphs/dtmf-e2e.json)                             | DTMF events-bridge canary across the server/browser split                              |

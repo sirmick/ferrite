@@ -1,5 +1,15 @@
 //! Pager (POCSAG + FLEX) decoder — wraps `multimon-ng`'s
-//! `demod_poc12`, `demod_flex`, and `demod_flex_next`.
+//! `demod_poc5/12/24` and `demod_flex_next`.
+//!
+//! multimon ships two FLEX decoders. The classic `demod_flex` is not
+//! run here: it ignores long addresses (its own comment cites upstream
+//! issue #79), so it mis-frames those pages (the first characters of
+//! the message drop) and its capcode arithmetic wraps in 32 bits
+//! (`aw1 - 0x8000` on a `uint32_t`), so a long-address page reports a
+//! capcode like 4294967072. Running it beside `demod_flex_next` made
+//! every page come out twice, once wrong. `demod_flex_next` handles
+//! both address forms and is the only FLEX decoder in this block; the
+//! classic one stays vendored for the offline analyzer's side-by-side.
 //!
 //! Takes NBFM-demodulated audio at exactly 22050 Hz (POCSAG1200's
 //! native rate inside multimon-ng — FLEX shares the same plumbing)
@@ -82,13 +92,15 @@ impl Default for PagerDemodParams {
 }
 
 pub struct PagerDemod {
-    /// Five multimon decoders running in parallel on the same
-    /// 22050 Hz audio stream — POCSAG512, 1200, 2400, FLEX, FLEX_NEXT.
+    /// Four multimon decoders running in parallel on the same
+    /// 22050 Hz audio stream — POCSAG512, 1200, 2400 and FLEX_NEXT.
     /// Each tries to lock its own bit timing / sync; whichever
     /// matches the carrier produces messages, the others sit
     /// silent. Cheap enough (a few % CPU per rate at 22 kHz) to
     /// always run all of them. FLEX largely replaced POCSAG on US
     /// carrier networks, so any "paging band" preset wants both.
+    /// One decoder per protocol: two FLEX decoders on one stream
+    /// means every page twice (see the module doc).
     decoders: Vec<MultimonDemod>,
     /// Tracks whether we've already logged the off-rate warning, so
     /// it doesn't spam every tick.
@@ -117,7 +129,6 @@ impl PagerDemod {
                 MultimonDemod::new(Decoder::Pocsag512),
                 MultimonDemod::new(Decoder::Pocsag1200),
                 MultimonDemod::new(Decoder::Pocsag2400),
-                MultimonDemod::new(Decoder::Flex),
                 MultimonDemod::new(Decoder::FlexNext),
             ],
             warned_off_rate: false,
@@ -173,7 +184,7 @@ impl Block for PagerDemod {
                     ai_notes: "Surface decodes that pass framing but fail BCH error-check. Useful for spotting traffic on encrypted channels; turn off for a clean log.",
                 },
             ],
-            ai_notes: "POCSAG + FLEX paging decoder. Tune to commercial paging channels (US: 929–932 MHz, 152–162 MHz; UK: 153 MHz; varies regionally) on NBFM. Output: `tail decoder --category pocsag` and `--category flex`.",
+            ai_notes: "POCSAG + FLEX paging decoder. Tune to commercial paging channels (US: 929–932 MHz, 152–162 MHz; UK: 153 MHz; varies regionally) on NBFM. Output: one `pager` record per page (protocol, capcode, format, frag K/C/F, message) via `decodes` / `await_events`; raw lines also in `tail decoder --category pocsag` / `--category flex`.",
         }
     }
 

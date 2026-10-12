@@ -45,10 +45,19 @@ pub fn parse_pocsag(line: &str) -> Option<Value> {
     }))
 }
 
-/// `FLEX|2026-10-10 12:00:00|1600/2/K/A|07.123|001234567|ALN|text` and
-/// `FLEX_NEXT|1600/2|07.123.A|0001234567|SS|5|ALN|…` — pipe-delimited;
-/// the capcode is the first long all-digit field, the page type one of
+/// `FLEX_NEXT|1600/2|07.123.A|0001234567|SS|5|ALN|3.0.K|text` — the
+/// decoder `PagerDemod` runs — and the classic
+/// `FLEX|2026-10-10 12:00:00|1600/2/K/A|07.123|001234567|ALN|text` the
+/// offline analyzer still prints. Pipe-delimited; the capcode is the
+/// first long all-digit field, the page type one of
 /// `ALN`/`NUM`/`TON`/`BIN`/`UNK`, the message everything after it.
+///
+/// FLEX_NEXT puts two things in front of an ALN message that are not
+/// message text: a fragment tag `<frag>.<cont>.<K|C|F>` (K = complete,
+/// C = the first part of a longer page, F = a continuation) and, when
+/// the `LS`/`SG` flag field says `G` (a group page), the member
+/// capcodes. Those come out as `frag` and `group`; `message` is the
+/// text alone.
 #[must_use]
 pub fn parse_flex(line: &str) -> Option<Value> {
     let fields: Vec<&str> = line.split('|').collect();
@@ -56,10 +65,11 @@ pub fn parse_flex(line: &str) -> Option<Value> {
     if protocol != "FLEX" && protocol != "FLEX_NEXT" {
         return None;
     }
+    let all_digits = |f: &str| f.len() >= 7 && f.bytes().all(|b| b.is_ascii_digit());
     let capcode = fields
         .iter()
         .skip(1)
-        .find(|f| f.len() >= 7 && f.bytes().all(|b| b.is_ascii_digit()))
+        .find(|f| all_digits(f))
         .and_then(|f| f.parse::<u64>().ok());
     let type_at = fields
         .iter()
@@ -76,14 +86,58 @@ pub fn parse_flex(line: &str) -> Option<Value> {
         .and_then(|fs| fs.iter().find(|f| f.contains('/')))
         .and_then(|f| f.split('/').next())
         .and_then(|b| b.parse::<u32>().ok());
-    let message = fields[type_at + 1..].join("|").trim().to_string();
-    Some(json!({
+    // FLEX_NEXT's address flags: `L`/`S` (long/short address) then
+    // `G`/`S` (group/single page).
+    let group_page = fields[..type_at]
+        .iter()
+        .any(|f| f.len() == 2 && matches!(f.as_bytes()[0], b'L' | b'S') && f.ends_with('G'));
+
+    let mut rest = &fields[type_at + 1..];
+    let mut frag = None;
+    if format == "alpha" {
+        if let Some(tag) = rest.first().filter(|f| is_frag_tag(f)) {
+            frag = tag.chars().last().filter(|c| *c != '?').map(String::from);
+            rest = &rest[1..];
+        }
+    }
+    let mut group: Vec<u64> = Vec::new();
+    if format == "alpha" && group_page {
+        while let Some(member) = rest.first().filter(|f| all_digits(f)) {
+            if let Ok(c) = member.parse::<u64>() {
+                group.push(c);
+            }
+            rest = &rest[1..];
+        }
+    }
+    let message = rest.join("|").trim().to_string();
+    let mut out = json!({
         "protocol": protocol,
         "baud": baud,
         "capcode": capcode,
         "format": format,
         "message": message,
-    }))
+    });
+    if let Some(obj) = out.as_object_mut() {
+        if let Some(f) = frag {
+            obj.insert("frag".into(), Value::from(f));
+        }
+        if !group.is_empty() {
+            obj.insert("group".into(), Value::from(group));
+        }
+    }
+    Some(out)
+}
+
+/// `3.0.K` — FLEX_NEXT's ALN fragment tag (`demod_flex_next.c`,
+/// `parse_alphanumeric`): fragment number, continuation bit, flag.
+fn is_frag_tag(f: &str) -> bool {
+    let b = f.as_bytes();
+    b.len() == 5
+        && b[0].is_ascii_digit()
+        && b[1] == b'.'
+        && b[2].is_ascii_digit()
+        && b[3] == b'.'
+        && matches!(b[4], b'K' | b'C' | b'F' | b'?')
 }
 
 // ─── EAS / SAME ─────────────────────────────────────────────────────────
@@ -460,6 +514,42 @@ mod tests {
         assert_eq!(v["capcode"], 2_029_569);
         assert_eq!(v["format"], "numeric");
         assert_eq!(v["message"], "8675309");
+        assert!(v.get("frag").is_none());
+    }
+
+    #[test]
+    fn flex_next_alpha_strips_fragment_tag_and_group_members() {
+        // A complete single page: the `3.0.K` tag is metadata, not text.
+        let v = parse_flex(
+            "FLEX_NEXT|1600/2|07.123.A|0001234567|LS|5|ALN|3.0.K|From: EVS@kp.org | bed",
+        )
+        .unwrap();
+        assert_eq!(v["capcode"], 1_234_567);
+        assert_eq!(v["frag"], "K");
+        assert_eq!(v["message"], "From: EVS@kp.org | bed");
+        assert!(v.get("group").is_none());
+        // A continuation fragment.
+        let v =
+            parse_flex("FLEX_NEXT|1600/2|07.123.A|0001234567|SS|5|ALN|1.1.F|more text").unwrap();
+        assert_eq!(v["frag"], "F");
+        assert_eq!(v["message"], "more text");
+        // A group page lists the member capcodes before the text.
+        let v = parse_flex(
+            "FLEX_NEXT|1600/2|07.123.A|0002029569|SG|5|ALN|3.0.K|0001234567|0007654321|Code blue",
+        )
+        .unwrap();
+        assert_eq!(v["capcode"], 2_029_569);
+        assert_eq!(v["group"], json!([1_234_567, 7_654_321]));
+        assert_eq!(v["message"], "Code blue");
+        // A single page whose text happens to be digits keeps them.
+        let v =
+            parse_flex("FLEX_NEXT|1600/2|07.123.A|0001234567|SS|5|ALN|3.0.K|5551234567").unwrap();
+        assert_eq!(v["message"], "5551234567");
+        // Unknown page type: hex word dump, no tag.
+        let v =
+            parse_flex("FLEX_NEXT|1600/2|07.123.A|0001234567|SS|7|UNK|0001a2b3 000c4d5e").unwrap();
+        assert_eq!(v["format"], "unknown");
+        assert_eq!(v["message"], "0001a2b3 000c4d5e");
     }
 
     #[test]

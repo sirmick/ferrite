@@ -4,7 +4,7 @@
   "category": "Paging & ISM",
   "label": "Pagers (POCSAG / FLEX)",
   "description": "Pager traffic on the US 929\u2013932 MHz band \u2014 POCSAG (512/1200/2400) and FLEX decoded in parallel.",
-  "ai_notes": "POCSAG + FLEX pager decoder. Default centre 929.614206 MHz \u2014 US commercial paging block. Coverage varies regionally (US: 929\u2013932 MHz, 152\u2013162 MHz; UK: 153 MHz; check sigidwiki). Output: `tail decoder --category pocsag` and `--category flex`. Hospital / commercial paging traffic is plentiful in most metros.",
+  "ai_notes": "POCSAG + FLEX pager decoder. Default centre 929.614206 MHz \u2014 US commercial paging block. Coverage varies regionally (US: 929\u2013932 MHz, 152\u2013162 MHz; UK: 153 MHz; check sigidwiki). Output: `decodes(kind=\"pager\")` / `await_events(kind=\"pager\")` (one record per page: protocol, capcode, format, frag, message); the operator sees the same in the Pager Journal (main pane `advanced`). Hospital / commercial paging traffic is plentiful in most metros.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/POCSAG",
   "sample_path": "samples/sigidwiki/POCSAG_Sound.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/POCSAG_Waterfallthmb.png",

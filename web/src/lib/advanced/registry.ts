@@ -25,6 +25,7 @@ import Ft8View from './Ft8View.svelte';
 import AdsbView from './AdsbView.svelte';
 import AprsView from './AprsView.svelte';
 import FldigiView from './FldigiView.svelte';
+import JournalView from './JournalView.svelte';
 import TranscriptView from './TranscriptView.svelte';
 
 /** Inputs the availability check gets — a uiSink map plus the browser
@@ -48,11 +49,23 @@ export interface AdvancedView {
   sink: string;
   /** Toolbar button label — mode-named, not a generic "Advanced". */
   label: string;
-  component: Component;
+  // Views take different prop shapes (most none, the Journal a `kind`);
+  // the workspace spreads `props` into whichever it mounts.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  component: Component<any>;
+  /** Props the workspace passes when mounting the component — lets
+   *  one generic view (the decode Journal) serve several kinds. */
+  props?: Record<string, unknown>;
   /** Optional availability override. When set, decides presence
    *  instead of the default `uiSinks[sink]` lookup — for views whose
    *  data doesn't arrive via a `ui:<sink>` stream. */
   present?: (ctx: AdvancedCtx) => boolean;
+}
+
+/** A decode Journal for a text-producing append-log kind: the preset
+ *  wires `ui:<kind>`, the view lists its records as text lines. */
+function journal(sink: string, label: string): AdvancedView {
+  return { sink, label, component: JournalView, props: { kind: sink, label } };
 }
 
 export const ADVANCED_VIEWS: AdvancedView[] = [
@@ -67,6 +80,13 @@ export const ADVANCED_VIEWS: AdvancedView[] = [
   // label is "Journal" — the streaming decoded-text view that every
   // streaming-digital preset falls into.
   { sink: 'fldigi', label: 'Journal', component: FldigiView },
+  // Text decoders that are not keyboard modes: one Journal each, so the
+  // pager / NWR / rtl_433 presets (which also have an AudioSink, for
+  // listening) show their decodes here rather than falling through to
+  // the voice Transcript below.
+  journal('pager', 'Pager'),
+  journal('eas', 'EAS'),
+  journal('rtl_433', 'rtl_433'),
   // Speech-to-text. Listed last so a mode-specific decoder view wins
   // if both ever co-exist. Advertised whenever the active preset has
   // an `AudioSink` (i.e. could be transcribed), NOT only when the

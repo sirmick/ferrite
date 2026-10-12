@@ -168,7 +168,7 @@
 {#snippet advancedColumn()}
   {#if advancedView}
     {@const Advanced = advancedView.component}
-    <Advanced />
+    <Advanced {...advancedView.props ?? {}} />
   {/if}
 {/snippet}
 
