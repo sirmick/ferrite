@@ -94,7 +94,7 @@ was placeholder hints → live `SourceConfig` (live state always won).
 
 **Shipped.** `BlockInstanceDecl.force_params` is an optional third
 layer that wins over live state. Used to pin known-good values per
-preset — e.g. `wbam.json` carries `"force_params": {"agc_enable":
+preset — e.g. `wbam.json` carries `"force_params": {"agc":
 false}` because AM AGC pumping otherwise resets the AGC about once per
 second. See [D24](09-decisions.md#d24) and
 `runtime/src/compose.rs::apply_force_params`.

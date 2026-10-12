@@ -1010,11 +1010,27 @@ impl Block for SoapySource {
                 .with_context(|| format!("live set_frequency={v}"))?;
             self.center_freq_hz = self.device.frequency(dir, ch).unwrap_or(v);
         }
+        // AGC first, gain second. SDRplay ignores a manual IFGR while AGC
+        // is on ("Not updating IFGR gain because AGC is enabled"), so the
+        // `{agc:false, gain_db:N}` pair only lands if the mode flips before
+        // the dial is written. And flipping AGC off on its own must re-push
+        // the stored dial: the hardware is sitting at AGC's last pick, not
+        // at the value the operator believes is set.
+        let mut gain_touched = false;
+        if let Some(v) = obj.get("agc").and_then(|v| v.as_bool()) {
+            // Drivers without AGC return Err — surface as soft-failure
+            // rather than killing the live path.
+            if let Err(err) = self.device.set_gain_mode(dir, ch, v) {
+                tracing::warn!(?err, agc = v, "live set_gain_mode failed (ignored)");
+            }
+            if !v {
+                gain_touched = true;
+            }
+        }
         // Gain: any of mode / dial / per-stage may arrive in the delta;
         // update the mirrored intent then re-apply the whole picture so a
         // partial change stays coherent (e.g. flipping to manual after
         // dragging a stage, or moving the dial in auto).
-        let mut gain_touched = false;
         if let Some(v) = obj.get("gain_mode").and_then(|v| v.as_str()) {
             self.gain_mode = v.to_string();
             gain_touched = true;
@@ -1047,13 +1063,6 @@ impl Block for SoapySource {
             self.device
                 .set_antenna(dir, ch, v.as_bytes())
                 .with_context(|| format!("live set_antenna={v}"))?;
-        }
-        if let Some(v) = obj.get("agc").and_then(|v| v.as_bool()) {
-            // Drivers without AGC return Err — surface as soft-failure
-            // rather than killing the live path.
-            if let Err(err) = self.device.set_gain_mode(dir, ch, v) {
-                tracing::warn!(?err, agc = v, "live set_gain_mode failed (ignored)");
-            }
         }
         if let Some(v) = obj.get("dc_offset_correction").and_then(|v| v.as_bool()) {
             // Drivers without DC-offset mode (HackRF) return Err — soft-fail

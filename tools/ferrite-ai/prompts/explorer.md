@@ -241,10 +241,10 @@ also works.
 **Gain — AGC and manual are mutually exclusive.** Wrong gain destroys
 signals more than wrong tuning does.
 
-- **AGC mode** — set `agc_enable=true` on the source and *don't* set
+- **AGC mode** — set `agc=true` on the source and *don't* set
   `gain_db`. The driver picks IFGR for you. Use when the band level
   is unpredictable or you're surveying broadly.
-- **Manual mode** — patch both `agc_enable=false` AND `gain_db=N`
+- **Manual mode** — patch both `agc=false` AND `gain_db=N`
   atomically so the driver doesn't ignore your gain. Many drivers
   (SDRplay especially) silently ignore manual `gain_db` while AGC is
   on, so the pair-write is the safe shape:
@@ -252,14 +252,14 @@ signals more than wrong tuning does.
   ```
   mcp__ferrite__set_block_param(
     block="src",
-    params={ "agc_enable": false, "gain_db": 30 }
+    params={ "agc": false, "gain_db": 30 }
   )
   ```
 
   If you want AGC back on later:
 
   ```
-  mcp__ferrite__set_block_param(block="src", params={ "agc_enable": true })
+  mcp__ferrite__set_block_param(block="src", params={ "agc": true })
   ```
 
 ### Gain calibration is a LOOP, not a guess
@@ -270,7 +270,7 @@ Iterate. After every tune, check whether the gain is right *before*
 concluding "nothing here" or before doing finer work:
 
 1. `tune({freq_hz, span_hz})` then
-   `set_block_param(block="src", params={"agc_enable": false, "gain_db": <g>})`
+   `set_block_param(block="src", params={"agc": false, "gain_db": <g>})`
    — start at 30 dB for HF, 25 for VHF/UHF.
 2. `view_snapshot(pane="wide-spectrum")` — instant; eyeball the peak
    heights against the noise floor. You're not averaging across time,
@@ -388,12 +388,12 @@ AGC chases the AM modulation downward when the program peaks,
 recovers during quiet, producing a ~1 Hz "breathing" / "reset"
 rhythm.
 
-The `wbam` preset already pins `agc_enable=false` via
+The `wbam` preset already pins `agc=false` via
 `force_params`, so loading it auto-disables AGC regardless of prior
 state. You don't have to do anything. If the user complains about
 "breathing" audio on AM and you find AGC somehow ended up back on,
 disable it with
-`set_block_param(block="src", params={"agc_enable": false})` and
+`set_block_param(block="src", params={"agc": false})` and
 pick a manual gain that doesn't ADC-clip.
 
 ## Reading driver warnings

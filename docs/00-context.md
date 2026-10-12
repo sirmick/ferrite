@@ -86,7 +86,7 @@ Not multi-tenant web-SDR station operators. Single-listener, LAN-trust
   for an RTL-SDR. See D09.
 - **Preset-imposed hard overrides.** `force_params` lets a preset pin
   known-good values that win over live state — used by `wbam.json` to
-  pin `agc_enable=false` because AM AGC pumping resets the AGC about
+  pin `agc=false` because AM AGC pumping resets the AGC about
   once per second.
 
 ## Non-goals

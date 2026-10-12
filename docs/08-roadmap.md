@@ -30,7 +30,7 @@ End-to-end, working today against live RF:
 - **`force_params`** — preset-imposed hard override on
   `BlockInstanceDecl` that wins over live `SourceConfig` (see D24 in
   [`09-decisions.md`](09-decisions.md)). Used by `wbam.json` to pin
-  `agc_enable=false` against AM AGC pumping.
+  `agc=false` against AM AGC pumping.
 - Postcard `Frame` transport on `/ws/preset`; encoder + decoder both
   come from `ferrite_blocks`, so wire-format drift is a build break.
 - Source placeholder + `compose_source`
@@ -88,7 +88,7 @@ End-to-end, working today against live RF:
   no API key in config.
 - `tools/ferrite-ctl/` — thin Rust CLI driving `ferrited` via REST,
   used by the AI (and by humans). Atomic `--gain` implies
-  `agc_enable=false` so the SDR side doesn't reject a manual gain.
+  `agc=false` so the SDR side doesn't reject a manual gain.
 - `tools/fft_to_png.py`, `tools/fft_peaks.py` — capture analysis
   tools. AI reads the same PNGs the human does.
 - Per-driver operator notes (`web/src/lib/controls/sdr-presets/*.json`

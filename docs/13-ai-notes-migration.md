@@ -66,7 +66,7 @@ also a small UI improvement.
   "name": "wbam",
   "label": "AM broadcast (wideband)",
   "description": "AM broadcast 540-1700 kHz...",
-  "ai_notes": "Listen preset for AM broadcast + shortwave SWL. Pins agc_enable=false via force_params (envelope chasing causes audible breathing). Full audio_nr stack on by default. Best with the high-Z HF antenna port on multi-port SDRs. No decoder output — this is a listen preset, not a decode preset.",
+  "ai_notes": "Listen preset for AM broadcast + shortwave SWL. Pins agc=false via force_params (envelope chasing causes audible breathing). Full audio_nr stack on by default. Best with the high-Z HF antenna port on multi-port SDRs. No decoder output — this is a listen preset, not a decode preset.",
   "environments": [...],
   "blocks": {...}
 }
