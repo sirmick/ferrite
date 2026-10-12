@@ -233,3 +233,53 @@ is not the limit.
 | 70 cm | A (B −1 dB) | gain 40 | IFGR 46 / RFGR 0 |
 | 460–930 MHz | B (A −1…2 dB) | gain 50 | IFGR 36 / RFGR 0 |
 | ADS-B, L-band | A | gain 50 | IFGR 36 / RFGR 0 |
+
+## After changes — 02:15–02:35 UTC re-run of 7 spots
+
+Mick's changes between the runs: shed fan **off**, common-mode **choke on
+the longwire (C)**, external **FM bandstop on the whip (A)**. (He also
+identified a 10G NIC with audible coil whine in the shed, running off a
+car battery over optical backhaul.) Same protocol, same session shape;
+replies in `.run/charac/out2/`.
+
+| Spot | Floor delta at gain 40 (spectrum, dB) | What changed |
+|---|---|---|
+| 80 m | A −8.8, B −9.3, C −5.7 | 55.5 kHz comb on C down ~11 dB (37 → 26), still present; 3.000 MHz carrier unchanged |
+| 40 m | A −5.9, B −5.9, C −1.8 | the strong 6.837 MHz carrier on C is **gone**; C still +15 dB on 41 m broadcasters, +3.5 dB FT8 |
+| 20 m | C now 13 dB above B (was 8) | C FT8 +37 dB over floor, nothing on B in the window; WWV 15 C +5 dB SNR / +22 dB absolute |
+| 15 m | C 8.4 dB above B (was 4.4) | **200 kHz comb on C gone**; 21.000 MHz carrier identical on all ports (−95 dBFS) → internal; new weak 8 kHz-spaced carriers 21.23–21.38 MHz on C |
+| FM bc | A floor at RFGR 0 −57.7 | filter on A: 97.7 MHz −40…47 dB, 98.5 MHz only partly rejected (filter edge) |
+| airband | A −65.9 → −75.8 (filter) | **overload threshold unchanged**: clean only at RFGR 7 (gain 20), onset at RFGR 2 (gain 25) |
+| 2 m | A −60.4 → −74.2 (filter) | same: clean only at gain 20; APRS 52 dB there vs 57 dB at gain 50 with the burst peaking near −6 dBFS |
+
+Conclusions:
+
+- **The fan was radiating into all three antennas**: A and B, which were
+  not touched, dropped 6–9 dB on 80/40 m. C dropped less because its
+  floor is dominated by the wire's own pickup (the 400 kV line it runs
+  parallel to). C's floor advantage over B therefore *grew* 4–5 dB with
+  the fan off, yet C still wins every HF band except 9–11 MHz by signal.
+- **Choke on C:** at most ~11 dB off the 55.5 kHz comb and the 6.837 MHz
+  carrier; the broadband floor barely moved (−1.8 dB on 40 m). The
+  remaining floor is the power line. The 200 kHz comb vanished with
+  fan-off + choke (not separable in this run); the whining 10G NIC remains
+  the suspect for the residual 55.5 kHz comb and the new 8 kHz carriers.
+- **FM bandstop on A:** worth keeping (10–14 dB lower floor at RFGR 0,
+  97.7 MHz −40 dB), but **it does not change the 118–150 MHz overload
+  threshold**. The 127.930 MHz product sits at the same absolute level
+  (≈ −51 dBFS) on A, B *and* C, vanishes only at RFGR 7, and rises with
+  IFGR — a front-end product independent of the antenna connected, i.e.
+  the RSPdx itself at LNA state 0–4 in this band. No external filter
+  fixes it; gain 20 (RFGR 7) stays the rule for airband / 2 m.
+- Internal lines confirmed by "identical on every port": 3.000, 21.000,
+  27.000 MHz, 144.000 MHz, 1089.600 MHz.
+- Tool note: after a `settings` write restarts the source, `health` says
+  ok before samples flow again and the first `snapshot` fails with
+  `SNAPSHOT_FAILED: src tee wrote no sidecar` (retry 2–8 s later works).
+  Writing `rfgain_sel "0"` restarts the source even when RFGR is already 0.
+
+**Hardware recommendation:** swap the 10G NIC for a fanless 1 GbE card
+(10 MS/s is < 40 MB/s on the wire), keep the fan off or move it, keep the
+FM filter on A and the choke on C, and if the longwire can be re-routed
+away from the 400 kV line that is the only thing left that lowers C's
+HF floor.
