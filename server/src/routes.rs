@@ -381,6 +381,11 @@ pub struct ReconfigureResponse {
     /// (`{carrier_hz, tone_hz, sideband, dial_hz}`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tuned: Option<serde_json::Value>,
+    /// Operator-facing notes about the write: settings keys skipped as
+    /// no-ops, or a stored setting the hardware no longer honours (the
+    /// `gain_db` dial overriding SDRplay `rfgain_sel`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 fn reconfigure_response(plan: Option<ferrite_runtime::ReconfigurePlan>) -> ReconfigureResponse {
@@ -393,6 +398,7 @@ fn reconfigure_response(plan: Option<ferrite_runtime::ReconfigurePlan>) -> Recon
             noop: true,
             source_readback: None,
             tuned: None,
+            notes: Vec::new(),
         },
         Some(p) => ReconfigureResponse {
             applied: true,
@@ -412,6 +418,7 @@ fn reconfigure_response(plan: Option<ferrite_runtime::ReconfigurePlan>) -> Recon
             noop: p.is_noop(),
             source_readback: None,
             tuned: None,
+            notes: Vec::new(),
         },
     }
 }
@@ -470,6 +477,9 @@ pub async fn patch_source(
         .map_err(|e| AppError::radio_or_bad_request("RECONFIGURE_FAILED", &e))?;
     let mut resp = reconfigure_response(plan);
     resp.source_readback = state.source_readback().await;
+    resp.notes = state
+        .source_setting_notes(resp.source_readback.as_ref())
+        .await;
     Ok(Json(resp))
 }
 
@@ -634,6 +644,9 @@ pub async fn post_tune(
         .map_err(|e| AppError::radio_or_bad_request("TUNE_FAILED", &e))?;
     let mut resp = reconfigure_response(plan);
     resp.source_readback = state.source_readback().await;
+    resp.notes = state
+        .source_setting_notes(resp.source_readback.as_ref())
+        .await;
     resp.tuned = tuned;
     Ok(Json(resp))
 }
@@ -681,17 +694,31 @@ pub async fn patch_pipeline_block(
             }
         }
     }
-    let plan = state
-        .apply_block_params(&id, delta)
-        .await
-        .map_err(|e| AppError::radio_or_bad_request("RECONFIGURE_FAILED", &e))?;
+    let (plan, mut notes) = if is_src {
+        let obj = delta.as_object().cloned().ok_or_else(|| {
+            AppError::bad_request("RECONFIGURE_FAILED", "params delta must be a JSON object")
+        })?;
+        state.apply_src_params(obj).await
+    } else {
+        state
+            .apply_block_params(&id, delta)
+            .await
+            .map(|p| (p, Vec::new()))
+    }
+    .map_err(|e| AppError::radio_or_bad_request("RECONFIGURE_FAILED", &e))?;
     let mut resp = reconfigure_response(plan);
     // Source goes through `patch_source` internally; mirror the
     // `/api/source` handler so a single-key `src` write still gets the
     // driver readback for optimistic-state reconciliation.
     if is_src {
         resp.source_readback = state.source_readback().await;
+        notes.extend(
+            state
+                .source_setting_notes(resp.source_readback.as_ref())
+                .await,
+        );
     }
+    resp.notes = notes;
     Ok(Json(resp))
 }
 

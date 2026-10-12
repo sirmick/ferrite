@@ -241,6 +241,15 @@ fn diff_params(
                 new_value: new_val,
                 scope: p.reconfig_scope,
             });
+        } else if old_val.is_object() || new_val.is_object() {
+            // Map-valued pass-through param the spec can't express as a
+            // control (SoapySource `settings` — driver writeSetting pairs —
+            // and `gain_elements`). Report each changed sub-key as
+            // `<key>.<sub>` so a caller sees *what* moved; restart-scoped,
+            // since the block can only take these at construction.
+            // (Was: escalated as a fake `WiresChanged` with no `changes`,
+            // which read as "restarted for nothing".)
+            diff_map_param(block_id, key, &old_val, &new_val, changes);
         } else {
             // Unknown key — registered spec doesn't declare it.
             // Treat as a structural delta: safest option is to
@@ -250,6 +259,34 @@ fn diff_params(
             // escalation is what matters. But drop one copy of
             // each signal so `structural` doesn't explode.
             break;
+        }
+    }
+}
+
+/// Per-sub-key changes for a map-valued param; a non-object side counts
+/// as an empty map and an absent sub-key reports as `null`.
+fn diff_map_param(
+    block_id: &str,
+    key: &str,
+    old_val: &Value,
+    new_val: &Value,
+    changes: &mut Vec<ParamChange>,
+) {
+    let empty = serde_json::Map::new();
+    let old_m = old_val.as_object().unwrap_or(&empty);
+    let new_m = new_val.as_object().unwrap_or(&empty);
+    let subs: BTreeSet<&String> = old_m.keys().chain(new_m.keys()).collect();
+    for sub in subs {
+        let o = old_m.get(sub).cloned().unwrap_or(Value::Null);
+        let n = new_m.get(sub).cloned().unwrap_or(Value::Null);
+        if o != n {
+            changes.push(ParamChange {
+                block_id: block_id.to_string(),
+                param_key: format!("{key}.{sub}"),
+                old_value: o,
+                new_value: n,
+                scope: ReconfigureScope::SourceRestart,
+            });
         }
     }
 }
@@ -604,5 +641,39 @@ mod tests {
         let plan = diff_presets(&a, &b, &TestRegistry).unwrap();
         assert_eq!(plan.overall, ReconfigureScope::SourceRestart);
         assert!(plan.structural.contains(&StructuralChange::WiresChanged));
+    }
+
+    #[test]
+    fn map_param_changes_are_listed_per_sub_key() {
+        // SoapySource `settings`: a sub-key edit must show up in `changes`
+        // (was: fake WiresChanged + empty changes); untouched sub-keys and
+        // an identical map produce nothing.
+        let with = |settings: serde_json::Value| {
+            doc(json!({
+                "name": "t",
+                "environments": ["browser"],
+                "blocks": { "s": { "type": "Scalar", "params": { "gain": 1.0, "settings": settings } } },
+                "wires": []
+            }))
+        };
+        let a = with(json!({ "rfgain_sel": "4", "rfnotch_ctrl": "true" }));
+        let b = with(json!({ "rfgain_sel": "0", "rfnotch_ctrl": "true", "biasT_ctrl": "false" }));
+        let plan = diff_presets(&a, &b, &TestRegistry).unwrap();
+        assert!(plan.structural.is_empty(), "{:?}", plan.structural);
+        assert_eq!(plan.overall, ReconfigureScope::SourceRestart);
+        let keys: Vec<&str> = plan.changes.iter().map(|c| c.param_key.as_str()).collect();
+        assert_eq!(keys, ["settings.biasT_ctrl", "settings.rfgain_sel"]);
+        assert_eq!(plan.changes[1].old_value, json!("4"));
+        assert_eq!(plan.changes[1].new_value, json!("0"));
+
+        let same = diff_presets(&a, &a.clone(), &TestRegistry).unwrap();
+        assert!(same.is_noop());
+        // Absent → map counts as a change from an empty map.
+        let none = doc(json!({
+            "name": "t", "environments": ["browser"],
+            "blocks": { "s": { "type": "Scalar", "params": { "gain": 1.0 } } }, "wires": []
+        }));
+        let plan = diff_presets(&none, &a, &TestRegistry).unwrap();
+        assert_eq!(plan.changes.len(), 2);
     }
 }
