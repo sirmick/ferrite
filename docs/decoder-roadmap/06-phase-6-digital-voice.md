@@ -1,6 +1,6 @@
 # Phase 6 — Digital voice + native-helper protocol
 
-**Status:** Track B shipped 2026-10-13 as `DsdHelper` (`blocks/src/dsd_helper.rs`, preset `dmr`): not a WebSocket helper protocol but a subprocess the block spawns — dsd-fme already speaks a loopback audio protocol (`-i tcp` SDR++ style s16le 48 kHz in, `-o udp` 8 kHz s16le out) and prints call metadata to its terminal, so the `HelperClient` RPC below was unnecessary for it. Track A (M17 / FreeDV via codec2) still a sketch.
+**Status:** Track B shipped 2026-10-13 as `DsdHelper` (`blocks/src/dsd_helper.rs`, preset `dmr`): not a WebSocket helper protocol but a subprocess the block spawns — dsd-fme already speaks a loopback audio protocol (`-i tcp` SDR++ style s16le 48 kHz in, `-o udp` 8 kHz s16le out) and prints call metadata to its terminal, so the `HelperClient` RPC below was unnecessary for it. DMR *metadata* moved in-browser the same day: `DmrDecode` (`blocks/src/dmr_decode.rs`) is a pure-Rust framing decoder (4FSK sync/timing, CACH, slot type, BPTC/RS full LC, embedded LC late entry, talker alias), so only the vocoder stays native/pluggable. Next: multi-channel (several channelizers on one 10 MS/s RSPdx span), P25/NXDN framing, trunk following. Track A (M17 / FreeDV via codec2) still a sketch.
 
 The two-track answer to digital voice.
 

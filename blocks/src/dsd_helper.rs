@@ -89,6 +89,11 @@ pub struct DsdHelperParams {
     /// Extra command-line arguments appended verbatim (whitespace
     /// separated), e.g. `-V 1` to hear slot 1 only.
     pub extra_args: String,
+    /// Emit dsd-fme's call / alias / sync records. Off when a native
+    /// metadata decoder (`DmrDecode`) shares the `ui:dsd` kind and this
+    /// block is only the voice plug-in; `helper` / `voice` records are
+    /// always emitted.
+    pub metadata: bool,
 }
 
 impl Default for DsdHelperParams {
@@ -97,6 +102,7 @@ impl Default for DsdHelperParams {
             mode: "auto".to_string(),
             helper_path: String::new(),
             extra_args: String::new(),
+            metadata: true,
         }
     }
 }
@@ -746,6 +752,13 @@ impl Block for DsdHelper {
                     ai_notes: "Path to the operator-installed dsd-fme binary. Empty = $FERRITE_DSD_FME, else `dsd-fme` on PATH. A `<prefix>/bin/dsd-fme` layout gets `<prefix>/lib` on LD_LIBRARY_PATH automatically (libmbe). Ferrite does not ship it (AMBE vocoder patents); a `helper` event in the Journal says whether it started.",
                 },
                 ParamSpec {
+                    key: "metadata",
+                    label: "Call metadata",
+                    kind: ParamKind::Toggle { default: true },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Emit dsd-fme's call / alias / sync records. The `dmr` preset turns this off because the native DmrDecode block already reports DMR calls (and runs in the browser); helper and voice start/stop records are always emitted.",
+                },
+                ParamSpec {
                     key: "extra_args",
                     label: "Extra args",
                     kind: ParamKind::Text { default: "" },
@@ -826,7 +839,10 @@ impl Block for DsdHelper {
                 }
             }
             let mut q = worker.events.lock().unwrap();
-            for line in q.drain(..) {
+            let metadata = self.params.metadata;
+            for line in q.drain(..).filter(|l| {
+                metadata || l.contains("\"event\":\"helper\"") || l.contains("\"event\":\"voice\"")
+            }) {
                 self.events_out.extend_from_slice(line.as_bytes());
                 self.events_out.push(b'\n');
             }

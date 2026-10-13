@@ -3,8 +3,8 @@
   "name": "dmr",
   "category": "Digital voice",
   "label": "DMR / P25 / NXDN (dsd-fme)",
-  "description": "Digital voice via the user-installed dsd-fme helper: DMR, P25 Phase 1/2, NXDN, D-STAR, YSF, dPMR auto-detected on a conventional channel; decoded speech plus talkgroup / radio-ID call events.",
-  "ai_notes": "Digital voice (DMR, P25, NXDN, D-STAR, YSF, dPMR) on a single conventional channel. The DsdHelper block runs the operator-installed `dsd-fme` binary (not shipped with Ferrite: AMBE vocoder patents) on raw discriminator audio at 48 kHz and plays its synthesised speech; call events (`ui:dsd`: protocol, slot, talkgroup TGT, radio-ID SRC, colour code) land in the Journal. Verified 2026-10-13 from bigear on Antenna B, gain 40: 441.850 MHz DMR repeater (colour code 1; slot 2 TG 31068, slot 1 TG 93 North America; busy, talker aliases), also TG 31068 traffic on 440.125 and 440.5875 MHz. Tune to a repeater OUTPUT: US amateur DMR 440–450 MHz (e.g. 441–445 MHz, Brandmeister / DMR-MARC), public-safety P25 conventional 150–174 / 450–470 / 769–775 MHz, NXDN business 450–470 MHz. Antenna B at 440 MHz, gain 40; use `status.health` and the wide waterfall to find a 12.5 kHz channel with a flat-topped 4FSK block, then `tune` on-centre (`chan_shift_hz` must stay well inside the 48 kHz channel). Encrypted P25/DMR shows events but no audio. `mode=auto` is fine; set `dmr` / `p25` when the auto-detect flips between sync types. Output: `tail decoder --category dsd`; `await dsd`.",
+  "description": "Digital voice: DMR call metadata (talkgroup, radio ID, colour code, talker alias) from Ferrite's native decoder — runs node-side or in the browser — plus decoded speech via the user-installed dsd-fme helper (DMR, P25, NXDN, D-STAR, YSF).",
+  "ai_notes": "Digital voice (DMR, P25, NXDN, D-STAR, YSF, dPMR) on a single conventional channel. Two decoders share the FmDemod tap: DmrDecode (pure Rust, WASM-able) reports DMR calls (`call` with slot/TG/source/CC/ENC — voice LC header or embedded LC late entry — `end` with duration, `alias`, `sync`); DsdHelper runs the operator-installed `dsd-fme` binary (not shipped with Ferrite: AMBE vocoder patents) on raw discriminator audio at 48 kHz and plays its synthesised speech; its `voice` start/stop records join the same `ui:dsd` Journal (its own call records are off, `metadata:false`; turn them on for P25/NXDN/D-STAR/YSF metadata, which DmrDecode doesn't parse yet). Verified 2026-10-13 from bigear on Antenna B, gain 40: 441.850 MHz DMR repeater (colour code 1; slot 2 TG 31068, slot 1 TG 93 North America; busy, talker aliases), also TG 31068 traffic on 440.125 and 440.5875 MHz. Tune to a repeater OUTPUT: US amateur DMR 440–450 MHz (e.g. 441–445 MHz, Brandmeister / DMR-MARC), public-safety P25 conventional 150–174 / 450–470 / 769–775 MHz, NXDN business 450–470 MHz. Antenna B at 440 MHz, gain 40; use `status.health` and the wide waterfall to find a 12.5 kHz channel with a flat-topped 4FSK block, then `tune` on-centre (`chan_shift_hz` must stay well inside the 48 kHz channel). Encrypted P25/DMR shows events but no audio. `mode=auto` is fine; set `dmr` / `p25` when the auto-detect flips between sync types. Output: `tail decoder --category dsd`; `await dsd`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Digital_Mobile_Radio_(DMR)",
   "environments": [
     "node"
@@ -56,11 +56,23 @@
         "max_deviation_hz": 5000
       }
     },
+    "disc_tee": {
+      "type": "TeeRealF32",
+      "placement": "node"
+    },
+    "dmr": {
+      "type": "DmrDecode",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 48000.0
+      }
+    },
     "dsd": {
       "type": "DsdHelper",
       "placement": "node",
       "params": {
-        "mode": "auto"
+        "mode": "auto",
+        "metadata": false
       }
     },
     "audio_resamp": {
@@ -109,7 +121,23 @@
     ],
     [
       "demod.out",
+      "disc_tee.in"
+    ],
+    [
+      "disc_tee.out0",
+      "dmr.in"
+    ],
+    [
+      "disc_tee.out1",
       "dsd.in"
+    ],
+    [
+      "dmr.events",
+      "ui:dsd"
+    ],
+    [
+      "dsd.events",
+      "ui:dsd"
     ],
     [
       "dsd.out",
@@ -118,10 +146,6 @@
     [
       "audio_resamp.out",
       "audio.in"
-    ],
-    [
-      "dsd.events",
-      "ui:dsd"
     ]
   ]
 }
