@@ -53,6 +53,32 @@ function easLine(d: Rec): string {
   return parts.join(' · ');
 }
 
+/** dsd-fme call event (blocks/src/dsd_helper.rs): `{event, protocol,
+ *  slot, tgt, src, cc, enc, text}` → `DMR S1  TG 31075 ← 3106123  CC 1`;
+ *  sync / helper events show their text. */
+function dsdLine(d: Rec): string {
+  const event = str(d.event);
+  if (event === 'alias') {
+    const s = num(d.slot);
+    return `${str(d.protocol) ?? 'DV'}${s !== undefined ? ` S${s}` : ''}  talker alias: ${str(d.text) ?? ''}`;
+  }
+  if (event === 'sync') return `${str(d.protocol) ?? 'DV'} sync  ${str(d.text) ?? ''}`;
+  if (event !== 'call') return str(d.text) ?? JSON.stringify(d);
+  const parts: string[] = [str(d.protocol) ?? 'DV'];
+  const slot = num(d.slot);
+  if (slot !== undefined) parts.push(`S${slot}`);
+  const tgt = str(d.tgt) ?? (num(d.tgt) !== undefined ? String(d.tgt) : undefined);
+  const src = str(d.src) ?? (num(d.src) !== undefined ? String(d.src) : undefined);
+  if (tgt !== undefined) parts.push(` TG ${tgt}`);
+  if (src !== undefined) parts.push(`← ${src}`);
+  const cc = num(d.cc);
+  if (cc !== undefined) parts.push(` CC ${cc}`);
+  if (d.enc === true) parts.push(' ENC');
+  const text = str(d.text);
+  if (text && tgt === undefined && src === undefined) parts.push(` ${text}`);
+  return parts.join(' ');
+}
+
 /** The text for one record of `kind`. Kinds without a formatter show
  *  their `text` / `message` field, else the record compactly. */
 export function journalLine(kind: string, data: unknown): string {
@@ -63,6 +89,8 @@ export function journalLine(kind: string, data: unknown): string {
       return pagerLine(d);
     case 'eas':
       return easLine(d);
+    case 'dsd':
+      return dsdLine(d);
     default: {
       const t = str(d.text) ?? str(d.message);
       return t ?? JSON.stringify(d);

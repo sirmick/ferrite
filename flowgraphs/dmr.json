@@ -1,0 +1,127 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "dmr",
+  "category": "Digital voice",
+  "label": "DMR / P25 / NXDN (dsd-fme)",
+  "description": "Digital voice via the user-installed dsd-fme helper: DMR, P25 Phase 1/2, NXDN, D-STAR, YSF, dPMR auto-detected on a conventional channel; decoded speech plus talkgroup / radio-ID call events.",
+  "ai_notes": "Digital voice (DMR, P25, NXDN, D-STAR, YSF, dPMR) on a single conventional channel. The DsdHelper block runs the operator-installed `dsd-fme` binary (not shipped with Ferrite: AMBE vocoder patents) on raw discriminator audio at 48 kHz and plays its synthesised speech; call events (`ui:dsd`: protocol, slot, talkgroup TGT, radio-ID SRC, colour code) land in the Journal. Verified 2026-10-13 from bigear on Antenna B, gain 40: 441.850 MHz DMR repeater (colour code 1; slot 2 TG 31068, slot 1 TG 93 North America; busy, talker aliases), also TG 31068 traffic on 440.125 and 440.5875 MHz. Tune to a repeater OUTPUT: US amateur DMR 440–450 MHz (e.g. 441–445 MHz, Brandmeister / DMR-MARC), public-safety P25 conventional 150–174 / 450–470 / 769–775 MHz, NXDN business 450–470 MHz. Antenna B at 440 MHz, gain 40; use `status.health` and the wide waterfall to find a 12.5 kHz channel with a flat-topped 4FSK block, then `tune` on-centre (`chan_shift_hz` must stay well inside the 48 kHz channel). Encrypted P25/DMR shows events but no audio. `mode=auto` is fine; set `dmr` / `p25` when the auto-detect flips between sync types. Output: `tail decoder --category dsd`; `await dsd`.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Digital_Mobile_Radio_(DMR)",
+  "environments": [
+    "node"
+  ],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 441850000.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 48000.0
+      }
+    },
+    "demod": {
+      "type": "FmDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 48000,
+        "max_deviation_hz": 5000
+      }
+    },
+    "dsd": {
+      "type": "DsdHelper",
+      "placement": "node",
+      "params": {
+        "mode": "auto"
+      }
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "node",
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "buffer_samples": 8192
+      }
+    }
+  },
+  "wires": [
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "dsd.in"
+    ],
+    [
+      "dsd.out",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio.in"
+    ],
+    [
+      "dsd.events",
+      "ui:dsd"
+    ]
+  ]
+}

@@ -87,6 +87,7 @@ export const ADVANCED_VIEWS: AdvancedView[] = [
   journal('pager', 'Pager'),
   journal('eas', 'EAS'),
   journal('rtl_433', 'rtl_433'),
+  journal('dsd', 'Digital voice'),
   // Speech-to-text. Listed last so a mode-specific decoder view wins
   // if both ever co-exist. Advertised whenever the active preset has
   // an `AudioSink` (i.e. could be transcribed), NOT only when the
