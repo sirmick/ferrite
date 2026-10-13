@@ -65,7 +65,7 @@ subset; DMR/DSD deferred for AMBE patent reasons.
 | Morse / DTMF | — | ✓ | `blocks/native/multimon-ng` |
 | RDS | — | ✓ | `blocks/src/rds_demod.rs` (in-tree) |
 | Codec2 / M17 | ✓ | — | Deferred |
-| DMR / DSD | deferred | deferred | AMBE patent |
+| DMR / P25 / NXDN / D-STAR / YSF / dPMR | ✓ (Phase 6 track B) | ✓ | `blocks/src/dsd_helper.rs` — `DsdHelper` drives the *operator-installed* `dsd-fme` subprocess (TCP in / UDP out); no vocoder in-tree (AMBE patent). Preset `dmr` |
 | `rtl_433` (ISM bundle) | — | ✓ | `blocks/native/rtl_433` (broader device coverage tracked for 1.0) |
 
 Net: the full planned subset shipped (incl. WSPR — the plan expected

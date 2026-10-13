@@ -692,21 +692,27 @@ pub fn push_event_json(out: &mut Vec<u8>, value: &serde_json::Value) {
 }
 
 /// Drain a queued events buffer into the block's `events` output port,
-/// recording the byte count in `w.produced[0]`. Anything that doesn't fit
-/// this tick rides to the next. No-op when the queue is empty or the
-/// block has no `events` port wired this split.
+/// recording the byte count in `w.produced[<events port index>]`.
+/// Anything that doesn't fit this tick rides to the next. No-op when the
+/// queue is empty or the block has no `events` port wired this split.
+///
+/// The index matters for blocks with more than one output: it used to
+/// be hard-coded to `produced[0]`, which was right only while every
+/// caller's `events` was its sole port — on `DsdHelper` (`out` audio at
+/// 0, `events` at 1) it overwrote the audio count and never committed
+/// the events bytes.
 pub fn drain_events_port(io: &mut BlockIo<'_>, queue: &mut Vec<u8>, w: &mut Work) {
     if queue.is_empty() {
         return;
     }
-    for port in io.outputs.iter_mut() {
+    for (j, port) in io.outputs.iter_mut().enumerate() {
         if port.name == "events" {
             if let OutBuf::Events(dst) = &mut port.buf {
                 let take = queue.len().min(dst.len());
                 if take > 0 {
                     dst[..take].copy_from_slice(&queue[..take]);
                     queue.drain(..take);
-                    w.produced[0] = take;
+                    w.produced[j] = take;
                 }
             }
         }

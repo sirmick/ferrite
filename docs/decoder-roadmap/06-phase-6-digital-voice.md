@@ -1,6 +1,6 @@
 # Phase 6 — Digital voice + native-helper protocol
 
-**Status:** not started. Sketch only.
+**Status:** Track B shipped 2026-10-13 as `DsdHelper` (`blocks/src/dsd_helper.rs`, preset `dmr`): not a WebSocket helper protocol but a subprocess the block spawns — dsd-fme already speaks a loopback audio protocol (`-i tcp` SDR++ style s16le 48 kHz in, `-o udp` 8 kHz s16le out) and prints call metadata to its terminal, so the `HelperClient` RPC below was unnecessary for it. Track A (M17 / FreeDV via codec2) still a sketch.
 
 The two-track answer to digital voice.
 
