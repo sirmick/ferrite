@@ -50,6 +50,7 @@
 
 use anyhow::{bail, Result};
 use ferrite_rtl_433::{DecoderSet, Rtl433Demod as Decoder};
+use num_complex::Complex;
 use serde::Deserialize;
 
 use crate::block::{
@@ -71,6 +72,9 @@ pub struct Rtl433DemodParams {
     /// Which subset of upstream's 320 decoders to register. See the
     /// module docs.
     pub decoder_set: String,
+    /// Normalise the IQ level before the shim's int16 conversion (see
+    /// [`LevelTracker`]). Default on.
+    pub auto_level: bool,
 }
 
 impl Default for Rtl433DemodParams {
@@ -79,7 +83,67 @@ impl Default for Rtl433DemodParams {
             #[allow(clippy::cast_precision_loss)]
             sample_rate_hz: RTL433_INPUT_RATE_HZ as f32,
             decoder_set: "default".to_string(),
+            auto_level: true,
         }
+    }
+}
+
+/// Peak the normaliser aims the loudest recent sample at (−6 dBFS):
+/// well inside rtl_433's `OOK_MAX_HIGH_LEVEL` (0 dB) with headroom for
+/// the fast attack to overshoot on the first sample of a burst.
+const LEVEL_TARGET: f32 = 0.5;
+/// Never amplify by more than this (+80 dB): silence stays silence
+/// instead of becoming full-scale quantisation noise.
+const LEVEL_MAX_GAIN: f32 = 1.0e4;
+/// Release time of the peak tracker. Long enough that the gain holds
+/// across the gaps inside a sensor's burst train (sub-second repeats),
+/// short enough to re-arm for the next, weaker device.
+const LEVEL_RELEASE_S: f32 = 2.0;
+
+/// Digital AGC in front of rtl_433. Upstream's pulse detector only
+/// looks at pulses above `min_level` = −12.1 dBFS (`r_api.c`), which
+/// assumes an RTL-SDR driven near full scale by its tuner AGC. An
+/// RSPdx at a sane gain hands us 433 MHz sensor bursts at −45…−55 dBFS —
+/// +45 dB over the floor, plainly visible on the waterfall — and
+/// rtl_433 silently ignores every one of them (found live 2026-10-13:
+/// 36 M samples in, 0 events). Scaling to a tracked peak keeps the
+/// OOK high/low ratios and the FSK deviation intact while giving the
+/// int16 path its full resolution, which lowering `min_level` would
+/// not (−50 dB is 33 LSB).
+///
+/// Fast attack (the chunk's own peak sets the level before it is
+/// scaled), exponential release, gain clamped to `[1, LEVEL_MAX_GAIN]`
+/// — it never attenuates, so a full-scale capture is passed through
+/// untouched.
+#[derive(Debug, Clone, Copy)]
+pub struct LevelTracker {
+    level: f32,
+    rate_hz: f32,
+}
+
+impl LevelTracker {
+    #[must_use]
+    pub fn new(rate_hz: f32) -> Self {
+        Self {
+            level: 0.0,
+            rate_hz: rate_hz.max(1.0),
+        }
+    }
+
+    /// Fold `chunk` into the peak tracker and return the gain to apply
+    /// to it.
+    pub fn gain_for(&mut self, chunk: &[Complex<f32>]) -> f32 {
+        let peak_sq = chunk
+            .iter()
+            .map(num_complex::Complex::norm_sqr)
+            .fold(0.0_f32, f32::max);
+        #[allow(clippy::cast_precision_loss)]
+        let decay = (-(chunk.len() as f32) / (self.rate_hz * LEVEL_RELEASE_S)).exp();
+        self.level = (self.level * decay).max(peak_sq.sqrt());
+        if self.level <= 0.0 || !self.level.is_finite() {
+            return 1.0;
+        }
+        (LEVEL_TARGET / self.level).clamp(1.0, LEVEL_MAX_GAIN)
     }
 }
 
@@ -101,6 +165,10 @@ pub struct Rtl433Demod {
     input_rate_hz: f64,
     events_out: Vec<u8>,
     construct_rate_hz: u32,
+    /// `Some` when `auto_level` is on.
+    level: Option<LevelTracker>,
+    /// Scaled copy of the input chunk handed to the shim.
+    scaled: Vec<Complex<f32>>,
 }
 
 impl Rtl433Demod {
@@ -122,6 +190,10 @@ impl Rtl433Demod {
             input_rate_hz: f64::from(params.sample_rate_hz),
             events_out: Vec::new(),
             construct_rate_hz: rate,
+            level: params
+                .auto_level
+                .then(|| LevelTracker::new(params.sample_rate_hz)),
+            scaled: Vec::new(),
         })
     }
 
@@ -137,6 +209,12 @@ impl Rtl433Demod {
             self.warned_off_rate = true;
         }
         self.input_rate_hz = rate;
+        if let Some(t) = self.level.as_mut() {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                *t = LevelTracker::new(rate as f32);
+            }
+        }
     }
 }
 
@@ -175,6 +253,13 @@ impl Block for Rtl433Demod {
                     },
                     reconfig_scope: ReconfigureScope::SourceRestart,
                     ai_notes: "default = ~220 stable decoders (upstream's `-R`-less default, lowest false-positive rate). extended adds experimental/niche/noisy ones. all adds broken/hidden too — parity-only, not for live use.",
+                },
+                ParamSpec {
+                    key: "auto_level",
+                    label: "Auto level",
+                    kind: ParamKind::Toggle { default: true },
+                    reconfig_scope: ReconfigureScope::SourceRestart,
+                    ai_notes: "Digital AGC in front of rtl_433 (on by default). rtl_433 ignores pulses below −12 dBFS, so without it an RSPdx/Airspy at a sane gain shows strong bursts on the waterfall and decodes nothing. Leave on; turn off only to reproduce upstream's raw behaviour on a full-scale capture.",
                 },
             ],
             ai_notes: "ISM-band device decoder. Tune to 433.92 MHz US/EU consumer/weather/TPMS, or 915 MHz US smart-meter / ERT / sensor band. ~320 protocols covering weather stations (Acurite, LaCrosse, Ambient Weather), TPMS, garage doors, AMR meters, soil moisture, etc. Output: `tail decoder --category rtl_433` — each frame is one JSON record with at minimum a `model` field. Plentiful in any US suburban RX environment; first decode usually arrives within 60 s of an antenna pointing skyward.",
@@ -215,7 +300,14 @@ impl Block for Rtl433Demod {
             return Ok(Work::new());
         }
 
-        self.dec.push_iq(src);
+        if let Some(tracker) = self.level.as_mut() {
+            let gain = tracker.gain_for(src);
+            self.scaled.clear();
+            self.scaled.extend(src.iter().map(|s| s * gain));
+            self.dec.push_iq(&self.scaled);
+        } else {
+            self.dec.push_iq(src);
+        }
         while let Some(event) = self.dec.drain_event() {
             tracing::info!(target: "decoder::rtl_433", "{event}");
             // `event` is already a JSON record — emit it verbatim (one
@@ -240,16 +332,16 @@ impl BlockFactory for Rtl433Demod {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_decoder_set, Rtl433Demod, Rtl433DemodParams};
+    use super::{parse_decoder_set, Complex, Rtl433Demod, Rtl433DemodParams};
     use crate::block::{Block, BlockIo, InBuf, InputPort, PortMeta};
     use ferrite_rtl_433::DecoderSet;
-    use num_complex::Complex;
 
     #[test]
     fn rejects_bad_rate() {
         let bad = Rtl433DemodParams {
             sample_rate_hz: 0.0,
             decoder_set: "default".into(),
+            auto_level: true,
         };
         assert!(Rtl433Demod::new(bad).is_err());
     }
@@ -259,6 +351,7 @@ mod tests {
         let bad = Rtl433DemodParams {
             sample_rate_hz: 250_000.0,
             decoder_set: "everything".into(),
+            auto_level: true,
         };
         assert!(Rtl433Demod::new(bad).is_err());
     }

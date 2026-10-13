@@ -13,7 +13,8 @@
 //!   teardown survive a real `process()` invocation, complementing
 //!   the in-crate unit test that targets the safe wrapper directly.
 //!
-//! One fixture-driven test:
+//! Fixture-driven tests (full scale, −50 dBFS with and without the
+//! block's auto-level normaliser):
 //!
 //! - `acurite_606tx_capture_decodes_at_least_one_event` — loads
 //!   `blocks/tests/fixtures/rtl433_acurite_606tx_433mhz_250ks.cu8`
@@ -98,8 +99,10 @@ fn silence_emits_no_events_via_block() {
 /// IQ, drives the block in 4096-sample chunks, captures the
 /// `decoder::rtl_433` tracing target into a buffer, and asserts at
 /// least one event mentions `Acurite-606TX`.
-#[test]
-fn acurite_606tx_capture_decodes_at_least_one_event() {
+/// Run the Acurite-606TX capture through a block, scaled by `scale`
+/// (1.0 = the capture's own near-full-scale level), returning the
+/// `decoder::rtl_433` tracing lines it produced.
+fn decode_fixture(params: Rtl433DemodParams, scale: f32) -> Vec<String> {
     use std::sync::Mutex;
     use tracing::Level;
     use tracing_subscriber::fmt::MakeWriter;
@@ -122,7 +125,7 @@ fn acurite_606tx_capture_decodes_at_least_one_event() {
         .map(|c| {
             let i = (i32::from(c[0]) - 128) as f32 / 128.0;
             let q = (i32::from(c[1]) - 128) as f32 / 128.0;
-            Complex::new(i, q)
+            Complex::new(i, q) * scale
         })
         .collect();
 
@@ -157,7 +160,7 @@ fn acurite_606tx_capture_decodes_at_least_one_event() {
             .finish(),
     );
 
-    let mut block = Rtl433Demod::new(Rtl433DemodParams::default()).unwrap();
+    let mut block = Rtl433Demod::new(params).unwrap();
 
     // Push in 4096-sample chunks to exercise the streaming path.
     for chunk in samples.chunks(4096) {
@@ -175,32 +178,61 @@ fn acurite_606tx_capture_decodes_at_least_one_event() {
     }
 
     let lines = sink.0.lock().unwrap();
-    let rtl433_lines: Vec<_> = lines
+    lines
         .iter()
         .filter(|l| l.contains("decoder::rtl_433"))
-        .collect();
+        .cloned()
+        .collect()
+}
 
+fn assert_acurite(rtl433_lines: &[String], what: &str) {
     assert!(
         !rtl433_lines.is_empty(),
-        "fixture should yield ≥1 decoded event; got {} total tracing lines",
-        lines.len()
+        "{what}: fixture should yield ≥1 decoded event"
     );
-
     // Spot-check that the right device was matched. Upstream's
     // Acurite-606TX decoder emits `"model" : "Acurite-606TX"` in its
     // JSON; any other model in those lines means we picked up a
     // false-positive against a different protocol.
-    let acurite_lines: Vec<_> = rtl433_lines
-        .iter()
-        .filter(|l| l.contains("Acurite-606TX"))
-        .collect();
     assert!(
-        !acurite_lines.is_empty(),
-        "expected Acurite-606TX in decoded events; got: {}",
-        rtl433_lines
-            .iter()
-            .map(|l| l.as_str())
-            .collect::<Vec<_>>()
-            .join(" | ")
+        rtl433_lines.iter().any(|l| l.contains("Acurite-606TX")),
+        "{what}: expected Acurite-606TX in decoded events; got: {}",
+        rtl433_lines.join(" | ")
+    );
+}
+
+#[test]
+fn acurite_606tx_capture_decodes_at_least_one_event() {
+    let lines = decode_fixture(Rtl433DemodParams::default(), 1.0);
+    assert_acurite(&lines, "full-scale capture");
+}
+
+/// A −50 dBFS copy of the same capture: what an RSPdx at a sane gain
+/// hands the block for a sensor 45 dB over the floor (2026-10-13 live:
+/// bursts at +46 dB over a −94 dBFS floor, 36 M samples in, 0 events).
+/// The default auto-level normaliser must still decode it…
+#[test]
+fn acurite_606tx_at_minus_50_dbfs_decodes_with_auto_level() {
+    let lines = decode_fixture(Rtl433DemodParams::default(), 0.003_16);
+    assert_acurite(&lines, "−50 dBFS capture, auto_level on");
+}
+
+/// …and the same copy with the normaliser off must decode nothing —
+/// upstream's `min_level` (−12.1 dBFS) gate. This pins the reason the
+/// normaliser exists; if upstream ever lowers the gate the assertion
+/// (not the normaliser) is what to revisit.
+#[test]
+fn acurite_606tx_at_minus_50_dbfs_is_silent_without_auto_level() {
+    let lines = decode_fixture(
+        Rtl433DemodParams {
+            auto_level: false,
+            ..Rtl433DemodParams::default()
+        },
+        0.003_16,
+    );
+    assert!(
+        lines.is_empty(),
+        "−50 dBFS capture, auto_level off: expected rtl_433's min_level gate to drop it; got: {}",
+        lines.join(" | ")
     );
 }
