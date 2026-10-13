@@ -1520,6 +1520,11 @@ private:
 		* 5 or more seconds of phasing signal and another message starting with "ZCZC" or
 		* an end of emission idle signal alpha for at least 2 seconds.  */
 public:
+	/// The audio rate this implementation's bit timing and mark/space
+	/// mixers were built for (ferrite: navtex::restart() compares it
+	/// against modem::samplerate).
+	int sample_rate() const { return m_sample_rate; }
+
 	void process_data(const double * data, int nb_samples) {
 			cmplx z, zmark, zspace, *zp_mark, *zp_space;
 
@@ -1944,16 +1949,16 @@ navtex::navtex (trx_mode md)
 	modem::samplerate = 11025;
 	modem::bandwidth = 2 * deviation_f ;
 	modem::reverse = false ;
-	bool only_sitor_b = false ;
+	m_only_sitor_b = false ;
 	switch( md )
 	{
-		case MODE_NAVTEX : only_sitor_b = false ;
+		case MODE_NAVTEX : m_only_sitor_b = false ;
 				   break;
-		case MODE_SITORB : only_sitor_b = true ;
+		case MODE_SITORB : m_only_sitor_b = true ;
 				   break;
 		default          : LOG_ERROR("Unknown mode");
 	}
-	m_impl = new navtex_implementation( modem::samplerate, only_sitor_b, this );
+	m_impl = new navtex_implementation( modem::samplerate, m_only_sitor_b, this );
 }
 
 navtex::~navtex()
@@ -1965,11 +1970,28 @@ navtex::~navtex()
 }
 void navtex::rx_init()
 {
+	// ferrite: the host calls set_samplerate() between construction and
+	// rx_init(); make sure the implementation matches it (see restart).
+	restart();
 	put_MODEstatus(modem::mode);
 }
 
+// ferrite patch. Upstream fldigi resamples the sound card to each
+// modem's own `samplerate` (11025 here), so the implementation could
+// bake its rate in at construction and restart() could be empty. The
+// ferrite shim instead feeds every modem at a host rate it sets with
+// set_samplerate() *after* construction — which this modem silently
+// ignored: its bit timing (m_bit_sample_count) and mark/space mixers
+// stayed at 11025 Hz while the audio arrived at 8 kHz, a 38 % timing
+// error that decoded nothing (fixture or live). Rebuild the
+// implementation whenever the modem's rate has changed under it,
+// preserving the carrier the host pinned via set_freq().
 void navtex::restart()
 {
+	if( m_impl && m_impl->sample_rate() == modem::samplerate ) return ;
+	if( m_impl ) delete m_impl ;
+	m_impl = new navtex_implementation( modem::samplerate, m_only_sitor_b, this );
+	if( modem::frequency > 0 ) m_impl->set_carrier( modem::frequency );
 }
 
 int  navtex::rx_process(const double *buf, int len)

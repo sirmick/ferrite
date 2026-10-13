@@ -20,8 +20,10 @@ Status: **Phases 1, 2, 4 shipped** (design locked 2026-05-18; Phase 3
 > Contestia (`tones`/`bandwidth`), DominoEX (`speed`), Throb
 > (`tones`/`extended`), NAVTEX (`standard`, singleton). All 7
 > mandatory fldigi e2e decode gates still green (param→id composition
-> preserves the proven decode path); NAVTEX e2e remains `#[ignore]`
-> (pre-existing lossy-fixture issue, unchanged). Related: `03-blocks.md`
+> preserves the proven decode path); the NAVTEX e2e, long `#[ignore]`d
+> as a "lossy fixture", went green on 2026-10-13 once the vendored
+> modem rebuilt itself at the shim's 8 kHz (`navtex::restart`) and the
+> test biased the clip onto the modem's carrier. Related: `03-blocks.md`
 (fldigi blocks), `04-flowgraphs.md` (preset schema),
 `decoder-roadmap/05-phase-5-ham-digital.md`.
 

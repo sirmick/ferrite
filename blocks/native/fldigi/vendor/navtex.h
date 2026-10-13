@@ -31,6 +31,10 @@ class navtex_implementation ;
 
 class navtex : public modem {
 	navtex_implementation * m_impl ;
+	/// Kept so restart() can rebuild m_impl at the modem's current
+	/// samplerate (ferrite: the host sets 8 kHz after construction;
+	/// upstream fldigi resamples audio to each modem's own rate).
+	bool m_only_sitor_b ;
 
 	/// Non-copiable object.
 	navtex();

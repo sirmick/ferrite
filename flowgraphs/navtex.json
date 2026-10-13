@@ -4,7 +4,7 @@
   "category": "Maritime",
   "label": "NAVTEX",
   "description": "NAVTEX \u2014 international maritime safety broadcast on 518 kHz (SITOR-B / CCIR-476, forward error corrected).",
-  "ai_notes": "NAVTEX / SITOR-B (CCIR-476 FEC, 100 bd / 170 shift, vendored fldigi navtex core). 518 kHz international (also 490 kHz local, 4209.5 kHz). US Pacific = Point Reyes NMC, scheduled ~4-6 slots/day (not continuous \u2014 watch the waterfall for the burst). MF: source sample_rate 384 kHz, dial \u2248 516.5 kHz. mode=navtex; sitorb variant available. Strong groundwave \u2014 the realistic decodable signal on a long-wire. Output: `tail decoder --category fldigi`.",
+  "ai_notes": "NAVTEX / SITOR-B (CCIR-476 FEC, 100 bd / 170 shift, vendored fldigi navtex core). 518 kHz international (also 490 kHz local, 4209.5 kHz). Not continuous: each station owns one 10-minute slot per 4 h, letter = slot (A = :00 after 00/04/08/12/16/20 UTC, +10 min per letter). US Pacific: Point Reyes NMC = C (00:20, 04:20, 08:20 \u2026), Long Beach/Cambria NMQ = Q (02:40, 06:40 \u2026), Astoria NMW = W (03:40, 07:40 \u2026). MF: source sample_rate 384 kHz, dial 516.5 kHz so the 518 kHz pair lands on the decoder's pinned 1500 Hz audio tone (`rx_freq_hz`); keep `afc` off \u2014 headless AFC has no spectrum to read and walks the carrier off the signal. Tune only by moving the dial; the mark/space pair must sit within \u00b1\u224850 Hz of 1500 Hz. The loop (Antenna B) hears NMQ; the longwire did not. Output: `tail decoder --category fldigi`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/NAVTEX",
   "sample_path": "samples/sigidwiki/NAVTEX_SITOR-B.mp3",
   "signal_wiki_image": "samples/sigidwiki/images/NAVTEX.jpg",
@@ -104,7 +104,8 @@
       "type": "NavtexDemod",
       "placement": "node",
       "params": {
-        "afc": true
+        "afc": false,
+        "rx_freq_hz": 1500.0
       }
     }
   },

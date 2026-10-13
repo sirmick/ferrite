@@ -280,18 +280,20 @@ fn dominoex_demod_decodes_full_chain() {
     );
 }
 
+/// The clip's tone pair sits at 1904/2104 Hz (centre 2004 Hz), so the
+/// bias moves it onto the modem's 1000 Hz default carrier. This was
+/// `#[ignore]`d as "the lossy clip won't satisfy the FEC" until
+/// 2026-10-13: the real cause was the vendored navtex modem keeping its
+/// 11025 Hz bit timing after the shim set 8 kHz (see `navtex::restart`
+/// in vendor/navtex.cxx), found when a live 518 kHz NMQ broadcast at
+/// +13 dB decoded nothing.
 #[test]
-#[ignore = "Real NAVTEX/SITOR-B: decodes nothing even through the full \
-             RX chain at any swept channelizer shift \
-             (fldigi_fullchain_probe). Not AFC — the lossy sigidwiki \
-             SITOR-B clip won't satisfy the time-diversity FEC. Block \
-             is complete; re-enable with a cleaner fixture."]
 fn navtex_demod_decodes_full_chain() {
     assert_pangram(
         &decode(
             || Box::new(NavtexDemod::new(NavtexDemodParams::default()).unwrap()),
             "NAVTEX_SITOR-B",
-            OFFSET,
+            OFFSET + 1004.0,
         ),
         "NavtexDemod",
     );
