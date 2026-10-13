@@ -337,6 +337,17 @@ mod native {
                 return PathBuf::from(p);
             }
         }
+        // Search PATH ourselves so the result is absolute and
+        // `sibling_lib` can find `<prefix>/lib` (libmbe) for a
+        // `~/.local/bin/dsd-fme` install; fall back to the bare name.
+        if let Some(paths) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&paths) {
+                let cand = dir.join(super::DEFAULT_HELPER);
+                if cand.is_file() {
+                    return cand;
+                }
+            }
+        }
         PathBuf::from(super::DEFAULT_HELPER)
     }
 
