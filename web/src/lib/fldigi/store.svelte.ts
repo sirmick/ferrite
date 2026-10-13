@@ -12,13 +12,42 @@
 import { decoders } from '$lib/decoders/store.svelte';
 import type { ConsoleLine } from '$lib/viz/TextConsole.svelte';
 
+import { EMPTY_CURSOR, foldRunningText, type TextCursor } from './runningText';
+
 interface FldigiRec {
   t?: string;
   mode?: string;
   text?: string;
 }
 
+// Running Rx text accumulator (see runningText.ts). Plain module state,
+// folded lazily inside the reactive `text` read: the read depends on the
+// mirror's `recent`, so it re-runs on every delta, and only the records
+// newer than the cursor are appended — the buffer outlives the ring's
+// 512-record cap. An operator Reset empties the kind server-side, which
+// the mirror reflects as an empty `recent`; that clears the buffer too.
+let runningBuffer = '';
+let runningCursor: TextCursor = EMPTY_CURSOR;
+
 export const fldigi = {
+  /** Continuous decoded text, newest at the end (fldigi's Rx pane):
+   *  consecutive records joined, `\n` honoured, a blank line after a
+   *  silence, a line break on a mode change. Not bounded by the record
+   *  ring — see `runningText.ts` for the character cap. */
+  get text(): string {
+    const recent = decoders.kind('fldigi').recent;
+    if (recent.length === 0) {
+      if (runningBuffer) {
+        runningBuffer = '';
+        runningCursor = EMPTY_CURSOR;
+      }
+      return runningBuffer;
+    }
+    const folded = foldRunningText(runningBuffer, runningCursor, recent);
+    runningBuffer = folded.buffer;
+    runningCursor = folded.cursor;
+    return runningBuffer;
+  },
   /** Append-only decoded-text console (newest last). */
   get lines(): ConsoleLine[] {
     const out: ConsoleLine[] = [];
