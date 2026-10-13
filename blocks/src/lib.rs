@@ -30,6 +30,7 @@ pub mod dc_block;
 pub mod decimator;
 pub mod decode_parse;
 pub mod digital_spot;
+pub mod dmr_decode;
 pub mod dsd_helper;
 pub mod dtmf_audio_source;
 pub mod dtmf_decoder;
@@ -112,6 +113,7 @@ pub use block::{
 pub use channelizer::{Channelizer, ChannelizerParams};
 pub use dc_block::{DcBlock, DcBlockParams};
 pub use decimator::{Decimator, DecimatorParams};
+pub use dmr_decode::{DmrDecode, DmrDecodeParams, DmrDecoder};
 pub use dsd_helper::{DsdHelper, DsdHelperParams};
 pub use dtmf_audio_source::{DtmfAudioSource, DtmfAudioSourceParams};
 pub use dtmf_decoder::{DtmfDecoder, DtmfDecoderParams};
