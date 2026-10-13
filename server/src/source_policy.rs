@@ -207,8 +207,16 @@ pub struct TunePlan {
 ///   target by `offset_ratio·chan_rate` and let the channelizer recover
 ///   the carrier off the DC spike.
 ///
+/// `passband_hz` is the source's analog anti-alias filter width at the
+/// rate the plan lands on (`None` = unknown → the digitised span is the
+/// limit). Every room calculation uses the narrower of span and passband:
+/// the dodge scales with the *channel* rate, so at low sample rates —
+/// where SDRplay's filter is only 200–300 kHz — an unclamped 0.7 × 240 kHz
+/// dodge parked wbfm's channel at or beyond the filter edge (2026-10-12).
+///
 /// [`AppState::tune`]: crate::app_state::AppState::tune
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn plan_tune(
     freq_hz: f64,
     span_hz: Option<f64>,
@@ -217,11 +225,19 @@ pub fn plan_tune(
     cur_src_center: Option<f64>,
     cur_rate: f64,
     chan_rate: Option<f64>,
+    passband_hz: Option<f64>,
 ) -> TunePlan {
+    // The width the channel may actually occupy: the analog passband when
+    // it is narrower than the digitised span.
+    let usable = |span: f64| match passband_hz {
+        Some(bw) if bw.is_finite() && bw > 0.0 && bw < span => bw,
+        _ => span,
+    };
+
     // In-span fast path: retune the channelizer, leave the LO + rate alone.
     if keep_lo {
         if let (Some(cur), Some(cr)) = (cur_src_center, chan_rate) {
-            let usable_half = cur_rate / 2.0 - cr / 2.0;
+            let usable_half = usable(cur_rate) / 2.0 - cr / 2.0;
             if cur_rate > 0.0 && usable_half > 0.0 && (freq_hz - cur).abs() <= usable_half {
                 return TunePlan {
                     src_center_hz: None,
@@ -243,10 +259,14 @@ pub fn plan_tune(
             // at all: an unclamped 0.7 × 2 MHz dodge put 1090 MHz 1.4 MHz
             // off a 2 MS/s LO, i.e. outside Nyquist, and the decoder saw
             // nothing. Clamp to the room available; zero room = tune
-            // on-centre and rely on `dc_offset_correction`.
+            // on-centre and rely on `dc_offset_correction`. The room is
+            // measured inside the analog passband, not just Nyquist —
+            // the filter at 0.5 MS/s is 300 kHz, so a 240 kHz channel has
+            // 30 kHz of dodge there, not 168 kHz.
             let span = span_hz.unwrap_or(0.0).max(cur_rate);
-            let room = if span > 0.0 {
-                (span / 2.0 - cr / 2.0).max(0.0)
+            let width = usable(span);
+            let room = if width > 0.0 {
+                (width / 2.0 - cr / 2.0).max(0.0)
             } else {
                 f64::INFINITY
             };
@@ -256,7 +276,9 @@ pub fn plan_tune(
                 Some(cur)
                     if {
                         let off = (freq_hz - cur).abs();
-                        off <= keepout && off >= dc_guard
+                        // Sticky only while the channel stays inside the
+                        // passband around the parked LO.
+                        off <= keepout && off >= dc_guard && off <= room
                     } =>
                 {
                     (cur, freq_hz - cur)
@@ -291,7 +313,7 @@ mod tests {
     #[test]
     fn snap_on_first_tune_parks_lo_low_of_target_by_the_dodge() {
         // Unknown centre (fresh device) → always snap + always write.
-        let p = plan_tune(100.0e6, None, 0.7, false, None, 2.4e6, Some(CR));
+        let p = plan_tune(100.0e6, None, 0.7, false, None, 2.4e6, Some(CR), None);
         let dodge = 0.7 * CR;
         assert_eq!(p.src_center_hz, Some(100.0e6 - dodge));
         assert_eq!(p.chan_shift_hz, Some(dodge));
@@ -304,7 +326,7 @@ mod tests {
         // sits within keepout (19.2k) and past the DC guard (4.8k) → reuse.
         let lo = 100.0e6 - 0.7 * CR;
         let target = lo + 10_000.0;
-        let p = plan_tune(target, None, 0.7, false, Some(lo), 2.4e6, Some(CR));
+        let p = plan_tune(target, None, 0.7, false, Some(lo), 2.4e6, Some(CR), None);
         assert_eq!(p.src_center_hz, None, "LO must not move");
         assert_eq!(p.chan_shift_hz, Some(target - lo));
     }
@@ -315,7 +337,7 @@ mod tests {
         // would park it on the DC spike; must re-snap off it instead.
         let lo = 100.0e6;
         let target = lo + 2_000.0;
-        let p = plan_tune(target, None, 0.7, false, Some(lo), 2.4e6, Some(CR));
+        let p = plan_tune(target, None, 0.7, false, Some(lo), 2.4e6, Some(CR), None);
         let dodge = 0.7 * CR;
         assert_eq!(p.src_center_hz, Some(target - dodge), "must re-snap off DC");
         assert_eq!(p.chan_shift_hz, Some(dodge));
@@ -330,7 +352,7 @@ mod tests {
     #[test]
     fn full_span_channel_clamps_dodge_to_zero() {
         let rate = 2.0e6;
-        let p = plan_tune(1090.0e6, None, 0.7, false, None, rate, Some(rate));
+        let p = plan_tune(1090.0e6, None, 0.7, false, None, rate, Some(rate), None);
         assert_eq!(p.src_center_hz, Some(1090.0e6), "no room → on-centre");
         assert_eq!(p.chan_shift_hz, Some(0.0));
     }
@@ -339,9 +361,137 @@ mod tests {
     /// of dodge, not 1.05 MHz.
     #[test]
     fn dodge_clamps_to_half_the_spare_span() {
-        let p = plan_tune(1090.0e6, None, 0.7, false, None, 2.0e6, Some(1.5e6));
+        let p = plan_tune(1090.0e6, None, 0.7, false, None, 2.0e6, Some(1.5e6), None);
         assert_eq!(p.src_center_hz, Some(1090.0e6 - 250_000.0));
         assert_eq!(p.chan_shift_hz, Some(250_000.0));
+    }
+
+    /// The 2026-10-12 characterization: the dodge scaled with the channel
+    /// rate only, so at 0.5 MS/s (300 kHz filter) wbfm's 240 kHz channel
+    /// was parked 168 kHz off the LO — centred 18 kHz past the filter
+    /// edge. The room must be measured inside the analog passband.
+    #[test]
+    fn dodge_clamps_to_the_analog_passband_at_low_rates() {
+        let wbfm = 240_000.0;
+        // 0.5 MS/s, 300 kHz filter → (300k − 240k) / 2 = 30 kHz of room.
+        let p = plan_tune(
+            98.1e6,
+            None,
+            0.7,
+            false,
+            None,
+            0.5e6,
+            Some(wbfm),
+            Some(300_000.0),
+        );
+        assert_eq!(p.src_center_hz, Some(98.1e6 - 30_000.0));
+        assert_eq!(p.chan_shift_hz, Some(30_000.0));
+        // 0.25 MS/s, 200 kHz filter: the channel is wider than the
+        // filter — no room at all, tune on-centre.
+        let p = plan_tune(
+            98.1e6,
+            None,
+            0.7,
+            false,
+            None,
+            0.25e6,
+            Some(wbfm),
+            Some(200_000.0),
+        );
+        assert_eq!(p.src_center_hz, Some(98.1e6));
+        assert_eq!(p.chan_shift_hz, Some(0.0));
+        // 2.4 MS/s with the 1.536 MHz filter: plenty of room, full dodge.
+        let p = plan_tune(
+            98.1e6,
+            None,
+            0.7,
+            false,
+            None,
+            2.4e6,
+            Some(wbfm),
+            Some(1_536_000.0),
+        );
+        assert_eq!(p.chan_shift_hz, Some(0.7 * wbfm));
+        // A passband wider than the span (stale / nonsense) never widens it.
+        let p = plan_tune(
+            1090.0e6,
+            None,
+            0.7,
+            false,
+            None,
+            2.0e6,
+            Some(2.0e6),
+            Some(8.0e6),
+        );
+        assert_eq!(p.chan_shift_hz, Some(0.0));
+    }
+
+    #[test]
+    fn sticky_lo_respects_the_passband() {
+        // LO parked 30 kHz low at 0.5 MS/s (300 kHz filter, 240 kHz
+        // channel). A target 15 kHz further up is inside the keepout but
+        // would push the channel past the filter edge → re-snap, not sticky.
+        let wbfm = 240_000.0;
+        let lo = 98.1e6 - 30_000.0;
+        let p = plan_tune(
+            lo + 45_000.0,
+            None,
+            0.7,
+            false,
+            Some(lo),
+            0.5e6,
+            Some(wbfm),
+            Some(300_000.0),
+        );
+        assert_eq!(
+            p.src_center_hz,
+            Some(lo + 45_000.0 - 30_000.0),
+            "must re-snap"
+        );
+        // …while the same move with a wide filter stays sticky.
+        let p = plan_tune(
+            lo + 45_000.0,
+            None,
+            0.7,
+            false,
+            Some(lo),
+            2.4e6,
+            Some(wbfm),
+            Some(1_536_000.0),
+        );
+        assert_eq!(p.src_center_hz, None, "LO stays put");
+        assert_eq!(p.chan_shift_hz, Some(45_000.0));
+    }
+
+    #[test]
+    fn in_span_fast_path_is_bounded_by_the_passband() {
+        // keep_lo: 2.4 MS/s but a 1.536 MHz filter — a target 1 MHz up is
+        // inside Nyquist yet outside the filter → fall through to a snap.
+        let lo = 100.0e6;
+        let p = plan_tune(
+            lo + 1.0e6,
+            None,
+            0.7,
+            true,
+            Some(lo),
+            2.4e6,
+            Some(CR),
+            Some(1_536_000.0),
+        );
+        assert_eq!(p.src_center_hz, Some(lo + 1.0e6 - 0.7 * CR), "LO must snap");
+        // 500 kHz up fits inside the filter → channelizer only.
+        let p = plan_tune(
+            lo + 0.5e6,
+            None,
+            0.7,
+            true,
+            Some(lo),
+            2.4e6,
+            Some(CR),
+            Some(1_536_000.0),
+        );
+        assert_eq!(p.src_center_hz, None);
+        assert_eq!(p.chan_shift_hz, Some(0.5e6));
     }
 
     #[test]
@@ -349,7 +499,7 @@ mod tests {
         // offset_ratio 0 → dodge 0, dc_guard 0. Target exactly on the LO is
         // allowed (off=0 ≥ guard=0, ≤ keepout) → sticky, zero shift.
         let lo = 100.0e6;
-        let p = plan_tune(lo, None, 0.0, false, Some(lo), 2.4e6, Some(CR));
+        let p = plan_tune(lo, None, 0.0, false, Some(lo), 2.4e6, Some(CR), None);
         assert_eq!(p.src_center_hz, None);
         assert_eq!(p.chan_shift_hz, Some(0.0));
     }
@@ -360,7 +510,16 @@ mod tests {
         // rate untouched, channelizer takes the whole shift.
         let lo = 100.0e6;
         let target = lo + 500_000.0;
-        let p = plan_tune(target, Some(4.0e6), 0.7, true, Some(lo), 2.4e6, Some(CR));
+        let p = plan_tune(
+            target,
+            Some(4.0e6),
+            0.7,
+            true,
+            Some(lo),
+            2.4e6,
+            Some(CR),
+            None,
+        );
         assert_eq!(p.src_center_hz, None, "fast path leaves the LO put");
         assert_eq!(p.src_rate_hz, None, "fast path ignores span widening");
         assert_eq!(p.chan_shift_hz, Some(target - lo));
@@ -371,13 +530,13 @@ mod tests {
         // keep_lo but target beyond the usable half-span → normal LO move.
         let lo = 100.0e6;
         let target = lo + 2_000_000.0; // > 1.2M - 24k
-        let p = plan_tune(target, None, 0.7, true, Some(lo), 2.4e6, Some(CR));
+        let p = plan_tune(target, None, 0.7, true, Some(lo), 2.4e6, Some(CR), None);
         assert_eq!(p.src_center_hz, Some(target - 0.7 * CR), "LO must snap");
     }
 
     #[test]
     fn no_channelizer_writes_lo_directly() {
-        let p = plan_tune(100.0e6, None, 0.7, false, None, 2.4e6, None);
+        let p = plan_tune(100.0e6, None, 0.7, false, None, 2.4e6, None, None);
         assert_eq!(
             p.src_center_hz,
             Some(100.0e6),
@@ -389,10 +548,28 @@ mod tests {
     #[test]
     fn span_widens_rate_only_when_larger() {
         // span > cur_rate → set rate.
-        let p = plan_tune(100.0e6, Some(4.0e6), 0.7, false, None, 2.4e6, Some(CR));
+        let p = plan_tune(
+            100.0e6,
+            Some(4.0e6),
+            0.7,
+            false,
+            None,
+            2.4e6,
+            Some(CR),
+            None,
+        );
         assert_eq!(p.src_rate_hz, Some(4.0e6));
         // span ≤ cur_rate → leave rate.
-        let p = plan_tune(100.0e6, Some(1.0e6), 0.7, false, None, 2.4e6, Some(CR));
+        let p = plan_tune(
+            100.0e6,
+            Some(1.0e6),
+            0.7,
+            false,
+            None,
+            2.4e6,
+            Some(CR),
+            None,
+        );
         assert_eq!(p.src_rate_hz, None);
     }
 
@@ -402,7 +579,7 @@ mod tests {
         // the graph — but only sticky can produce that (snap moves by dodge).
         let lo = 100.0e6;
         // Target on the LO with a DC-tracking driver → sticky, LO unchanged.
-        let p = plan_tune(lo, None, 0.0, false, Some(lo), 2.4e6, Some(CR));
+        let p = plan_tune(lo, None, 0.0, false, Some(lo), 2.4e6, Some(CR), None);
         assert_eq!(p.src_center_hz, None);
     }
 

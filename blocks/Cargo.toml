@@ -59,6 +59,9 @@ fldigi   = ["dep:ferrite-fldigi"]
 [dependencies]
 anyhow                = "1"
 ferrite-blocks-macros = { path = "../blocks-macros", version     = "0.9.0" }
+# SDRplay LNA attenuation ladders for the source readback (an LNA state
+# is an index, not dB). Tiny leaf crate, no DSP/hardware deps.
+ferrite-sdr-tables    = { path = "../sdr-tables", version     = "0.9.0" }
 # Drop-in `SystemTime` that works on wasm32 (JS clock) as well as
 # native (re-exports std). Used by the slot-aligned ft8/wspr decoders
 # so they run browser-side; `std::time::SystemTime::now()` panics on

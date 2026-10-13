@@ -65,9 +65,61 @@ export interface SoapyReadback {
   sample_rate_hz?: number;
   center_freq_hz?: number;
   bandwidth_hz?: number;
+  /** Realised gain in true dB. On SDRplay the LNA stage is counted at
+   *  its per-band attenuation, so this is below `dial_db` once an LNA
+   *  state is in. */
   gain_db?: number;
+  /** The `gain_db` *param* value the hardware sits at (the dial) — what
+   *  the slider follows. Same as `gain_db` on non-SDRplay drivers. */
+  dial_db?: number;
+  /** SDRplay LNA state, reported separately from the dB figure. */
+  lna?: {
+    hardware: string;
+    state: number;
+    states?: number;
+    atten_db: number | null;
+    band_hz?: [number, number];
+  };
   agc?: boolean;
   antenna?: string;
+  gain_elements?: Record<string, number>;
+}
+
+import type { SourceConfig } from './source';
+
+/** Readback keys that are also `src` params — the ones `applyReadback`
+ *  may overlay. The rest (`lna`, `dial_db`) are display-only and must not
+ *  land in the params the next PATCH sends back (unknown keys are 400). */
+const READBACK_PARAM_KEYS = [
+  'sample_rate_hz',
+  'center_freq_hz',
+  'bandwidth_hz',
+  'agc',
+  'antenna',
+  'gain_elements',
+] as const;
+
+/**
+ * Overlay the driver readback on a source config: only keys the server
+ * actually returned are overwritten — undefined fields mean "driver
+ * didn't report this, keep the optimistic value." The gain slider is a
+ * *dial*, so it follows `dial_db` (the position the `gain_db` param maps
+ * to), not the true-dB `gain_db`. Leaves `type` alone; readback is
+ * always about params.
+ */
+export function applyReadback(
+  next: SourceConfig,
+  readback: SoapyReadback | undefined,
+): SourceConfig {
+  if (!readback) return next;
+  const merged: Record<string, unknown> = { ...next.params };
+  for (const k of READBACK_PARAM_KEYS) {
+    const v = readback[k];
+    if (v !== undefined) merged[k] = v;
+  }
+  const dial = readback.dial_db ?? readback.gain_db;
+  if (dial !== undefined) merged.gain_db = dial;
+  return { type: next.type, params: merged };
 }
 
 /**

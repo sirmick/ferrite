@@ -114,8 +114,12 @@ describe('defaultsFor — SDRPlay', () => {
 
   it('exposes a curated quick list from the preset', () => {
     // The nixie dropdown binds to this list — short + opinionated.
+    // 0.25 MS/s (the smallest rate verified drop-free over SoapyRemote)
+    // and the preset-declared 2.4 MS/s survey rate are on it; the probe's
+    // continuous [62.5k, 10.66M] range reaches both.
     expect(state.sample_rate_quick_choices).toEqual([
-      500_000, 1_000_000, 2_000_000, 4_000_000, 6_000_000, 8_000_000, 10_000_000,
+      250_000, 500_000, 1_000_000, 2_000_000, 2_400_000, 4_000_000, 6_000_000, 8_000_000,
+      10_000_000,
     ]);
   });
 });

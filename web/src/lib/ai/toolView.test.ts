@@ -2,7 +2,15 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { fmtHz, resultSummary, signalsOf, toolLabel, toolSummary, toolWhy } from './toolView';
+import {
+  fmtHz,
+  resultSummary,
+  signalsMetaOf,
+  signalsOf,
+  toolLabel,
+  toolSummary,
+  toolWhy,
+} from './toolView';
 
 describe('toolLabel', () => {
   it('drops the ferrite MCP prefix, keeps other servers', () => {
@@ -65,5 +73,16 @@ describe('signalsOf', () => {
       { freq_hz: 98.5e6, power_db: -40, snr_db: 28 },
     ]);
     expect(signalsOf('mcp__ferrite__status', r)).toBeNull();
+  });
+
+  it('keeps the first ten rows and reports listed vs tracked counts', () => {
+    const rows = Array.from({ length: 14 }, (_, i) => ({ freq_hz: 100e6 + i * 1e5 }));
+    const r = JSON.stringify({ signals: rows, total: 37, top_k: 14 });
+    expect(signalsOf('mcp__ferrite__signals', r)).toHaveLength(10);
+    expect(signalsMetaOf('mcp__ferrite__signals', r)).toEqual({ listed: 14, total: 37 });
+    // An older payload without `total` counts the list itself.
+    const old = JSON.stringify({ signals: rows.slice(0, 3) });
+    expect(signalsMetaOf('mcp__ferrite__signals', old)).toEqual({ listed: 3, total: 3 });
+    expect(signalsMetaOf('mcp__ferrite__status', r)).toBeNull();
   });
 });

@@ -36,8 +36,10 @@
 //!    `persist_window` consecutive misses. Debounces noise spikes without
 //!    holding a signal on screen after it drops.
 //! 5. **Top-K** — reported tracks are sorted by power and the strongest
-//!    `top_k` are emitted as one JSON object on the `events` port, plus a
-//!    `decoder::signals` trace line so `recent_decodes` can read them.
+//!    `top_k` are emitted as one JSON object on the `events` port (with
+//!    `total`, the tracked count before the cap, so a busy band still
+//!    reads as busy), plus a `decoder::signals` trace line so
+//!    `recent_decodes` can read them.
 //!
 //! Emission is throttled to `emit_interval_ms` (default 250 ms = 4 Hz) so
 //! the panel updates smoothly without flooding the WS — detection still
@@ -103,7 +105,8 @@ pub struct SignalListParams {
     /// channel width (e.g. 12 kHz for AM, 5 kHz for narrow tones) to surface
     /// real carriers instead of blobs.
     pub max_bw_hz: f32,
-    /// Maximum signals reported per emission, strongest first.
+    /// Maximum signals reported per emission, strongest first. The
+    /// payload's `total` counts every tracked signal before this cap.
     pub top_k: usize,
     /// Persistence window: a track is evicted after this many consecutive
     /// frames with no matching detection.
@@ -155,7 +158,7 @@ impl Default for SignalListParams {
             threshold_db: 12.0,
             min_bw_hz: 0.0,
             max_bw_hz: 0.0,
-            top_k: 16,
+            top_k: 48,
             persist_window: 5,
             persist_hits: 3,
             track_bucket_hz: 2_500.0,
@@ -562,6 +565,12 @@ impl SignalList {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.id.cmp(&b.id))
         });
+        // Count before the cap: with `top_k` alone the list length said
+        // nothing about a band once more than `top_k` signals cleared the
+        // gate (every busy band read "16"). `total` is how many persistent
+        // signals the detector is tracking right now; `signals` is the
+        // strongest `top_k` of them.
+        let total = reported.len();
         reported.truncate(self.params.top_k);
 
         let signals: Vec<serde_json::Value> = reported
@@ -581,6 +590,8 @@ impl SignalList {
 
         serde_json::json!({
             "signals": signals,
+            "total": total,
+            "top_k": self.params.top_k,
             "center_freq_hz": self.center_freq_hz,
             "span_hz": self.sample_rate_hz,
             "frame": self.frame,
@@ -742,13 +753,13 @@ impl Block for SignalList {
                     label: "Top N",
                     kind: ParamKind::Range {
                         min: 1.0,
-                        max: 64.0,
+                        max: 256.0,
                         step: 1.0,
-                        default: 16.0,
+                        default: 48.0,
                         unit: "",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "How many of the strongest signals to report per update.",
+                    ai_notes: "How many of the strongest signals to report per update. The payload's `total` is the count of every tracked signal before this cap, so `total` (not the list length) is the band-occupancy number.",
                 },
                 ParamSpec {
                     key: "persist_window",
@@ -842,7 +853,7 @@ impl Block for SignalList {
                     ai_notes: "Ignore ±this around the tuned centre so the LO/DC spike is never listed. Signals inside the hole are invisible to the list — retune (or use `spectrum`) to see a carrier at the LO. 0 disables.",
                 },
             ],
-            ai_notes: "Strongest-signal detector on the wideband FFT byte stream. Inline pass-through (FftU8 in → FftU8 out, like RssiProbe): splice it between LogMagU8 and the ui:fft sink — logmag.out → signals.in → ui:fft, with the watchlist on signals.events → ui:signals. NativeOnly (node-side). Emits a ranked list of {id, freq_hz, power_db, bw_hz, snr_db} JSON events ~4 Hz, driving the UI's 'Strongest Signals' panel and the `signals` MCP verb; click/tune a row to retune there. The noise floor is the 10th percentile over the analog passband (`floor_span_hz`, set from the source bandwidth), so it tracks gain/antenna; ±`dc_mask_hz` around the tuned centre is masked so the LO spike is never listed.",
+            ai_notes: "Strongest-signal detector on the wideband FFT byte stream. Inline pass-through (FftU8 in → FftU8 out, like RssiProbe): splice it between LogMagU8 and the ui:fft sink — logmag.out → signals.in → ui:fft, with the watchlist on signals.events → ui:signals. NativeOnly (node-side). Emits a ranked list of {id, freq_hz, power_db, bw_hz, snr_db} JSON events ~4 Hz (plus `total`, the tracked-signal count before the `top_k` cap), driving the UI's 'Strongest Signals' panel and the `signals` MCP verb; click/tune a row to retune there. The noise floor is the 10th percentile over the analog passband (`floor_span_hz`, set from the source bandwidth), so it tracks gain/antenna; ±`dc_mask_hz` around the tuned centre is masked so the LO spike is never listed.",
         }
     }
 
@@ -1015,9 +1026,9 @@ impl Block for SignalList {
         if self.emit_due() {
             let payload = self.build_payload();
             // Compact single-line JSON object — same bytes go to the
-            // events port (for the browser WS) and the decoder trace. The
-            // trace message is the raw JSON so `/api/signals` can parse it
-            // directly into the current watchlist without a WS subscription.
+            // events port (for the server's decoder store, mirrored to the
+            // browser) and the decoder trace, whose message is the raw JSON
+            // so a log reader can parse the watchlist directly.
             let json = serde_json::to_string(&payload).unwrap_or_default();
             tracing::info!(target: "decoder::signals", "{json}");
             self.pending.extend_from_slice(json.as_bytes());
@@ -1425,6 +1436,10 @@ mod tests {
             3,
             "top_k=3 caps the list"
         );
+        // The cap must not hide how busy the band is: every tracked
+        // signal is counted before truncation.
+        assert_eq!(v["total"], 6, "total counts the signals behind the cap");
+        assert_eq!(v["top_k"], 3);
     }
 
     #[test]

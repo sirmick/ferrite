@@ -11,6 +11,8 @@
   // each knob actually is without leaving the UI.
 
   import { pipeline } from '$lib/pipeline.svelte';
+  import { decoders } from '$lib/decoders/store.svelte';
+  import type { SoapyReadback } from '$lib/api/flowgraph';
   import type { RangeSpec, SettingInfo, SettingType } from '$lib/api/devices';
   import {
     fullBandwidthChoices,
@@ -98,6 +100,18 @@
       : Number.POSITIVE_INFINITY,
   );
   let ampOn = $derived(manualGain ? (gainElementValues.AMP ?? 0) > 0 : currentGain > ampThreshold);
+  // SDRplay: the dial's bottom steps are LNA *states* (an attenuator
+  // ladder whose dB depends on the band), so the readback reports the
+  // state separately with its real attenuation and a true-dB gain.
+  let readback = $derived(
+    decoders.kind('readback').current['current']?.data as SoapyReadback | undefined,
+  );
+  let lna = $derived(readback?.lna);
+  let trueGainDb = $derived(readback?.gain_db);
+  function fmtBandMhz(band: [number, number] | undefined): string {
+    if (!band) return '';
+    return ` (${(band[0] / 1e6).toFixed(0)}–${(band[1] / 1e6).toFixed(0)} MHz)`;
+  }
   let currentAntenna = $derived(
     typeof params.antenna === 'string' ? (params.antenna as string) : (antennas[0] ?? ''),
   );
@@ -313,6 +327,29 @@
           >
             <span class="label">AMP</span>
             <span class="amp-badge" class:on={ampOn}>{ampOn ? 'ON · +14 dB' : 'off'}</span>
+          </div>
+        {/if}
+        {#if lna}
+          <div
+            class="row"
+            title={`SDRplay LNA state (RFGR / rfgain_sel): an attenuator-ladder index, not dB. State 0 = full LNA gain; the dial's bottom steps select it. ${
+              lna.atten_db === null
+                ? 'No attenuation ladder known for this model/band.'
+                : `In this band state ${lna.state} inserts ${lna.atten_db} dB, so the realised gain is ${trueGainDb ?? '?'} dB.`
+            }`}
+          >
+            <span class="label">LNA</span>
+            <span class="lna-readout">
+              state {lna.state}{lna.states !== undefined ? ` / ${lna.states - 1}` : ''}
+              {#if lna.atten_db !== null}
+                · −{lna.atten_db} dB{fmtBandMhz(lna.band_hz)}
+                {#if trueGainDb !== undefined && Math.abs(trueGainDb - currentGain) >= 0.5}
+                  · {trueGainDb} dB real
+                {/if}
+              {:else}
+                · dB unknown
+              {/if}
+            </span>
           </div>
         {/if}
       {/if}
@@ -562,6 +599,12 @@
   .amp-badge.on {
     background: #7a3b00;
     color: #ffb066;
+  }
+  .lna-readout {
+    font-size: 0.7rem;
+    color: #999;
+    font-variant-numeric: tabular-nums;
+    user-select: none;
   }
   .advanced-gain {
     margin: 0.2rem 0 0.1rem;

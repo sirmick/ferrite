@@ -158,13 +158,27 @@ impl PresetMount {
         rt.block_typed::<SoapySource>(SOURCE_ID).map(|b| b.health())
     }
 
-    /// The first channelizer's live VFO shift (Hz), if the graph has one.
-    pub async fn chan_shift_hz(&self) -> Option<f64> {
+    /// The first channelizer's live VFO shift and realised output rate
+    /// (Hz), if the graph has one — where the channel sits relative to
+    /// the LO and how wide it is.
+    pub async fn chan_info(&self) -> Option<ChanInfo> {
         let mut rt = self.runtime.lock().await;
         let id = rt.first_id_typed::<Channelizer>()?;
-        rt.block_typed::<Channelizer>(&id)
-            .map(|c| c.freq_shift_hz())
+        rt.block_typed::<Channelizer>(&id).map(|c| ChanInfo {
+            shift_hz: c.freq_shift_hz(),
+            output_rate_hz: c.output_rate_hz(),
+        })
     }
+}
+
+/// Live position + width of the demodulated channel inside the source
+/// span. See [`PresetMount::chan_info`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChanInfo {
+    /// Channelizer `freq_shift_hz`: listen frequency − LO.
+    pub shift_hz: f64,
+    /// Realised channel rate, Hz.
+    pub output_rate_hz: f64,
 }
 
 impl PresetHandle {

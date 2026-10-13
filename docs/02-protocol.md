@@ -537,7 +537,7 @@ request structs; the descriptions below are what `tools/list` returns.
 | `status` | `GET /api/pipeline` + `/source` + `/flowgraph` + `/ui-sinks` | Cheap "what's the world look like" snapshot (incl. a `ready` boolean + the full flowgraph). Call first. |
 | `list_devices` | `GET /api/devices` | Enumerate Soapy devices + capability schemas. |
 | `source_capabilities` | `GET /api/source/capabilities` | Antennas, gain ladder, rate/bw/freq ranges, and the driver `settings` map for the *bound* source. |
-| `source_readback` | `GET /api/state` → `kinds.readback` | Live driver readback (actual gain/AGC/antenna/bw) — confirms a gain/AGC change landed. Folded into the store by the diag tick. |
+| `source_readback` | `GET /api/state` → `kinds.readback` | Live driver readback (actual gain/AGC/antenna/bw) — confirms a gain/AGC change landed. `gain_db` is true dB; `dial_db` is the `gain_db` *param* position it corresponds to; on SDRplay `lna` reports the LNA state with its per-band attenuation (`{hardware, state, states, atten_db, band_hz}`) instead of counting the state index as dB. Folded into the store by the diag tick. |
 | `flowdiag` | `GET /api/state` → `kinds.flowdiag` | Per-block throughput / process-time / ring fill — "are samples actually moving?". Folded into the store by the diag tick. |
 | `list_captures` | `GET /api/captures` | The curated `samples/` fixtures (path, kind, rate, centre, modulation). |
 | `replay_capture` | `PATCH /api/source` (`ModulatedFileSource`) | Replay a fixture through the full RX chain — deterministic decode/transcribe tests, no SDR. |

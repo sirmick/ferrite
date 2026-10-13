@@ -14,6 +14,7 @@
 import type { FlowgraphDoc } from '$lib/flowgraph';
 import { ApiError, wsUrlFor } from '$lib/api/errors';
 import {
+  applyReadback,
   fetchFlowgraph,
   fetchBrowserHalf,
   patchFlowgraph,
@@ -757,18 +758,10 @@ class PipelineStore {
 
 /**
  * Merge the server's post-apply readback into the optimistic source
- * config. Only keys the server actually returned are overwritten —
- * undefined fields mean "driver didn't report this, keep the optimistic
- * value." Leaves `type` alone; readback is always about params.
+ * config. Lives in `$lib/api/flowgraph` (`applyReadback`) next to the
+ * `SoapyReadback` wire type so the key whitelist and the type can't
+ * drift apart.
  */
-function applyReadback(next: SourceConfig, readback: SoapyReadback | undefined): SourceConfig {
-  if (!readback) return next;
-  const merged: Record<string, unknown> = { ...next.params };
-  for (const [k, v] of Object.entries(readback)) {
-    if (v !== undefined) merged[k] = v;
-  }
-  return { type: next.type, params: merged };
-}
 
 /** Shallow equality on a SourceConfig — used by the readback poll to
  *  skip reassignments when the driver state didn't move (so reactive

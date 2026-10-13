@@ -340,6 +340,217 @@ pub fn setting_gain_element(driver_key: &str, setting: &str) -> Option<&'static 
     }
 }
 
+// ── SDRplay LNA-state attenuation tables ────────────────────────────────
+//
+// SDRplay's `RFGR` gain element is the tuner's **LNA state** — an index
+// into a per-band attenuator ladder, not a dB value. SoapySDR's overall
+// gain sums every element's `(value − min)` as if it were dB, so a
+// readback that trusts it counts LNA state 4 as 4 dB when the ladder says
+// 12 dB at MW/HF (measured 8–14 dB on the station, 2026-10-12) or 16 dB at
+// UHF. These tables are the SDRplay API Specification's "gain reduction
+// tables" (§5 / appendix A in the v3.x documents), per model and RF band,
+// as transcribed by gr-sdrplay3; the per-band state counts agree with the
+// RSPdx limits other implementations carry (22/19/20/25/27/28/21/19) and
+// with SoapySDRPlay3's `RFGR` ranges (RSP1 0–3, RSP2 0–8, RSP1A/1B/duo
+// 0–9, RSPdx 0–27). The daemon's readback uses them to report the LNA
+// state separately from the dB figure (`SoapyReadback.lna`).
+
+/// One band of an RSP model's LNA attenuation ladder.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LnaTable {
+    /// RF band the ladder applies to, Hz: `lo ≤ f < hi`.
+    pub band_hz: (f64, f64),
+    /// Attenuation per LNA state, dB, indexed by state. The number of
+    /// entries is the number of valid states in this band.
+    pub atten_db: &'static [u8],
+}
+
+const fn lna(lo_hz: f64, hi_hz: f64, atten_db: &'static [u8]) -> LnaTable {
+    LnaTable {
+        band_hz: (lo_hz, hi_hz),
+        atten_db,
+    }
+}
+
+const MHZ: f64 = 1.0e6;
+
+/// RSPdx / RSPdx-R2 (identical front end). The HDR ladder applies only
+/// with HDR mode on and below 2 MHz; otherwise the 0–12 MHz ladder covers
+/// it. Bands: 0–12, 12–50, 50–60, 60–250, 250–420, 420–1000, 1000–2000 MHz.
+const RSPDX_HDR: LnaTable = lna(
+    0.0,
+    2.0 * MHZ,
+    &[
+        0, 3, 6, 9, 12, 15, 18, 21, 24, 25, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60,
+    ],
+);
+const RSPDX: &[LnaTable] = &[
+    lna(
+        0.0,
+        12.0 * MHZ,
+        &[
+            0, 3, 6, 9, 12, 15, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60,
+        ],
+    ),
+    lna(
+        12.0 * MHZ,
+        50.0 * MHZ,
+        &[
+            0, 3, 6, 9, 12, 15, 18, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60,
+        ],
+    ),
+    lna(
+        50.0 * MHZ,
+        60.0 * MHZ,
+        &[
+            0, 3, 6, 9, 12, 20, 23, 26, 29, 32, 35, 38, 44, 47, 50, 53, 56, 59, 62, 65, 68, 71, 74,
+            77, 80,
+        ],
+    ),
+    lna(
+        60.0 * MHZ,
+        250.0 * MHZ,
+        &[
+            0, 3, 6, 9, 12, 15, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72,
+            75, 78, 81, 84,
+        ],
+    ),
+    lna(
+        250.0 * MHZ,
+        420.0 * MHZ,
+        &[
+            0, 3, 6, 9, 12, 15, 18, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69,
+            72, 75, 78, 81, 84,
+        ],
+    ),
+    lna(
+        420.0 * MHZ,
+        1000.0 * MHZ,
+        &[
+            0, 7, 10, 13, 16, 19, 22, 25, 31, 34, 37, 40, 43, 46, 49, 52, 55, 58, 61, 64, 67,
+        ],
+    ),
+    lna(
+        1000.0 * MHZ,
+        2000.0 * MHZ,
+        &[
+            0, 5, 8, 11, 14, 17, 20, 32, 35, 38, 41, 44, 47, 50, 53, 56, 59, 62, 65,
+        ],
+    ),
+];
+
+/// RSP1A. Bands: 0–60, 60–420, 420–1000, 1000–2000 MHz.
+const RSP1A: &[LnaTable] = &[
+    lna(0.0, 60.0 * MHZ, &[0, 6, 12, 18, 37, 42, 61]),
+    lna(
+        60.0 * MHZ,
+        420.0 * MHZ,
+        &[0, 6, 12, 18, 20, 26, 32, 38, 57, 62],
+    ),
+    lna(
+        420.0 * MHZ,
+        1000.0 * MHZ,
+        &[0, 7, 13, 19, 20, 27, 33, 39, 45, 64],
+    ),
+    lna(
+        1000.0 * MHZ,
+        2000.0 * MHZ,
+        &[0, 6, 12, 20, 26, 32, 38, 43, 62],
+    ),
+];
+
+/// RSP1B. Like the RSP1A, but the 7-state HF ladder stops at 50 MHz and
+/// 50–60 MHz already uses the VHF ladder.
+const RSP1B: &[LnaTable] = &[
+    lna(0.0, 50.0 * MHZ, &[0, 6, 12, 18, 37, 42, 61]),
+    lna(
+        50.0 * MHZ,
+        420.0 * MHZ,
+        &[0, 6, 12, 18, 20, 26, 32, 38, 57, 62],
+    ),
+    lna(
+        420.0 * MHZ,
+        1000.0 * MHZ,
+        &[0, 7, 13, 19, 20, 27, 33, 39, 45, 64],
+    ),
+    lna(
+        1000.0 * MHZ,
+        2000.0 * MHZ,
+        &[0, 6, 12, 20, 26, 32, 38, 43, 62],
+    ),
+];
+
+/// RSPduo on the 50 Ω ports. The Hi-Z port below 60 MHz has its own
+/// 5-state ladder ([`RSPDUO_HIZ`]).
+const RSPDUO: &[LnaTable] = RSP1A;
+const RSPDUO_HIZ: LnaTable = lna(0.0, 60.0 * MHZ, &[0, 6, 12, 18, 37]);
+
+/// RSP2 on the 50 Ω ports. Bands: 0–420, 420–1000, 1000–2000 MHz; the
+/// Hi-Z port below 60 MHz uses [`RSP2_HIZ`]. (The 1–2 GHz ladder is
+/// non-monotonic in the specification; reproduced as published.)
+const RSP2: &[LnaTable] = &[
+    lna(0.0, 420.0 * MHZ, &[0, 10, 15, 21, 24, 34, 39, 45, 64]),
+    lna(420.0 * MHZ, 1000.0 * MHZ, &[0, 7, 10, 17, 22, 41]),
+    lna(1000.0 * MHZ, 2000.0 * MHZ, &[0, 5, 21, 15, 15, 34]),
+];
+const RSP2_HIZ: LnaTable = lna(0.0, 60.0 * MHZ, &[0, 6, 12, 18, 37]);
+
+/// RSP1 (four LNA states, non-monotonic below 420 MHz as published).
+const RSP1: &[LnaTable] = &[
+    lna(0.0, 420.0 * MHZ, &[0, 24, 19, 43]),
+    lna(420.0 * MHZ, 1000.0 * MHZ, &[0, 7, 19, 26]),
+    lna(1000.0 * MHZ, 2000.0 * MHZ, &[0, 5, 19, 24]),
+];
+
+/// The LNA attenuation ladder for an RSP model (SoapySDRPlay3's
+/// `hardware_key`: `RSP1`, `RSP1A`, `RSP1B`, `RSP2`, `RSPduo`, `RSPdx`,
+/// `RSPdx-R2`; case-insensitive) at RF frequency `freq_hz`. `hdr` is the
+/// RSPdx HDR mode (`hdr_ctrl`), `hi_z` whether the RSP2/RSPduo Hi-Z port is
+/// selected (both ignored on models without that variant). `None` for an
+/// unknown model or a frequency outside every band (> 2 GHz).
+#[must_use]
+pub fn sdrplay_lna_table(
+    hardware_key: &str,
+    freq_hz: f64,
+    hdr: bool,
+    hi_z: bool,
+) -> Option<LnaTable> {
+    if !freq_hz.is_finite() || freq_hz < 0.0 {
+        return None;
+    }
+    let in_band = |t: &LnaTable| freq_hz >= t.band_hz.0 && freq_hz < t.band_hz.1;
+    let key = hardware_key.trim().to_ascii_lowercase().replace('-', "");
+    let (special, ladder): (Option<LnaTable>, &[LnaTable]) = match key.as_str() {
+        "rspdx" | "rspdxr2" => (hdr.then_some(RSPDX_HDR), RSPDX),
+        "rsp1a" => (None, RSP1A),
+        "rsp1b" => (None, RSP1B),
+        "rspduo" => (hi_z.then_some(RSPDUO_HIZ), RSPDUO),
+        "rsp2" => (hi_z.then_some(RSP2_HIZ), RSP2),
+        "rsp1" => (None, RSP1),
+        _ => return None,
+    };
+    special
+        .filter(in_band)
+        .or_else(|| ladder.iter().copied().find(in_band))
+}
+
+/// LNA attenuation, dB, for `state` on `hardware_key` at `freq_hz` — see
+/// [`sdrplay_lna_table`]. `None` when the model/band is unknown or the
+/// state is beyond the band's ladder (the API clamps such a write).
+#[must_use]
+pub fn sdrplay_lna_attenuation_db(
+    hardware_key: &str,
+    freq_hz: f64,
+    state: usize,
+    hdr: bool,
+    hi_z: bool,
+) -> Option<f64> {
+    sdrplay_lna_table(hardware_key, freq_hz, hdr, hi_z)?
+        .atten_db
+        .get(state)
+        .map(|&db| f64::from(db))
+}
+
 /// SDRplay hardware broadcast-notch passbands (Hz). The RF notch covers the
 /// AM **and** FM broadcast bands (two disjoint ranges); the DAB notch covers
 /// Band III. Fixed in hardware, locale-independent. Mirrors the rules in
@@ -478,6 +689,102 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 9, "expected ≥9 presets checked, got {checked}");
+    }
+
+    // ── SDRplay LNA attenuation ladders ────────────────────────────────
+
+    #[test]
+    fn rspdx_lna_state_is_not_db() {
+        // The station measurement: LNA state 4 ≈ 12 dB at MW, 8–14 dB at
+        // HF — not the 4 dB a naive element sum reports.
+        let at = |f: f64, s: usize| sdrplay_lna_attenuation_db("RSPdx", f, s, false, false);
+        assert_eq!(at(1.0e6, 4), Some(12.0));
+        assert_eq!(at(7.1e6, 4), Some(12.0));
+        assert_eq!(at(14.0e6, 4), Some(12.0));
+        // The 88–150 MHz rule: dial 20 lands state 7, which is 27 dB here.
+        assert_eq!(at(118.0e6, 7), Some(27.0));
+        assert_eq!(at(118.0e6, 0), Some(0.0));
+        // UHF ladder starts with a 7 dB step.
+        assert_eq!(at(445.0e6, 1), Some(7.0));
+        assert_eq!(at(1090.0e6, 7), Some(32.0));
+        // Band edges are `lo ≤ f < hi`.
+        assert_eq!(at(12.0e6 - 1.0, 6), Some(24.0));
+        assert_eq!(at(12.0e6, 6), Some(18.0));
+        // State beyond the band's ladder → None (19 states below 12 MHz).
+        assert_eq!(at(1.0e6, 19), None);
+        assert_eq!(at(118.0e6, 26), Some(84.0));
+        assert_eq!(at(118.0e6, 27), None);
+        // Above 2 GHz the specification has no ladder.
+        assert_eq!(at(2.1e9, 0), None);
+    }
+
+    #[test]
+    fn rspdx_hdr_ladder_only_below_2mhz_with_hdr_on() {
+        assert_eq!(
+            sdrplay_lna_attenuation_db("RSPdx", 1.0e6, 8, true, false),
+            Some(24.0)
+        );
+        assert_eq!(
+            sdrplay_lna_attenuation_db("RSPdx", 1.0e6, 8, false, false),
+            Some(30.0)
+        );
+        // HDR on but above 2 MHz → the normal ladder.
+        assert_eq!(
+            sdrplay_lna_attenuation_db("RSPdx", 3.0e6, 8, true, false),
+            Some(30.0)
+        );
+        let t = sdrplay_lna_table("RSPdx", 1.0e6, true, false).unwrap();
+        assert_eq!(t.atten_db.len(), 22);
+    }
+
+    #[test]
+    fn lna_ladders_match_soapy_rfgr_ranges_and_model_keys() {
+        // Widest ladder per model == SoapySDRPlay3's `RFGR` range + 1.
+        let widest = |hw: &str| {
+            (0..2000)
+                .map(|i| f64::from(i) * 1.0e6)
+                .filter_map(|f| sdrplay_lna_table(hw, f, false, false))
+                .map(|t| t.atten_db.len())
+                .max()
+                .unwrap()
+        };
+        assert_eq!(widest("RSP1"), 4);
+        assert_eq!(widest("RSP2"), 9);
+        assert_eq!(widest("RSPduo"), 10);
+        assert_eq!(widest("RSP1A"), 10);
+        assert_eq!(widest("RSP1B"), 10);
+        assert_eq!(widest("RSPdx"), 28);
+        assert_eq!(widest("RSPdx-R2"), 28);
+        // Case-insensitive, and the R2 spelling variants.
+        assert_eq!(
+            sdrplay_lna_table("rspdx", 100.0e6, false, false),
+            sdrplay_lna_table("RSPdxR2", 100.0e6, false, false)
+        );
+        assert_eq!(sdrplay_lna_table("hackrf", 100.0e6, false, false), None);
+        // Hi-Z port ladders on the RSP2 / RSPduo below 60 MHz.
+        assert_eq!(
+            sdrplay_lna_attenuation_db("RSPduo", 7.0e6, 4, false, true),
+            Some(37.0)
+        );
+        assert_eq!(
+            sdrplay_lna_attenuation_db("RSPduo", 7.0e6, 5, false, true),
+            None
+        );
+        assert_eq!(
+            sdrplay_lna_attenuation_db("RSP2", 7.0e6, 1, false, false),
+            Some(10.0)
+        );
+        assert_eq!(
+            sdrplay_lna_attenuation_db("RSP2", 7.0e6, 1, false, true),
+            Some(6.0)
+        );
+        // Every ladder starts at 0 dB (state 0 = full LNA gain).
+        for hw in ["RSP1", "RSP1A", "RSP1B", "RSP2", "RSPduo", "RSPdx"] {
+            for f in [0.5e6, 30.0e6, 55.0e6, 100.0e6, 300.0e6, 700.0e6, 1.5e9] {
+                let t = sdrplay_lna_table(hw, f, true, true).unwrap_or_else(|| panic!("{hw} {f}"));
+                assert_eq!(t.atten_db[0], 0, "{hw} at {f}");
+            }
+        }
     }
 
     // ── driver-arg parsing + per-driver policy ─────────────────────────

@@ -16,6 +16,17 @@
 // same "finalize a closed utterance" call the streaming demo uses for its
 // tail flush. Live partials (a rolling-prediction view) are a later
 // enhancement that feeds sherpa continuously instead of per-clip.
+//
+// ONE STREAM FOR THE WHOLE SESSION. The streaming zipformer keeps encoder
+// state across `reset()` (cached attention/conv context plus a running
+// average that never stops accumulating), and that state is what makes it
+// intelligible: a *fresh* stream per clip is cold every time and, on the
+// TTS round-trip corpus, returned nothing at all for most utterances
+// (7/38 content words over eight clips). One stream reset at each VAD
+// endpoint keeps the context warm — same corpus, 25/44, good from the
+// second clip on. Only the first utterance after `load()` is cold, and
+// no synthetic warm-up (silence, noise, formant babble, a real speech
+// clip) fixes that; it's the model's own cold start.
 
 /** Thrown by `load()` when the sherpa-onnx WASM artifact isn't built
  *  (the dynamic import fails) so the Worker can degrade gracefully —
@@ -96,9 +107,21 @@ interface OnlineRecognizer {
   free(): void;
 }
 
+/** Zero tail appended to every clip. The recognizer only decodes a
+ *  chunk once chunk + lookahead frames (32 + 7 at 10 ms) are *all*
+ *  available, so without ≥ 0.45 s of padding the clip's last frames
+ *  would sit undecoded until the next clip arrived — and surface at the
+ *  head of *that* result. 0.5 s covers it. Don't go long: runs of
+ *  silence through the live stream degrade the carried state (1 s
+ *  tails cost the next three clips on the round-trip corpus). */
+export const CLIP_TAIL_S = 0.5;
+
 export class SherpaEngine {
   private mod: SherpaModule | undefined;
   private recognizer: OnlineRecognizer | undefined;
+  /** The session-long stream (see the header) — created with the
+   *  recognizer, reset after every clip, freed with it. */
+  private stream: OnlineStream | undefined;
 
   get loaded(): boolean {
     return this.recognizer !== undefined;
@@ -145,22 +168,23 @@ export class SherpaEngine {
     // No config arg → the recognizer uses the baked model (encoder.onnx /
     // decoder.onnx / joiner.onnx / tokens.txt preloaded from the .data).
     this.recognizer = createOnlineRecognizer(this.mod);
+    this.stream = this.recognizer.createStream();
   }
 
-  /** Transcribe one closed 16 kHz mono clip → one segment. Drives the
-   *  online recognizer to completion on the clip (with a short zero tail
-   *  so the endpointer flushes the final words), reads the text, and
-   *  resets the stream. Returns the whisper-compatible shape the Rust
-   *  core's `ingestInflight` expects. */
+  /** Transcribe one closed 16 kHz mono clip → one segment. Feeds the
+   *  clip to the session stream (with a short zero tail so the last
+   *  words flush through the feature window), decodes to completion,
+   *  reads the text, and resets the stream at this endpoint — which
+   *  clears the result but keeps the encoder context warm for the next
+   *  clip. Returns the whisper-compatible shape the Rust core's
+   *  `ingestInflight` expects. */
   transcribe(pcm16k: Float32Array): SherpaResult {
     const rec = this.recognizer;
-    if (!rec) throw new Error('SherpaEngine.transcribe: not loaded');
-    const stream = rec.createStream();
+    const stream = this.stream;
+    if (!rec || !stream) throw new Error('SherpaEngine.transcribe: not loaded');
     try {
       stream.acceptWaveform(SHERPA_RATE, pcm16k);
-      // Tail padding flushes the last frames through the feature window
-      // so the final word isn't clipped (mirrors the streaming demo).
-      stream.acceptWaveform(SHERPA_RATE, new Float32Array(Math.round(SHERPA_RATE * 0.3)));
+      stream.acceptWaveform(SHERPA_RATE, new Float32Array(Math.round(SHERPA_RATE * CLIP_TAIL_S)));
       while (rec.isReady(stream)) rec.decode(stream);
       const text = rec.getResult(stream).text.trim();
       const t1 = pcm16k.length / SHERPA_RATE;
@@ -168,11 +192,15 @@ export class SherpaEngine {
         segments: text ? [{ t0: 0, t1, text, tokens: [], avgLogprob: 0, noSpeechProb: 0 }] : [],
       };
     } finally {
-      stream.free();
+      // The VAD clip boundary *is* the endpoint: start the next clip's
+      // result from scratch without discarding the stream's history.
+      rec.reset(stream);
     }
   }
 
   free(): void {
+    this.stream?.free();
+    this.stream = undefined;
     this.recognizer?.free();
     this.recognizer = undefined;
     this.mod = undefined;

@@ -32,6 +32,7 @@ use tokio::sync::broadcast;
 
 use super::AppState;
 use crate::log_stream::LogEntry;
+use crate::preset_pipeline::ChanInfo;
 
 /// Supervisor tick.
 const TICK: Duration = Duration::from_secs(1);
@@ -251,6 +252,40 @@ pub fn describe_radio_error(raw: &str, args: &str) -> String {
     }
 }
 
+/// The channel (`chan_rate_hz` wide, centred `shift_hz` off the LO) must
+/// sit inside the source's analog passband (`passband_hz`, centred on the
+/// LO). The DC dodge parks the LO a fraction of the *channel* rate off the
+/// listen frequency, so at low sample rates — where the anti-alias filter
+/// is only 200–300 kHz — a 240 kHz wbfm channel ends up at or beyond the
+/// filter edge and the demod sees the skirt. The tune planner now clamps
+/// the dodge to the passband; this is the check for everything the
+/// planner didn't do (a hand-set `freq_shift_hz`, a preset's stored
+/// shift, a driver that snapped the filter).
+fn filter_edge_issue(shift_hz: f64, chan_rate_hz: f64, passband_hz: f64) -> Option<String> {
+    if !(shift_hz.is_finite() && chan_rate_hz.is_finite() && passband_hz.is_finite())
+        || chan_rate_hz <= 0.0
+        || passband_hz <= 0.0
+    {
+        return None;
+    }
+    let edge = shift_hz.abs() + chan_rate_hz / 2.0;
+    let half = passband_hz / 2.0;
+    // A hair of slack: a full-span channel (ADS-B) is exactly the filter.
+    if edge <= half * 1.01 {
+        return None;
+    }
+    let beyond = edge - half;
+    Some(format!(
+        "the listen frequency is {:.0} kHz off the LO and the {:.0} kHz channel reaches {:.0} kHz \
+         past the analog filter edge (±{:.0} kHz at this rate): the demod is in the filter skirt — \
+         raise the sample rate (`tune` with `span_hz`) or re-`tune` so the dodge re-plans",
+        shift_hz / 1e3,
+        chan_rate_hz / 1e3,
+        beyond / 1e3,
+        half / 1e3,
+    ))
+}
+
 fn num(v: Option<&Value>) -> Option<f64> {
     v.and_then(Value::as_f64).filter(|x| x.is_finite())
 }
@@ -294,10 +329,10 @@ impl AppState {
         );
     }
 
-    async fn mount_health(&self) -> (bool, Option<SourceHealth>, Option<f64>) {
+    async fn mount_health(&self) -> (bool, Option<SourceHealth>, Option<ChanInfo>) {
         let pipeline = self.inner.pipeline.lock().await;
         match pipeline.as_ref() {
-            Some(m) => (true, m.source_health().await, m.chan_shift_hz().await),
+            Some(m) => (true, m.source_health().await, m.chan_info().await),
             None => (false, None, None),
         }
     }
@@ -314,7 +349,8 @@ impl AppState {
     }
 
     async fn update_rf_ctx(&self) {
-        let (running, _, shift) = self.mount_health().await;
+        let (running, _, chan) = self.mount_health().await;
+        let shift = chan.map(|c| c.shift_hz);
         if !running {
             self.inner.decoder_store.set_ctx(None);
             return;
@@ -349,7 +385,8 @@ impl AppState {
     pub(super) async fn publish_health(&self, warnings: &mut Warnings) -> Option<String> {
         warnings.sync_epoch(self.epoch());
         self.update_rf_ctx().await;
-        let (running, src, shift) = self.mount_health().await;
+        let (running, src, chan) = self.mount_health().await;
+        let shift = chan.map(|c| c.shift_hz);
         let cfg = self.inner.source_config.read().await.clone();
         let declared = num(self
             .inner
@@ -400,6 +437,10 @@ impl AppState {
         let cfg_rate = num(cfg.params.get("sample_rate_hz"));
         let rb_center = num(readback.as_ref().and_then(|r| r.get("center_freq_hz")));
         let rb_rate = num(readback.as_ref().and_then(|r| r.get("sample_rate_hz")));
+        let rb_bw = num(readback.as_ref().and_then(|r| r.get("bandwidth_hz")));
+        let passband = rb_bw
+            .or_else(|| num(cfg.params.get("bandwidth_hz")))
+            .filter(|b| b.is_finite() && *b > 0.0);
         let lo = rb_center.or(cfg_center);
         let listen = lo.map(|c| c + shift.unwrap_or(0.0));
 
@@ -462,6 +503,11 @@ impl AppState {
                         ));
                     }
                 }
+                if let (Some(c), Some(bw)) = (chan, passband) {
+                    if let Some(why) = filter_edge_issue(c.shift_hz, c.output_rate_hz, bw) {
+                        issues.push(why);
+                    }
+                }
             }
         }
         if !warnings.items.is_empty() {
@@ -500,6 +546,8 @@ impl AppState {
                     "lo_requested_hz": cfg_center,
                     "lo_actual_hz": rb_center,
                     "chan_shift_hz": shift,
+                    "chan_rate_hz": chan.map(|c| c.output_rate_hz),
+                    "passband_hz": passband,
                     "listen_hz": listen,
                 },
                 "rate": {
@@ -734,6 +782,27 @@ mod tests {
         );
         assert_eq!(steady_phase(Some(&fresh), true), RadioPhase::Lost);
         assert_eq!(steady_phase(None, false), RadioPhase::Idle);
+    }
+
+    /// The 2026-10-12 characterization: at 0.5 / 0.25 MS/s the +168 kHz
+    /// dodge put wbfm's 240 kHz channel at or beyond the 300 k / 200 k
+    /// filter and health said nothing.
+    #[test]
+    fn channel_past_the_filter_edge_is_flagged() {
+        // 2.4 MS/s, 1.536 MHz filter: the dodge is comfortably inside.
+        assert_eq!(filter_edge_issue(168_000.0, 240_000.0, 1_536_000.0), None);
+        // 0.5 MS/s, 300 kHz filter: 168 k + 120 k = 288 k vs ±150 k.
+        let why = filter_edge_issue(168_000.0, 240_000.0, 300_000.0).unwrap();
+        assert!(why.contains("138 kHz past"), "{why}");
+        assert!(why.contains("±150 kHz"), "{why}");
+        // Negative shifts count the same way.
+        assert!(filter_edge_issue(-168_000.0, 240_000.0, 300_000.0).is_some());
+        // A full-span channel exactly fills the filter (ADS-B at 2 MS/s).
+        assert_eq!(filter_edge_issue(0.0, 2_000_000.0, 2_000_000.0), None);
+        // Unknown / degenerate inputs never flag.
+        assert_eq!(filter_edge_issue(168_000.0, 0.0, 300_000.0), None);
+        assert_eq!(filter_edge_issue(168_000.0, 240_000.0, 0.0), None);
+        assert_eq!(filter_edge_issue(f64::NAN, 240_000.0, 300_000.0), None);
     }
 
     #[test]

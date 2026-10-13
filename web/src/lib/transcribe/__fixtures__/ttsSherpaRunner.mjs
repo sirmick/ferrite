@@ -6,13 +6,21 @@
 // Emscripten ASR module in a real Node process (vitest's http module
 // runner breaks Emscripten's pthread worker URL).
 //
+// Mirrors the production engine (`sherpaEngine.ts`): ONE stream for the
+// whole run, each utterance fed as a closed VAD-style clip + a short
+// zero tail, decoded to completion, read, then `reset` at that endpoint
+// so the encoder context carries into the next clip. That carried
+// context is what makes the streaming zipformer intelligible — a fresh
+// stream per clip is cold every time (see the engine header).
+//
 // espeak-ng emits 22.05 kHz mono PCM16 WAV; the streaming zipformer
 // wants 16 kHz, so we chunk-scan the WAV header (espeak's isn't a bare
 // 44-byte one) and linear-resample. Linear is plenty — intelligibility
 // here is dominated by the model.
 //
-// argv: <sherpa-onnx-wasm-main-asr.js> <sherpa-onnx-asr.js> <text>
-//   → prints {"text": "..."} JSON.
+// argv: <sherpa-onnx-wasm-main-asr.js> <sherpa-onnx-asr.js> <text>...
+//   → prints {"texts": ["...", ...]} JSON, one entry per input text
+//     (each spoken + transcribed as its own clip, in order).
 
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -20,7 +28,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const [, , mjsPath, apiPath, text] = process.argv;
+const [, , mjsPath, apiPath, ...texts] = process.argv;
+
+/** Same tail the engine appends per clip (`CLIP_TAIL_S`): enough for
+ *  the model's chunk + lookahead so the clip is fully decoded in its
+ *  own turn, no longer (silent runs degrade the carried state). */
+const CLIP_TAIL_S = 0.5;
 
 /** Scan RIFF chunks (don't assume a 44-byte header) → mono f32 + rate. */
 function decodeWav(buf) {
@@ -76,20 +89,22 @@ function resampleTo16k(pcm, srcRate) {
   return out;
 }
 
-const dir = mkdtempSync(join(tmpdir(), 'ferrite-tts-'));
-const wavPath = join(dir, 'tts.wav');
-let pcm16k;
-try {
-  // Speaking rate (wpm). Overridable for tuning: TTS_WPM=130 node …
-  const wpm = process.env.TTS_WPM ?? '140';
-  const voice = process.env.TTS_VOICE ?? 'en-us';
-  execFileSync('espeak-ng', ['-v', voice, '-s', wpm, '-w', wavPath, text], {
-    stdio: 'ignore',
-  });
-  const { pcm, rate } = decodeWav(readFileSync(wavPath));
-  pcm16k = resampleTo16k(pcm, rate);
-} finally {
-  rmSync(dir, { recursive: true, force: true });
+/** espeak-ng → 16 kHz mono f32. */
+function speak(text) {
+  const dir = mkdtempSync(join(tmpdir(), 'ferrite-tts-'));
+  const wavPath = join(dir, 'tts.wav');
+  try {
+    // Speaking rate (wpm). Overridable for tuning: TTS_WPM=130 node …
+    const wpm = process.env.TTS_WPM ?? '140';
+    const voice = process.env.TTS_VOICE ?? 'en-us';
+    execFileSync('espeak-ng', ['-v', voice, '-s', wpm, '-w', wavPath, text], {
+      stdio: 'ignore',
+    });
+    const { pcm, rate } = decodeWav(readFileSync(wavPath));
+    return resampleTo16k(pcm, rate);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 const wasmPath = mjsPath.replace(/\.js$/, '.wasm');
@@ -109,16 +124,13 @@ const Module = await createSherpaAsrModule({
 
 const recognizer = createOnlineRecognizer(Module);
 const stream = recognizer.createStream();
-// The streaming zipformer warm-up clips the first few hundred ms of a
-// stream (the JFK golden notes the same). espeak starts speaking at
-// t=0, so lead with 1 s of silence — in the live path the VAD clip
-// carries its own pre-roll, so this mirrors production rather than
-// papering over a model fault.
-stream.acceptWaveform(16000, new Float32Array(16000));
-stream.acceptWaveform(16000, pcm16k);
-// ~0.5 s of silence flushes the last words through the feature window.
-stream.acceptWaveform(16000, new Float32Array(8000));
-while (recognizer.isReady(stream)) recognizer.decode(stream);
-const result = recognizer.getResult(stream).text;
-process.stdout.write(JSON.stringify({ text: result }));
+const results = [];
+for (const text of texts) {
+  stream.acceptWaveform(16000, speak(text));
+  stream.acceptWaveform(16000, new Float32Array(Math.round(16000 * CLIP_TAIL_S)));
+  while (recognizer.isReady(stream)) recognizer.decode(stream);
+  results.push(recognizer.getResult(stream).text);
+  recognizer.reset(stream);
+}
+process.stdout.write(JSON.stringify({ texts: results }));
 process.exit(0);

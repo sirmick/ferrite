@@ -257,8 +257,24 @@ pub struct SoapyReadback {
     pub center_freq_hz: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bandwidth_hz: Option<f64>,
+    /// Realised gain, dB, user-facing (higher = louder), on the same
+    /// scale as the `gain_db` param. On SDRplay the LNA stage is counted
+    /// at its *attenuation in dB* for the tuned band (see [`Self::lna`]),
+    /// not at its state index — so it equals the dial only while the LNA
+    /// state is 0, and reads lower (even negative) once attenuation is in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gain_db: Option<f64>,
+    /// The `gain_db` *param* value the hardware currently corresponds to
+    /// — the dial position SoapySDR's element sum reports (SDRplay:
+    /// `86 − IFGR − RFGR`, LNA state counted as a step). What the UI
+    /// slider follows and what a stored `gain_db` is compared against;
+    /// same number as `gain_db` on every other driver.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dial_db: Option<f64>,
+    /// SDRplay only: the tuner's LNA state, reported separately from the
+    /// dB figure. `None` on other drivers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lna: Option<LnaReadback>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agc: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -268,6 +284,29 @@ pub struct SoapyReadback {
     /// "AMP on" indicator. Empty for drivers with no named gain elements.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub gain_elements: BTreeMap<String, f64>,
+}
+
+/// SDRplay LNA state in the readback. The `RFGR` element is an *index*
+/// into a per-band attenuator ladder (SDRplay API specification gain
+/// tables, [`ferrite_sdr_tables::sdrplay_lna_table`]), so it is reported
+/// here with its real dB value instead of being summed into `gain_db`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LnaReadback {
+    /// The RSP model the ladder is for (`hardware_key`: `RSPdx`, …).
+    pub hardware: String,
+    /// LNA state index (`RFGR`, `rfgain_sel`): 0 = full LNA gain.
+    pub state: u32,
+    /// Number of valid states in this band's ladder, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub states: Option<u32>,
+    /// Attenuation this state inserts in the tuned band, dB. `None` when
+    /// no ladder is known for the model/band (then `gain_db` falls back
+    /// to counting the state as dB, the SoapySDR convention) or the
+    /// state is beyond the band's ladder.
+    pub atten_db: Option<f64>,
+    /// RF band the ladder applies to, Hz `[lo, hi)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub band_hz: Option<[f64; 2]>,
 }
 
 type RingHandle = Arc<Mutex<IqRing>>;
@@ -453,6 +492,14 @@ pub struct SoapySource {
     /// Opened through SoapyRemote (`driver=remote`). Decides `Drop`'s
     /// leak-vs-unmake on a hung driver; see [`soapy_retry::is_remote_args`].
     is_remote: bool,
+    /// Probed once at open (each is a driver round trip, remote-able):
+    /// the Soapy driver key, the hardware model (`RSPdx`, …) and whether
+    /// SDRplay HDR mode is on — the inputs the readback's LNA ladder
+    /// lookup needs. Settings changes restart the source, so `hdr` can't
+    /// go stale.
+    driver_key: String,
+    hardware_key: String,
+    hdr: bool,
 }
 
 /// Liveness of the radio behind a [`SoapySource`], for the daemon's
@@ -632,6 +679,16 @@ impl SoapySource {
 
         let actual_rate = device.sample_rate(dir, ch).unwrap_or(params.sample_rate_hz);
         let actual_freq = device.frequency(dir, ch).unwrap_or(params.center_freq_hz);
+        let driver_key = device.driver_key().unwrap_or_default();
+        let hardware_key = device.hardware_key().unwrap_or_default();
+        // RSPdx HDR mode changes the sub-2 MHz LNA ladder; read it back
+        // after the settings landed (the driver's default applies when
+        // the operator never wrote `hdr_ctrl`).
+        let hdr = driver_has_inverted_gain(&driver_key)
+            && device
+                .read_setting("hdr_ctrl")
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
         // Log when the driver snaps the requested rate to its supported
         // ladder — this is the signal for downstream rate-aware blocks
         // to rebuild. Picked up via tracing target so an operator can
@@ -681,6 +738,9 @@ impl SoapySource {
             start_instant: std::time::Instant::now(),
             record: crate::iq_record_tap::IqRecordTap::new(),
             is_remote: soapy_retry::is_remote_args(&params.args),
+            driver_key,
+            hardware_key,
+            hdr,
         })
     }
 
@@ -795,28 +855,95 @@ impl SoapySource {
     pub fn readback(&self) -> SoapyReadback {
         let dir = Direction::Rx;
         let ch = self.channel;
+        let center_freq_hz = self.device.frequency(dir, ch).ok();
+        let antenna = self.device.antenna(dir, ch).ok().filter(|s| !s.is_empty());
+        let gain_elements: BTreeMap<String, f64> = self
+            .device
+            .list_gains(dir, ch)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|name| {
+                let v = self.device.gain_element(dir, ch, name.as_str()).ok()?;
+                Some((name, v))
+            })
+            .collect();
+        // SoapySDR's overall gain is Σ(element − min) — the dial position
+        // (inverted for SDRplay). Correct in dB for every driver whose
+        // elements are dB; on SDRplay the `RFGR` element is an LNA state
+        // index, so split it out: `gain_db` swaps the index for the
+        // band's real attenuation, `lna` carries the state itself.
+        let dial_db = self
+            .device
+            .gain(dir, ch)
+            .ok()
+            .map(|raw| raw_gain_to_user(&self.device, dir, ch, raw));
+        let lna = sdrplay_lna_readback(
+            &self.driver_key,
+            &self.hardware_key,
+            center_freq_hz.unwrap_or(self.center_freq_hz),
+            self.hdr,
+            antenna.as_deref(),
+            &gain_elements,
+        );
+        let gain_db = match (dial_db, &lna) {
+            (Some(dial), Some(l)) => Some(gain_db_with_lna(dial, l)),
+            (dial, _) => dial,
+        };
         SoapyReadback {
             sample_rate_hz: self.device.sample_rate(dir, ch).ok(),
-            center_freq_hz: self.device.frequency(dir, ch).ok(),
+            center_freq_hz,
             bandwidth_hz: self.device.bandwidth(dir, ch).ok(),
-            gain_db: self
-                .device
-                .gain(dir, ch)
-                .ok()
-                .map(|raw| raw_gain_to_user(&self.device, dir, ch, raw)),
+            gain_db,
+            dial_db,
+            lna,
             agc: self.device.gain_mode(dir, ch).ok(),
-            antenna: self.device.antenna(dir, ch).ok().filter(|s| !s.is_empty()),
-            gain_elements: self
-                .device
-                .list_gains(dir, ch)
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|name| {
-                    let v = self.device.gain_element(dir, ch, name.as_str()).ok()?;
-                    Some((name, v))
-                })
-                .collect(),
+            antenna,
+            gain_elements,
         }
+    }
+}
+
+/// The SDRplay LNA-state readback, from the live `RFGR` element and the
+/// model/band ladder. `None` for non-SDRplay drivers or when the driver
+/// reports no `RFGR`.
+fn sdrplay_lna_readback(
+    driver_key: &str,
+    hardware_key: &str,
+    freq_hz: f64,
+    hdr: bool,
+    antenna: Option<&str>,
+    gain_elements: &BTreeMap<String, f64>,
+) -> Option<LnaReadback> {
+    if !driver_has_inverted_gain(driver_key) {
+        return None;
+    }
+    let rfgr = gain_elements.get("RFGR").copied()?;
+    if !rfgr.is_finite() || rfgr < 0.0 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let state = rfgr.round() as u32;
+    // RSP2 / RSPduo expose the Hi-Z port as an antenna name.
+    let hi_z = antenna.is_some_and(|a| a.to_ascii_lowercase().contains("hi-z"));
+    let table = ferrite_sdr_tables::sdrplay_lna_table(hardware_key, freq_hz, hdr, hi_z);
+    Some(LnaReadback {
+        hardware: hardware_key.to_string(),
+        state,
+        states: table.and_then(|t| u32::try_from(t.atten_db.len()).ok()),
+        atten_db: table
+            .and_then(|t| t.atten_db.get(state as usize).copied())
+            .map(f64::from),
+        band_hz: table.map(|t| [t.band_hz.0, t.band_hz.1]),
+    })
+}
+
+/// The dial counted the LNA state as `state` dB of reduction; replace
+/// that with the ladder's attenuation. Falls back to the dial when the
+/// ladder is unknown (visible as `lna.atten_db == null`).
+fn gain_db_with_lna(dial_db: f64, lna: &LnaReadback) -> f64 {
+    match lna.atten_db {
+        Some(atten) => dial_db + f64::from(lna.state) - atten,
+        None => dial_db,
     }
 }
 
@@ -865,7 +992,7 @@ impl Block for SoapySource {
                         unit: "Hz",
                     },
                     reconfig_scope: ReconfigureScope::SelfBlock,
-                    ai_notes: "RF tuning. Park 50–100 kHz off your target on zero-IF drivers to dodge the DC spike; use the channelizer's `freq_shift_hz` to recover the carrier.",
+                    ai_notes: "RF tuning (the LO). Prefer the `tune` verb: it parks the LO off-target by the per-driver DC dodge (0.7 × the channel rate on zero-IF drivers, clamped to the analog passband) and recovers the carrier with the channelizer's `freq_shift_hz`, so the spike never sits in the channel. Writing this directly leaves the shift where it was.",
                 },
                 ParamSpec {
                     key: "bandwidth_hz",
@@ -1383,11 +1510,105 @@ fn open_with_retry(args: &str) -> Result<Device> {
 #[cfg(test)]
 mod tests {
     use super::{
-        driver_has_inverted_gain, driver_is_hackrf, hackrf_auto_split, invert_gain, SoapySource,
-        SoapySourceParams, HACKRF_AMP_DB, HACKRF_LNA_MAX_DB, HACKRF_LNA_STEP_DB, HACKRF_VGA_MAX_DB,
+        driver_has_inverted_gain, driver_is_hackrf, gain_db_with_lna, hackrf_auto_split,
+        invert_gain, sdrplay_lna_readback, LnaReadback, SoapySource, SoapySourceParams,
+        HACKRF_AMP_DB, HACKRF_LNA_MAX_DB, HACKRF_LNA_STEP_DB, HACKRF_VGA_MAX_DB,
         HACKRF_VGA_STEP_DB,
     };
     use crate::block::{Block, Placement, PortType};
+    use std::collections::BTreeMap;
+
+    fn elements(ifgr: f64, rfgr: f64) -> BTreeMap<String, f64> {
+        [("IFGR".to_string(), ifgr), ("RFGR".to_string(), rfgr)]
+            .into_iter()
+            .collect()
+    }
+
+    /// The characterization's defect: dial 40 with a stale `rfgain_sel 4`
+    /// read back as 36 "dB" (86 − 46 − 4), counting the LNA state as 4 dB
+    /// when the HF ladder puts state 4 at 12 dB. The readback now reports
+    /// the state separately and swaps the index for the ladder value.
+    #[test]
+    fn sdrplay_lna_state_reported_separately_not_as_db() {
+        let lna =
+            sdrplay_lna_readback("sdrplay", "RSPdx", 7.1e6, false, None, &elements(46.0, 4.0))
+                .expect("sdrplay with RFGR → lna readback");
+        assert_eq!(
+            lna,
+            LnaReadback {
+                hardware: "RSPdx".into(),
+                state: 4,
+                states: Some(19),
+                atten_db: Some(12.0),
+                band_hz: Some([0.0, 12.0e6]),
+            }
+        );
+        // Dial = 86 − IFGR − RFGR = 36; true dB swaps the 4-step for 12 dB.
+        let dial = 86.0 - 46.0 - 4.0;
+        assert_eq!(gain_db_with_lna(dial, &lna), 28.0);
+        // State 0: the dial *is* the dB figure.
+        let lna0 =
+            sdrplay_lna_readback("sdrplay", "RSPdx", 7.1e6, false, None, &elements(46.0, 0.0))
+                .unwrap();
+        assert_eq!(gain_db_with_lna(40.0, &lna0), 40.0);
+        // The 88–150 MHz rule (dial 20 → IFGR 59 / RFGR 7): 27 dB at VHF,
+        // so the realised gain is 66 − 39 − 27 = 0 dB, not "20".
+        let vhf = sdrplay_lna_readback(
+            "sdrplay",
+            "RSPdx",
+            118.0e6,
+            false,
+            None,
+            &elements(59.0, 7.0),
+        )
+        .unwrap();
+        assert_eq!(vhf.atten_db, Some(27.0));
+        assert_eq!(gain_db_with_lna(20.0, &vhf), 0.0);
+    }
+
+    #[test]
+    fn lna_readback_degrades_visibly_without_a_ladder() {
+        // Unknown model: the state is still reported, the dB is null, and
+        // the gain figure falls back to the dial (the SoapySDR sum).
+        let lna = sdrplay_lna_readback(
+            "sdrplay",
+            "RSPfuture",
+            7.1e6,
+            false,
+            None,
+            &elements(46.0, 4.0),
+        )
+        .unwrap();
+        assert_eq!(lna.state, 4);
+        assert_eq!(lna.atten_db, None);
+        assert_eq!(lna.states, None);
+        assert_eq!(gain_db_with_lna(36.0, &lna), 36.0);
+        // Hi-Z port on an RSPduo picks the 5-state HF ladder.
+        let duo = sdrplay_lna_readback(
+            "sdrplay",
+            "RSPduo",
+            7.1e6,
+            false,
+            Some("Tuner 1 Hi-Z"),
+            &elements(46.0, 4.0),
+        )
+        .unwrap();
+        assert_eq!((duo.states, duo.atten_db), (Some(5), Some(37.0)));
+        // Not SDRplay, or no RFGR element → no LNA readback at all.
+        assert!(sdrplay_lna_readback(
+            "hackrf",
+            "HackRF One",
+            7.1e6,
+            false,
+            None,
+            &elements(46.0, 4.0)
+        )
+        .is_none());
+        assert!(
+            sdrplay_lna_readback("sdrplay", "RSPdx", 7.1e6, false, None, &BTreeMap::new())
+                .is_none()
+        );
+    }
 
     #[test]
     fn sdrplay_is_the_only_inverted_driver() {

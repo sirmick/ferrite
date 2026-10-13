@@ -40,7 +40,11 @@
     <span>
       <span class="rounded-sm bg-sky-900/50 px-1 font-mono text-sky-300">Signals</span>
       <span class="ml-2 text-[color:var(--color-muted)]">
-        {signals.signals.length} strongest
+        {#if signals.total > signals.signals.length}
+          {signals.signals.length} strongest of {signals.total}
+        {:else}
+          {signals.signals.length} strongest
+        {/if}
       </span>
     </span>
   </header>

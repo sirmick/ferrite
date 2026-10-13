@@ -10,7 +10,10 @@
 //      targets). Runs sherpa in a subprocess (`ttsSherpaRunner.mjs`)
 //      since the Emscripten module's pthread workers need a file:// URL
 //      vitest's module runner can't give them — the runner does its own
-//      minimal resample.
+//      minimal resample. The runner mirrors the engine: ONE stream for
+//      the whole session, each utterance a closed clip, `reset` at the
+//      endpoint — so the utterances are a *sequence*, and the second
+//      one is transcribed with a warm stream, start of phrase included.
 //   2. TTS → shared Rust core (needs only espeak-ng): a long
 //      *continuous* utterance is chopped into bounded segments, never one
 //      unbounded blob. Drives the WASM `WasmTranscriber` (the SAME core
@@ -28,7 +31,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 
 import { initSync, WasmTranscriber } from '../wasm/blocks/ferrite_blocks';
 
@@ -112,39 +115,51 @@ function hits(haystack: string, words: string[]): number {
 }
 
 describe.skipIf(!(TTS && SHERPA_BUILT))('TTS → sherpa round-trip', () => {
-  function transcribe(text: string): string {
-    const stdout = execFileSync(process.execPath, [RUNNER, SHERPA_JS, SHERPA_API, text], {
+  /** Speak each text as its own clip through ONE stream (reset at each
+   *  endpoint, like the engine) → one transcript per clip, in order. */
+  function transcribe(...texts: string[]): string[] {
+    const stdout = execFileSync(process.execPath, [RUNNER, SHERPA_JS, SHERPA_API, ...texts], {
       encoding: 'utf8',
       timeout: 180_000,
       maxBuffer: 8 * 1024 * 1024,
     });
-    return (JSON.parse(stdout) as { text: string }).text;
+    return (JSON.parse(stdout) as { texts: string[] }).texts;
   }
 
-  it('round-trips a short spoken phrase', () => {
-    // The streaming 20M model needs ~1–2 s of *speech* to lock on (a
-    // silent pre-roll doesn't help — the first clause of a cold start is
-    // garbled, same as the JFK golden's clipped "fellow"). Operators
-    // repeat themselves on air anyway, so say it twice and assert on the
-    // content words; the second pass is the one that lands.
-    const out = transcribe(
-      'the radio operator reported a clear signal from the station. i repeat. ' +
-        'the radio operator reported a clear signal from the station',
-    );
-    expect(
-      hits(out, ['radio', 'operator', 'reported', 'clear', 'signal', 'station']),
-    ).toBeGreaterThanOrEqual(4);
+  const LONG =
+    'this is a long continuous radio transmission with no pauses ' +
+    'the weather today is clear with a light wind from the north ' +
+    'and the signal report is five nine here in the city';
+  const SHORT = 'the radio operator reported a clear signal from the station';
+
+  // One session, three utterances. The first clip of a stream is the
+  // model's cold start (its encoder context is empty — nothing we feed
+  // beforehand warms it, see the engine header), so it is spoken and
+  // discarded; it needs to be a *long* stretch of speech, since a few
+  // short clips can leave the stream cold. The clips after it ride on
+  // the context it left behind: those must come through whole, start of
+  // phrase included — exactly what a kept-alive stream buys over a fresh
+  // stream per clip (which lost the first clause, or everything).
+  let long = '';
+  let short = '';
+  beforeAll(() => {
+    [, short, long] = transcribe(LONG, SHORT, LONG);
   });
 
   it('round-trips a long continuous (no-pause) utterance', () => {
-    const out = transcribe(
-      'this is a long continuous radio transmission with no pauses ' +
-        'the weather today is clear with a light wind from the north ' +
-        'and the signal report is five nine here in the city',
-    );
     expect(
-      hits(out, ['continuous', 'transmission', 'weather', 'clear', 'wind', 'signal', 'city']),
+      hits(long, ['continuous', 'transmission', 'weather', 'clear', 'wind', 'signal', 'city']),
     ).toBeGreaterThanOrEqual(4);
+  });
+
+  it('round-trips a short spoken phrase, start of phrase included', () => {
+    expect(
+      hits(short, ['radio', 'operator', 'reported', 'clear', 'signal', 'station']),
+    ).toBeGreaterThanOrEqual(4);
+    // The start. espeak's "radio" is the one word the 20M model
+    // consistently mishears ("raid", "radian"), so the anchor is the
+    // next two words — present only when the opening clause decoded.
+    expect(short.toLowerCase()).toContain('operator reported');
   });
 });
 

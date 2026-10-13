@@ -262,6 +262,14 @@ impl Channelizer {
         self.freq_shift_hz
     }
 
+    /// Realised output rate, Hz (`input_rate / factor`) — the channel
+    /// width the daemon's health check holds against the analog filter.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn output_rate_hz(&self) -> f64 {
+        self.input_rate_hz / self.factor.max(1) as f64
+    }
+
     /// True when a side-tee write is currently open.
     #[must_use]
     pub fn is_recording(&self) -> bool {

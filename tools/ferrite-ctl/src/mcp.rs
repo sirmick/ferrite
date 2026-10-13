@@ -2157,7 +2157,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "The current strongest-signal watchlist, auto-detected at the wideband FFT by the `SignalList` block. Returns a *snapshot* (not history): `{signals:[{id, freq_hz, power_db, bw_hz, snr_db, first_seen_frame, last_seen_frame}], center_freq_hz, span_hz, frame, at_ms, now}`, ranked strongest-first. The two-step survey workflow is `signals` → pick a row → `tune` its `freq_hz`. Empty `signals` means either no signal clears the detector or the active preset has no `SignalList` (only the wideband presets wire it — e.g. `wbfm`). `at_ms` is when the list was emitted; if `now - at_ms` is large the list is stale (detection stalled). `max_age_ms` gates that staleness (default 2000)."
+        description = "The current strongest-signal watchlist, auto-detected at the wideband FFT by the `SignalList` block. Returns a *snapshot* (not history): `{signals:[{id, freq_hz, power_db, bw_hz, snr_db, first_seen_frame, last_seen_frame}], total, top_k, center_freq_hz, span_hz, frame, noise_floor_dbfs, threshold_dbfs, at_ms, now}`, ranked strongest-first. `signals` holds the strongest `top_k` (default 48); `total` is every tracked signal before that cap — use `total`, not the list length, as the band-occupancy count (raise `top_k` on the `signals` block to see more rows). The two-step survey workflow is `signals` → pick a row → `tune` its `freq_hz`. Empty `signals` means either no signal clears the detector or the active preset has no `SignalList` (only the wideband presets wire it — e.g. `wbfm`). `at_ms` is when the list was emitted; if `now - at_ms` is large the list is stale (detection stalled). `max_age_ms` gates that staleness (default 2000)."
     )]
     async fn signals(
         &self,

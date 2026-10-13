@@ -330,3 +330,28 @@ Remaining items it raised:
 - A stored `rfgain_sel` is re-applied when a preset load restarts the
   source. That is intended, but surprising. A same-value `gain_db` write
   now goes through when the readback disagrees.
+
+## Follow-up 2 — defects 5, 7 (readback), 8 and the dodge
+
+Later the same day:
+
+- **`signals` cap (5).** The payload carries `total` (tracked signals
+  before the cap) and `top_k`; the default cap is 48 (max 256). `total`
+  is the occupancy number.
+- **Readback (7).** `SoapyReadback.gain_db` is true dB: the LNA state is
+  counted at its per-band attenuation from the SDRplay API gain tables
+  (`ferrite_sdr_tables::sdrplay_lna_table`, all RSP models), reported
+  separately as `lna {hardware, state, states, atten_db, band_hz}`;
+  `dial_db` is the dial position the `gain_db` param maps to (the UI
+  slider and the no-op check use it). Dial 20 at 118 MHz reads
+  `dial_db 20, lna.state 7, lna.atten_db 27, gain_db 0`.
+- **`sdrplay.json` (8).** Notes corrected: RSPdx LNA states 0–27 with
+  per-band counts, the real rate ladder and the 10 MS/s clamp, the
+  deterministic dial→IFGR/RFGR mapping, `settings {"rfgain_sel": null}`
+  to clear, and "88–150 MHz needs RFGR ≥ 2 except FM broadcast on A with
+  the bandstop (clean at RFGR 0 to gain 50)".
+- **Dodge vs rate.** `plan_tune` measures its room inside the analog
+  passband, so the dodge is 30 kHz at 0.5 MS/s (300 kHz filter, 240 kHz
+  channel) and 0 at 0.25 MS/s; `health.issues` names a channel that still
+  reaches past the filter edge, and `tuning` carries `chan_rate_hz` /
+  `passband_hz`. The channelizer's integer decimation is still open.

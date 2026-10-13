@@ -1593,6 +1593,29 @@ impl AppState {
             .get("sample_rate_hz")
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
+        // The analog passband the plan lands in: the stored filter width
+        // (source policy derives it from the rate), or — when `span_hz`
+        // is about to raise the rate — the ladder's filter for that rate.
+        // Unknown → `None`, and the planner falls back to Nyquist.
+        let cur_bw = source
+            .params
+            .get("bandwidth_hz")
+            .and_then(serde_json::Value::as_f64)
+            .filter(|b| b.is_finite() && *b > 0.0);
+        let passband_hz = match span_hz {
+            Some(span) if span > cur_rate => {
+                let args = source
+                    .params
+                    .get("args")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                ferrite_sdr_tables::recommended_bandwidth_for(
+                    &ferrite_sdr_tables::driver_key(args),
+                    span,
+                )
+            }
+            _ => cur_bw,
+        };
 
         // All the dodge / keep-out / DC-guard / in-span-fast-path math is a
         // pure function of the current source state — see
@@ -1609,6 +1632,7 @@ impl AppState {
             cur_src_center,
             cur_rate,
             chan.as_ref().map(|(_, rate)| *rate),
+            passband_hz,
         );
 
         // Build the source-side delta from the plan (centre + rate).
@@ -1745,9 +1769,14 @@ const HW_CHECKED_KEYS: &[&str] = &["gain_db", "agc", "antenna"];
 
 /// Does the driver readback disagree with `v` for source key `k`? Only
 /// the keys the readback reports; anything else counts as agreeing.
+/// `gain_db` is compared in dial space (`dial_db`, the position the
+/// `gain_db` param maps to) — the readback's `gain_db` is true dB and
+/// legitimately differs from the dial once an SDRplay LNA state is in.
 fn hardware_differs(rb: &SoapyReadback, k: &str, v: &serde_json::Value) -> bool {
     match k {
-        "gain_db" => matches!((rb.gain_db, v.as_f64()), (Some(h), Some(w)) if (h - w).abs() >= 0.5),
+        "gain_db" => {
+            matches!((rb.dial_db.or(rb.gain_db), v.as_f64()), (Some(h), Some(w)) if (h - w).abs() >= 0.5)
+        }
         "agc" => matches!((rb.agc, v.as_bool()), (Some(h), Some(w)) if h != w),
         "antenna" => matches!((rb.antenna.as_deref(), v.as_str()), (Some(h), Some(w)) if h != w),
         _ => false,
@@ -2632,6 +2661,16 @@ mod tests {
             "dial moved by rfgain_sel"
         );
         assert!(!hardware_differs(&rb, "gain_db", &json!(36)));
+        // SDRplay: `gain_db` is true dB (LNA state 4 = 12 dB at HF) while
+        // the dial the param maps to is `dial_db`; the comparison is in
+        // dial space, so a dial that *is* where the operator put it agrees.
+        let rb_sdrplay = SoapyReadback {
+            gain_db: Some(28.0),
+            dial_db: Some(36.0),
+            ..Default::default()
+        };
+        assert!(!hardware_differs(&rb_sdrplay, "gain_db", &json!(36)));
+        assert!(hardware_differs(&rb_sdrplay, "gain_db", &json!(40)));
         assert!(!hardware_differs(&rb, "agc", &json!(false)));
         assert!(hardware_differs(&rb, "antenna", &json!("Antenna B")));
         assert!(!hardware_differs(&rb, "settings", &json!({})));

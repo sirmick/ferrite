@@ -31,6 +31,8 @@ export interface Signal {
 
 interface SignalsSnapshot {
   signals?: Signal[];
+  /** Tracked signals before the `top_k` cap — the band-occupancy count. */
+  total?: number;
   center_freq_hz?: number;
   span_hz?: number;
 }
@@ -53,6 +55,14 @@ export const signals = {
     // Defensive re-sort: the block ranks by power, but never trust the
     // wire — consumers assume strongest-first.
     return Array.isArray(s) ? [...s].sort((a, b) => b.power_db - a.power_db) : [];
+  },
+  /** How many signals the detector is tracking, counted *before* the
+   *  Top N cap — so a busy band reads as busy even when the list is
+   *  capped. Falls back to the list length for an older payload. */
+  get total(): number {
+    if (pipeline.status !== 'running') return 0;
+    const s = snapshot();
+    return typeof s.total === 'number' ? s.total : (s.signals?.length ?? 0);
   },
   /** Tuned centre the list was detected against (Hz). */
   get centerFreqHz(): number | null {

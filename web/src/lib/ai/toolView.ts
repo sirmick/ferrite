@@ -108,6 +108,22 @@ export interface SignalRow {
   bw_hz?: number;
 }
 
+/** How many rows the `signals` reply listed and how many signals the
+ *  detector was tracking before its `top_k` cap — the card shows only
+ *  the first few rows, so the counts say what the list itself can't. */
+export function signalsMetaOf(
+  name: string,
+  result: string | undefined,
+): { listed: number; total: number } | null {
+  if (toolLabel(name) !== 'signals' || !result) return null;
+  const o = parse(result.trim());
+  const rows = o?.signals;
+  if (!Array.isArray(rows)) return null;
+  const listed = rows.length;
+  const total = typeof o?.total === 'number' ? o.total : listed;
+  return { listed, total };
+}
+
 /** The `signals` tool's watchlist, for a small table in its card. */
 export function signalsOf(name: string, result: string | undefined): SignalRow[] | null {
   if (toolLabel(name) !== 'signals' || !result) return null;

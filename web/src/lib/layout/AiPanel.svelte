@@ -8,6 +8,7 @@
     fmtHz,
     isShell,
     resultSummary,
+    signalsMetaOf,
     signalsOf,
     toolLabel,
     toolSummary,
@@ -473,6 +474,7 @@
                 {@const outcome = resultSummary(chunk.result, !!chunk.error)}
                 {@const shell = isShell(chunk.name)}
                 {@const signals = signalsOf(chunk.name, chunk.result)}
+                {@const signalsMeta = signalsMetaOf(chunk.name, chunk.result)}
                 {@const graphic = chunk.analysisId ? analysisById.get(chunk.analysisId) : undefined}
                 <div
                   class="my-1 rounded border px-1.5 py-1 font-mono text-[10px]"
@@ -548,6 +550,11 @@
                         {/each}
                       </tbody>
                     </table>
+                    {#if signalsMeta && (signalsMeta.listed > signals.length || signalsMeta.total > signalsMeta.listed)}
+                      <div class="mt-0.5 text-[10px] text-[color:var(--color-muted)]">
+                        {signals.length} of {signalsMeta.listed} listed · {signalsMeta.total} tracked
+                      </div>
+                    {/if}
                   {/if}
                   {#if chunk.resultImages && chunk.resultImages.length}
                     <div class="mt-1 flex flex-col gap-1">

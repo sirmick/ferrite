@@ -707,6 +707,7 @@ dependencies = [
  "ferrite-multimon-ng",
  "ferrite-rtl-433",
  "ferrite-rtl-ais",
+ "ferrite-sdr-tables",
  "ferrite-whisper",
  "ferrite-wsprd",
  "inventory",
