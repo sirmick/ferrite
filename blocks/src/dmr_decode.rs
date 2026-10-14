@@ -356,6 +356,11 @@ pub fn voice_frames(bits: &[u8; 264]) -> [[u8; 96]; 3] {
     out
 }
 
+/// Voice is synthesised only within this long of the slot's last
+/// FEC-valid LC: covers the 360 ms superframe with margin for one
+/// failed embedded LC.
+const VOICE_VERIFIED_S: f64 = 1.0;
+
 /// Decoded speech waiting for the output clock, per slot: 1 s at 8 kHz.
 const VOICE_QUEUE: usize = 8_000;
 
@@ -390,6 +395,10 @@ struct SlotState {
     alias_bits: Vec<u8>,
     alias_have: [bool; 4],
     alias_sent: String,
+    /// Sample index of this slot's last FEC-valid LC (voice header or
+    /// embedded LC). Voice is only synthesised while this is recent —
+    /// see [`VOICE_VERIFIED_S`].
+    verified_t: Option<u64>,
     /// The current call's privacy flag (service options bit 6): its
     /// voice frames are ciphertext, so they are not synthesised.
     enc: bool,
@@ -442,6 +451,8 @@ pub struct DmrStats {
     /// AMBE+2 frames handed to the vocoder, and the errors it corrected.
     pub voice_frames: u64,
     pub voice_errs: u64,
+    /// Voice frames skipped because the slot had no recently verified call.
+    pub voice_unverified: u64,
 }
 
 const HIST: usize = 4_096;
@@ -703,8 +714,20 @@ impl DmrDecoder {
     /// it only counts frames.
     #[allow(unused_variables, clippy::unused_self)]
     fn voice(&mut self, slot: u8, bits: &[u8; 264]) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let window = (VOICE_VERIFIED_S * self.fs) as u64;
+        let now = self.t;
         let st = &mut self.slots[usize::from(slot)];
         if st.enc {
+            return;
+        }
+        // Only voice a slot whose call is FEC-verified recently: on an
+        // idle channel noise occasionally matches the voice sync, and the
+        // five "voice" bursts after it are garbage the vocoder would turn
+        // into babble (and the transcriber into fragments — seen live).
+        // A real call re-verifies every superframe (embedded LC, 360 ms).
+        if st.verified_t.is_none_or(|t| now.saturating_sub(t) > window) {
+            self.stats.voice_unverified += 3;
             return;
         }
         let frames = voice_frames(bits);
@@ -807,6 +830,7 @@ impl DmrDecoder {
         }
         self.stats.lc_ok += 1;
         self.announce();
+        self.slots[usize::from(slot)].verified_t = Some(self.t);
         let lc = Lc::from_bytes(&cw);
         if !lc.is_voice_call() {
             return;
@@ -846,6 +870,7 @@ impl DmrDecoder {
                     Some(lc_bits) => {
                         self.stats.emb_ok += 1;
                         self.announce();
+                        self.slots[usize::from(slot)].verified_t = Some(self.t);
                         self.embedded_lc(slot, &lc_bits);
                     }
                     None => self.stats.emb_bad += 1,

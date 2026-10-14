@@ -47,6 +47,11 @@ pub struct SherpaTranscribeParams {
     /// Momentary: clear the rolling transcript + bias, and reset the
     /// sidecar's in-flight stream. Auto-clears.
     pub reset: bool,
+    /// Transcript lane stamped onto every record (`"slot1"`, `"slot2"`,
+    /// a channel id …). Empty = the single default lane. The decoder
+    /// store attributes a lane's lines to the call on that lane
+    /// (`server/src/speakers.rs`).
+    pub lane: String,
 }
 
 impl Default for SherpaTranscribeParams {
@@ -56,6 +61,7 @@ impl Default for SherpaTranscribeParams {
             buffer_samples: DEFAULT_BUFFER_SAMPLES,
             prompt: String::new(),
             reset: false,
+            lane: String::new(),
         }
     }
 }
@@ -77,6 +83,14 @@ const PROMPT_PARAM: ParamSpec = ParamSpec {
     kind: ParamKind::Text { default: "" },
     reconfig_scope: ReconfigureScope::SelfBlock,
     ai_notes: "Vocab bias for the transcript post-processor (callsigns, NATO phonetics). Empty = built-in ham corpus.",
+};
+
+const LANE_PARAM: ParamSpec = ParamSpec {
+    key: "lane",
+    label: "Lane",
+    kind: ParamKind::Text { default: "" },
+    reconfig_scope: ReconfigureScope::SelfBlock,
+    ai_notes: "Transcript lane id stamped on every record — `slot1` / `slot2` for the two DMR timeslots, so the decoder store can attribute each line to the radio talking on that slot. Empty = single lane.",
 };
 
 const RESET_PARAM: ParamSpec = ParamSpec {
@@ -328,7 +342,15 @@ impl SherpaTranscribe {
             t.drain_new()
         };
         for entry in &new {
-            if let Ok(line) = serde_json::to_string(entry) {
+            let line = if self.params.lane.is_empty() {
+                serde_json::to_string(entry)
+            } else {
+                serde_json::to_value(entry).and_then(|mut v| {
+                    v["lane"] = serde_json::Value::from(self.params.lane.as_str());
+                    serde_json::to_string(&v)
+                })
+            };
+            if let Ok(line) = line {
                 self.events_out.extend_from_slice(line.as_bytes());
                 self.events_out.push(b'\n');
             }
@@ -368,7 +390,7 @@ impl Block for SherpaTranscribe {
                     port_type: PortType::Events,
                 },
             ],
-            params: &[MODE_PARAM, PROMPT_PARAM, RESET_PARAM, BUFFER_SAMPLES_PARAM],
+            params: &[MODE_PARAM, PROMPT_PARAM, LANE_PARAM, RESET_PARAM, BUFFER_SAMPLES_PARAM],
             ai_notes: "Server-side passthrough tap that transcribes demodulated voice via the sherpa-onnx sidecar (streaming, multilingual, VAD-endpointed). Node-only counterpart to VoiceTranscribe; emits the same transcript spots on 'events' → ui:transcribe. Audio passes through unchanged ('off'/'on') or silenced ('muted').",
         }
     }

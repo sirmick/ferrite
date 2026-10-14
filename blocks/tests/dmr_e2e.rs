@@ -244,3 +244,36 @@ fn synthesises_slot_voice() {
         "voiced/silent pattern diverges from dsd-fme: {agree:.3}"
     );
 }
+
+/// Noise must never reach the vocoder: false voice syncs on an idle
+/// channel would otherwise be synthesised into babble (and transcribed
+/// into fragments — seen live before the verified-call gate).
+#[test]
+fn noise_is_never_voiced() {
+    let mut dec = DmrDecoder::new(48_000.0, false);
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+    };
+    let noise: Vec<f32> = (0..48_000 * 30).map(|_| (next() + next()) * 0.9).collect();
+    let mut buf = vec![0.0_f32; 16_000];
+    let mut voiced = 0;
+    for c in noise.chunks(4_096) {
+        dec.push(c);
+        for slot in 0..2 {
+            voiced += dec.take_voice(slot, &mut buf);
+        }
+    }
+    assert_eq!(voiced, 0, "noise was voiced: {:?}", dec.stats);
+    assert_eq!(dec.stats.voice_frames, 0, "{:?}", dec.stats);
+    // …and the gate was actually exercised: noise does produce false
+    // voice syncs (267 frames' worth when this was written).
+    assert!(
+        dec.stats.voice_unverified > 0,
+        "no false voice syncs — the test no longer exercises the gate: {:?}",
+        dec.stats
+    );
+}

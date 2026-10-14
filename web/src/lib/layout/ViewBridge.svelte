@@ -37,7 +37,8 @@
   type WireSetViewState = {
     type: 'set_view_state';
     state: {
-      main_pane?: 'wide' | 'advanced' | string;
+      main_pane?: string;
+      right_pane?: string;
       channel_detail_visible?: boolean;
       left_tab?: string;
     };
@@ -50,11 +51,22 @@
    *  validates + persists the value. Unknown fields are logged + dropped
    *  instead of silently swallowed — surfaces server-side bugs. */
   function applyViewStatePatch(state: WireSetViewState['state']): void {
+    // Pane ids are validated where they're resolved (Workspace /
+    // registry): an id the active preset doesn't offer falls back to
+    // the waterfall (left) or leaves the right column off, so a stale
+    // or mistyped id is harmless.
     if (state.main_pane !== undefined) {
-      if (state.main_pane === 'wide' || state.main_pane === 'advanced') {
+      if (typeof state.main_pane === 'string' && state.main_pane.length > 0) {
         void applyControl('client.workspace.mainPane', state.main_pane);
       } else {
-        logs.push('client', 'warn', `view-bridge: unknown main_pane=${state.main_pane}`);
+        logs.push('client', 'warn', `view-bridge: bad main_pane=${String(state.main_pane)}`);
+      }
+    }
+    if (state.right_pane !== undefined) {
+      if (typeof state.right_pane === 'string' && state.right_pane.length > 0) {
+        void applyControl('client.workspace.rightPane', state.right_pane);
+      } else {
+        logs.push('client', 'warn', `view-bridge: bad right_pane=${String(state.right_pane)}`);
       }
     }
     if (state.channel_detail_visible !== undefined) {

@@ -24,6 +24,8 @@ export interface TranscriptToken {
   readonly p: number;
 }
 
+import type { Speaker } from '$lib/transcript/flow';
+
 export interface TranscriptSegment {
   readonly id: number;
   /** Wall-clock at capture (ms since epoch) — segment close time. */
@@ -57,6 +59,12 @@ export interface TranscriptSegment {
    *  talker changed at this segment. Only meaningful on the
    *  `small.en-tdrz` model; false on others. */
   readonly speakerTurn?: boolean;
+  /** Transcript lane (`slot1` / `slot2` for DMR timeslots), when the
+   *  producer runs more than one. */
+  readonly lane?: string;
+  /** Who spoke — stamped server-side for digital voice
+   *  (server/src/speakers.rs); absent for analog voice. */
+  readonly speaker?: Speaker;
 }
 
 export type EngineStatus =
@@ -68,6 +76,33 @@ export type EngineStatus =
   | 'error';
 
 const MAX_SEGMENTS = 2000;
+
+function isSpeaker(v: unknown): v is Speaker {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    typeof (v as Speaker).key === 'string' &&
+    typeof (v as Speaker).label === 'string'
+  );
+}
+
+/** A store segment as a transcript-widget line. */
+export function segmentLine(s: TranscriptSegment): import('$lib/transcript/flow').TLine {
+  return {
+    id: s.id,
+    atMs: s.atMs,
+    text: s.text,
+    gapMs: s.gapMs,
+    dur: s.t1 > s.t0 ? s.t1 - s.t0 : undefined,
+    tokens: s.tokens,
+    rawText: s.rawText,
+    confidence: s.confidence,
+    vfoHz: s.vfoHz,
+    lane: s.lane,
+    speaker: s.speaker,
+    speakerTurn: s.speakerTurn,
+  };
+}
 
 class TranscriptStore {
   /** Append-only, capped. Newest last. */
@@ -145,6 +180,8 @@ class TranscriptStore {
         cont: obj.cont === true,
         gapMs: typeof obj.gapMs === 'number' ? obj.gapMs : 0,
         speakerTurn: obj.speakerTurn === true,
+        lane: typeof obj.lane === 'string' ? obj.lane : undefined,
+        speaker: isSpeaker(obj.speaker) ? obj.speaker : undefined,
       });
     }
     // A live server feed means transcription is running; reflect it in

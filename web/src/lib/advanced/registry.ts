@@ -27,87 +27,69 @@ import AprsView from './AprsView.svelte';
 import FldigiView from './FldigiView.svelte';
 import JournalView from './JournalView.svelte';
 import TranscriptView from './TranscriptView.svelte';
+import CallLogView from './CallLogView.svelte';
+import {
+  VIEW_SPECS,
+  defaultRightOf,
+  paneViewsOf,
+  resolveOf,
+  type AdvancedCtx,
+  type Pane,
+  type ViewSpec,
+} from './viewSpecs';
 
-/** Inputs the availability check gets — a uiSink map plus the browser
- *  runtime's VoiceTranscribe tap ids (some views aren't fed by a
- *  `ui:` stream). */
-export interface AdvancedCtx {
-  uiSinks: Record<string, unknown>;
-  voiceTranscribeIds: ReadonlyArray<string>;
-  /** Whether the active preset declares an `AudioSink` block — i.e.
-   *  is a voice/audio preset that *could* be transcribed. Lets the
-   *  Transcript entry advertise itself before transcribe is actually
-   *  on (the toolbar flips `profile.transcribe` the moment the user
-   *  picks it). */
-  hasAudioSink: boolean;
-}
+export type { AdvancedCtx, Pane } from './viewSpecs';
 
-export interface AdvancedView {
-  /** UI-sink name the runtime advertises (`pipeline.uiSinks[sink]`)
-   *  when a preset using this view is active. Also the stable identity
-   *  key for views with a custom `present` predicate. */
-  sink: string;
-  /** Toolbar button label — mode-named, not a generic "Advanced". */
-  label: string;
+export interface AdvancedView extends ViewSpec {
   // Views take different prop shapes (most none, the Journal a `kind`);
   // the workspace spreads `props` into whichever it mounts.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   component: Component<any>;
-  /** Props the workspace passes when mounting the component — lets
-   *  one generic view (the decode Journal) serve several kinds. */
-  props?: Record<string, unknown>;
-  /** Optional availability override. When set, decides presence
-   *  instead of the default `uiSinks[sink]` lookup — for views whose
-   *  data doesn't arrive via a `ui:<sink>` stream. */
-  present?: (ctx: AdvancedCtx) => boolean;
 }
 
-/** A decode Journal for a text-producing append-log kind: the preset
- *  wires `ui:<kind>`, the view lists its records as text lines. */
-function journal(sink: string, label: string): AdvancedView {
-  return { sink, label, component: JournalView, props: { kind: sink, label } };
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function componentFor(id: string): Component<any> {
+  if (id.startsWith('journal:')) return JournalView;
+  switch (id) {
+    case 'ft8':
+      return Ft8View;
+    case 'adsb':
+      return AdsbView;
+    case 'aprs':
+      return AprsView;
+    case 'fldigi':
+      return FldigiView;
+    case 'calls:dsd':
+      return CallLogView;
+    case 'transcript':
+      return TranscriptView;
+    default:
+      throw new Error(`advanced registry: no component for view ${id}`);
+  }
 }
 
-export const ADVANCED_VIEWS: AdvancedView[] = [
-  // FT8, FT4 and WSPR all wire `ui:ft8` and share Ft8View.
-  { sink: 'ft8', label: 'FT8 / FT4 / WSPR', component: Ft8View },
-  // ADS-B (Mode-S, 1090 MHz) — live aircraft map + table.
-  { sink: 'adsb', label: 'ADS-B', component: AdsbView },
-  // APRS (AX.25 packet) — station map + table + packet console.
-  { sink: 'aprs', label: 'APRS', component: AprsView },
-  // fldigi family (RTTY/PSK31/CW/MT63/Olivia/…/RSID) — RX-text Journal.
-  // `sink` stays 'fldigi' (the ui:fldigi wire key); the user-facing
-  // label is "Journal" — the streaming decoded-text view that every
-  // streaming-digital preset falls into.
-  { sink: 'fldigi', label: 'Journal', component: FldigiView },
-  // Text decoders that are not keyboard modes: one Journal each, so the
-  // pager / NWR / rtl_433 presets (which also have an AudioSink, for
-  // listening) show their decodes here rather than falling through to
-  // the voice Transcript below.
-  journal('pager', 'Pager'),
-  journal('eas', 'EAS'),
-  journal('rtl_433', 'rtl_433'),
-  journal('dsd', 'Digital voice'),
-  // Speech-to-text. Listed last so a mode-specific decoder view wins
-  // if both ever co-exist. Advertised whenever the active preset has
-  // an `AudioSink` (i.e. could be transcribed), NOT only when the
-  // VoiceTranscribe block is already present — the toolbar dropdown
-  // flips `profile.transcribe` on the moment the user picks this,
-  // which re-composes and injects the tap. That keeps the
-  // "every audio preset has an advanced view" promise without paying
-  // the whisper-worker cost up front.
-  {
-    sink: 'transcribe',
-    label: 'Transcript',
-    component: TranscriptView,
-    present: (ctx) => ctx.hasAudioSink,
-  },
-];
+export const ADVANCED_VIEWS: AdvancedView[] = VIEW_SPECS.map((s) => ({
+  ...s,
+  component: componentFor(s.id),
+}));
 
-/** The advanced view for the active preset, or null when none match. */
+/** Every view the active preset offers in `pane`, in registry order. */
+export function paneViews(ctx: AdvancedCtx, pane: Pane): AdvancedView[] {
+  return paneViewsOf(ADVANCED_VIEWS, ctx, pane);
+}
+
+/** The view a pane value selects, or null — see `resolveOf`. */
+export function resolvePaneView(ctx: AdvancedCtx, pane: Pane, value: string): AdvancedView | null {
+  return resolveOf(ADVANCED_VIEWS, ctx, pane, value);
+}
+
+/** The right-pane view a preset selects on load, if it has one. */
+export function defaultRightView(ctx: AdvancedCtx): AdvancedView | null {
+  return defaultRightOf(ADVANCED_VIEWS, ctx);
+}
+
+/** The preset's first left-pane view, or null (kept for callers that
+ *  predate panes). */
 export function activeAdvancedView(ctx: AdvancedCtx): AdvancedView | null {
-  return (
-    ADVANCED_VIEWS.find((v) => (v.present ? v.present(ctx) : ctx.uiSinks[v.sink] !== undefined)) ??
-    null
-  );
+  return paneViews(ctx, 'left')[0] ?? null;
 }

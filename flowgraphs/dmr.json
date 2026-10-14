@@ -4,7 +4,7 @@
   "category": "Digital voice",
   "label": "DMR (native decoder + voice)",
   "description": "DMR Tier II / repeater: call metadata (talkgroup, radio ID, colour code, talker alias) and AMBE+2 voice, decoded entirely by Ferrite — runs node-side or in the browser.",
-  "ai_notes": "DMR (Tier II conventional / repeater) decoded end to end by Ferrite's DmrDecode: call records (`call` with slot, TG, source ID, CC, ENC — voice LC header or embedded LC late entry — `end` with duration, `alias`, `sync`) in `ui:dsd`, and AMBE+2 speech via the vendored mbelib vocoder on the audio chain (`listen`: both slots mixed, or 1 / 2; `slot1`/`slot2` ports carry each slot). Encrypted calls: events, no audio. Runs node-side or browser-side (the browser fetches the 54 KB vocoder module lazily). For P25 / NXDN / D-STAR / YSF use the `dsd-fme` preset. Verified 2026-10-13 from bigear on Antenna B, gain 40: 441.850 MHz DMR repeater (colour code 1; slot 2 TG 31068, slot 1 TG 93; talker aliases), also TG 31068 traffic on 440.125 and 440.5875 MHz. Tune on-centre of the 12.5 kHz channel. Output: `tail decoder --category dsd`; `await dsd`.",
+  "ai_notes": "DMR (Tier II conventional / repeater) decoded end to end by Ferrite's DmrDecode: call records (`call` with slot, TG, source ID, CC, ENC — voice LC header or embedded LC late entry — `end` with duration, `alias`, `sync`) in `ui:dsd`, and AMBE+2 speech via the vendored mbelib vocoder on the audio chain (`listen`: both slots mixed, or 1 / 2; `slot1`/`slot2` ports carry each slot). Encrypted calls: events, no audio. Transcription (Audio → Transcribe) runs server-side as two lanes, one per timeslot (`stt1`/`stt2`, lane `slot1`/`slot2`); the decoder store stamps each transcript line with the talker (`speaker`: radio ID, alias, talkgroup, colour) from the call on that slot. Runs node-side or browser-side (the browser fetches the 54 KB vocoder module lazily). For P25 / NXDN / D-STAR / YSF use the `dsd-fme` preset. Verified 2026-10-13 from bigear on Antenna B, gain 40: 441.850 MHz DMR repeater (colour code 1; slot 2 TG 31068, slot 1 TG 93; talker aliases), also TG 31068 traffic on 440.125 and 440.5875 MHz. Tune on-centre of the 12.5 kHz channel. Output: `tail decoder --category dsd`; `await dsd`.",
   "signal_wiki_url": "https://www.sigidwiki.com/wiki/Digital_Mobile_Radio_(DMR)",
   "environments": [
     "node",
@@ -82,6 +82,28 @@
       "params": {
         "buffer_samples": 8192
       }
+    },
+    "stt1": {
+      "type": "SherpaTranscribe",
+      "placement": "node",
+      "when": {
+        "transcribe": true
+      },
+      "params": {
+        "mode": "on",
+        "lane": "slot1"
+      }
+    },
+    "stt2": {
+      "type": "SherpaTranscribe",
+      "placement": "node",
+      "when": {
+        "transcribe": true
+      },
+      "params": {
+        "mode": "on",
+        "lane": "slot2"
+      }
     }
   },
   "wires": [
@@ -124,6 +146,22 @@
     [
       "audio_resamp.out",
       "audio.in"
+    ],
+    [
+      "dmr.slot1",
+      "stt1.in"
+    ],
+    [
+      "stt1.events",
+      "ui:transcribe"
+    ],
+    [
+      "dmr.slot2",
+      "stt2.in"
+    ],
+    [
+      "stt2.events",
+      "ui:transcribe"
     ]
   ]
 }

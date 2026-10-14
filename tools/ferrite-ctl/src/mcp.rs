@@ -1032,11 +1032,18 @@ pub struct ReplayCaptureArgs {
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct SetViewStateArgs {
-    /// Set the operator's Main pane: `"wide"` for the
-    /// FFT/Waterfall column, `"advanced"` for the per-preset advanced
-    /// view (FT8 / ADS-B / APRS map, Transcript, …). Unset = leave alone.
+    /// The operator's main (wide, left) column: `"wide"` for the
+    /// FFT/Waterfall, or one of the preset's left-pane views —
+    /// `"transcript"`, `"ft8"`, `"adsb"`, `"aprs"`, `"fldigi"`,
+    /// `"journal:<kind>"` (`"advanced"` = the first one). Unset = leave alone.
     #[serde(default)]
     pub main_pane: Option<String>,
+    /// The narrow right column: `"off"`, `"channel"` (channel
+    /// FFT/waterfall), `"signals"` (strongest-signal list), or a
+    /// right-pane view — `"calls:dsd"` (digital-voice call log). Unset =
+    /// leave alone.
+    #[serde(default)]
+    pub right_pane: Option<String>,
     /// Show/hide the channel-detail pane (the narrow FFT + waterfall
     /// column alongside whatever Main pane is up). Unset = leave alone.
     #[serde(default)]
@@ -1899,6 +1906,9 @@ impl FerriteServer {
         if let Some(p) = args.main_pane {
             body.insert("main_pane".into(), Value::String(p));
         }
+        if let Some(p) = args.right_pane {
+            body.insert("right_pane".into(), Value::String(p));
+        }
         if let Some(b) = args.channel_detail_visible {
             body.insert("channel_detail_visible".into(), Value::Bool(b));
         }
@@ -2468,7 +2478,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Push a chrome-state patch to the operator's browser. Use this to put them on the right pane for what's happening: `main_pane='advanced'` switches the main column to the per-preset view (FT8 map / ADS-B map / APRS map / Transcript / fldigi console, depending on the active preset); `main_pane='wide'` switches back to the FFT/Waterfall. `channel_detail_visible` flips the narrow channel-detail column on/off. Unset fields are left alone. 503 when no UI tab is connected — the patch needs a viewer to land on."
+        description = "Push a chrome-state patch to the operator's browser. Use this to put them on the right view for what's happening. The wide left column (`main_pane`) is `wide` (FFT/Waterfall) or one of the preset's left views: `transcript` (speech, coloured by speaker), `ft8`, `adsb`, `aprs`, `fldigi` (Journal), `journal:<kind>` (pager / eas / rtl_433) — `advanced` picks the first. The narrow right column (`right_pane`) is `off`, `channel` (channel FFT/waterfall), `signals` (strongest signals) or a right view: `calls:dsd` (digital-voice call log). DMR, for example: `main_pane='transcript', right_pane='calls:dsd'`. `channel_detail_visible` is the older on/off for the right column. Unset fields are left alone. 503 when no UI tab is connected — the patch needs a viewer to land on."
     )]
     async fn set_view_state(
         &self,
