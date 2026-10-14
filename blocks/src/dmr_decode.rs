@@ -362,6 +362,7 @@ pub fn voice_frames(bits: &[u8; 264]) -> [[u8; 96]; 3] {
 const VOICE_VERIFIED_S: f64 = 1.0;
 
 /// Decoded speech waiting for the output clock, per slot: 1 s at 8 kHz.
+#[cfg(feature = "vocoder")]
 const VOICE_QUEUE: usize = 8_000;
 
 // ---------------------------------------------------------- decoder
