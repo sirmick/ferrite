@@ -6,6 +6,8 @@
 // (`mcp__ferrite__tune`, …) and, from a coding agent mirrored onto the
 // bus, built-in tools such as `Bash` (a shell command) or `Read`.
 
+import type { TLine } from '$lib/transcript/flow';
+
 /** `mcp__ferrite__tune` → `tune`; another server's tool keeps its server. */
 export function toolLabel(name: string): string {
   const m = /^mcp__([^_]+(?:_[^_]+)*)__(.+)$/.exec(name);
@@ -133,4 +135,42 @@ export function signalsOf(name: string, result: string | undefined): SignalRow[]
   return rows
     .filter((r): r is SignalRow => !!r && typeof (r as SignalRow).freq_hz === 'number')
     .slice(0, 10);
+}
+
+/** Transcript lines in a tool result — `decodes(kind="transcribe")`
+ *  (`{recent: [{seq, at_ms, data}]}`) or `await_events` (`{records:
+ *  [{record: {record: {seq, at_ms, data}}}]}`) — for the card's compact
+ *  transcript. A record counts when its `data` has the transcript entry
+ *  shape (`text` + `t0`/`t1`); speakers ride along from the server. */
+export function transcriptOf(result: string | undefined, max = 8): TLine[] | null {
+  if (!result) return null;
+  const o = parse(result.trim());
+  if (!o) return null;
+  const raw: unknown[] = Array.isArray(o.recent)
+    ? o.recent
+    : Array.isArray(o.records)
+      ? (o.records as unknown[]).map((r) => {
+          const x = r as { record?: { record?: unknown } & Record<string, unknown> };
+          return x.record?.record ?? x.record ?? r;
+        })
+      : [];
+  const lines: TLine[] = [];
+  for (const r of raw) {
+    const rec = r as { seq?: number; at_ms?: number; data?: Record<string, unknown> };
+    const d = rec?.data;
+    if (!d || typeof d.text !== 'string' || typeof d.t0 !== 'number' || typeof d.t1 !== 'number') {
+      continue;
+    }
+    const sp = d.speaker as TLine['speaker'] | undefined;
+    lines.push({
+      id: rec.seq ?? lines.length,
+      atMs: typeof rec.at_ms === 'number' ? rec.at_ms : typeof d.atMs === 'number' ? d.atMs : 0,
+      text: d.text,
+      gapMs: typeof d.gapMs === 'number' ? d.gapMs : 0,
+      dur: d.t1 - d.t0 > 0 ? d.t1 - d.t0 : undefined,
+      speaker: sp && typeof sp.key === 'string' && typeof sp.label === 'string' ? sp : undefined,
+      speakerTurn: d.speakerTurn === true,
+    });
+  }
+  return lines.length ? lines.slice(-max) : null;
 }

@@ -340,9 +340,15 @@ enum Cmd {
     ViewGet,
     /// Push a chrome-state patch to the operator's browser.
     ViewSet {
-        /// `wide` (FFT/Waterfall) or `advanced` (per-preset view).
+        /// Wide left column: `wide` (FFT/Waterfall) or a left view id —
+        /// `transcript`, `ft8`, `adsb`, `aprs`, `fldigi`, `journal:<kind>`
+        /// (`advanced` = the first).
         #[arg(long)]
         main_pane: Option<String>,
+        /// Narrow right column: `off`, `channel`, `signals`, or a right
+        /// view id (`calls:dsd`).
+        #[arg(long)]
+        right_pane: Option<String>,
         /// Show/hide the channel-detail pane.
         #[arg(long)]
         channel_detail: Option<bool>,
@@ -1129,11 +1135,13 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
         Cmd::ViewGet => emit(&server.view_state_op().await.map_err(op_err)?, json),
         Cmd::ViewSet {
             main_pane,
+            right_pane,
             channel_detail,
         } => {
             let v = server
                 .set_view_state_op(SetViewStateArgs {
                     main_pane,
+                    right_pane,
                     channel_detail_visible: channel_detail,
                     left_tab: None,
                     note: None,

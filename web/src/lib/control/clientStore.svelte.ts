@@ -17,14 +17,18 @@ const STORAGE_KEY = 'ferrite.clientControls';
 /** Which view occupies the workspace's main column (the toolbar's
  *  Display → Main dropdown). Exported so the dispatcher / consumers can
  *  refer to the union by name. */
-export type WorkspaceMainPane = 'wide' | 'advanced';
+/** `wide` (FFT/waterfall), or a left-pane view id from the advanced
+ *  registry (`transcript`, `ft8`, `journal:pager`, …). `advanced` = the
+ *  preset's first left view (legacy value). */
+export type WorkspaceMainPane = string;
 
 /** Which view occupies the workspace's right (channel-detail) column
  *  (the toolbar's Display → Right dropdown). `off` collapses it,
  *  `channel` is the narrow FFT/waterfall, `signals` is the strongest-
  *  signal list (only selectable when the preset advertises `ui:signals`).
  *  Replaces the old boolean `narrowVisible` checkbox with a 3-state pick. */
-export type WorkspaceRightPane = 'off' | 'channel' | 'signals';
+/** `off`, `channel`, `signals`, or a right-pane view id (`calls:dsd`). */
+export type WorkspaceRightPane = string;
 
 /** Full list of known client paths and their defaults. The defaults
  *  object also declares the *type* of each knob (by its JavaScript

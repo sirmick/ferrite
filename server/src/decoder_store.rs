@@ -12,6 +12,12 @@
 //! The block owns the record *schema* (`data` is its JSON verbatim); the
 //! store owns the *fold policy*.
 
+/// Speaker attribution for `dsd` / `transcribe` records (see the module).
+/// A `#[path]` child so the integration tests that `#[path]`-include this
+/// file get it too.
+#[path = "speakers.rs"]
+pub mod speakers;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -255,6 +261,9 @@ pub struct DecoderStore {
     /// RF context stamped onto decoder records ([`Record::ctx`]); kept
     /// current by the daemon (supervisor tick + every tune).
     ctx: Mutex<Option<Value>>,
+    /// Who-said-what: stamps `speaker` onto `dsd` and `transcribe`
+    /// records before they are stored ([`speakers`]).
+    speakers: Mutex<speakers::SpeakerBook>,
 }
 
 impl Default for DecoderStore {
@@ -286,6 +295,7 @@ impl DecoderStore {
             tx,
             epoch: Arc::new(AtomicU64::new(0)),
             ctx: Mutex::new(None),
+            speakers: Mutex::new(speakers::SpeakerBook::new()),
         }
     }
 
@@ -400,8 +410,50 @@ impl DecoderStore {
         self.guard().kinds.get(kind).cloned()
     }
 
+    /// Fold a live param delta into the stored `blocks` snapshot, in
+    /// place — no new seq, no broadcast. Live edits travel to connected
+    /// clients as `params/<block>` deltas (a 35 KB `blocks` re-publish per
+    /// VFO click would be wasteful), but the snapshot is what a *newly*
+    /// connecting client (and REST / MCP) reads, and `params/<block>` only
+    /// keeps the last delta per block. Without this fold the snapshot kept
+    /// the values from the last graph compose: a page loaded after a few
+    /// clicks showed a VFO two tunes old, and its own click-to-tune looked
+    /// dead (found live 2026-10-14).
+    pub fn fold_block_params(&self, block: &str, delta: &serde_json::Map<String, Value>) {
+        let mut g = self.guard();
+        let Some(rec) = g
+            .kinds
+            .get_mut("blocks")
+            .and_then(|k| k.current.get_mut(REPLACE_KEY))
+        else {
+            return;
+        };
+        let Some(list) = rec.data.get_mut("blocks").and_then(Value::as_array_mut) else {
+            return;
+        };
+        for b in list.iter_mut() {
+            if b.get("id").and_then(Value::as_str) != Some(block) {
+                continue;
+            }
+            if !b.get("values").is_some_and(Value::is_object) {
+                b["values"] = Value::Object(serde_json::Map::new());
+            }
+            if let Some(values) = b.get_mut("values").and_then(Value::as_object_mut) {
+                for (k, v) in delta {
+                    values.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+
     /// Fold one record into `kind` per its policy; broadcasts the delta.
-    pub fn apply(&self, kind: &str, data: Value) {
+    pub fn apply(&self, kind: &str, mut data: Value) {
+        if kind == "dsd" || kind == "transcribe" {
+            self.speakers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .enrich(kind, &mut data, now_ms());
+        }
         let policy = policy_for(kind);
         let epoch = self.epoch();
         let ctx = if is_decode_kind(kind) {
@@ -961,6 +1013,70 @@ mod tests {
         let d = rx.try_recv().unwrap();
         assert!(matches!(d.op, DeltaOp::Reset));
         assert_eq!(d.epoch, 1);
+    }
+
+    #[test]
+    fn transcripts_are_stamped_with_the_talker_through_apply() {
+        // The store wiring, not just the SpeakerBook policy: a DMR call
+        // record then a slot-2 transcript record, both through `apply`
+        // as the EventStore blocks do, must come out with one `speaker`.
+        let s = DecoderStore::new();
+        s.apply(
+            "dsd",
+            serde_json::json!({"t":"dsd","event":"call","protocol":"DMR","slot":2,
+                               "tgt":"31068","src":"3107998"}),
+        );
+        s.apply(
+            "transcribe",
+            serde_json::json!({"text":"go ahead","t0":0.0,"t1":1.0,"lane":"slot2"}),
+        );
+        let call = &s.snapshot_kind("dsd").unwrap().recent[0].data;
+        let line = &s.snapshot_kind("transcribe").unwrap().recent[0].data;
+        assert_eq!(call["speaker"]["key"], "DMR:3107998");
+        assert_eq!(line["speaker"]["key"], "DMR:3107998", "{line}");
+        assert_eq!(line["speaker"]["group"], "31068");
+        assert_eq!(line["speaker"]["colour"], call["speaker"]["colour"]);
+        // Other kinds pass through untouched.
+        s.apply("ft8", serde_json::json!({"msg":"CQ K1ABC FN42"}));
+        assert!(s.snapshot_kind("ft8").unwrap().recent[0]
+            .data
+            .get("speaker")
+            .is_none());
+    }
+
+    #[test]
+    fn param_deltas_fold_into_the_blocks_snapshot_quietly() {
+        let s = DecoderStore::new();
+        s.apply(
+            "blocks",
+            serde_json::json!({"blocks": [
+                {"id": "chan", "values": {"freq_shift_hz": 942_736, "output_rate_hz": 48_000.0}},
+                {"id": "demod", "values": {"max_deviation_hz": 5000}}
+            ]}),
+        );
+        let before = s.snapshot().seq;
+        let mut rx = s.subscribe();
+        let mut d = serde_json::Map::new();
+        d.insert("freq_shift_hz".into(), serde_json::json!(480_000));
+        s.fold_block_params("chan", &d);
+        let b = s.snapshot_kind("blocks").unwrap();
+        let rec = &b.current[REPLACE_KEY].data["blocks"];
+        assert_eq!(
+            rec[0]["values"]["freq_shift_hz"], 480_000,
+            "snapshot updated"
+        );
+        assert_eq!(
+            rec[0]["values"]["output_rate_hz"], 48_000.0,
+            "other values kept"
+        );
+        assert_eq!(
+            rec[1]["values"]["max_deviation_hz"], 5000,
+            "other blocks untouched"
+        );
+        assert_eq!(s.snapshot().seq, before, "no new seq");
+        assert!(rx.try_recv().is_err(), "no broadcast");
+        // No `blocks` record yet → a no-op, not a panic.
+        DecoderStore::new().fold_block_params("chan", &d);
     }
 
     #[test]

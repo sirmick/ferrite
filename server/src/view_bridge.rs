@@ -75,11 +75,17 @@ pub enum WireOutbound<'a> {
 /// means "leave alone") don't drift in interpretation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UiViewStatePatch {
-    /// Set the operator's main-pane selector — `"wide"` for the
-    /// FFT/Waterfall column, `"advanced"` for the per-preset mode
-    /// view (FT8 / ADS-B / APRS map, Transcript, …).
+    /// Set the operator's main (wide, left) column — `"wide"` for the
+    /// FFT/Waterfall, or a left-pane view id: `"transcript"`, `"ft8"`,
+    /// `"adsb"`, `"aprs"`, `"fldigi"`, `"journal:<kind>"`. `"advanced"`
+    /// = the preset's first left view (legacy).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub main_pane: Option<String>,
+    /// Set the narrow right column — `"off"`, `"channel"` (channel
+    /// FFT/waterfall), `"signals"`, or a right-pane view id
+    /// (`"calls:dsd"`, the digital-voice call log).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub right_pane: Option<String>,
     /// Show/hide the channel-detail pane (channel-spectrum +
     /// channel-waterfall) alongside whatever Main pane is up.
     #[serde(skip_serializing_if = "Option::is_none", default)]

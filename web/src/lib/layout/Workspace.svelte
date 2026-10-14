@@ -40,7 +40,8 @@
   import ViewBridge from '$lib/layout/ViewBridge.svelte';
   import { pipeline } from '$lib/pipeline.svelte';
   import { clientControls } from '$lib/control/clientStore.svelte';
-  import { activeAdvancedView } from '$lib/advanced/registry';
+  import { defaultRightView, resolvePaneView } from '$lib/advanced/registry';
+  import { applyControl } from '$lib/control/dispatch';
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
   import type { FrameClient } from '$lib/ws/client';
 
@@ -64,7 +65,6 @@
   let rightPane = $derived(clientControls.get('client.workspace.rightPane'));
   let showNarrow = $derived(hasNarrowSink && rightPane === 'channel');
   let showSignals = $derived(hasSignalsSink && rightPane === 'signals');
-  let showRight = $derived(showNarrow || showSignals);
 
   // Advanced view replaces *only* the wide FFT/waterfall column when
   // toggled on (and the preset registers one). The Channel column is
@@ -73,16 +73,41 @@
   let hasAudioSink = $derived(
     Object.values(pipeline.flowgraph?.blocks ?? {}).some((b) => b.type === 'AudioSink'),
   );
+  let viewCtx = $derived({
+    uiSinks: pipeline.uiSinks,
+    voiceTranscribeIds: browserRuntime.voiceTranscribeIds,
+    hasAudioSink,
+  });
+  // Left (wide) column: the selected left-pane view, else FFT/waterfall.
   let advancedView = $derived(
-    activeAdvancedView({
-      uiSinks: pipeline.uiSinks,
-      voiceTranscribeIds: browserRuntime.voiceTranscribeIds,
-      hasAudioSink,
-    }),
+    resolvePaneView(viewCtx, 'left', clientControls.get('client.workspace.mainPane')),
   );
-  let showAdvanced = $derived(
-    advancedView !== null && clientControls.get('client.workspace.mainPane') === 'advanced',
-  );
+  let showAdvanced = $derived(advancedView !== null);
+  // Right (narrow) column: channel, signals, or a right-pane view
+  // (the digital-voice call log).
+  let rightView = $derived(resolvePaneView(viewCtx, 'right', rightPane));
+  let showRight = $derived(showNarrow || showSignals || rightView !== null);
+
+  // Per-preset default for the right column, applied once per preset
+  // load: a preset with a default right view (DMR → its call log) opens
+  // with it; leaving such a preset drops back to the channel view so a
+  // stale view id never blanks the column. The operator can change it
+  // freely afterwards.
+  let defaultedFor = '';
+  $effect(() => {
+    const name = pipeline.flowgraph?.name ?? '';
+    if (!name || name === defaultedFor) return;
+    // Wait for the composed graph (sinks) of this preset.
+    if (Object.keys(pipeline.uiSinks).length === 0) return;
+    defaultedFor = name;
+    const def = defaultRightView(viewCtx);
+    const current = clientControls.get('client.workspace.rightPane');
+    if (def) {
+      void applyControl('client.workspace.rightPane', def.id);
+    } else if (!['off', 'channel', 'signals'].includes(current)) {
+      void applyControl('client.workspace.rightPane', 'channel');
+    }
+  });
 
   // Channel-detail header used to read "Channel · 240 kHz @ 100.001 MHz"
   // but the bandwidth + centre were redundant — the orange VFO Nixie
@@ -127,7 +152,7 @@
           {@render (showAdvanced ? advancedColumn : wideColumn)()}
         {/snippet}
         {#snippet b()}
-          {@render (showSignals ? signalsColumn : narrowColumn)()}
+          {@render (rightView ? rightViewColumn : showSignals ? signalsColumn : narrowColumn)()}
         {/snippet}
       </Split>
     {:else}
@@ -169,6 +194,13 @@
   {#if advancedView}
     {@const Advanced = advancedView.component}
     <Advanced {...advancedView.props ?? {}} />
+  {/if}
+{/snippet}
+
+{#snippet rightViewColumn()}
+  {#if rightView}
+    {@const Right = rightView.component}
+    <Right {...rightView.props ?? {}} />
   {/if}
 {/snippet}
 

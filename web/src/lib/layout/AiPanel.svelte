@@ -2,6 +2,7 @@
   import { ai, AI_MODES, type AiMode, clearedAtMs, renderMarkdown } from '$lib/ai/store.svelte';
   import { decoders } from '$lib/decoders/store.svelte';
   import AnalysisCard from '$lib/analysis/AnalysisCard.svelte';
+  import TranscriptFlow from '$lib/transcript/TranscriptFlow.svelte';
   import type { AnalysisRecord } from '$lib/analysis/types';
   import type { Turn } from '$lib/ai/store.svelte';
   import {
@@ -10,6 +11,7 @@
     resultSummary,
     signalsMetaOf,
     signalsOf,
+    transcriptOf,
     toolLabel,
     toolSummary,
     toolWhy,
@@ -475,6 +477,7 @@
                 {@const shell = isShell(chunk.name)}
                 {@const signals = signalsOf(chunk.name, chunk.result)}
                 {@const signalsMeta = signalsMetaOf(chunk.name, chunk.result)}
+                {@const spoken = transcriptOf(chunk.result)}
                 {@const graphic = chunk.analysisId ? analysisById.get(chunk.analysisId) : undefined}
                 <div
                   class="my-1 rounded border px-1.5 py-1 font-mono text-[10px]"
@@ -555,6 +558,13 @@
                         {signals.length} of {signalsMeta.listed} listed · {signalsMeta.total} tracked
                       </div>
                     {/if}
+                  {/if}
+                  {#if spoken}
+                    <!-- Transcript records in the result: the same widget,
+                         labels and speaker colours as the main view. -->
+                    <div class="mt-1 rounded border border-slate-800 bg-slate-950/40 p-1">
+                      <TranscriptFlow lines={spoken} compact />
+                    </div>
                   {/if}
                   {#if chunk.resultImages && chunk.resultImages.length}
                     <div class="mt-1 flex flex-col gap-1">

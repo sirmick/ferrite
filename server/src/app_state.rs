@@ -1316,6 +1316,9 @@ impl AppState {
     /// these on receipt, which is how a UI knob, the CLI and an agent all
     /// drive the same block through one path.
     fn publish_params(&self, id: &str, delta: &serde_json::Map<String, serde_json::Value>) {
+        // Keep the `blocks` snapshot current for clients that connect
+        // later (they seed from it); connected ones get the delta below.
+        self.inner.decoder_store.fold_block_params(id, delta);
         self.inner.decoder_store.apply(
             &format!("params/{id}"),
             serde_json::json!({ "block": id, "epoch": self.epoch(), "params": delta }),

@@ -310,25 +310,50 @@ class PipelineStore {
         });
       });
       $effect(() => {
-        const rec = decoders.kind('blocks').current['current']?.data as
-          | { blocks?: PipelineBlock[] }
-          | undefined;
-        if (!rec?.blocks) return;
+        const r = decoders.kind('blocks').current['current'];
+        const rec = r?.data as { blocks?: PipelineBlock[] } | undefined;
+        if (!r || !rec?.blocks) return;
         untrack(() => {
+          // Install a `blocks` snapshot only when it is a *newer record*.
+          // The mirror replaces its `kinds` map on every delta of any
+          // kind, so this effect re-runs many times a second; comparing
+          // values instead of seq meant each re-run found the snapshot
+          // "different" from the live-edited list and overwrote it — a
+          // VFO click applied, then snapped back on the next unrelated
+          // delta (click-to-tune looked dead, 2026-10-14).
+          if (r.seq <= this.blocksSeq) return;
+          this.blocksSeq = r.seq;
           const next = indexById(rec.blocks ?? []);
           if (!jsonEq(next, this.nodeBlocks)) this.nodeBlocks = next;
+          // Edits newer than this snapshot must land on top of it again.
+          for (const name of Object.keys(this.paramsSeen)) {
+            if (this.paramsSeen[name] > r.seq) this.paramsSeen[name] = r.seq;
+          }
         });
       });
       $effect(() => {
         const kinds = decoders.kinds;
+        // Tracked too, so an edit deferred for want of its block applies
+        // as soon as the `blocks` record builds the list (applying one
+        // marks its seq seen, so the re-run this write causes is a no-op).
+        void this.nodeBlocks;
         untrack(() => {
           for (const [name, k] of Object.entries(kinds)) {
             if (!name.startsWith('params/')) continue;
             const rec = k.current['current'];
             if (!rec || rec.seq <= (this.paramsSeen[name] ?? 0)) continue;
-            this.paramsSeen[name] = rec.seq;
             const d = rec.data as { block?: string; params?: Record<string, unknown> };
-            if (d.block && d.params) this.applyParamDelta(d.block, d.params);
+            if (!d.block || !d.params) {
+              this.paramsSeen[name] = rec.seq;
+              continue;
+            }
+            // Only mark it seen once it landed on a block: on page load
+            // this effect can run before the `blocks` record has built
+            // `nodeBlocks`, and marking it seen then dropped the edit for
+            // good (the VFO readout stuck on a stale shift — 2026-10-14).
+            if (!this.nodeBlocks[d.block]) continue;
+            this.paramsSeen[name] = rec.seq;
+            this.applyParamDelta(d.block, d.params);
           }
         });
       });
@@ -337,6 +362,8 @@ class PipelineStore {
 
   /** Last `params/<block>` seq applied, per kind. */
   private paramsSeen: Record<string, number> = {};
+  /** Seq of the `blocks` snapshot currently installed in `nodeBlocks`. */
+  private blocksSeq = 0;
 
   /** Replace the local view fields the `graph` record carries, when
    *  they differ (so a stable record doesn't churn reactive consumers). */

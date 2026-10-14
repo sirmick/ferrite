@@ -10,6 +10,7 @@ import {
   toolLabel,
   toolSummary,
   toolWhy,
+  transcriptOf,
 } from './toolView';
 
 describe('toolLabel', () => {
@@ -84,5 +85,39 @@ describe('signalsOf', () => {
     const old = JSON.stringify({ signals: rows.slice(0, 3) });
     expect(signalsMetaOf('mcp__ferrite__signals', old)).toEqual({ listed: 3, total: 3 });
     expect(signalsMetaOf('mcp__ferrite__status', r)).toBeNull();
+  });
+});
+
+describe('transcriptOf', () => {
+  it('reads decodes(kind=transcribe) records with their speakers', () => {
+    const res = JSON.stringify({
+      recent: [
+        { seq: 1, at_ms: 1000, data: { text: 'cq cq', t0: 0, t1: 2, gapMs: 0 } },
+        {
+          seq: 2,
+          at_ms: 5000,
+          data: {
+            text: 'go ahead',
+            t0: 0,
+            t1: 1.5,
+            speaker: { key: 'DMR:3107998', label: 'KR1JOE', group: '31068', colour: 3 },
+          },
+        },
+        { seq: 3, at_ms: 6000, data: { msg: 'not a transcript' } },
+      ],
+    });
+    const lines = transcriptOf(res);
+    expect(lines?.map((l) => l.text)).toEqual(['cq cq', 'go ahead']);
+    expect(lines?.[1].speaker?.label).toBe('KR1JOE');
+    expect(lines?.[1].dur).toBe(1.5);
+  });
+
+  it('reads await_events records and ignores other results', () => {
+    const res = JSON.stringify({
+      records: [{ record: { record: { seq: 7, at_ms: 1, data: { text: 'x', t0: 0, t1: 1 } } } }],
+    });
+    expect(transcriptOf(res)?.[0].id).toBe(7);
+    expect(transcriptOf(JSON.stringify({ signals: [] }))).toBeNull();
+    expect(transcriptOf(undefined)).toBeNull();
   });
 });
