@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildFlow, flowToText, gapLabel, sepFor, type TLine } from './flow';
+import { buildFlow, flowToText, gapLabel, latestLabels, relabel, sepFor, type TLine } from './flow';
 
 const sp = (id: string, group = '31068', colour = 1) => ({
   key: `DMR:${id}`,
@@ -79,5 +79,24 @@ describe('buildFlow', () => {
     );
     expect(t).toContain('[KR1JOE TG31068] cq cq');
     expect(t).toContain('[9 TG31068] ((encrypted))');
+  });
+});
+
+describe('latestLabels / relabel', () => {
+  it('relabels lines spoken before the talker alias arrived', () => {
+    const recs = [
+      { data: { event: 'call', speaker: sp('4040379') } },
+      { data: { event: 'call', speaker: sp('3107998') } },
+      { data: { event: 'alias', speaker: { ...sp('4040379'), label: 'VU3ITI' } } },
+      { data: { event: 'end' } },
+      { data: null },
+    ];
+    const labels = latestLabels(recs);
+    expect(labels.get('DMR:4040379')).toBe('VU3ITI');
+    const early = sp('4040379');
+    expect(relabel(early, labels)).toEqual({ ...early, label: 'VU3ITI' });
+    const other = sp('3107998');
+    expect(relabel(other, labels)).toBe(other);
+    expect(relabel(undefined, labels)).toBeUndefined();
   });
 });
