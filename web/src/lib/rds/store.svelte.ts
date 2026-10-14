@@ -18,6 +18,7 @@ import { decoders } from '$lib/decoders/store.svelte';
 interface RdsState {
   pi?: number;
   ps?: string;
+  rt?: string;
   pty?: number;
   tp?: boolean;
   ta?: boolean;
@@ -32,9 +33,15 @@ export const rds = {
     const v = rdsState().pi;
     return typeof v === 'number' ? v : null;
   },
+  // Text fields: the decoder sends "" to clear the previous station's.
   get ps(): string | null {
     const v = rdsState().ps;
-    return typeof v === 'string' ? v : null;
+    return typeof v === 'string' && v.trim() !== '' ? v : null;
+  },
+  /** RadioText — usually "now playing"; confirmed whole by the decoder. */
+  get rt(): string | null {
+    const v = rdsState().rt;
+    return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
   },
   get pty(): number | null {
     const v = rdsState().pty;

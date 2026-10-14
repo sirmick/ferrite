@@ -6,9 +6,9 @@
 //! 57 kHz subcarrier, coherently mixes it to baseband, then runs the
 //! full pipeline — biphase recovery → bit sync → block sync → group
 //! assembler — and emits newline-delimited JSON RDS events (PI / PS /
-//! PTY / TP / TA). RadioText (RT), AF and clock-time (CT) groups are
-//! parsed for sync but not yet surfaced as events (see the group
-//! handler).
+//! RadioText / PTY / TP / TA). PS and RadioText are only emitted whole
+//! and confirmed, never as they fill in (see the group handler); AF and
+//! clock-time (CT) groups are not decoded.
 //!
 //! ### Why 57 kHz is trivially coherent to recover
 //!
@@ -81,6 +81,10 @@ const NUM_TAPS_LPF: usize = 201;
 /// decoder's pilot PLL — narrow enough to reject leakage, fast enough
 /// to acquire in tens of ms.
 const PLL_BANDWIDTH_NORM: f32 = 5e-4;
+/// No complete group for this long = RDS gone: forget the station and
+/// clear the readout. ~11 groups/s arrive on a decodable signal, so 3 s
+/// rides out a fade without blanking a station still tuned.
+const RDS_GONE_S: f32 = 3.0;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
@@ -193,6 +197,13 @@ pub struct RdsDemod {
     block_sync: BlockSync,
     /// Phase 4: group assembler → PI / PS / PTY / TP state.
     parser: GroupParser,
+    /// Decimated samples since the last complete group, and how many
+    /// make "RDS is gone" ([`RDS_GONE_S`]): retuned off the station, or
+    /// it faded out. Then the parser forgets the station and a
+    /// [`CLEAR_JSON`] blanks the readout — once (`cleared`).
+    since_group: usize,
+    gone_after: usize,
+    cleared: bool,
     /// UTF-8 JSON events queued for drain on the `events` output port.
     /// Newline-delimited so a downstream `EventsSink` or UI shim can
     /// split them cleanly — same convention `StereoDecoder` uses.
@@ -276,6 +287,10 @@ impl RdsDemod {
             bit_sync,
             block_sync: BlockSync::new(),
             parser: GroupParser::new(),
+            since_group: 0,
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            gone_after: (out_rate * RDS_GONE_S) as usize,
+            cleared: false,
             events_out: Vec::new(),
         })
     }
@@ -296,8 +311,8 @@ impl RdsDemod {
         self.q_power
     }
 
-    /// Snapshot of decoder health counters + the last-decoded fields
-    /// (incl. RadioText, which is parsed but not yet an event).
+    /// Snapshot of decoder health counters + the raw last-written
+    /// PS / RadioText buffers (unconfirmed, unlike the events).
     #[must_use]
     pub fn diag(&self) -> RdsDiag {
         let printable = |b: &[u8]| -> String {
@@ -316,8 +331,8 @@ impl RdsDemod {
             groups: self.parser.groups,
             sync_losses: self.block_sync.sync_losses,
             clock_ppm: self.bit_sync.clock_error() * 1e6,
-            pi: self.parser.pi,
-            pty: self.parser.pty,
+            pi: self.parser.pi.value,
+            pty: self.parser.pty.value,
             ps: printable(&self.parser.ps_buf),
             rt: printable(&self.parser.rt_buf),
         }
@@ -404,11 +419,25 @@ impl RdsDemod {
             // compact change set whenever something new was decoded;
             // we serialize that to newline-delimited JSON into
             // `events_out` for the `events` port drain.
+            let groups = self.parser.groups;
             if let Some(bit) = self.bit_sync.push(out_i, out_q) {
                 if let Some(block) = self.block_sync.push(bit) {
                     if let Some(update) = self.parser.push_block(block) {
                         update.write_json(&mut self.events_out);
                     }
+                }
+            }
+            if self.parser.groups != groups {
+                self.since_group = 0;
+                self.cleared = false;
+            } else {
+                self.since_group += 1;
+                // Also clears a record a previous run left in the store
+                // when this one never hears RDS at all.
+                if self.since_group >= self.gone_after && !self.cleared {
+                    self.parser.forget();
+                    self.events_out.extend_from_slice(CLEAR_JSON);
+                    self.cleared = true;
                 }
             }
 
@@ -452,7 +481,7 @@ impl Block for RdsDemod {
                 reconfig_scope: ReconfigureScope::SourceRestart,
                 ai_notes: "MPX composite rate from the FM demod. Needs ≥128 kHz to keep the 57 kHz RDS subcarrier above Nyquist.",
             }],
-            ai_notes: "RDS / RBDS decoder. Reads the 57 kHz subcarrier in the FM-broadcast composite signal — call sign / station name / program type / RadioText. Auto-loads in `wbfm`; surfaces in the UI's RdsReadout component, not as a `tail decoder` category.",
+            ai_notes: "RDS / RBDS decoder. Reads the 57 kHz subcarrier in the FM-broadcast composite signal — station name / program type / RadioText (\"now playing\"). Auto-loads in `wbfm`; surfaces in the UI's RdsReadout component and the `rds` store record (`ps`, `rt`, `pi`, `pty`), not as a `tail decoder` category.",
         }
     }
 
@@ -1011,19 +1040,156 @@ impl BlockSync {
 //
 // PS (8-char station name) is spread over 4 successive 0A or 0B
 // groups: block B bits 0..1 give the segment index, block D gives two
-// ASCII chars. We emit on every update — callers see the name filling
-// in character pairs from left to right as groups arrive.
+// ASCII chars. RadioText (2A: up to 64 chars in 16 segments of 4,
+// 2B: 32 chars in 16 segments of 2) works the same way, ending early
+// at a 0x0D carriage return.
+//
+// Neither is emitted as it fills in. Many US stations scroll a slogan
+// through the 8-char PS ("MIX 106." → "5 Today'" → …), so a buffer
+// written segment by segment mixes two frames ("5 Toda6."); a lost
+// group or a bit error does the same to RadioText. [`SegText`] only
+// reports a text once one whole pass (segment 0, 1, … in order, none
+// missing) arrives twice in a row unchanged.
 
+/// Segments of one RDS text field, reported only when whole and
+/// confirmed — see the section comment above.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SegText {
+    max_segs: usize,
+    /// The pass being assembled, segment 0 onward.
+    cur: Vec<u8>,
+    /// The segment expected next; `None` = waiting for a segment 0.
+    next: Option<usize>,
+    /// The last complete pass, to confirm the next one against.
+    prev: Option<Vec<u8>>,
+    /// The last text reported, so a repeat isn't re-sent.
+    emitted: Option<Vec<u8>>,
+}
+
+impl SegText {
+    const fn new(max_segs: usize) -> Self {
+        Self {
+            max_segs,
+            cur: Vec::new(),
+            next: None,
+            prev: None,
+            emitted: None,
+        }
+    }
+
+    /// Drop any partial or unconfirmed pass (the text is changing).
+    fn restart(&mut self) {
+        self.cur.clear();
+        self.next = None;
+        self.prev = None;
+    }
+
+    /// Feed one segment. Returns the text when a pass completes, equals
+    /// the pass before it, and differs from the last text reported.
+    /// `short_ok`: a pass may end at a wrap back to segment 0 without a
+    /// 0x0D (RadioText from stations that only send the used segments).
+    fn push(&mut self, seg: usize, chars: &[u8], short_ok: bool) -> Option<Vec<u8>> {
+        let mut out = None;
+        if seg == 0 {
+            if short_ok && self.next.is_some_and(|n| n > 0) {
+                let pass = std::mem::take(&mut self.cur);
+                out = self.finish(pass);
+            }
+            self.cur.clear();
+            self.next = Some(0);
+        }
+        if self.next != Some(seg) {
+            // A segment was lost or arrived out of order: this pass
+            // can't be trusted, wait for the next segment 0.
+            self.next = None;
+            return out;
+        }
+        self.cur.extend_from_slice(chars);
+        self.next = Some(seg + 1);
+        let end = self.cur.iter().position(|&c| c == 0x0D);
+        if end.is_some() || seg + 1 == self.max_segs {
+            if let Some(end) = end {
+                self.cur.truncate(end);
+            }
+            self.next = None;
+            let pass = std::mem::take(&mut self.cur);
+            out = self.finish(pass);
+        }
+        out
+    }
+
+    fn finish(&mut self, pass: Vec<u8>) -> Option<Vec<u8>> {
+        let confirmed = self.prev.as_ref() == Some(&pass);
+        self.prev = Some(pass.clone());
+        if confirmed && self.emitted.as_ref() != Some(&pass) {
+            self.emitted = Some(pass.clone());
+            Some(pass)
+        } else {
+            None
+        }
+    }
+}
+
+/// A per-group field (PI, PTY, TP, TA) taken only once two groups in a
+/// row agree: one bit error that slips past the CRC-10 must not flip
+/// it (seen live: one group read PTY 17 / TP on a PTY-9 station).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Confirmed<T> {
+    value: Option<T>,
+    candidate: Option<T>,
+}
+
+impl<T: Copy + PartialEq> Confirmed<T> {
+    const fn new() -> Self {
+        Self {
+            value: None,
+            candidate: None,
+        }
+    }
+
+    /// Feed one reading; returns the new value when it changes.
+    fn see(&mut self, v: T) -> Option<T> {
+        if self.value == Some(v) {
+            self.candidate = None;
+            None
+        } else if self.candidate == Some(v) {
+            self.value = Some(v);
+            self.candidate = None;
+            Some(v)
+        } else {
+            self.candidate = Some(v);
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GroupUpdate {
     pi_changed: Option<u16>,
     pty_changed: Option<u8>,
     tp_changed: Option<bool>,
     ta_changed: Option<bool>,
-    /// Snapshot of the PS buffer whenever a new character pair lands
-    /// or the name completes a full sweep. `None` means no PS change
-    /// in this group.
-    ps_changed: Option<[u8; 8]>,
+    /// A confirmed station name (8 chars), or empty to clear the old
+    /// station's on a PI change. `None` = no PS change in this group.
+    ps_changed: Option<Vec<u8>>,
+    /// A confirmed RadioText (trailing spaces trimmed), or empty to
+    /// clear. `None` = no change.
+    rt_changed: Option<Vec<u8>>,
+}
+
+/// One JSON string of RDS text: printable ASCII, anything else as a
+/// space (malformed frames carry control bytes now and then).
+fn push_json_text(out: &mut Vec<u8>, text: &[u8]) {
+    out.push(b'"');
+    for &b in text {
+        let ch = if (0x20..=0x7E).contains(&b) { b } else { b' ' };
+        match ch {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            _ => out.push(ch),
+        }
+    }
+    out.push(b'"');
 }
 
 impl GroupUpdate {
@@ -1034,15 +1200,17 @@ impl GroupUpdate {
             tp_changed: None,
             ta_changed: None,
             ps_changed: None,
+            rt_changed: None,
         }
     }
 
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.pi_changed.is_none()
             && self.pty_changed.is_none()
             && self.tp_changed.is_none()
             && self.ta_changed.is_none()
             && self.ps_changed.is_none()
+            && self.rt_changed.is_none()
     }
 
     /// Serialize this update as one newline-terminated JSON object
@@ -1067,25 +1235,24 @@ impl GroupUpdate {
         if let Some(ta) = self.ta_changed {
             let _ = write!(out, r#","ta":{}"#, ta);
         }
-        if let Some(ps) = self.ps_changed {
-            out.extend_from_slice(br#","ps":""#);
-            // ASCII-only escape — replace control bytes with spaces.
-            // Non-printables land in malformed PS frames occasionally;
-            // fall-through to space keeps downstream JSON parsers
-            // happy without an extra transform.
-            for &b in &ps {
-                let ch = if (0x20..=0x7E).contains(&b) { b } else { b' ' };
-                match ch {
-                    b'"' => out.extend_from_slice(b"\\\""),
-                    b'\\' => out.extend_from_slice(b"\\\\"),
-                    _ => out.push(ch),
-                }
-            }
-            out.push(b'"');
+        if let Some(ps) = &self.ps_changed {
+            out.extend_from_slice(br#","ps":"#);
+            push_json_text(out, ps);
+        }
+        if let Some(rt) = &self.rt_changed {
+            out.extend_from_slice(br#","rt":"#);
+            push_json_text(out, rt);
         }
         out.extend_from_slice(b"}\n");
     }
 }
+
+/// Clears every field downstream (the store merges records, so absent
+/// fields would keep the last station's values): sent when RDS has been
+/// gone long enough that the readout would otherwise show a station
+/// that is no longer tuned.
+const CLEAR_JSON: &[u8] = br#"{"t":"rds","pi":null,"pty":null,"tp":null,"ta":null,"ps":"","rt":""}
+"#;
 
 struct GroupParser {
     /// The four most recent blocks assembled into a group slot,
@@ -1093,18 +1260,20 @@ struct GroupParser {
     /// stores the 16-bit data payload or `None` if we haven't yet
     /// seen that offset in the current group.
     slots: [Option<u16>; 4],
-    /// Authoritative state. Event emission compares against these.
-    pi: Option<u16>,
-    pty: Option<u8>,
-    tp: Option<bool>,
-    ta: Option<bool>,
+    /// Authoritative state, each confirmed by two groups in a row.
+    pi: Confirmed<u16>,
+    pty: Confirmed<u8>,
+    tp: Confirmed<bool>,
+    ta: Confirmed<bool>,
+    /// Raw PS / RadioText as last written, for [`RdsDiag`] only.
     ps_buf: [u8; 8],
-    ps_seen_segments: u8,
-    /// Last fully-sent PS snapshot — emits only when content changes.
-    last_emitted_ps: Option<[u8; 8]>,
-    /// RadioText (2A: 64 chars, 2B: 32) — parsed for diagnostics only,
-    /// not yet surfaced as an event.
     rt_buf: [u8; 64],
+    /// What is emitted: confirmed whole passes.
+    ps: SegText,
+    rt: SegText,
+    /// RadioText A/B flag and 2A-vs-2B variant of the current text; a
+    /// change of either means a new text.
+    rt_ab: Option<(bool, bool)>,
     /// Diagnostics: complete groups parsed.
     groups: u64,
 }
@@ -1113,16 +1282,27 @@ impl GroupParser {
     const fn new() -> Self {
         Self {
             slots: [None; 4],
-            pi: None,
-            pty: None,
-            tp: None,
-            ta: None,
+            pi: Confirmed::new(),
+            pty: Confirmed::new(),
+            tp: Confirmed::new(),
+            ta: Confirmed::new(),
             ps_buf: [b' '; 8],
-            ps_seen_segments: 0,
-            last_emitted_ps: None,
             rt_buf: [b' '; 64],
+            ps: SegText::new(4),
+            rt: SegText::new(16),
+            rt_ab: None,
             groups: 0,
         }
+    }
+
+    /// Forget the station (signal gone). Returns whether there was one
+    /// to forget, i.e. whether downstream needs a [`CLEAR_JSON`].
+    fn forget(&mut self) -> bool {
+        let had = self.pi.value.is_some();
+        let groups = self.groups;
+        *self = Self::new();
+        self.groups = groups;
+        had
     }
 
     fn push_block(&mut self, block: RdsBlock) -> Option<GroupUpdate> {
@@ -1149,21 +1329,31 @@ impl GroupParser {
             return None;
         };
         let d = self.slots[3]?;
+        // Block C feeds RT (2A) below. Take it before consuming the
+        // group.
+        let c_or_cprime = self.slots[2];
         // Consume the group: a later D must not pair with this group's
         // (stale) B if the next A/B are lost — that would write PS
         // characters into the wrong segment.
         self.slots = [None; 4];
         self.groups += 1;
-        // Block C feeds RT (2A) below; AF / CT group decoding will need
-        // it too once those group types are implemented.
-        let c_or_cprime = self.slots[2];
 
         let mut update = GroupUpdate::empty();
 
-        // Block A: PI.
-        if self.pi != Some(a) {
-            self.pi = Some(a);
+        // Block A: PI. Until two groups agree on it, distrust the whole
+        // group. A confirmed different PI is a different station: drop
+        // the old one's texts and clear them downstream.
+        if self.pi.value != Some(a) {
+            self.pi.see(a)?;
+            let (groups, pi) = (self.groups, self.pi);
+            *self = Self::new();
+            self.groups = groups;
+            self.pi = pi;
             update.pi_changed = Some(a);
+            update.ps_changed = Some(Vec::new());
+            update.rt_changed = Some(Vec::new());
+        } else {
+            self.pi.see(a);
         }
 
         // Block B parse.
@@ -1173,16 +1363,10 @@ impl GroupParser {
         let pty = ((b >> 5) & 0x1F) as u8;
         let b_low5 = (b & 0x1F) as u8;
 
-        if self.tp != Some(tp) {
-            self.tp = Some(tp);
-            update.tp_changed = Some(tp);
-        }
-        if self.pty != Some(pty) {
-            self.pty = Some(pty);
-            update.pty_changed = Some(pty);
-        }
+        update.tp_changed = self.tp.see(tp);
+        update.pty_changed = self.pty.see(pty);
 
-        // Group-type-specific handling. V1: 0A + 0B for PS + TA.
+        // Group-type-specific handling: 0A + 0B for PS + TA.
         if group_type_code == 0 {
             // Group 0A/0B layout of block B's low 5 bits:
             //   bit 4: TA flag
@@ -1190,38 +1374,44 @@ impl GroupParser {
             //   bit 2: DI (decoder identification) bit
             //   bits 1..0: PS segment index (0..3)
             let ta = (b_low5 >> 4) & 0x01 == 1;
-            if self.ta != Some(ta) {
-                self.ta = Some(ta);
-                update.ta_changed = Some(ta);
-            }
+            update.ta_changed = self.ta.see(ta);
             let seg = (b_low5 & 0x03) as usize;
             // Block D holds the two PS chars for this segment,
             // regardless of 0A vs 0B.
-            let ch_hi = ((d >> 8) & 0xFF) as u8;
-            let ch_lo = (d & 0xFF) as u8;
-            self.ps_buf[seg * 2] = ch_hi;
-            self.ps_buf[seg * 2 + 1] = ch_lo;
-            self.ps_seen_segments |= 1 << seg;
-            // Only emit PS snapshots once all 4 segments have been
-            // seen at least once — avoids broadcasting half-filled
-            // names on first-seek. After that, emit on any change.
-            if self.ps_seen_segments == 0b1111 && self.last_emitted_ps != Some(self.ps_buf) {
-                self.last_emitted_ps = Some(self.ps_buf);
-                update.ps_changed = Some(self.ps_buf);
+            let pair = d.to_be_bytes();
+            self.ps_buf[seg * 2..seg * 2 + 2].copy_from_slice(&pair);
+            if let Some(ps) = self.ps.push(seg, &pair, false) {
+                update.ps_changed = Some(ps);
             }
         }
 
-        // Group 2A/2B: RadioText. Diagnostics-only buffer (no event yet).
+        // Group 2A/2B: RadioText. Block B bit 4 is the A/B text flag —
+        // it toggles when the station starts a new text.
         if group_type_code == 2 {
             let seg = usize::from(b & 0x0F);
-            if variant_b {
-                self.rt_buf[seg * 2] = (d >> 8) as u8;
-                self.rt_buf[seg * 2 + 1] = (d & 0xFF) as u8;
-            } else if let Some(c) = c_or_cprime {
-                self.rt_buf[seg * 4] = (c >> 8) as u8;
-                self.rt_buf[seg * 4 + 1] = (c & 0xFF) as u8;
-                self.rt_buf[seg * 4 + 2] = (d >> 8) as u8;
-                self.rt_buf[seg * 4 + 3] = (d & 0xFF) as u8;
+            let ab = (b_low5 >> 4) & 0x01 == 1;
+            if self.rt_ab != Some((ab, variant_b)) {
+                self.rt_ab = Some((ab, variant_b));
+                self.rt.restart();
+                self.rt_buf = [b' '; 64];
+            }
+            let chars: Option<Vec<u8>> = if variant_b {
+                Some(d.to_be_bytes().to_vec())
+            } else {
+                c_or_cprime.map(|c| [c.to_be_bytes(), d.to_be_bytes()].concat())
+            };
+            if let Some(chars) = chars {
+                let at = seg * chars.len();
+                self.rt_buf[at..at + chars.len()].copy_from_slice(&chars);
+                if let Some(mut rt) = self.rt.push(seg, &chars, true) {
+                    while rt.last() == Some(&b' ') {
+                        rt.pop();
+                    }
+                    update.rt_changed = Some(rt);
+                }
+            } else {
+                // 2A without its block C: a hole in this pass.
+                self.rt.next = None;
             }
         }
 
@@ -1496,7 +1686,10 @@ mod tests {
 
         let mut parser = GroupParser::new();
         let mut updates = Vec::new();
-        for (seg, pair) in ps_chars.iter().enumerate() {
+        // Three passes: group 1 only proposes the PI (losing the first
+        // pass), and a name is only reported once a pass repeats.
+        for (seg, pair) in ps_chars.iter().cycle().take(12).enumerate() {
+            let seg = seg % 4;
             let d = u16::from(pair[0]) << 8 | u16::from(pair[1]);
             let blocks = [
                 RdsBlock {
@@ -1523,21 +1716,21 @@ mod tests {
             }
         }
 
-        // First update (from group 1, seg 0): PI + PTY + TP set, no
-        // PS yet (we only emit PS once all 4 segments are seen).
-        let first = updates[0];
+        // Group 1 only proposes the PI; group 2 confirms it and clears
+        // the previous station's PS / RT; PTY and TP confirm next.
+        let first = &updates[0];
         assert_eq!(first.pi_changed, Some(pi));
-        assert_eq!(first.pty_changed, Some(pty as u8));
-        assert_eq!(first.tp_changed, Some(true));
-        assert_eq!(first.ps_changed, None);
+        assert_eq!(first.ps_changed.as_deref(), Some(&b""[..]));
+        assert!(updates.iter().any(|u| u.pty_changed == Some(pty as u8)));
+        assert!(updates.iter().any(|u| u.tp_changed == Some(true)));
 
-        // The PS-complete event must land somewhere in the stream and
-        // carry the full assembled name.
-        let ps_event = updates
+        // Exactly one non-empty PS, after the second whole pass.
+        let names: Vec<_> = updates
             .iter()
-            .find_map(|u| u.ps_changed)
-            .expect("should emit a PS snapshot after the 4th segment");
-        assert_eq!(&ps_event, b"KEXP 90 ");
+            .filter_map(|u| u.ps_changed.clone())
+            .filter(|p| !p.is_empty())
+            .collect();
+        assert_eq!(names, vec![b"KEXP 90 ".to_vec()]);
     }
 
     #[test]
@@ -1548,12 +1741,197 @@ mod tests {
             pty_changed: Some(22),
             tp_changed: Some(true),
             ta_changed: None,
-            ps_changed: Some(*b"KEXP 90 "),
+            ps_changed: Some(b"KEXP 90 ".to_vec()),
+            rt_changed: Some(b"Now: \"Song\"".to_vec()),
         };
         update.write_json(&mut out);
         let s = std::str::from_utf8(&out).unwrap();
-        let expected = "{\"t\":\"rds\",\"pi\":4660,\"pty\":22,\"tp\":true,\"ps\":\"KEXP 90 \"}\n";
+        let expected = "{\"t\":\"rds\",\"pi\":4660,\"pty\":22,\"tp\":true,\"ps\":\"KEXP 90 \",\"rt\":\"Now: \\\"Song\\\"\"}\n";
         assert_eq!(s, expected, "full JSON: {s}");
+    }
+
+    /// Feed one group (A, B, C, D) and collect any update.
+    fn feed(
+        p: &mut super::GroupParser,
+        pi: u16,
+        b: u16,
+        c: u16,
+        d: u16,
+    ) -> Option<super::GroupUpdate> {
+        use super::{BlockOffset, RdsBlock};
+        let mut out = None;
+        for (offset, data) in [
+            (BlockOffset::A, pi),
+            (BlockOffset::B, b),
+            (BlockOffset::C, c),
+            (BlockOffset::D, d),
+        ] {
+            if let Some(u) = p.push_block(RdsBlock { offset, data }) {
+                out = Some(u);
+            }
+        }
+        out
+    }
+
+    /// A parser already locked to PI 0x1D2B: two group-1A groups (not
+    /// otherwise decoded) confirm the PI, as on air.
+    fn primed() -> super::GroupParser {
+        let mut p = super::GroupParser::new();
+        for _ in 0..2 {
+            let _ = feed(&mut p, 0x1D2B, 1 << 12, 0, 0);
+        }
+        p
+    }
+
+    /// One 0A pass of an 8-char PS; returns the PS values reported.
+    fn ps_pass(p: &mut super::GroupParser, name: &[u8; 8]) -> Vec<String> {
+        (0..4)
+            .filter_map(|seg| {
+                let d = u16::from_be_bytes([name[seg * 2], name[seg * 2 + 1]]);
+                feed(p, 0x1D2B, seg as u16, 0, d)?.ps_changed
+            })
+            .filter(|ps| !ps.is_empty())
+            .map(|ps| String::from_utf8(ps).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn scrolling_ps_never_reports_a_mixed_frame() {
+        // MIX 106.5 (found live 2026-10-14) scrolls "MIX 106.5 Today's
+        // Best Mix" through the PS. Frames change mid-pass, so a buffer
+        // written per segment showed "5 Toda6.". Only whole frames that
+        // repeat unchanged may come out.
+        let frames: [&[u8; 8]; 3] = [b"MIX 106.", b"5 Today'", b"s Best M"];
+        let mut p = primed();
+        let mut seen = Vec::new();
+        for f in frames {
+            // The frame changes mid-pass: segments 2, 3 of the new frame
+            // complete a pass begun with the old one's 0, 1 ("5 Toda6.").
+            for seg in [2_usize, 3] {
+                let d = u16::from_be_bytes([f[seg * 2], f[seg * 2 + 1]]);
+                if let Some(ps) = feed(&mut p, 0x1D2B, seg as u16, 0, d)
+                    .and_then(|u| u.ps_changed)
+                    .filter(|ps| !ps.is_empty())
+                {
+                    seen.push(String::from_utf8(ps).unwrap());
+                }
+            }
+            for _ in 0..3 {
+                seen.extend(ps_pass(&mut p, f));
+            }
+            for seg in [0_usize, 1] {
+                let d = u16::from_be_bytes([f[seg * 2], f[seg * 2 + 1]]);
+                let _ = feed(&mut p, 0x1D2B, seg as u16, 0, d);
+            }
+        }
+        assert_eq!(seen, vec!["MIX 106.", "5 Today'", "s Best M"]);
+    }
+
+    #[test]
+    fn ps_pass_with_a_lost_segment_is_not_reported() {
+        let mut p = primed();
+        assert!(
+            ps_pass(&mut p, b"KEXP 90 ").is_empty(),
+            "one pass: unconfirmed"
+        );
+        // Segment 2 lost: the pass is dropped, nothing confirms.
+        for seg in [0_usize, 1, 3] {
+            let d = u16::from_be_bytes([b"KEXP 90 "[seg * 2], b"KEXP 90 "[seg * 2 + 1]]);
+            assert!(feed(&mut p, 0x1D2B, seg as u16, 0, d)
+                .and_then(|u| u.ps_changed)
+                .is_none());
+        }
+        assert_eq!(ps_pass(&mut p, b"KEXP 90 "), vec!["KEXP 90 "]);
+    }
+
+    /// 2A RadioText groups for `text`, padded to whole 4-char segments.
+    fn rt_2a(p: &mut super::GroupParser, text: &[u8], ab: bool) -> Vec<String> {
+        let mut t = text.to_vec();
+        while !t.len().is_multiple_of(4) {
+            t.push(b' ');
+        }
+        t.chunks(4)
+            .enumerate()
+            .filter_map(|(seg, ch)| {
+                let b = (2 << 12) | (u16::from(ab) << 4) | seg as u16;
+                let c = u16::from_be_bytes([ch[0], ch[1]]);
+                let d = u16::from_be_bytes([ch[2], ch[3]]);
+                feed(p, 0x1D2B, b, c, d)?.rt_changed
+            })
+            .filter(|rt| !rt.is_empty())
+            .map(|rt| String::from_utf8(rt).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn radiotext_2a_is_reported_whole_and_confirmed() {
+        let mut p = primed();
+        let text = b"Now playing: Artist - Title\r";
+        assert!(
+            rt_2a(&mut p, text, false).is_empty(),
+            "one pass: unconfirmed"
+        );
+        assert_eq!(
+            rt_2a(&mut p, text, false),
+            vec!["Now playing: Artist - Title"]
+        );
+        assert!(
+            rt_2a(&mut p, text, false).is_empty(),
+            "a repeat isn't re-sent"
+        );
+        // A/B flag toggles: a new text, confirmed afresh.
+        let next = b"Next: Other Song\r";
+        assert!(rt_2a(&mut p, next, true).is_empty());
+        assert_eq!(rt_2a(&mut p, next, true), vec!["Next: Other Song"]);
+    }
+
+    #[test]
+    fn radiotext_without_carriage_return_ends_at_the_wrap() {
+        // Stations that send only the used segments, no 0x0D: the pass
+        // ends when segment 0 comes round again; padding is trimmed.
+        let mut p = primed();
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.extend(rt_2a(&mut p, b"MIX 106.5", false));
+        }
+        assert_eq!(seen, vec!["MIX 106.5"]);
+    }
+
+    #[test]
+    fn a_single_corrupt_group_does_not_flip_pty() {
+        let mut p = primed();
+        let b = |pty: u16| (1 << 12) | (pty << 5);
+        // Priming left PTY 0; PTY 9 takes two groups.
+        assert_eq!(
+            feed(&mut p, 0x1D2B, b(9), 0, 0).and_then(|u| u.pty_changed),
+            None
+        );
+        assert_eq!(
+            feed(&mut p, 0x1D2B, b(9), 0, 0).and_then(|u| u.pty_changed),
+            Some(9)
+        );
+        // One group reads 17 (slipped past the CRC), then 9 again.
+        assert_eq!(
+            feed(&mut p, 0x1D2B, b(17), 0, 0).and_then(|u| u.pty_changed),
+            None
+        );
+        assert_eq!(
+            feed(&mut p, 0x1D2B, b(9), 0, 0).and_then(|u| u.pty_changed),
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_pi_clears_the_old_station() {
+        let mut p = primed();
+        ps_pass(&mut p, b"KEXP 90 ");
+        assert_eq!(ps_pass(&mut p, b"KEXP 90 "), vec!["KEXP 90 "]);
+        // One group with a new PI could be a bit error: ignored.
+        assert!(feed(&mut p, 0x1234, 0, 0, u16::from_be_bytes(*b"MI")).is_none());
+        let u = feed(&mut p, 0x1234, 0, 0, u16::from_be_bytes(*b"MI")).unwrap();
+        assert_eq!(u.pi_changed, Some(0x1234));
+        assert_eq!(u.ps_changed.as_deref(), Some(&b""[..]));
+        assert_eq!(u.rt_changed.as_deref(), Some(&b""[..]));
     }
 
     // ----- P5-H3: symbol-timing recovery under sample-clock error ------
@@ -1683,8 +2061,8 @@ mod tests {
             "{label}: group rate min {min}/s mean {mean:.2}/s (ideal {ideal:.2}), \
              {losses} sync losses; per-second: {per_sec:?}"
         );
-        assert_eq!(parser.pi, Some(0x12BC), "{label}: PI");
-        assert_eq!(parser.pty, Some(10), "{label}: PTY");
+        assert_eq!(parser.pi.value, Some(0x12BC), "{label}: PI");
+        assert_eq!(parser.pty.value, Some(10), "{label}: PTY");
         assert_eq!(&parser.ps_buf, b"FERRITE!", "{label}: PS");
     }
 

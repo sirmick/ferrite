@@ -1,11 +1,12 @@
 <script lang="ts">
-  // RDS (Radio Data System) readout — station name, PI, PTY. Appears
+  // RDS (Radio Data System) readout — station name, RadioText, PI, PTY. Appears
   // in the Settings panel when a preset wires `ui:rds`; silently
   // hides itself otherwise so the SSB / AM / digital presets show no
   // empty box.
 
   import { pipeline } from '$lib/pipeline.svelte';
   import { rds, PTY_NAMES } from './store.svelte';
+  import { rbdsCallsign } from './callsign';
 
   // RDS state comes from the always-connected decoder mirror (kind `rds`,
   // Merge-folded). Show the readout when the preset has an RdsDemod.
@@ -15,6 +16,9 @@
   // PI is a 4-hex-digit code — render in upper-case for the display
   // convention every broadcaster database uses (e.g. RDS Spy, RDSVisual).
   let piHex = $derived(rds.pi === null ? null : rds.pi.toString(16).toUpperCase().padStart(4, '0'));
+  // The call sign stays put while many US stations scroll a slogan or
+  // the song title through the 8-char PS.
+  let callsign = $derived(rbdsCallsign(rds.pi));
 </script>
 
 {#if hasRds}
@@ -24,13 +28,17 @@
         station
       </span>
       <span class="font-mono text-slate-300">
+        {#if callsign}<span class="text-sky-300">{callsign}</span>{/if}
         {#if rds.ps}
-          {rds.ps}
-        {:else}
+          <span class="whitespace-pre">{rds.ps}</span>
+        {:else if !callsign}
           <span class="text-slate-600">—</span>
         {/if}
       </span>
     </div>
+    {#if rds.rt}
+      <div class="font-mono text-[11px] leading-snug text-slate-400" title={rds.rt}>{rds.rt}</div>
+    {/if}
     <div class="flex items-baseline justify-between text-[10px]">
       <span class="text-[color:var(--color-muted)]">pi</span>
       <span class="font-mono text-slate-400">
