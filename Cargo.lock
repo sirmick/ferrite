@@ -704,6 +704,7 @@ dependencies = [
  "ferrite-fldigi",
  "ferrite-ft8",
  "ferrite-liquid-dsp",
+ "ferrite-mbelib",
  "ferrite-multimon-ng",
  "ferrite-rtl-433",
  "ferrite-rtl-ais",
@@ -792,6 +793,14 @@ name = "ferrite-liquid-dsp"
 version = "0.9.0"
 dependencies = [
  "bindgen",
+ "cc",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "ferrite-mbelib"
+version = "0.9.0"
+dependencies = [
  "cc",
  "wasm-bindgen",
 ]

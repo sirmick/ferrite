@@ -41,8 +41,8 @@ use anyhow::Result;
 use serde::Deserialize;
 
 use crate::block::{
-    drain_events_port, Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, ParamKind,
-    ParamSpec, Placement, PortSpec, PortType, ReconfigureScope, Work,
+    drain_events_port, Block, BlockFactory, BlockIo, BlockSpec, InitCtx, InputPort, OutputPort,
+    ParamKind, ParamSpec, Placement, PortSpec, PortType, ReconfigureScope, Work,
 };
 use crate::dsd_helper::DsdEvent;
 
@@ -313,6 +313,52 @@ impl Lc {
     }
 }
 
+// ------------------------------------------------------------ voice
+
+/// DMR AMBE+2 frame deinterleave (ETSI TS 102 361-1 §B, the tables
+/// dsd-fme ships as `rW/rX/rY/rZ`): dibit `i` of a 72-bit frame puts its
+/// high bit at `ambe_fr[W[i]][X[i]]` and its low bit at
+/// `ambe_fr[Y[i]][Z[i]]`.
+const AMBE_W: [usize; 36] = [
+    0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2,
+    0, 2, 0, 2,
+];
+const AMBE_X: [usize; 36] = [
+    23, 10, 22, 9, 21, 8, 20, 7, 19, 6, 18, 5, 17, 4, 16, 3, 15, 2, 14, 1, 13, 0, 12, 10, 11, 9,
+    10, 8, 9, 7, 8, 6, 7, 5, 6, 4,
+];
+const AMBE_Y: [usize; 36] = [
+    0, 2, 0, 2, 0, 2, 0, 2, 0, 3, 0, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3,
+    1, 3, 1, 3,
+];
+const AMBE_Z: [usize; 36] = [
+    5, 3, 4, 2, 3, 1, 2, 0, 1, 13, 0, 12, 22, 11, 21, 10, 20, 9, 19, 8, 18, 7, 17, 6, 16, 5, 15, 4,
+    14, 3, 13, 2, 12, 1, 11, 0,
+];
+
+/// The three 72-bit AMBE+2 frames of a voice burst (264 burst bits:
+/// 108 voice | 48 sync/EMB | 108 voice; frame 2 straddles the middle),
+/// each deinterleaved to mbelib's `ambe_fr[4][24]` (row-major).
+#[must_use]
+pub fn voice_frames(bits: &[u8; 264]) -> [[u8; 96]; 3] {
+    let mut raw = [[0_u8; 72]; 3];
+    raw[0].copy_from_slice(&bits[..72]);
+    raw[1][..36].copy_from_slice(&bits[72..108]);
+    raw[1][36..].copy_from_slice(&bits[156..192]);
+    raw[2].copy_from_slice(&bits[192..264]);
+    let mut out = [[0_u8; 96]; 3];
+    for (f, r) in out.iter_mut().zip(raw.iter()) {
+        for i in 0..36 {
+            f[AMBE_W[i] * 24 + AMBE_X[i]] = r[2 * i];
+            f[AMBE_Y[i] * 24 + AMBE_Z[i]] = r[2 * i + 1];
+        }
+    }
+    out
+}
+
+/// Decoded speech waiting for the output clock, per slot: 1 s at 8 kHz.
+const VOICE_QUEUE: usize = 8_000;
+
 // ---------------------------------------------------------- decoder
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,7 +379,7 @@ struct SyncHit {
     lo: f32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct SlotState {
     /// Bursts of this slot since its last voice sync (0 = burst A).
     voice_burst: Option<u8>,
@@ -344,6 +390,13 @@ struct SlotState {
     alias_bits: Vec<u8>,
     alias_have: [bool; 4],
     alias_sent: String,
+    /// The current call's privacy flag (service options bit 6): its
+    /// voice frames are ciphertext, so they are not synthesised.
+    enc: bool,
+    /// Synthesised 8 kHz speech for this slot, oldest first.
+    voice: std::collections::VecDeque<f32>,
+    #[cfg(feature = "vocoder")]
+    vocoder: Option<ferrite_mbelib::Vocoder>,
 }
 
 /// Streaming DMR decoder over discriminator samples. Pure, no I/O.
@@ -386,6 +439,9 @@ pub struct DmrStats {
     pub lc_bad: u64,
     pub emb_ok: u64,
     pub emb_bad: u64,
+    /// AMBE+2 frames handed to the vocoder, and the errors it corrected.
+    pub voice_frames: u64,
+    pub voice_errs: u64,
 }
 
 const HIST: usize = 4_096;
@@ -621,6 +677,7 @@ impl DmrDecoder {
             Some(SyncKind::Voice) => {
                 self.slots[s].voice_burst = Some(0);
                 self.slots[s].frags.clear();
+                self.voice(slot, &bits);
             }
             Some(SyncKind::Data) => {
                 self.slots[s].voice_burst = None;
@@ -631,11 +688,58 @@ impl DmrDecoder {
                 if let Some(n) = vb.filter(|&n| n < 5) {
                     self.slots[s].voice_burst = Some(n + 1);
                     self.embedded(slot, &bits);
+                    self.voice(slot, &bits);
                 } else {
                     self.slots[s].voice_burst = None;
                 }
             }
         }
+    }
+
+    /// Synthesise the burst's three AMBE+2 frames into the slot's voice
+    /// queue (60 ms of speech per burst — one burst per slot per 60 ms,
+    /// so the queue stays level). Skipped for encrypted calls; without
+    /// the `vocoder` feature (or before the browser module has loaded)
+    /// it only counts frames.
+    #[allow(unused_variables, clippy::unused_self)]
+    fn voice(&mut self, slot: u8, bits: &[u8; 264]) {
+        let st = &mut self.slots[usize::from(slot)];
+        if st.enc {
+            return;
+        }
+        let frames = voice_frames(bits);
+        self.stats.voice_frames += 3;
+        #[cfg(feature = "vocoder")]
+        {
+            if st.vocoder.is_none() {
+                st.vocoder = ferrite_mbelib::Vocoder::new();
+            }
+            if let Some(v) = st.vocoder.as_mut() {
+                let mut pcm = [0.0_f32; ferrite_mbelib::FRAME_SAMPLES];
+                for f in &frames {
+                    let e = v.decode_ambe2450(f, &mut pcm);
+                    if e > 0 {
+                        self.stats.voice_errs += u64::try_from(e).unwrap_or(0);
+                    }
+                    st.voice.extend(pcm.iter().copied());
+                }
+                while st.voice.len() > VOICE_QUEUE {
+                    st.voice.pop_front();
+                }
+            }
+        }
+    }
+
+    /// Pop up to `n` samples of slot `slot`'s (0-based) speech into `out`,
+    /// zero-filling the rest. Returns how many were real speech.
+    pub fn take_voice(&mut self, slot: usize, out: &mut [f32]) -> usize {
+        let q = &mut self.slots[slot].voice;
+        let n = out.len().min(q.len());
+        for (d, s) in out.iter_mut().zip(q.drain(..n)) {
+            *d = s;
+        }
+        out[n..].fill(0.0);
+        n
     }
 
     /// One `sync` record when DMR is first *verified* — after an LC or
@@ -763,6 +867,7 @@ impl DmrDecoder {
 
     fn call(&mut self, slot: u8, lc: Lc, how: &str) {
         let st = &mut self.slots[usize::from(slot)];
+        st.enc = lc.service & 0x40 != 0;
         if st.call.is_some_and(|(t, s, _)| t == lc.tgt && s == lc.src) {
             return;
         }
@@ -797,6 +902,7 @@ impl DmrDecoder {
         let Some((_, _, t0)) = self.slots[usize::from(slot)].call.take() else {
             return;
         };
+        self.slots[usize::from(slot)].enc = false;
         #[allow(clippy::cast_precision_loss)]
         let secs = (self.t - t0) as f64 / self.fs;
         self.events.push(DsdEvent {
@@ -892,6 +998,9 @@ pub struct DmrDecodeParams {
     pub sample_rate_hz: f64,
     /// Invert the discriminator (receivers whose FM output is negated).
     pub invert: bool,
+    /// What the `out` audio port carries: `both` timeslots mixed, or
+    /// only `1` / `2`. `slot1` / `slot2` always carry their own slot.
+    pub listen: String,
 }
 
 impl Default for DmrDecodeParams {
@@ -899,6 +1008,7 @@ impl Default for DmrDecodeParams {
         Self {
             sample_rate_hz: 48_000.0,
             invert: false,
+            listen: "both".to_string(),
         }
     }
 }
@@ -907,15 +1017,31 @@ pub struct DmrDecode {
     params: DmrDecodeParams,
     dec: DmrDecoder,
     events_out: Vec<u8>,
+    /// Voice output samples owed for consumed input (8 kHz per 48 kHz).
+    owed: f64,
+    scratch: [Vec<f32>; 2],
 }
+
+/// Voice output rate (AMBE+2 synthesis).
+pub const VOICE_RATE_HZ: f64 = 8_000.0;
+/// Cap on owed voice output: one second.
+const MAX_OWED: f64 = 8_000.0;
 
 impl DmrDecode {
     pub fn new(params: DmrDecodeParams) -> Result<Self> {
         let dec = DmrDecoder::new(params.sample_rate_hz, params.invert);
+        if !["both", "1", "2"].contains(&params.listen.as_str()) {
+            anyhow::bail!(
+                "DmrDecode: listen must be both, 1 or 2 (got {:?})",
+                params.listen
+            );
+        }
         Ok(Self {
             params,
             dec,
             events_out: Vec::new(),
+            owed: 0.0,
+            scratch: [Vec::new(), Vec::new()],
         })
     }
 }
@@ -930,11 +1056,35 @@ impl Block for DmrDecode {
                 name: "in",
                 port_type: PortType::RealF32,
             }],
-            outputs: &[PortSpec {
-                name: "events",
-                port_type: PortType::Events,
-            }],
+            outputs: &[
+                PortSpec {
+                    name: "events",
+                    port_type: PortType::Events,
+                },
+                PortSpec {
+                    name: "out",
+                    port_type: PortType::RealF32,
+                },
+                PortSpec {
+                    name: "slot1",
+                    port_type: PortType::RealF32,
+                },
+                PortSpec {
+                    name: "slot2",
+                    port_type: PortType::RealF32,
+                },
+            ],
             params: &[
+                ParamSpec {
+                    key: "listen",
+                    label: "Listen",
+                    kind: ParamKind::EnumString {
+                        values: &["both", "1", "2"],
+                        default: "both",
+                    },
+                    reconfig_scope: ReconfigureScope::SelfBlock,
+                    ai_notes: "Which timeslot the `out` audio port plays: both mixed (default), or only 1 / 2. `slot1` / `slot2` always carry their own slot (per-slot transcription lanes).",
+                },
                 ParamSpec {
                     key: "sample_rate_hz",
                     label: "Input sample rate",
@@ -956,7 +1106,7 @@ impl Block for DmrDecode {
                     ai_notes: "Negate the discriminator. Only needed if a receiver inverts FM polarity: symptom is sync found but every LC failing (data and voice syncs are each other's inverse).",
                 },
             ],
-            ai_notes: "Native DMR (Tier II conventional / repeater) metadata decoder in pure Rust — runs node-side or in the browser. Feed a 48 kHz FmDemod (max_deviation_hz 5000) tap. Emits `ui:dsd` records: call (slot, TG, source ID, colour code, ENC flag; from the voice LC header or the embedded LC = late entry), end (terminator, with duration), alias (talker alias), sync. No voice audio — that is DsdHelper's job. FEC/CRC-checked, so it prints nothing rather than a wrong ID.",
+            ai_notes: "Native DMR (Tier II conventional / repeater) metadata decoder in pure Rust — runs node-side or in the browser. Feed a 48 kHz FmDemod (max_deviation_hz 5000) tap. Emits `ui:dsd` records: call (slot, TG, source ID, colour code, ENC flag; from the voice LC header or the embedded LC = late entry), end (terminator, with duration), alias (talker alias), sync. Voice: 8 kHz AMBE+2 speech on `out` (both slots mixed, or `listen` 1/2) and per slot on `slot1`/`slot2`, via mbelib (the `vocoder` feature; in the browser a lazily loaded module — silence until it loads, and for encrypted calls). FEC/CRC-checked, so it prints nothing rather than a wrong ID.",
         }
     }
 
@@ -968,6 +1118,21 @@ impl Block for DmrDecode {
             }
         }
         Ok(())
+    }
+
+    fn output_rate_hz(&self, port: usize) -> Option<f64> {
+        (port >= 1).then_some(VOICE_RATE_HZ)
+    }
+
+    fn output_capacity_hints(&self) -> [usize; crate::block::MAX_PORTS] {
+        // The shared output budget is the minimum across ports: give
+        // every port the same generous hint so `events` never throttles
+        // the audio ports (the SignalList lesson), and vice versa.
+        let mut h = [0; crate::block::MAX_PORTS];
+        for v in h.iter_mut().take(4) {
+            *v = 4_096;
+        }
+        h
     }
 
     fn process(&mut self, io: &mut BlockIo<'_>) -> Result<Work> {
@@ -992,6 +1157,52 @@ impl Block for DmrDecode {
         }
         let mut w = Work::new();
         w.consumed[0] = consumed;
+        // Block-progress rule: input is always consumed; the voice ports
+        // are *owed* 8/48 of it and paid as their room allows.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.owed = (self.owed + consumed as f64 * VOICE_RATE_HZ / self.params.sample_rate_hz)
+                .min(MAX_OWED);
+        }
+        let room = io
+            .outputs
+            .iter()
+            .filter(|p| matches!(p.name, "out" | "slot1" | "slot2"))
+            .map(OutputPort::len)
+            .min();
+        if let Some(room) = room {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = (self.owed.floor() as usize).min(room);
+            #[allow(clippy::cast_precision_loss)]
+            {
+                self.owed -= n as f64;
+            }
+            for (i, buf) in self.scratch.iter_mut().enumerate() {
+                buf.resize(n, 0.0);
+                self.dec.take_voice(i, buf);
+            }
+            let listen = self.params.listen.as_str();
+            for (j, port) in io.outputs.iter_mut().enumerate() {
+                let name = port.name;
+                let Some(dst) = port.as_real_f32_mut() else {
+                    continue;
+                };
+                let dst = &mut dst[..n];
+                match (name, listen) {
+                    ("slot1", _) | ("out", "1") => dst.copy_from_slice(&self.scratch[0]),
+                    ("slot2", _) | ("out", "2") => dst.copy_from_slice(&self.scratch[1]),
+                    ("out", _) => {
+                        for ((d, a), b) in
+                            dst.iter_mut().zip(&self.scratch[0]).zip(&self.scratch[1])
+                        {
+                            *d = (a + b).clamp(-1.0, 1.0);
+                        }
+                    }
+                    _ => continue,
+                }
+                w.produced[j] = n;
+            }
+        }
         drain_events_port(io, &mut self.events_out, &mut w);
         Ok(w)
     }

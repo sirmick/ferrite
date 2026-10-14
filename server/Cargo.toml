@@ -30,7 +30,7 @@ serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 anyhow      = "1"
 clap        = { version = "4", features = ["derive", "env"] }
-ferrite-blocks = { path = "../blocks", features = ["soapysdr", "multimon", "adsb", "ais", "ft8", "wspr", "rtl_433", "fldigi"] }
+ferrite-blocks = { path = "../blocks", features = ["soapysdr", "multimon", "adsb", "ais", "ft8", "wspr", "rtl_433", "fldigi", "vocoder"] }
 ferrite-runtime = { path = "../runtime" }
 ferrite-sdr-tables = { path = "../sdr-tables" }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }

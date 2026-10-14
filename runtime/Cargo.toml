@@ -34,6 +34,7 @@ wasm    = [
     "ferrite-blocks/multimon",
     "ferrite-blocks/rtl_433",
     "ferrite-blocks/fldigi",
+    "ferrite-blocks/vocoder",
     "ferrite-blocks/ft8",
     "ferrite-blocks/wspr",
 ]
