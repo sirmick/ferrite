@@ -72,7 +72,6 @@
   }
 
   let aSize = $derived(`${(fraction * 100).toFixed(3)}%`);
-  let bSize = $derived(`${((1 - fraction) * 100).toFixed(3)}%`);
 </script>
 
 <div
@@ -99,12 +98,11 @@
     onpointerup={onPointerUp}
     onpointercancel={onPointerUp}
   ></div>
-  <div
-    class="pane"
-    style:flex-basis={bSize}
-    style:width={direction === 'row' ? bSize : undefined}
-    style:height={direction === 'column' ? bSize : undefined}
-  >
+  <!-- `b` takes what's left after `a` and the bar. Sizing it at
+       (1 − fraction) too made a + bar + b one bar wider than the
+       container, and the page scrolled sideways (clipping the right
+       pane's last column). -->
+  <div class="pane rest">
     {@render b()}
   </div>
 </div>
@@ -129,6 +127,9 @@
     overflow: hidden;
     flex-grow: 0;
     flex-shrink: 0;
+  }
+  .pane.rest {
+    flex: 1 1 0;
   }
   .bar {
     position: relative;

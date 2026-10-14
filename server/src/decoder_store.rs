@@ -462,6 +462,14 @@ impl DecoderStore {
             None
         };
         let mut g = self.guard();
+        if kind == "dsd" && data.get("event").and_then(Value::as_str) == Some("alias") {
+            if let (Some(key), Some(label)) = (
+                data.pointer("/speaker/key").and_then(Value::as_str),
+                data.pointer("/speaker/label").and_then(Value::as_str),
+            ) {
+                relabel_speaker(&mut g.kinds, key, label);
+            }
+        }
         g.seq += 1;
         let seq = g.seq;
         let entry = g.kinds.entry(kind.to_string()).or_default();
@@ -660,6 +668,25 @@ impl DecoderSink for DecoderStore {
 }
 
 /// Drop `field` from all but the newest `keep` records that carry it.
+/// A talker alias often arrives a few overs after a radio's first call,
+/// so its earlier `dsd` / `transcribe` records were stamped with the bare
+/// ID. Rewrite their `speaker.label` in place — no new seq, no broadcast
+/// (like [`DecoderStore::fold_block_params`]): a newly connecting client,
+/// REST and MCP read the corrected history, and live tabs relabel on
+/// render from the newest `dsd` label (`web/src/lib/transcript/flow.ts`).
+fn relabel_speaker(kinds: &mut BTreeMap<String, KindState>, key: &str, label: &str) {
+    for kind in ["dsd", "transcribe"] {
+        let Some(state) = kinds.get_mut(kind) else {
+            continue;
+        };
+        for rec in state.recent.iter_mut().chain(state.current.values_mut()) {
+            if let Some(sp) = rec.data.get_mut("speaker").filter(|s| s["key"] == key) {
+                sp["label"] = Value::from(label);
+            }
+        }
+    }
+}
+
 fn strip_old_field(log: &mut VecDeque<Record>, field: &str, keep: usize) {
     let mut seen = 0usize;
     for rec in log.iter_mut().rev() {
@@ -1013,6 +1040,42 @@ mod tests {
         let d = rx.try_recv().unwrap();
         assert!(matches!(d.op, DeltaOp::Reset));
         assert_eq!(d.epoch, 1);
+    }
+
+    #[test]
+    fn a_late_alias_relabels_earlier_records() {
+        // VU3ITI's first overs were stamped "4040379"; the alias arrived
+        // afterwards. The stored history must read VU3ITI.
+        let s = DecoderStore::new();
+        let call = serde_json::json!({"t":"dsd","event":"call","protocol":"DMR","slot":1,
+                                      "tgt":"91","src":"4040379"});
+        s.apply("dsd", call);
+        s.apply(
+            "transcribe",
+            serde_json::json!({"text":"cq cq","t0":0.0,"t1":1.0,"lane":"slot1"}),
+        );
+        s.apply(
+            "dsd",
+            serde_json::json!({"t":"dsd","event":"call","protocol":"DMR","slot":2,
+                               "tgt":"91","src":"3107998"}),
+        );
+        assert_eq!(
+            s.snapshot_kind("dsd").unwrap().recent[0].data["speaker"]["label"],
+            "4040379"
+        );
+        s.apply(
+            "dsd",
+            serde_json::json!({"t":"dsd","event":"alias","protocol":"DMR","slot":1,
+                               "src":"4040379","text":"VU3ITI"}),
+        );
+        let dsd = s.snapshot_kind("dsd").unwrap();
+        assert_eq!(dsd.recent[0].data["speaker"]["label"], "VU3ITI");
+        assert_eq!(
+            dsd.recent[1].data["speaker"]["label"], "3107998",
+            "other talker untouched"
+        );
+        let line = &s.snapshot_kind("transcribe").unwrap().recent[0].data;
+        assert_eq!(line["speaker"]["label"], "VU3ITI");
     }
 
     #[test]

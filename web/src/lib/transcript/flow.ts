@@ -32,6 +32,31 @@ export interface Speaker {
   colour?: number;
 }
 
+/** The newest label per speaker key, read from the `dsd` log (oldest →
+ *  newest). A talker alias often arrives a few overs after a radio's
+ *  first call, so its early records carry the bare ID; every record
+ *  stamped after the alias carries the name, so the latest one wins and
+ *  views relabel the earlier lines with it. */
+export function latestLabels(
+  records: ReadonlyArray<{ data: unknown }>,
+): ReadonlyMap<string, string> {
+  const out = new Map<string, string>();
+  for (const r of records) {
+    const sp = (r.data as { speaker?: Partial<Speaker> } | null)?.speaker;
+    if (typeof sp?.key === 'string' && typeof sp.label === 'string') out.set(sp.key, sp.label);
+  }
+  return out;
+}
+
+/** `s` with its label brought up to date from `labels`. */
+export function relabel<S extends Speaker | undefined>(
+  s: S,
+  labels: ReadonlyMap<string, string>,
+): S {
+  const label = s && labels.get(s.key);
+  return s && label && label !== s.label ? { ...s, label } : s;
+}
+
 export interface TLine {
   id: string | number;
   /** Wall clock when the line closed (ms since epoch). */

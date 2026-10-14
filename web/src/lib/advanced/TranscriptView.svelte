@@ -23,7 +23,7 @@
   // Decoder section is the canonical UI. This view focuses on output.
   import TranscriptFlow from '$lib/transcript/TranscriptFlow.svelte';
   import TranscriptLegend from '$lib/transcript/TranscriptLegend.svelte';
-  import { buildFlow, flowToText } from '$lib/transcript/flow';
+  import { buildFlow, flowToText, latestLabels, relabel } from '$lib/transcript/flow';
 
   // Server-side transcription (sherpa, node-whisper) flows through the
   // unified decoder store: each segment is a record under kind
@@ -50,7 +50,15 @@
   // owns both, and a clicked chip highlights that speaker.
   let colourBy = $state<'speaker' | 'group'>('speaker');
   let focusKey = $state<string | undefined>(undefined);
-  let lines = $derived(transcript.segments.map(segmentLine));
+  // Lines spoken before a talker alias arrived carry the bare radio ID;
+  // relabel them from the call log's newest label for that speaker.
+  let labels = $derived(latestLabels(decoders.kind('dsd').recent));
+  let lines = $derived(
+    transcript.segments.map(segmentLine).map((l) => {
+      const speaker = relabel(l.speaker, labels);
+      return speaker === l.speaker ? l : { ...l, speaker };
+    }),
+  );
 
   // whisper initial_prompt — the single biggest accuracy lever for ham
   // voice. Stored empty = "use the built-in dense corpus"; the textarea

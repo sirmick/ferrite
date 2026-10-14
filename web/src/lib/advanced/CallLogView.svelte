@@ -12,6 +12,7 @@
   import { decoders } from '$lib/decoders/store.svelte';
   import { resetJournal } from '$lib/decoders/journal';
   import { speakerColour, NEUTRAL } from '$lib/transcript/palette';
+  import { latestLabels } from '$lib/transcript/flow';
 
   interface Props {
     kind?: string;
@@ -27,7 +28,7 @@
     src?: string;
     enc?: boolean;
     text?: string;
-    speaker?: { label?: string; colour?: number };
+    speaker?: { key?: string; label?: string; colour?: number };
   }
   interface Row {
     id: number;
@@ -39,9 +40,10 @@
     tone: 'call' | 'end' | 'muted';
   }
 
-  function row(seq: number, atMs: number, d: Rec): Row {
+  function row(seq: number, atMs: number, d: Rec, labels: ReadonlyMap<string, string>): Row {
     const event = d.event ?? '';
-    const who = d.speaker?.label ?? d.src ?? '';
+    // Calls logged before the talker alias arrived show the newest label.
+    const who = (d.speaker?.key && labels.get(d.speaker.key)) ?? d.speaker?.label ?? d.src ?? '';
     const colour = d.speaker ? speakerColour(d.speaker.colour) : NEUTRAL;
     const head = `${d.slot ? `S${d.slot} ` : ''}${d.tgt ? `TG${d.tgt} ` : ''}`;
     if (event === 'call') {
@@ -89,9 +91,11 @@
     };
   }
 
-  let rows = $derived(
-    decoders.kind(kind).recent.map((r) => row(r.seq, r.at_ms, (r.data ?? {}) as Rec)),
-  );
+  let rows = $derived.by(() => {
+    const recent = decoders.kind(kind).recent;
+    const labels = latestLabels(recent);
+    return recent.map((r) => row(r.seq, r.at_ms, (r.data ?? {}) as Rec, labels));
+  });
   let calls = $derived(rows.filter((r) => r.event === 'call').length);
   const hms = (ms: number) => new Date(ms).toLocaleTimeString([], { hour12: false });
 
