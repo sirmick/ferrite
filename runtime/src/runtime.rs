@@ -693,8 +693,9 @@ impl Runtime {
         // and centre equal input[0]'s. This lets pipelines like `src →
         // chan → demod → resamp` propagate both across intermediate
         // blocks (e.g. FmDemod) without every one needing to override.
-        let mut block_out_rate: Vec<f64> = vec![0.0; self.entries.len()];
-        let mut block_out_center: Vec<f64> = vec![0.0; self.entries.len()];
+        let mut block_out_rate: Vec<[f64; MAX_PORTS]> = vec![[0.0; MAX_PORTS]; self.entries.len()];
+        let mut block_out_center: Vec<[f64; MAX_PORTS]> =
+            vec![[0.0; MAX_PORTS]; self.entries.len()];
         for i in 0..self.entries.len() {
             // Build per-input-port (name, PortMeta) with rate + centre
             // resolved from the producing block. Producer ran earlier
@@ -709,8 +710,12 @@ impl Runtime {
                 .map(|(port_idx, port_spec)| {
                     let producer =
                         self.entries[i].input_wires[port_idx].and_then(|widx| wire_producer[widx]);
-                    let rate = producer.map(|(pb, _)| block_out_rate[pb]).unwrap_or(0.0);
-                    let centre = producer.map(|(pb, _)| block_out_center[pb]).unwrap_or(0.0);
+                    let rate = producer
+                        .map(|(pb, pp)| block_out_rate[pb][pp])
+                        .unwrap_or(0.0);
+                    let centre = producer
+                        .map(|(pb, pp)| block_out_center[pb][pp])
+                        .unwrap_or(0.0);
                     (
                         port_spec.name,
                         PortMeta {
@@ -758,11 +763,17 @@ impl Runtime {
             // rate-changers + frequency translators); fall back to
             // input[0]'s value as a 1:1 pass-through for sync blocks
             // (FmDemod, Tee, RssiProbe, Squelch, …) that don't override.
-            block_out_rate[i] = self.entries[i].block.output_rate_hz(0).unwrap_or(in0_rate);
-            block_out_center[i] = self.entries[i]
-                .block
-                .output_center_freq_hz(0)
-                .unwrap_or(in0_center);
+            // Per output port: a block may emit different rates on
+            // different ports (DmrDecode: events + 8 kHz voice from
+            // 48 kHz input). Ports without an override pass input[0]'s
+            // rate / centre through, as before.
+            for j in 0..self.entries[i].spec.outputs.len().min(MAX_PORTS) {
+                block_out_rate[i][j] = self.entries[i].block.output_rate_hz(j).unwrap_or(in0_rate);
+                block_out_center[i][j] = self.entries[i]
+                    .block
+                    .output_center_freq_hz(j)
+                    .unwrap_or(in0_center);
+            }
         }
         self.state = RuntimeState::Initialized;
         Ok(())
@@ -800,8 +811,9 @@ impl Runtime {
                 }
             }
         }
-        let mut block_out_rate: Vec<f64> = vec![0.0; self.entries.len()];
-        let mut block_out_center: Vec<f64> = vec![0.0; self.entries.len()];
+        let mut block_out_rate: Vec<[f64; MAX_PORTS]> = vec![[0.0; MAX_PORTS]; self.entries.len()];
+        let mut block_out_center: Vec<[f64; MAX_PORTS]> =
+            vec![[0.0; MAX_PORTS]; self.entries.len()];
         for i in 0..self.entries.len() {
             let input_meta: Vec<(&str, PortMeta)> = self.entries[i]
                 .spec
@@ -811,8 +823,12 @@ impl Runtime {
                 .map(|(port_idx, port_spec)| {
                     let producer =
                         self.entries[i].input_wires[port_idx].and_then(|widx| wire_producer[widx]);
-                    let rate = producer.map(|(pb, _)| block_out_rate[pb]).unwrap_or(0.0);
-                    let centre = producer.map(|(pb, _)| block_out_center[pb]).unwrap_or(0.0);
+                    let rate = producer
+                        .map(|(pb, pp)| block_out_rate[pb][pp])
+                        .unwrap_or(0.0);
+                    let centre = producer
+                        .map(|(pb, pp)| block_out_center[pb][pp])
+                        .unwrap_or(0.0);
                     (
                         port_spec.name,
                         PortMeta {
@@ -840,11 +856,17 @@ impl Runtime {
                 .block
                 .update_rates(&ctx)
                 .with_context(|| format!("refresh_rates block {id:?}"))?;
-            block_out_rate[i] = self.entries[i].block.output_rate_hz(0).unwrap_or(in0_rate);
-            block_out_center[i] = self.entries[i]
-                .block
-                .output_center_freq_hz(0)
-                .unwrap_or(in0_center);
+            // Per output port: a block may emit different rates on
+            // different ports (DmrDecode: events + 8 kHz voice from
+            // 48 kHz input). Ports without an override pass input[0]'s
+            // rate / centre through, as before.
+            for j in 0..self.entries[i].spec.outputs.len().min(MAX_PORTS) {
+                block_out_rate[i][j] = self.entries[i].block.output_rate_hz(j).unwrap_or(in0_rate);
+                block_out_center[i][j] = self.entries[i]
+                    .block
+                    .output_center_freq_hz(j)
+                    .unwrap_or(in0_center);
+            }
         }
         Ok(())
     }

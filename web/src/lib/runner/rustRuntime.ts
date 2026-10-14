@@ -20,6 +20,7 @@ import initWasm, {
 
 import type { FlowgraphDoc } from '../flowgraph.js';
 import { initFldigiBridge } from '../wasm/fldigi/fldigiBridge.js';
+import { initMbeBridge } from '../wasm/vocoder/mbeBridge.js';
 
 let initPromise: Promise<void> | undefined;
 
@@ -39,6 +40,15 @@ const FLDIGI_BLOCK_TYPES = new Set([
   'ThrobDemod',
   'NavtexDemod',
 ]);
+
+// Block `type`s that synthesise digital voice through the mbelib
+// vocoder. The vocoder is a separate, lazily fetched module: only a
+// flowgraph that puts one of these browser-side pulls `mbe.wasm`.
+const VOCODER_BLOCK_TYPES = new Set(['DmrDecode']);
+
+function docNeedsVocoder(doc: FlowgraphDoc): boolean {
+  return Object.values(doc.blocks ?? {}).some((d) => VOCODER_BLOCK_TYPES.has(d.type));
+}
 
 function docNeedsFldigi(doc: FlowgraphDoc): boolean {
   const blocks = doc.blocks;
@@ -109,6 +119,11 @@ export async function createRuntime(
   // is absent (decode just won't produce; nothing throws).
   if (env === 'browser' && docNeedsFldigi(doc)) {
     await initFldigiBridge();
+  }
+  // Lazy: the vocoder module is fetched the first time a browser-side
+  // flowgraph decodes digital voice, never otherwise. Inert if unbuilt.
+  if (env === 'browser' && docNeedsVocoder(doc)) {
+    await initMbeBridge();
   }
   return new RuntimeHandle(JSON.stringify(doc), env, framesHint);
 }

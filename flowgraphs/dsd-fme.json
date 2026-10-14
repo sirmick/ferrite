@@ -1,0 +1,128 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "dsd-fme",
+  "category": "Digital voice",
+  "label": "Digital voice: P25 / NXDN / D-STAR / YSF (dsd-fme)",
+  "description": "Multi-protocol digital voice through the operator-installed dsd-fme helper (native only): DMR, P25 Phase 1/2, NXDN, D-STAR, YSF, dPMR — call metadata and decoded speech.",
+  "ai_notes": "Multi-protocol digital voice via DsdHelper, which runs the operator-installed `dsd-fme` (not shipped; `FERRITE_DSD_FME` / `helper_path`) on 48 kHz discriminator audio: DMR, P25 Phase 1/2, NXDN48/96, D-STAR, YSF, dPMR auto-detected (`mode`), call records (protocol, slot, TG, source, CC, ENC) and talker aliases in `ui:dsd`, speech on the audio chain. Native only. For DMR prefer the `dmr` preset (Ferrite's own decoder + vocoder, also runs in the browser). Bay Area: P25 system WACN BEE00 / SYS 5E4 control channels 774.20625 (site 2), 773.45625 (site 5), 772.30625 (site 1) MHz, Phase II voice 770.28125 / 770.55625 MHz (Antenna B, gain 50); conventional DMR 441.850 MHz. Output: `tail decoder --category dsd`; `await dsd`.",
+  "signal_wiki_url": "https://www.sigidwiki.com/wiki/Digital_Mobile_Radio_(DMR)",
+  "environments": [
+    "node"
+  ],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "center_freq_hz": 774206250.0,
+        "sample_rate_hz": 2400000.0,
+        "bandwidth_hz": 2000000.0
+      }
+    },
+    "tee": {
+      "type": "TeeIqF32",
+      "placement": "node"
+    },
+    "fft": {
+      "type": "FFT",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "window": "hann",
+        "max_frames_per_second": 30
+      }
+    },
+    "logmag": {
+      "type": "LogMagU8",
+      "placement": "node",
+      "params": {
+        "size": 16384,
+        "alpha": 0.3
+      }
+    },
+    "chan": {
+      "type": "Channelizer",
+      "placement": "node",
+      "params": {
+        "input_rate_hz": 2400000.0,
+        "output_rate_hz": 48000.0
+      }
+    },
+    "demod": {
+      "type": "FmDemod",
+      "placement": "node",
+      "params": {
+        "sample_rate_hz": 48000,
+        "max_deviation_hz": 5000
+      }
+    },
+    "dsd": {
+      "type": "DsdHelper",
+      "placement": "node",
+      "params": {
+        "mode": "auto",
+        "metadata": true
+      }
+    },
+    "audio_resamp": {
+      "type": "RealF32Resamp",
+      "placement": "node",
+      "params": {
+        "output_rate_hz": 48000.0,
+        "stopband_db": 60.0
+      }
+    },
+    "audio": {
+      "type": "AudioSink",
+      "placement": "browser",
+      "when": {
+        "audio": true
+      },
+      "params": {
+        "buffer_samples": 8192
+      }
+    }
+  },
+  "wires": [
+    [
+      "src.out",
+      "tee.in"
+    ],
+    [
+      "tee.out0",
+      "chan.in"
+    ],
+    [
+      "tee.out1",
+      "fft.in"
+    ],
+    [
+      "fft.out",
+      "logmag.in"
+    ],
+    [
+      "logmag.out",
+      "ui:fft"
+    ],
+    [
+      "chan.out",
+      "demod.in"
+    ],
+    [
+      "demod.out",
+      "dsd.in"
+    ],
+    [
+      "dsd.events",
+      "ui:dsd"
+    ],
+    [
+      "dsd.out",
+      "audio_resamp.in"
+    ],
+    [
+      "audio_resamp.out",
+      "audio.in"
+    ]
+  ]
+}

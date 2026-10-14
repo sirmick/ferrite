@@ -164,3 +164,83 @@ fn noise_produces_no_events() {
     assert!(events.is_empty(), "noise produced events: {events:?}");
     assert_eq!(dec.stats.lc_ok + dec.stats.emb_ok, 0);
 }
+
+/// Voice through the vocoder: the slot 2 call in the fixture is ~40 s
+/// of AMBE+2 speech. With the `vocoder` feature the decoder must
+/// synthesise it (and nothing on slot 1 beyond its short call).
+/// `DMR_VOICE_DUMP=<path>` writes slot 2 as raw f32 for inspection.
+#[cfg(feature = "vocoder")]
+#[test]
+fn synthesises_slot_voice() {
+    let mut dec = DmrDecoder::new(48_000.0, false);
+    let mut slots: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
+    let mut buf = vec![0.0_f32; 16_000];
+    for c in fixture().chunks(4_096) {
+        dec.push(c);
+        for (i, s) in slots.iter_mut().enumerate() {
+            let n = dec.take_voice(i, &mut buf);
+            s.extend_from_slice(&buf[..n]);
+        }
+    }
+    if let Some(p) = std::env::var_os("DMR_VOICE_DUMP") {
+        let bytes: Vec<u8> = slots[1].iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(p, bytes).unwrap();
+    }
+    let secs = |v: &[f32]| v.len() as f64 / 8_000.0;
+    let rms = |v: &[f32]| {
+        (v.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() / v.len().max(1) as f64).sqrt()
+    };
+    eprintln!(
+        "slot1 {:.1} s rms {:.4}, slot2 {:.1} s rms {:.4}, {:?}",
+        secs(&slots[0]),
+        rms(&slots[0]),
+        secs(&slots[1]),
+        rms(&slots[1]),
+        dec.stats
+    );
+    assert!(secs(&slots[1]) > 30.0, "slot 2 speech too short");
+    assert!(rms(&slots[1]) > 0.01, "slot 2 speech is silent");
+
+    // Oracle: dsd-fme's synthesis of the same audio (`-fs -w`), reduced
+    // to log10 RMS per 20 ms frame (`fixtures/dmr_441850_dsd_slot2_env
+    // .txt`, 1991 frames). mbelib synthesises unvoiced bands from random
+    // noise, so waveforms never match sample-for-sample; the speech
+    // envelope and the voiced/silent pattern must. Measured when this
+    // test was written: correlation 0.876, frame agreement 0.945.
+    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests/fixtures/dmr_441850_dsd_slot2_env.txt");
+    let oracle: Vec<f64> = std::fs::read_to_string(&p)
+        .unwrap()
+        .lines()
+        .map(|l| l.trim().parse().unwrap())
+        .collect();
+    let ours: Vec<f64> = slots[1]
+        .as_chunks::<160>()
+        .0
+        .iter()
+        .map(|c| (rms(c) + 1e-5).log10())
+        .collect();
+    let n = oracle.len().min(ours.len());
+    let (a, b) = (&oracle[..n], &ours[..n]);
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let (ma, mb) = (mean(a), mean(b));
+    let cov: f64 = a.iter().zip(b).map(|(x, y)| (x - ma) * (y - mb)).sum();
+    let va: f64 = a.iter().map(|x| (x - ma).powi(2)).sum();
+    let vb: f64 = b.iter().map(|y| (y - mb).powi(2)).sum();
+    let corr = cov / (va * vb).sqrt();
+    let agree = a
+        .iter()
+        .zip(b)
+        .filter(|(x, y)| (**x > -2.5) == (**y > -2.5))
+        .count() as f64
+        / n as f64;
+    eprintln!("envelope corr {corr:.3}, voiced-frame agreement {agree:.3}");
+    assert!(
+        corr > 0.8,
+        "speech envelope diverges from dsd-fme: {corr:.3}"
+    );
+    assert!(
+        agree > 0.9,
+        "voiced/silent pattern diverges from dsd-fme: {agree:.3}"
+    );
+}

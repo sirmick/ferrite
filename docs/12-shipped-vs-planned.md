@@ -65,8 +65,8 @@ subset; DMR/DSD deferred for AMBE patent reasons.
 | Morse / DTMF | — | ✓ | `blocks/native/multimon-ng` |
 | RDS | — | ✓ | `blocks/src/rds_demod.rs` (in-tree) |
 | Codec2 / M17 | ✓ | — | Deferred |
-| DMR call metadata (TG, radio ID, CC, talker alias) | ✓ | ✓ | `blocks/src/dmr_decode.rs` — `DmrDecode`, pure Rust, runs node *and* browser (wasm); BPTC(196,96)+RS(12,9) and embedded LC BPTC(128,77), oracle-tested against dsd-fme on a real capture |
-| DMR / P25 / NXDN / D-STAR / YSF / dPMR voice | ✓ (Phase 6 track B) | ✓ (native) | `blocks/src/dsd_helper.rs` — `DsdHelper` drives the *operator-installed* `dsd-fme` subprocess; no vocoder in-tree (AMBE patent). Preset `dmr` pairs it with `DmrDecode` |
+| DMR call metadata (TG, radio ID, CC, talker alias) **and voice** | ✓ | ✓ | `blocks/src/dmr_decode.rs` — `DmrDecode`, pure Rust framing + AMBE+2 frame extraction; voice via vendored mbelib (`vocoder` feature; browser: lazily loaded 54 KB Emscripten module). Runs node *and* browser; oracle-tested against dsd-fme (calls exact, speech envelope r=0.875) |
+| DMR / P25 / NXDN / D-STAR / YSF / dPMR voice | ✓ (Phase 6 track B) | ✓ (native) | `blocks/src/dsd_helper.rs` — `DsdHelper` drives the *operator-installed* `dsd-fme` subprocess; no vocoder in-tree (AMBE patent). Preset `dsd-fme` (P25 / NXDN / D-STAR / YSF) |
 | `rtl_433` (ISM bundle) | — | ✓ | `blocks/native/rtl_433` (broader device coverage tracked for 1.0) |
 
 Net: the full planned subset shipped (incl. WSPR — the plan expected
