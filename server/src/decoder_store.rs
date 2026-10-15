@@ -122,6 +122,16 @@ fn policy_for(kind: &str) -> Policy {
             track: false,
             merge: false,
         },
+        // Spectrum-analyzer rows (`SweepSource` / `SweepSim`), one per
+        // sweep step: keyed by step so the current set *is* the last full
+        // pass (late joiners and MCP read it whole). A stale range's rows
+        // age out; consumers also filter on the row's `cfg`.
+        "panorama" => Policy::Upsert {
+            key_field: "step",
+            ttl_ms: 300_000,
+            track: false,
+            merge: false,
+        },
         // AI session bus — every conversation, whichever client drives
         // it (the ferrite-ai sidecar, a Claude Code session's hooks):
         // one record per user prompt / finished text block / tool use /
@@ -171,6 +181,7 @@ pub fn is_live_kind(kind: &str) -> bool {
             | "health"
             | "blocks"
             | "ai_live"
+            | "panorama"
     ) || kind.starts_with("params/")
 }
 
@@ -540,9 +551,13 @@ impl DecoderStore {
                 // Tables also keep a capped frame log in `recent`, so
                 // consumers can derive history the latest-per-key `current`
                 // can't (APRS packet console, ADS-B trails, per-key counts).
-                entry.recent.push_back(record.clone());
-                while entry.recent.len() > LOG_CAP {
-                    entry.recent.pop_front();
+                // Not panorama rows: ~10 KB each, and `current` already is
+                // the whole pass.
+                if kind != "panorama" {
+                    entry.recent.push_back(record.clone());
+                    while entry.recent.len() > LOG_CAP {
+                        entry.recent.pop_front();
+                    }
                 }
                 DeltaOp::Upsert { record }
             }

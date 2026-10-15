@@ -638,6 +638,21 @@ impl AppState {
         &self,
         mut delta: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(Option<ReconfigurePlan>, Vec<String>)> {
+        // Sweep knobs belong to the stepped preset, not to the operator's
+        // radio config: stage them in the placeholder (so a recompose keeps
+        // them) and hand them to the running sweep live.
+        let sweep: serde_json::Map<String, serde_json::Value> = delta
+            .iter()
+            .filter(|(k, _)| SWEEP_KEYS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !sweep.is_empty() {
+            delta.retain(|k, _| !SWEEP_KEYS.contains(&k.as_str()));
+            let plan = self.apply_sweep_params(sweep).await?;
+            if delta.is_empty() {
+                return Ok((plan, Vec::new()));
+            }
+        }
         let current = self.inner.source_config.read().await.clone();
         let mut notes = Vec::new();
         if let Some(new_settings) = delta.remove("settings") {
@@ -704,6 +719,40 @@ impl AppState {
         let merged = merge_into_params(current, delta);
         let plan = self.patch_source(merged).await?;
         Ok((plan, notes))
+    }
+
+    /// Stage sweep knobs in the preset's `src` placeholder and, while a
+    /// stepped source runs, apply them to it live (the pass restarts).
+    async fn apply_sweep_params(
+        &self,
+        sweep: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Option<ReconfigurePlan>> {
+        {
+            let mut doc = self.inner.preset_doc.write().await;
+            if !ferrite_runtime::wants_stepped(&doc) {
+                bail!("sweep parameters need the spectrum analyzer (a stepped preset) loaded");
+            }
+            if let Some(block) = doc.blocks.get_mut(SOURCE_ID) {
+                let mut merged = match block.params.take() {
+                    Some(serde_json::Value::Object(m)) => m,
+                    _ => serde_json::Map::new(),
+                };
+                for (k, v) in &sweep {
+                    merged.insert(k.clone(), v.clone());
+                }
+                block.params = Some(serde_json::Value::Object(merged));
+            }
+        }
+        let pipeline = self.inner.pipeline.lock().await;
+        let Some(mount) = pipeline.as_ref() else {
+            return Ok(None);
+        };
+        let plan = mount
+            .live_reconfigure_block(SOURCE_ID, serde_json::Value::Object(sweep.clone()))
+            .await?;
+        drop(pipeline);
+        self.publish_params(SOURCE_ID, &sweep);
+        Ok(Some(plan))
     }
 
     /// Notes for settings the hardware no longer honours: a stored setting
@@ -1768,6 +1817,19 @@ fn overlay_live_params(base: &mut FlowgraphDoc, applied: &FlowgraphDoc) {
 
 /// Source keys whose stored value can drift from the hardware (see
 /// [`hardware_differs`]).
+/// Sweep knobs (`SweepSource` / `SweepSim`) — routed to the stepped
+/// preset's placeholder, never into the operator's `SourceConfig`.
+const SWEEP_KEYS: &[&str] = &[
+    "sweep_start_hz",
+    "sweep_stop_hz",
+    "rbw_hz",
+    "averages",
+    "discard_ms",
+    "usable_fraction",
+    "overlap",
+    "dc_mask_hz",
+];
+
 const HW_CHECKED_KEYS: &[&str] = &["gain_db", "agc", "antenna"];
 
 /// Does the driver readback disagree with `v` for source key `k`? Only

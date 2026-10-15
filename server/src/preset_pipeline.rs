@@ -146,7 +146,10 @@ impl PresetMount {
     /// rather than the user's last optimistic write.
     pub async fn source_readback(&self) -> Option<SoapyReadback> {
         let mut rt = self.runtime.lock().await;
-        rt.block_typed::<SoapySource>(SOURCE_ID)
+        if let Some(b) = rt.block_typed::<SoapySource>(SOURCE_ID) {
+            return Some(b.readback());
+        }
+        rt.block_typed::<ferrite_blocks::SweepSource>(SOURCE_ID)
             .map(|b| b.readback())
     }
 
@@ -155,7 +158,11 @@ impl PresetMount {
     /// driver, so it is safe against a dead remote.
     pub async fn source_health(&self) -> Option<ferrite_blocks::SourceHealth> {
         let mut rt = self.runtime.lock().await;
-        rt.block_typed::<SoapySource>(SOURCE_ID).map(|b| b.health())
+        if let Some(b) = rt.block_typed::<SoapySource>(SOURCE_ID) {
+            return Some(b.health());
+        }
+        rt.block_typed::<ferrite_blocks::SweepSource>(SOURCE_ID)
+            .map(|b| b.health())
     }
 
     /// The first channelizer's live VFO shift and realised output rate
@@ -452,6 +459,10 @@ async fn drive(
                         // gain moves reach the UI/AI between explicit
                         // PATCH /api/source writes.
                         new_readback = Some(src.readback());
+                    } else if let Some(sweep) =
+                        rt.block_typed::<ferrite_blocks::SweepSource>(SOURCE_ID)
+                    {
+                        new_readback = Some(sweep.readback());
                     }
                     drop(rt);
                     // Fold the readback into the store as the `readback`

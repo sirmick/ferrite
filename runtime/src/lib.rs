@@ -33,7 +33,10 @@ pub mod wasm;
 
 pub use apply_profile::{apply_profile, AudioSplit, Profile};
 pub use block_registry::{instantiate_blocks, BlockMap, InventorySpecRegistry};
-pub use compose::{compose_source, ComposeError, SourceConfig, SOURCE_ID, SOURCE_SENTINEL_TYPE};
+pub use compose::{
+    compose_source, stepped_type_for, wants_stepped, ComposeError, SourceConfig, SOURCE_ID,
+    SOURCE_SENTINEL_TYPE,
+};
 pub use corpus::{validate_corpus, CorpusFinding};
 pub use doc::{BlockInstanceDecl, Environment, FlowgraphDoc, VariantDecl, Wire};
 pub use env_split::{split_for_environment, SplitError, CROSS_ENV_STREAM_BASE};

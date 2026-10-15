@@ -685,7 +685,12 @@ pub async fn patch_pipeline_block(
     // that cost the radio seconds and looked like success.
     if is_src {
         if let Some(obj) = delta.as_object() {
-            let type_name = state.get_source().await.type_name;
+            let mut type_name = state.get_source().await.type_name;
+            // A stepped preset (the spectrum analyzer) runs the sweep
+            // counterpart of the operator's source at `src`.
+            if ferrite_runtime::wants_stepped(&state.get_flowgraph().await) {
+                type_name = ferrite_runtime::stepped_type_for(&type_name).to_string();
+            }
             if let Some(u) = crate::block_schema::find_unknown_param(&type_name, obj) {
                 return Err(AppError::bad_request(
                     "UNKNOWN_PARAM",
