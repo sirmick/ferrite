@@ -292,6 +292,17 @@ One line each; the handler doc comments in
 - `POST /api/analysis/{snapshot,spectrum,spectrogram,envelope,spot_map}`
   (`/api/spectrum` = alias of `analysis/spectrum`) — live measurements;
   see the MCP tool table below.
+- `POST /api/sweep` — spectrum-analyzer measurement over any range:
+  aims the stepped sweep (`lo_hz`, `hi_hz`, `rbw_hz`, `averages`),
+  folds `passes` fresh passes from the `panorama` store kind and returns
+  `{range_hz, rbw_hz, steps, passes, floor_dbfs, floor_range_dbfs,
+  peaks[{freq_hz, level_dbfs, peak_db, avg_db, width_hz, duty, bursty}],
+  profile, complete, text}` (also an `analysis` record, tool `sweep`).
+  409 `RADIO_BUSY` if a receiver is running, unless `force`; `restore`
+  reloads the receiver preset afterwards.
+- `POST /api/preset/return` — leave the spectrum analyzer: reload the
+  receiver preset stashed when it was entered. (`POST /api/tune` answers
+  409 `RADIO_BUSY` while the analyzer runs, unless `force`.)
 - `GET /api/sigwiki/{identify,search,page,image}` — sigidwiki lookup
   against a locally cached index.
 - `GET /api/band-plan/at?hz=` — US allocations covering a frequency.
@@ -589,6 +600,7 @@ request structs; the descriptions below are what `tools/list` returns.
 | `load_preset` | `POST /api/preset` | Swap to a different preset (preserves centre freq). |
 | `tune` | `POST /api/tune` (+ `PATCH /api/source`) | Listen-frequency change with the per-driver DC-spike dodge; optionally folds in `gain_db` (+`agc=false`), `bandwidth_hz`, `sample_rate_hz`. Or `carrier_hz` (+ `tone_hz`): put an RF carrier on an audio tone — dial = carrier − tone (USB) / + tone (LSB); the tone defaults to the running decoder's `rx_freq_hz`. CLI: `tune --carrier 14.062007M`. |
 | `spectrum` | `POST /api/analysis/spectrum` (alias `/api/spectrum`) | Few-Hz spectrum of a ≤ 400 kHz range from a few seconds of live IQ (the source's tee on hardware, the channel's on a software source; no retune): peaks with interpolated `freq_hz`, `avg_db`/`peak_db` over the floor, `width_hz`, `keyed` + `duty` from a 20 ms envelope, and a max-hold `profile`. CLI: `spectrum <lo> <hi> [--secs --res --keyed]`. |
+| `sweep` | `POST /api/sweep` | Spectrum analyzer over any range (steps the radio ~7.6 MHz at a time, ~55 ms/step): per-step floor, emitters with occupied width / duty / bursty, max-hold profile. Takes the radio (`force` / `restore`). CLI: `sweep [<lo> <hi>] [--passes --rbw --force --restore]`. |
 | `snapshot` | `POST /api/analysis/snapshot` | Record a few seconds of live IQ (source tee = full span on hardware; no retune) and keep it by id (last 4) so several measurements see the same moment. |
 | `spectrogram` | `POST /api/analysis/spectrogram` | Time × frequency of a ≤ 400 kHz range (mixed to baseband + decimated first): `result {f0_hz, df_hz, dt_s, rows, cols}`, a character rendering in `text`, pixels (`cells_b64`) for the UI only. |
 | `envelope` | `POST /api/analysis/envelope` | On/off power timeline at one frequency: `segments` [{start_s, end_s}] from the snapshot's UTC `start_ms`, `duty`, `swing_db`, `keyed`, a `#`/`.` strip in `text`. |

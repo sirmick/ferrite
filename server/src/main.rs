@@ -51,6 +51,7 @@ mod sigwiki;
 mod soapy_log;
 mod source_policy;
 mod store_persist;
+mod sweep_api;
 mod view_bridge;
 
 /// Ferrite SDR daemon.
@@ -531,6 +532,7 @@ async fn main() -> Result<()> {
         .route("/api/sigwiki/image", get(sigwiki::get_image))
         .route("/api/preset", post(routes::load_preset))
         .route("/api/preset/return", post(routes::return_preset))
+        .route("/api/sweep", post(sweep_api::post_sweep))
         .route(
             "/api/profile",
             get(routes::get_profile).patch(routes::patch_profile),

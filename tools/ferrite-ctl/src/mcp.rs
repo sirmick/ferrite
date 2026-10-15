@@ -558,6 +558,11 @@ pub struct TuneArgs {
     /// target is outside the span. Ideal for the `signals` → hop → listen loop.
     #[serde(default)]
     pub keep_lo: bool,
+    /// The spectrum analyzer owns the radio while it runs: a tune then
+    /// answers 409 RADIO_BUSY unless `force`, which leaves the analyzer
+    /// (restoring the receiver preset) and tunes.
+    #[serde(default)]
+    pub force: bool,
     /// Optional "why" note surfaced in the UI's activity transcript.
     #[serde(default)]
     pub note: Option<String>,
@@ -801,6 +806,49 @@ pub struct SpectrumArgs {
     /// Points in the max-hold profile (default 120; 0 = none).
     #[serde(default)]
     pub profile_points: Option<usize>,
+    /// Optional "why" note for the activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SweepArgs {
+    /// Range start, Hz. Omit to keep the analyzer's current range.
+    #[serde(default)]
+    pub lo_hz: Option<f64>,
+    /// Range end, Hz. Any width — the radio steps ~7.6 MHz at a time
+    /// (~55 ms/step: 88–108 MHz ≈ 0.2 s/pass, 30–300 MHz ≈ 2 s,
+    /// 1–2000 MHz ≈ 15 s).
+    #[serde(default)]
+    pub hi_hz: Option<f64>,
+    /// Resolution (bin spacing), Hz (default 2500).
+    #[serde(default)]
+    pub rbw_hz: Option<f64>,
+    /// FFT frames averaged per step (default 16).
+    #[serde(default)]
+    pub averages: Option<u32>,
+    /// Fresh passes to fold, 1–20 (default 1). More passes = max-hold
+    /// catches bursts, and `duty` / `bursty` become meaningful.
+    #[serde(default)]
+    pub passes: Option<u32>,
+    /// dB over the local floor for a bin to count as signal (default 10).
+    #[serde(default)]
+    pub threshold_db: Option<f32>,
+    /// Peaks to return, strongest first (default 20).
+    #[serde(default)]
+    pub max_peaks: Option<usize>,
+    /// Points in the max-hold profile (default 64; 0 = none).
+    #[serde(default)]
+    pub profile_points: Option<usize>,
+    /// Take the radio from a running receiver (409 RADIO_BUSY otherwise).
+    #[serde(default)]
+    pub force: bool,
+    /// Put the receiver preset back afterwards.
+    #[serde(default)]
+    pub restore: bool,
+    /// Give up after this many seconds (default 120).
+    #[serde(default)]
+    pub timeout_s: Option<f64>,
     /// Optional "why" note for the activity transcript.
     #[serde(default)]
     pub note: Option<String>,
@@ -1392,6 +1440,26 @@ impl FerriteServer {
             .await
     }
 
+    /// Spectrum-analyzer sweep summary (`POST /api/sweep`).
+    pub(crate) async fn sweep_op(&self, args: SweepArgs) -> Result<Value, McpError> {
+        let timeout = args.timeout_s.unwrap_or(120.0).clamp(5.0, 600.0);
+        self.http
+            .post_slow(
+                "/api/sweep",
+                json!({
+                    "lo_hz": args.lo_hz, "hi_hz": args.hi_hz,
+                    "rbw_hz": args.rbw_hz, "averages": args.averages,
+                    "passes": args.passes, "threshold_db": args.threshold_db,
+                    "max_peaks": args.max_peaks, "profile_points": args.profile_points,
+                    "force": args.force, "restore": args.restore, "timeout_s": timeout,
+                }),
+                "sweep",
+                args.note.as_deref(),
+                Duration::from_secs_f64(timeout + 60.0),
+            )
+            .await
+    }
+
     pub(crate) async fn snapshot_op(&self, args: SnapshotArgs) -> Result<Value, McpError> {
         let secs = args.secs.unwrap_or(3.0).clamp(0.5, 15.0);
         self.http
@@ -1640,6 +1708,7 @@ impl FerriteServer {
                     // the per-driver dodge default; `Some` overrides it.
                     "offset_ratio": args.offset_ratio,
                     "keep_lo": args.keep_lo,
+                    "force": args.force,
                 }),
                 "tune",
                 note,
@@ -2254,6 +2323,16 @@ impl FerriteServer {
     }
 
     #[tool(
+        description = "Spectrum analyzer: sweep the radio across ANY range (wider than one span — it retunes in ~7.6 MHz steps, ~55 ms each) and get a summary instead of raw bins: `{range_hz, rbw_hz, steps, passes, floor_dbfs, floor_range_dbfs, peaks:[{freq_hz, level_dbfs, peak_db, avg_db, width_hz, duty, bursty}], profile:[[freq_hz, maxhold_dbfs]], complete, text}`. `peak_db`/`avg_db` are over the *local* (per-step) floor and `width_hz` is the occupied span above the threshold, so the radio's gain-band steps don't read as signals; `floor_range_dbfs` shows that spread. Use `passes` ≥ 3 to catch intermittent transmitters (max-hold) and get `duty`/`bursty`. This takes the radio: if a receiver preset is running it answers 409 RADIO_BUSY unless `force=true`; pass `restore=true` to put the receiver back after. The sweep is visible in the UI (Spectrum tool) and the summary lands in the AI panel. Then `tune(freq_hz)` (force if the analyzer is still up) or `spectrum` for a few-Hz look inside the span."
+    )]
+    async fn sweep(
+        &self,
+        Parameters(args): Parameters<SweepArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.sweep_op(args).await?)
+    }
+
+    #[tool(
         description = "Structured decoder output from the server-side DecoderStore — the single home for every event-emitting demod (APRS, ADS-B, AIS, FT8, WSPR, pager, transcribe, signals, RDS, …). With `kind` returns that kind as `{recent:[…], current:{…}}`: `recent` is a time-ordered append log (ft8/wspr/pager/transcribe/…); `current` is a keyed table (adsb by icao, aprs by call, ais by mmsi) or the single latest snapshot (signals/rds/rssi). Omit `kind` for the whole store `{seq, kinds:{…}}`. This is the same structured state the advanced UI views paint — captured server-side, so it works headless. Records carry `{seq, epoch, at_ms, key?, data, ctx?}`: `data` is the decoder's JSON (pager/EAS/AIS add parsed fields — address/capcode + message, SAME event + locations, mmsi + position + name — next to the raw `text`), `ctx` is where the radio was listening (`listen_hz`, `lo_hz`, `preset`). Also reads bookkeeping kinds: `jobs` (captures), `activity`, `health`. Driver/decoder warnings live in `status().health.warnings`."
     )]
     async fn decodes(
@@ -2508,6 +2587,7 @@ Find and measure signals — every result is drawn in the AI tab
 - `signals` — coarse strongest-signal watchlist over the whole span (live, ~146 Hz bins).
 - `snapshot` — record a few seconds of live IQ, kept by id, so several measurements look at the same moment.
 - `spectrum` — Hz-accurate peaks over a ≤400 kHz range: level over the floor, width, duty, `keyed`.
+- `sweep` — spectrum analyzer over ANY range (steps the radio ~7.6 MHz at a time): per-step floor, emitters (freq, level, width, duty, bursty), max-hold profile. Takes the radio: `force` to preempt a running receiver, `restore` to give it back; `tune(force=true)` leaves it.
 - `spectrogram` — time × frequency of a range: read the mode off its shape (CW dashes, RTTY's two tones, FT8 tone blocks, PSK31's thin line).
 - `envelope` — on/off timeline at one frequency: Morse elements, beacon slots, bursts.
 - `reference_image` — a preset's sigidwiki reference waterfall, to compare by eye.

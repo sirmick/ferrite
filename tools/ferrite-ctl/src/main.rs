@@ -110,6 +110,9 @@ enum Cmd {
         /// worker reload). Ideal for hopping stations during a survey.
         #[arg(long)]
         keep_lo: bool,
+        /// Leave the spectrum analyzer if it holds the radio, then tune.
+        #[arg(long)]
+        force: bool,
     },
     /// Patch parameter(s) on a pipeline block — the advanced/direct
     /// surface. `key=value` pairs; values parse as JSON when possible
@@ -219,6 +222,30 @@ enum Cmd {
         /// Analyse a kept snapshot instead of taking a fresh one.
         #[arg(long)]
         snapshot: Option<String>,
+    },
+    /// Spectrum-analyzer sweep across any range (steps the radio ~7.6 MHz
+    /// at a time): floor, emitters, max-hold profile. Takes the radio —
+    /// `--force` if a receiver is running, `--restore` to give it back.
+    Sweep {
+        /// Range start (Hz; `88M` shorthand ok). Omit to keep the current.
+        lo: Option<String>,
+        /// Range end.
+        hi: Option<String>,
+        #[arg(long)]
+        rbw: Option<f64>,
+        #[arg(long)]
+        averages: Option<u32>,
+        /// Fresh passes to fold (max-hold, duty).
+        #[arg(long, default_value_t = 1)]
+        passes: u32,
+        #[arg(long)]
+        threshold: Option<f32>,
+        #[arg(long, default_value_t = 20)]
+        peaks: usize,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        restore: bool,
     },
     /// Record a few seconds of live IQ and keep it by id (no retune).
     Snapshot {
@@ -813,6 +840,7 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             span,
             offset,
             keep_lo,
+            force,
         } => {
             if freq.is_none() && carrier.is_none() {
                 bail!("give a frequency or --carrier");
@@ -827,6 +855,7 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 bandwidth_hz: parse_si_opt(bw.as_deref())?,
                 sample_rate_hz: parse_si_opt(rate.as_deref())?,
                 keep_lo,
+                force,
                 note: None,
             };
             emit(&server.tune_op(args).await.map_err(op_err)?, json)
@@ -929,6 +958,45 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 }
             }
             if !json {
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("profile");
+                }
+            }
+            emit(&v, json)
+        }
+        Cmd::Sweep {
+            lo,
+            hi,
+            rbw,
+            averages,
+            passes,
+            threshold,
+            peaks,
+            force,
+            restore,
+        } => {
+            let mut v = server
+                .sweep_op(mcp::SweepArgs {
+                    lo_hz: lo.as_deref().map(parse_si).transpose()?,
+                    hi_hz: hi.as_deref().map(parse_si).transpose()?,
+                    rbw_hz: rbw,
+                    averages,
+                    passes: Some(passes),
+                    threshold_db: threshold,
+                    max_peaks: Some(peaks),
+                    profile_points: Some(64),
+                    force,
+                    restore,
+                    timeout_s: None,
+                    note: None,
+                })
+                .await
+                .map_err(op_err)?;
+            if !json {
+                if let Some(text) = v.get("text").and_then(Value::as_str) {
+                    print!("{text}");
+                    return Ok(());
+                }
                 if let Some(o) = v.as_object_mut() {
                     o.remove("profile");
                 }
