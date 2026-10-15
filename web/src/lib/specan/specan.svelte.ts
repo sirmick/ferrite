@@ -16,6 +16,8 @@ class SpecAnState {
   autoDb = $state(false);
   dbLo = $state(-100);
   dbHi = $state(-20);
+  /** Show the emitter panel on the right. */
+  showEmitters = $state(true);
   /** Marker frequency (click), Hz. */
   marker = $state<number | null>(null);
 

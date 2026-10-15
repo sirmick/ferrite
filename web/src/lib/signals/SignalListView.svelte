@@ -3,34 +3,70 @@
   // in place of the narrow FFT/waterfall when the operator picks
   // Display → Right → "Strongest Signals" (offered when the active preset
   // wires a SignalList at the wideband FFT). Rows are the auto-detected
-  // signals across the whole span, ranked strongest-first; clicking a row
-  // tunes the VFO to that frequency. Keyed on the block's stable track `id`
-  // so rows update in place rather than re-rendering as signals come/go.
+  // signals across the whole span, ranked strongest-first, joined to the
+  // station's emitter list (same number / band / label as the spectrum
+  // analyzer's panel — one EmitterTable for both). Ignored emitters
+  // (spurs) are hidden. Click or double-click tunes there.
 
-  import { pipeline } from '$lib/pipeline.svelte';
+  import { currentAxes, pipeline } from '$lib/pipeline.svelte';
   import { signals } from '$lib/signals/store.svelte';
+  import { emitters } from '$lib/emitters/store.svelte';
+  import EmitterTable, { type EmitterRow } from '$lib/emitters/EmitterTable.svelte';
   import BlockParams from '$lib/controls/BlockParams.svelte';
 
-  // The watchlist comes from the always-connected decoder mirror via the
-  // `signals` adapter — no per-view WS attach. The node-side SignalList
-  // detector backing this panel has live Min SNR (detection threshold) +
-  // Top N knobs, so editing them re-ranks the list + FFT squares at once.
+  // The node-side SignalList detector backing this panel has live Min SNR
+  // (detection threshold) + Top N knobs.
   let signalsBlock = $derived(pipeline.blocks['signals']);
 
-  // MHz with enough digits to distinguish adjacent broadcast channels.
-  function fmtMhz(hz: number): string {
-    return (hz / 1e6).toFixed(4);
-  }
-  // Signal occupied bandwidth, in the friendliest unit.
-  function fmtBw(hz: number): string {
-    if (hz >= 1e6) return `${(hz / 1e6).toFixed(2)} MHz`;
-    if (hz >= 1e3) return `${(hz / 1e3).toFixed(1)} kHz`;
-    return `${Math.round(hz)} Hz`;
-  }
+  // One row per emitter: the live detections (a station can be a dozen
+  // fragments) collapse onto the emitter they belong to — strongest
+  // detection's frequency and level. Detections not (yet) tied to an
+  // emitter show as themselves.
+  let joined = $derived.by<EmitterRow[]>(() => {
+    const byEmitter = new Map<number, EmitterRow>();
+    const loose: EmitterRow[] = [];
+    for (const s of signals.signals) {
+      const e = emitters.match(s.freq_hz, s.bw_hz, s.power_db);
+      if (!e) {
+        loose.push({
+          key: `s${s.id}`,
+          freq_hz: s.freq_hz,
+          width_hz: s.bw_hz,
+          level_dbfs: s.power_db,
+          snr_db: s.snr_db,
+        });
+        continue;
+      }
+      const prev = byEmitter.get(e.id);
+      if (prev && prev.level_dbfs >= s.power_db) continue;
+      byEmitter.set(e.id, {
+        key: `e${e.id}`,
+        id: e.id,
+        freq_hz: s.freq_hz,
+        width_hz: Math.max(e.width_hz, s.bw_hz),
+        level_dbfs: s.power_db,
+        snr_db: Math.max(s.snr_db, prev?.snr_db ?? -Infinity),
+        band: e.band,
+        label: e.label,
+        status: e.status,
+        last_seen_ms: e.last_seen_ms,
+      });
+    }
+    return [...byEmitter.values(), ...loose].sort((a, b) => b.level_dbfs - a.level_dbfs);
+  });
+  let rows = $derived(joined.filter((r) => r.status !== 'ignored'));
+  let hidden = $derived(joined.length - rows.length);
+  // Where the VFO listens: LO + the channelizer's shift (highlights the
+  // row you're on).
+  let vfo = $derived.by(() => {
+    const c = currentAxes(pipeline)?.center_freq_hz;
+    if (c === undefined) return null;
+    const shift = (pipeline.blocks.chan?.values as Record<string, number> | undefined)
+      ?.freq_shift_hz;
+    return c + (shift ?? 0);
+  });
 
-  function tuneTo(freqHz: number): void {
-    void pipeline.tune(freqHz);
-  }
+  const tuneTo = (r: EmitterRow) => void pipeline.tune(r.freq_hz);
 </script>
 
 <div
@@ -40,50 +76,25 @@
     <span>
       <span class="rounded-sm bg-sky-900/50 px-1 font-mono text-sky-300">Signals</span>
       <span class="ml-2 text-[color:var(--color-muted)]">
+        {rows.length} emitter{rows.length === 1 ? '' : 's'} in span ·
         {#if signals.total > signals.signals.length}
-          {signals.signals.length} strongest of {signals.total}
+          {signals.signals.length} of {signals.total} detections
         {:else}
-          {signals.signals.length} strongest
+          {signals.signals.length} detections
         {/if}
+        {#if hidden > 0}· {hidden} ignored{/if}
       </span>
     </span>
   </header>
 
   <div class="min-h-0 flex-1 overflow-auto">
-    {#if signals.signals.length === 0}
-      <p class="p-3 text-[11px] text-[color:var(--color-muted)]">
-        scanning the wideband FFT for signals…
-      </p>
-    {:else}
-      <table class="w-full border-collapse text-[11px] tabular-nums">
-        <thead
-          class="sticky top-0 bg-[color:var(--color-bg)] text-left text-[color:var(--color-muted)]"
-        >
-          <tr class="border-b border-slate-800">
-            <th class="px-2 py-1 font-medium">Freq (MHz)</th>
-            <th class="px-2 py-1 text-right font-medium">Pwr</th>
-            <th class="px-2 py-1 text-right font-medium">SNR</th>
-            <th class="px-2 py-1 text-right font-medium">BW</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each signals.signals as sig (sig.id)}
-            <tr
-              class="cursor-pointer border-b border-slate-900 hover:bg-sky-900/30"
-              title="Tune to {fmtMhz(sig.freq_hz)} MHz"
-              onclick={() => tuneTo(sig.freq_hz)}
-            >
-              <td class="px-2 py-1 font-mono text-sky-300">{fmtMhz(sig.freq_hz)}</td>
-              <td class="px-2 py-1 text-right">{sig.power_db.toFixed(1)}</td>
-              <td class="px-2 py-1 text-right text-emerald-300">{sig.snr_db.toFixed(0)}</td>
-              <td class="px-2 py-1 text-right text-[color:var(--color-muted)]">
-                {fmtBw(sig.bw_hz)}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    {/if}
+    <EmitterTable
+      {rows}
+      onPick={tuneTo}
+      onListen={tuneTo}
+      activeHz={vfo}
+      empty="scanning the wideband FFT for signals…"
+    />
   </div>
 
   {#if signalsBlock}

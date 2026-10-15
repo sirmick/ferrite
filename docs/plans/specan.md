@@ -149,3 +149,20 @@ server-side from the same rows.
 - MCP `sweep` tool (pass summary + max hold), the three-surface test.
 - The AGC checkbox still shows in the Spectrum quick bar (forced off by
   the preset; harmless but misleading).
+
+## Emitter list (2026-10-15)
+
+One model behind the receiver's Strongest Signals pane and the
+analyzer's emitter panel: `server/src/emitters.rs` folds the `signals`
+kind (receiver) and `panorama` rows (sweep) into numbered, persisted
+emitters (store kind `emitter`). Frame detections merge first — by
+200 kHz channel cell in broadcast FM (a fine-RBW detector splits a
+station + HD sidebands into a dozen fragments), within 10 kHz elsewhere
+(land-mobile neighbours stay separate); weak satellites ≥10 dB down fold
+into a ≥100 kHz carrier without widening it; widths are smoothed (a
+union only ever grows — a 2.4 MHz detection once became a black hole).
+The browser's matcher mirrors the rules (`emitters/store.test.ts`). UI:
+`EmitterTable` shared by both panes (number, MHz, level, SNR, width,
+band / label, ✎ label, ⊘ ignore); numbered ticks on the panorama.
+MCP: `emitters`, `label_emitter`. Next: `inspect`.
+

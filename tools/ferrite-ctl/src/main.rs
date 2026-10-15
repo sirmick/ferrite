@@ -247,6 +247,32 @@ enum Cmd {
         #[arg(long)]
         restore: bool,
     },
+    /// The emitter list (both detectors merged, numbered, persisted).
+    Emitters {
+        /// new | identified | ignored | all (default: all but ignored).
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        lo: Option<String>,
+        #[arg(long)]
+        hi: Option<String>,
+        /// level | freq | recent | new
+        #[arg(long)]
+        sort: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Label an emitter (sets it identified), or `--status ignored`.
+    LabelEmitter {
+        id: u64,
+        label: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        confidence: Option<f32>,
+        #[arg(long)]
+        notes: Option<String>,
+    },
     /// Record a few seconds of live IQ and keep it by id (no retune).
     Snapshot {
         #[arg(long, default_value_t = 3.0)]
@@ -1003,6 +1029,70 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             }
             emit(&v, json)
         }
+        Cmd::Emitters {
+            status,
+            lo,
+            hi,
+            sort,
+            limit,
+        } => {
+            let v = server
+                .emitters_op(mcp::EmittersArgs {
+                    status,
+                    lo_hz: lo.as_deref().map(parse_si).transpose()?,
+                    hi_hz: hi.as_deref().map(parse_si).transpose()?,
+                    since_ms: None,
+                    sort,
+                    limit: Some(limit),
+                })
+                .await
+                .map_err(op_err)?;
+            if json {
+                return emit(&v, json);
+            }
+            for e in v
+                .get("emitters")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let f = |k: &str| e.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                println!(
+                    "#{:<4} {:>12.4} MHz {:>8.1} kHz {:>6.1} dBFS  {:<9} {}{}",
+                    e.get("id").and_then(Value::as_u64).unwrap_or(0),
+                    f("freq_hz") / 1e6,
+                    f("width_hz") / 1e3,
+                    f("level_dbfs"),
+                    e.get("status").and_then(Value::as_str).unwrap_or(""),
+                    e.get("label").and_then(Value::as_str).unwrap_or(""),
+                    e.get("band")
+                        .and_then(Value::as_str)
+                        .map(|b| format!("  [{b}]"))
+                        .unwrap_or_default(),
+                );
+            }
+            Ok(())
+        }
+        Cmd::LabelEmitter {
+            id,
+            label,
+            status,
+            confidence,
+            notes,
+        } => emit(
+            &server
+                .label_emitter_op(mcp::LabelEmitterArgs {
+                    id,
+                    label,
+                    status,
+                    confidence,
+                    evidence: None,
+                    notes,
+                })
+                .await
+                .map_err(op_err)?,
+            json,
+        ),
         Cmd::Snapshot { secs } => emit(
             &server
                 .snapshot_op(mcp::SnapshotArgs { secs: Some(secs) })

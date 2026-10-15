@@ -300,6 +300,17 @@ One line each; the handler doc comments in
   profile, complete, text}` (also an `analysis` record, tool `sweep`).
   409 `RADIO_BUSY` if a receiver is running, unless `force`; `restore`
   reloads the receiver preset afterwards.
+- `GET /api/emitters?status=&lo_hz=&hi_hz=&since_ms=&sort=&limit=` —
+  the station's emitter list (store kind `emitter`, persisted): every
+  transmitter the receiver's SignalList or the spectrum analyzer has
+  seen, merged and numbered (`{id, freq_hz, width_hz, level_dbfs,
+  peak_dbfs, snr_db, band, first_seen_ms, last_seen_ms, seen, sources,
+  status, label, notes, ident}`); `status` new / identified / ignored
+  (ignored hidden unless asked). `POST /api/emitters/:id {label?,
+  status?, notes?, confidence?, evidence?}` labels it (→ identified) or
+  ignores it; the editor (`ui` / `cli` / `mcp`) is recorded in `ident`.
+  Broadcast FM groups by 200 kHz channel cell; elsewhere detections
+  within 10 kHz merge.
 - `POST /api/preset/return` — leave the spectrum analyzer: reload the
   receiver preset stashed when it was entered. (`POST /api/tune` answers
   409 `RADIO_BUSY` while the analyzer runs, unless `force`.)
@@ -600,6 +611,7 @@ request structs; the descriptions below are what `tools/list` returns.
 | `load_preset` | `POST /api/preset` | Swap to a different preset (preserves centre freq). |
 | `tune` | `POST /api/tune` (+ `PATCH /api/source`) | Listen-frequency change with the per-driver DC-spike dodge; optionally folds in `gain_db` (+`agc=false`), `bandwidth_hz`, `sample_rate_hz`. Or `carrier_hz` (+ `tone_hz`): put an RF carrier on an audio tone — dial = carrier − tone (USB) / + tone (LSB); the tone defaults to the running decoder's `rx_freq_hz`. CLI: `tune --carrier 14.062007M`. |
 | `spectrum` | `POST /api/analysis/spectrum` (alias `/api/spectrum`) | Few-Hz spectrum of a ≤ 400 kHz range from a few seconds of live IQ (the source's tee on hardware, the channel's on a software source; no retune): peaks with interpolated `freq_hz`, `avg_db`/`peak_db` over the floor, `width_hz`, `keyed` + `duty` from a 20 ms envelope, and a max-hold `profile`. CLI: `spectrum <lo> <hi> [--secs --res --keyed]`. |
+| `emitters` / `label_emitter` | `GET /api/emitters` · `POST /api/emitters/:id` | The persisted emitter list (both detectors merged, numbered, with band / level / first-last seen / status) and labelling — the AI's memory of the band. CLI: `emitters [--status --lo --hi --sort]`, `label-emitter <id> [label] [--status]`. |
 | `sweep` | `POST /api/sweep` | Spectrum analyzer over any range (steps the radio ~7.6 MHz at a time, ~55 ms/step): per-step floor, emitters with occupied width / duty / bursty, max-hold profile. Takes the radio (`force` / `restore`). CLI: `sweep [<lo> <hi>] [--passes --rbw --force --restore]`. |
 | `snapshot` | `POST /api/analysis/snapshot` | Record a few seconds of live IQ (source tee = full span on hardware; no retune) and keep it by id (last 4) so several measurements see the same moment. |
 | `spectrogram` | `POST /api/analysis/spectrogram` | Time × frequency of a ≤ 400 kHz range (mixed to baseband + decimated first): `result {f0_hz, df_hz, dt_s, rows, cols}`, a character rendering in `text`, pixels (`cells_b64`) for the UI only. |

@@ -107,7 +107,7 @@ pub struct StepAcc {
 }
 
 impl StepAcc {
-    fn new(f_lo_hz: f64, bin_hz: f64, n: usize) -> Self {
+    pub fn new(f_lo_hz: f64, bin_hz: f64, n: usize) -> Self {
         Self {
             f_lo_hz,
             bin_hz,
@@ -189,9 +189,10 @@ pub fn summarize(
     let bin_hz = steps.first().map_or(0.0, |s| s.bin_hz);
     let hot = |b: &Bin| b.max.is_finite() && b.max - b.floor >= threshold_db;
     // Clusters of hot bins. A modulated signal's max-hold at a fine RBW
-    // is spiky (broadcast FM drops below threshold between sidebands),
-    // so bridge gaps up to ~15 kHz (at least 3 bins): one emitter, one
-    // peak.
+    // is spiky (broadcast FM drops below threshold between sidebands; HD
+    // Radio sidebands sit just outside the analog carrier), so bridge
+    // gaps up to ~15 kHz (at least 3 bins): one emitter,
+    // one peak. (The emitter list groups broadcast FM by channel cell.)
     let bridge = ((15_000.0 / bin_hz.max(1.0)).round() as usize).max(3);
     let mut clusters: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;

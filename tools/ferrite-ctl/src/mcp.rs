@@ -855,6 +855,52 @@ pub struct SweepArgs {
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct EmittersArgs {
+    /// `new` (not yet identified), `identified`, `ignored`, or `all`.
+    /// Default: everything except ignored.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Only emitters at or above this frequency, Hz.
+    #[serde(default)]
+    pub lo_hz: Option<f64>,
+    /// Only emitters at or below this frequency, Hz.
+    #[serde(default)]
+    pub hi_hz: Option<f64>,
+    /// Only emitters seen since this Unix time, ms.
+    #[serde(default)]
+    pub since_ms: Option<u64>,
+    /// `level` (strongest first, default), `freq`, `recent`, `new`.
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// Max rows (default 50).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct LabelEmitterArgs {
+    /// Emitter number (`id` from `emitters`).
+    pub id: u64,
+    /// What it is, e.g. "NOAA Weather Radio KEC49", "APRS digipeater",
+    /// "local switching-supply spur". Empty clears the label.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// `identified` (set automatically with a label), `ignored` (spur /
+    /// not interesting — hidden from lists), or `new`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// 0–1: how sure you are.
+    #[serde(default)]
+    pub confidence: Option<f32>,
+    /// What you based it on — decodes heard, measurements (width, keying,
+    /// baud), sigwiki matches, band plan. Free-form JSON.
+    #[serde(default)]
+    pub evidence: Option<Value>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct SignalsArgs {
     /// Freshness gate (ms). The watchlist is reported empty if the
     /// `SignalList` block hasn't emitted within this window — i.e. the
@@ -1436,6 +1482,46 @@ impl FerriteServer {
                 "spectrum",
                 args.note.as_deref(),
                 Duration::from_secs_f64(secs + 30.0),
+            )
+            .await
+    }
+
+    /// The emitter list (`GET /api/emitters`).
+    pub(crate) async fn emitters_op(&self, args: EmittersArgs) -> Result<Value, McpError> {
+        let mut q: Vec<String> = Vec::new();
+        if let Some(v) = &args.status {
+            q.push(format!("status={v}"));
+        }
+        if let Some(v) = args.lo_hz {
+            q.push(format!("lo_hz={v}"));
+        }
+        if let Some(v) = args.hi_hz {
+            q.push(format!("hi_hz={v}"));
+        }
+        if let Some(v) = args.since_ms {
+            q.push(format!("since_ms={v}"));
+        }
+        if let Some(v) = &args.sort {
+            q.push(format!("sort={v}"));
+        }
+        q.push(format!("limit={}", args.limit.unwrap_or(50)));
+        self.http
+            .get(&format!("/api/emitters?{}", q.join("&")))
+            .await
+    }
+
+    /// Label / ignore an emitter (`POST /api/emitters/:id`).
+    pub(crate) async fn label_emitter_op(&self, args: LabelEmitterArgs) -> Result<Value, McpError> {
+        self.http
+            .post(
+                &format!("/api/emitters/{}", args.id),
+                json!({
+                    "label": args.label, "status": args.status,
+                    "confidence": args.confidence, "evidence": args.evidence,
+                    "notes": args.notes,
+                }),
+                "label-emitter",
+                None,
             )
             .await
     }
@@ -2333,6 +2419,26 @@ impl FerriteServer {
     }
 
     #[tool(
+        description = "The emitter list — every transmitter this station has seen, from the receiver's strongest-signal detector and from spectrum-analyzer sweeps alike, merged into numbered emitters and persisted across restarts: `{count, emitters:[{id, freq_hz, width_hz, level_dbfs, peak_dbfs, snr_db, band, first_seen_ms, last_seen_ms, seen, sources, status, label, notes, ident}]}`. `status` is `new` (unidentified — your queue), `identified` (labelled), or `ignored` (spurs, hidden by default). Filter by `status`, `lo_hz`/`hi_hz`, `since_ms` (what's new since yesterday), `sort` (`level`/`freq`/`recent`/`new`). Feed it by running `sweep` over a range (or just letting the receiver run); then investigate the `new` ones and record what you found with `label_emitter`."
+    )]
+    async fn emitters(
+        &self,
+        Parameters(args): Parameters<EmittersArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.emitters_op(args).await?)
+    }
+
+    #[tool(
+        description = "Record what an emitter is: `label` (sets status `identified`), or `status:\"ignored\"` for a spur / birdie / not interesting (hidden from lists). Give `confidence` (0–1) and `evidence` (decodes heard, width / keying / baud measured, sigwiki match, band plan) — the operator sees the label on the emitter panel and the panorama, and it persists as the station's knowledge. Use the `id` from `emitters`."
+    )]
+    async fn label_emitter(
+        &self,
+        Parameters(args): Parameters<LabelEmitterArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.label_emitter_op(args).await?)
+    }
+
+    #[tool(
         description = "Structured decoder output from the server-side DecoderStore — the single home for every event-emitting demod (APRS, ADS-B, AIS, FT8, WSPR, pager, transcribe, signals, RDS, …). With `kind` returns that kind as `{recent:[…], current:{…}}`: `recent` is a time-ordered append log (ft8/wspr/pager/transcribe/…); `current` is a keyed table (adsb by icao, aprs by call, ais by mmsi) or the single latest snapshot (signals/rds/rssi). Omit `kind` for the whole store `{seq, kinds:{…}}`. This is the same structured state the advanced UI views paint — captured server-side, so it works headless. Records carry `{seq, epoch, at_ms, key?, data, ctx?}`: `data` is the decoder's JSON (pager/EAS/AIS add parsed fields — address/capcode + message, SAME event + locations, mmsi + position + name — next to the raw `text`), `ctx` is where the radio was listening (`listen_hz`, `lo_hz`, `preset`). Also reads bookkeeping kinds: `jobs` (captures), `activity`, `health`. Driver/decoder warnings live in `status().health.warnings`."
     )]
     async fn decodes(
@@ -2587,6 +2693,7 @@ Find and measure signals — every result is drawn in the AI tab
 - `signals` — coarse strongest-signal watchlist over the whole span (live, ~146 Hz bins).
 - `snapshot` — record a few seconds of live IQ, kept by id, so several measurements look at the same moment.
 - `spectrum` — Hz-accurate peaks over a ≤400 kHz range: level over the floor, width, duty, `keyed`.
+- `emitters` / `label_emitter` — the station's persisted emitter list (both detectors merged, numbered, with band, level, first/last seen, status new/identified/ignored); label what you identify, ignore spurs.
 - `sweep` — spectrum analyzer over ANY range (steps the radio ~7.6 MHz at a time): per-step floor, emitters (freq, level, width, duty, bursty), max-hold profile. Takes the radio: `force` to preempt a running receiver, `restore` to give it back; `tune(force=true)` leaves it.
 - `spectrogram` — time × frequency of a range: read the mode off its shape (CW dashes, RTTY's two tones, FT8 tone blocks, PSK31's thin line).
 - `envelope` — on/off timeline at one frequency: Morse elements, beacon slots, bursts.

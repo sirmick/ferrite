@@ -5,6 +5,9 @@
   import ViewBridge from '$lib/layout/ViewBridge.svelte';
   import SpecAnQuickBar from './SpecAnQuickBar.svelte';
   import Panorama from './Panorama.svelte';
+  import EmitterPanel from './EmitterPanel.svelte';
+  import Split from '$lib/layout/Split.svelte';
+  import { specan } from './specan.svelte';
 </script>
 
 <div class="flex h-full min-h-0 w-full flex-col">
@@ -13,8 +16,15 @@
     <AppToolbar />
   </header>
   <SpecAnQuickBar />
-  <div class="min-h-0 flex-1">
-    <Panorama />
+  <div class="flex min-h-0 flex-1">
+    {#if specan.showEmitters}
+      <Split direction="row" defaultFraction={0.72} storageKey="ferrite.split.specan-emitters">
+        {#snippet a()}<Panorama />{/snippet}
+        {#snippet b()}<EmitterPanel />{/snippet}
+      </Split>
+    {:else}
+      <Panorama />
+    {/if}
   </div>
 </div>
 

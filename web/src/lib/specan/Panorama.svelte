@@ -14,6 +14,7 @@
   import { registerView, unregisterView } from '$lib/viz/viewRegistry';
   import { pipeline } from '$lib/pipeline.svelte';
   import { specan } from './specan.svelte';
+  import { emitters } from '$lib/emitters/store.svelte';
   import {
     autoRange,
     fmtHz,
@@ -41,6 +42,7 @@
   let plotW = $derived(Math.max(1, Math.floor(traceBox.w - GUTTER)));
   let live = $derived(reduceToColumns(decoded, lo, hi, plotW));
   let newest = $derived(decoded.reduce((m, r) => Math.max(m, r.t_ms), 0));
+  let marks = $derived(emitters.inRange(lo, hi).sort((a, b) => a.freq_hz - b.freq_hz));
 
   let dbRange = $state<[number, number]>([-110, -30]);
   let hover = $state<{ x: number; f: number; db: number } | null>(null);
@@ -129,6 +131,25 @@
       specan.traceMode
     ];
     path(trace, colour, 1.25);
+    // emitters: a tick each, numbers (labels when named) where they fit
+    ctx.font = '9px ui-monospace, monospace';
+    let lastLabelX = -Infinity;
+    for (const e of marks) {
+      const x = Math.round(xAt(e.freq_hz)) + 0.5;
+      ctx.strokeStyle = e.status === 'identified' ? '#fbbf24' : 'rgba(148,163,184,0.7)';
+      ctx.beginPath();
+      ctx.moveTo(x, plotH - 6);
+      ctx.lineTo(x, plotH);
+      ctx.stroke();
+      const txt = e.label ? `${e.id} ${e.label}` : `${e.id}`;
+      const tw = ctx.measureText(txt).width;
+      if (x - lastLabelX > tw / 2 + 14) {
+        ctx.fillStyle = e.status === 'identified' ? '#fbbf24' : '#94a3b8';
+        ctx.fillText(txt, x - tw / 2, plotH - 9);
+        lastLabelX = x + tw / 2;
+      }
+    }
+    ctx.font = '10px ui-monospace, monospace';
     // marker
     if (specan.marker !== null && specan.marker >= lo && specan.marker <= hi) {
       const x = Math.round(xAt(specan.marker)) + 0.5;

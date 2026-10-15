@@ -11,6 +11,7 @@
   import { fmtHz, type TraceMode } from './panorama';
   import IconZoomOut from '@tabler/icons-svelte-runes/icons/zoom-out';
   import IconEraser from '@tabler/icons-svelte-runes/icons/eraser';
+  import IconListDetails from '@tabler/icons-svelte-runes/icons/list-details';
 
   const RBW = [1000, 2500, 5000, 10000, 25000, 100000];
   const AVG = [1, 4, 8, 16, 32, 64, 128];
@@ -115,6 +116,16 @@
   >
   <LiveControls />
   <div class="ml-auto flex items-center gap-2">
+    <button
+      type="button"
+      class="flex items-center gap-1 rounded border px-1.5 py-0.5 hover:border-sky-400"
+      class:border-sky-500={specan.showEmitters}
+      class:border-slate-700={!specan.showEmitters}
+      title="Show / hide the emitter list"
+      aria-pressed={specan.showEmitters}
+      onclick={() => (specan.showEmitters = !specan.showEmitters)}
+      ><IconListDetails size={14} /> Emitters</button
+    >
     <div
       class="flex overflow-hidden rounded border border-slate-700"
       role="group"
