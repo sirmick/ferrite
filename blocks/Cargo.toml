@@ -123,3 +123,12 @@ wasm-opt = false
 # Used by integration tests that want to capture lines a block emits via
 # `tracing::info!(target: "decoder::…", …)` without a global subscriber.
 tracing-subscriber    = { version = "0.3", default-features = false, features = ["fmt"] }
+
+# Hand-run hardware spike (stepped-sweep latency numbers); needs a radio.
+[[example]]
+name              = "sweep_spike"
+required-features = ["soapysdr"]
+
+[[example]]
+name              = "passband_spike"
+required-features = ["soapysdr"]
