@@ -4,11 +4,11 @@
 
 Point a small Rust daemon at your radio, open the URL on any machine on the
 LAN, and you get a fluent spectrum/waterfall UI, thirty-plus ready-to-go
-listening and decoder presets (analog, paging/packet/aviation, the full
-fldigi keyboard-mode family, FT8/FT4/WSPR weak-signal — many decoding
+listening and decoder presets (analog, paging/packet/aviation/ISM, the full
+fldigi keyboard-mode family, FT8/FT4/WSPR weak-signal, DMR — many decoding
 right in the browser), mode-specific decoder panels (maps, tables, live
 text), **a live speech-to-text transcript of whatever voice mode you're
-listening to** (whisper.cpp running locally in the browser, no cloud),
+listening to** (sherpa-onnx running locally in the browser, no cloud),
 and an optional Claude sidecar that finds signals, tunes the rig,
 captures clips, and explains what it's hearing — all without leaving the
 page.
@@ -24,12 +24,14 @@ One app, in the browser, out of the box:
   the page and listen.
 - **Every common mode built in.** Analog voice/music plus the digital
   decoders people actually reach for — ADS-B, AIS, APRS/packet,
-  POCSAG/FLEX, RDS, EAS/SAME, DTMF, the weak-signal trio (FT8, FT4,
-  WSPR), and the full vendored **fldigi** keyboard-mode family (RTTY,
-  PSK31, CW, MT63, Olivia, Contestia, DominoEX, Throb, NAVTEX) with
-  **RSID auto-detect** that hot-swaps to whatever mode shows up. All
-  ship as presets — no recompiling, no external decoders as
-  subprocesses.
+  POCSAG/FLEX, RDS, EAS/SAME, DTMF, rtl_433 ISM sensors, the
+  weak-signal trio (FT8, FT4, WSPR), DMR (call metadata + voice), and
+  the full vendored **fldigi** keyboard-mode family (RTTY, PSK31, CW,
+  MT63, Olivia, Contestia, DominoEX, Throb, NAVTEX) with **RSID
+  auto-detect** that hot-swaps to whatever mode shows up. All ship as
+  presets — no recompiling, no external decoders as subprocesses
+  (the one opt-in exception: P25 / NXDN / D-STAR / YSF voice via an
+  operator-installed `dsd-fme`).
 - **An AI operator that drives the radio.** Optional, local-auth, and it
   uses the *same* control surface you do — it can find a signal, tune,
   swap presets, capture, and show you the spectrum it just looked at.
@@ -51,19 +53,23 @@ One app, in the browser, out of the box:
 
 ## Features
 
-- **AI operator that drives the radio.** The `ferrite-ai` sidecar hands
-  Claude a real SoapySDR rig via `ferrite-ctl`: tune, swap presets, change
-  gain/AGC/antenna/DC-mode, capture FFT or audio, run a peak finder, and
-  read PNG renders of what it just heard. Auth is your local Claude Code
-  subscription — no API key in a file. Every command it runs surfaces in
-  the activity panel.
+- **AI operator that drives the radio.** The `ferrite-ai` sidecar (Claude
+  Code over ACP) hands Claude a real SoapySDR rig through the `ferrite`
+  MCP server — and nothing else (no shell): tune, swap presets, change
+  gain/AGC/antenna/DC-mode, measure live spectrum/spectrogram/envelope,
+  read the strongest-signal list, capture IQ/FFT/audio, and look at
+  snapshots of the panes. Auth is your local Claude Code subscription —
+  no API key in a file. Every command it runs surfaces in the activity
+  panel, and the conversation lives on the event plane, so every tab
+  shows the same chat.
 - **MCP server.** `ferrite-ctl mcp` exposes the rig as a Model Context
   Protocol server over stdio — any MCP-enabled client (Claude Desktop,
   Claude Code CLI, the bundled sidecar) can drive a running `ferrited`
   with no shell-exec, no glue. Tools: `status`, `list_devices` /
   `list_presets`, `select_device` / `load_preset`, `tune` (dodge-aware),
-  `start` / `stop`, `set_block_param`, `decodes` / `await_events`, `view_snapshot`
-  / `view_state`, `transcribe`, `reload_drivers`. See
+  `start` / `stop`, `set_block_param`, `decodes` / `await_events`,
+  `signals`, `spectrum` / `spectrogram` / `envelope`, `view_snapshot`
+  / `view_state`, `transcribe`, `reload_drivers`, … See
   [docs/02-protocol.md](docs/02-protocol.md) for the wire surface +
   example Claude Desktop config.
 - **One block crate, two compile targets.** Every DSP unit (channelizer,
@@ -83,17 +89,15 @@ One app, in the browser, out of the box:
   FFT/waterfall column for a mode view: FT8/FT4/WSPR decode table +
   station map, ADS-B aircraft map, APRS station map + packet console,
   and a live fldigi text console (mode badge tracks RSID switches).
-- **In-browser voice transcription.** Tap *Main → Transcript* on any
-  analog-voice preset (WBFM / NBFM / AM / SSB) and the post-demod PCM
-  starts feeding [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
-  compiled to WASM — fully local, no network, no API key, no cloud.
-  Ham-vocabulary prompt + post-processing scrubs whisper's classic
-  short-clip tail-loop and call-sign mishearings;
-  [tinydiarize](https://github.com/akashmjn/tinydiarize) flags
-  speaker turns when you load the `tdrz` model so a two-station QSO
-  breaks into separate paragraphs. Live rolling transcript with
-  copy / save controls; the AI sidecar reads the same store so you
-  can ask it about what just got said.
+- **In-browser voice transcription.** Set the receiver's Audio control
+  to *Transcribe* on any voice preset (WBFM / NBFM / AM / SSB) and the
+  post-demod PCM feeds [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)'s
+  streaming Zipformer (EN-20M) compiled to WASM — fully local, no
+  network, no API key, no cloud. With demod on the server, the same
+  model runs in the `tools/sherpa-asr` sidecar instead. Ham
+  post-processing keeps call signs honest; the transcript lands in the
+  main pane (per-slot, with talker attribution, on DMR) and in the
+  store the AI reads, so you can ask it about what just got said.
 - **JSON-authored flowgraphs.** A mode is a flowgraph file in
   [`flowgraphs/`](flowgraphs/) plus optional blocks — no UI work, no
   server recompile. Thirty-plus ship in the box.
@@ -139,13 +143,15 @@ sudo apt install ./ferrite_0.9.0_amd64.deb
 # Fedora
 sudo dnf install ./ferrite-0.9.0-1.fc40.x86_64.rpm
 
-sudo systemctl enable --now ferrited
-xdg-open http://localhost:10001
+ferrited --flowgraph /usr/share/ferrite/flowgraphs/wbfm.json
+xdg-open http://localhost:8088
 ```
 
 The package wires `/usr/bin/ferrited` to launch with the bundled SoapySDR
-+ driver plugins and the static web bundle — no env exports. `ferrited`
-listens on `0.0.0.0:10001` (REST + WS, plain HTTP on loopback); remote
++ driver plugins and the static web bundle — no env exports. It ships no
+systemd unit yet; run it from a shell or your own unit. `ferrited`
+listens on `0.0.0.0:8088` by default (`--bind` to change; REST + WS +
+the web UI, plain HTTP); remote
 access is your tunnel problem (same posture as KiwiSDR / OpenWebRX). See
 [docs/07-deploy.md](docs/07-deploy.md).
 
@@ -164,7 +170,7 @@ hammer there.
 
 ## First five minutes
 
-1. Open `http://localhost:10001`.
+1. Open `http://localhost:8088`.
 2. Click **Source…** in the top bar, pick your device. The compact
    dialog is the SDR-management surface — one-line-per-device list,
    driver/rx chips; the rare alternatives (Tone, File, JSON) live
@@ -183,11 +189,10 @@ hammer there.
    per-driver DC-spike dodge); drag = live fine-tune; wheel = zoom at
    cursor; ↑/↓ = step. The orange Nixie also commits to whatever
    frequency you type.
-6. **Transcribe.** Flip the top-bar **Main → Transcript** on any voice
-   preset (WBFM / NBFM / AM / SSB) and a rolling, locally-run
-   whisper.cpp transcript starts populating in the main pane. Speaker
-   changes break into separate paragraphs (with the `tdrz` model);
-   ham-vocabulary post-processing keeps the call signs honest.
+6. **Transcribe.** Set the receiver's Audio control to **Transcribe** on
+   any voice preset (WBFM / NBFM / AM / SSB) and a rolling,
+   locally-run sherpa-onnx transcript starts populating in the main
+   pane; ham post-processing keeps the call signs honest.
 7. Or open the **AI** tab and ask: *"find a strong FM station and identify
    it"*, *"scan 144–148 MHz for activity"*, *"capture 10 s of 162.475 MHz
    and render the FFT"*.
@@ -208,12 +213,12 @@ browser-path e2e (not just node-side).
 | AM broadcast / SW / air | `wbam` | analog | fixture (`am_e2e`, real sigidwiki IQ) + loopback + contract |
 | NBFM voice | `nbfm` | analog | loopback (`audio_modes_e2e`) + contract |
 | SSB (USB / LSB) | `usb`, `lsb` | analog | loopback (`audio_modes_e2e`) |
-| CW / Morse (multimon) | `cw`, `morse-e2e` | digital | fixture (`morse_e2e`) |
+| CW / Morse | `cw` (fldigi), `morse-e2e` (multimon canary) | digital | fixture (`morse_e2e`) |
 | ADS-B / Mode S | `adsb` | digital | fixture (`adsb_e2e`, dump1090) |
 | AIS | `ais` | digital | fixture (`ais_e2e`, rtl-ais) |
 | AX.25 packet / APRS | `packet`, `packet-debug` | digital | fixture (`packet_e2e`) |
 | POCSAG / FLEX paging | `pager` | digital | fixture (`pager_e2e`, multimon-ng) |
-| FT8 / FT4 | `ft8`, `ft4` | digital | fixture (`ft8_e2e`, ft8_lib) + **browser** (`ft8BrowserE2E`) |
+| FT8 / FT4 | `ft8-ft8`, `ft8-ft4` (variants) | digital | fixture (`ft8_e2e`, ft8_lib) + **browser** (`ft8BrowserE2E`) |
 | WSPR | `wspr` | digital | fixture (`wspr_e2e`, wsprd → `K1JT FN20 20`) + **browser** (`wsprBrowserE2E`) |
 | RTTY / PSK31 / CW / MT63 / Olivia / Contestia / DominoEX / Throb / NAVTEX | `rtty`, `psk31`, `mt63`, `throb`, `dominoex`, `contestia`, `olivia`, `navtex` | digital (fldigi) | fixture (`fldigi_modes_e2e`, real samples) + loopback (`fldigi_e2e`) + **browser** (`fldigiBrowserE2E`) |
 | RSID auto-mode | `rsid` | digital (fldigi) | fixture (`fldigi_auto_e2e` — RSID hot-swap + decode) |
@@ -221,6 +226,8 @@ browser-path e2e (not just node-side).
 | NOAA WX + EAS/SAME | `nwr` | hazard | fixture (`eas_e2e`) |
 | DTMF | `dtmf-e2e` | tones | fixture (`dtmf_e2e`, `dtmf_cross_env`) |
 | rtl_433 ISM | `rtl433-433` | digital | fixture (`rtl433_e2e`, real Acurite CU8) |
+| DMR (metadata + voice) | `dmr` | digital voice | fixture (`dmr_e2e`, real 441.850 MHz capture, dsd-fme as oracle) |
+| P25 / NXDN / D-STAR / YSF | `dsd-fme` | digital voice (helper) | unit (`dsd_helper` line parser); needs `dsd-fme` installed |
 | Capture / record | `capture_fm`, `capture-aprs`, `capture-pager`, `fm-audio-record`, `am-audio-record` | utility | smoke (`record_smoke`) |
 
 Cross-cutting audio correctness is gated by `chunk_invariance_e2e`
@@ -232,9 +239,10 @@ preset composes/splits + is rate-drift-free). See
 ## Vendored libraries
 
 Heavy decoders are wrapped as native Rust crates (regression-tested, not
-subprocesses) under [`blocks/native/`](blocks/native/). Each builds native
-*and* to WASM from the same vendored sources; per-crate `VENDOR.md` records
-the pinned commit + resync steps.
+subprocesses) under [`blocks/native/`](blocks/native/). The decoders build
+native *and* to WASM from the same vendored sources (the two STT engines
+are one-sided, see their rows); per-crate `VENDOR.md` / `README.md`
+records the pinned commit + resync steps.
 
 | Library | Upstream | License | What we modified |
 |---|---|---|---|
@@ -247,6 +255,8 @@ the pinned commit + resync steps.
 | fldigi (modem cores) | [w1hkj/fldigi](https://github.com/w1hkj/fldigi) v4.2.11 | GPL-3.0-or-later | Curated RX-only modem cores (RTTY/PSK/CW/MT63/Olivia/Contestia/DominoEX/Throb/NAVTEX + RSID) behind a narrow C ABI. ~21 replacement `shim/` headers strip FLTK/UI/TX. **Native**: static C++ link. **wasm32**: link-vs-bridge — `build.rs` compiles nothing, the ABI is left as wasm imports satisfied by a sibling Emscripten module (`emscripten/build.sh`, emsdk). |
 | wsprd | [Guenael/rtlsdr-wsprd](https://github.com/Guenael/rtlsdr-wsprd) | GPL-3.0 | WSJT-X WSPR decode core (K1JT/K9AN) only — one 120 s window in, spots out. FFTW shimmed to bundled `kiss_fft` so it cross-compiles to wasm32 with the rest. |
 | mbelib | [lwvmobile/mbelib](https://github.com/lwvmobile/mbelib) (pin in `vendor/UPSTREAM`) | ISC | AMBE+2 / IMBE voice synthesis for `DmrDecode`. Unmodified sources plus a 3-call `shim/` (one decoder per voice stream). **Native**: static C link. **wasm32**: link-vs-bridge like fldigi — a ~54 KB sibling Emscripten module the browser fetches *lazily*, only when a flowgraph decodes voice browser-side. Behind the `vocoder` cargo feature. **Patent notice:** mbelib's README warns that compiled AMBE/IMBE decoders may be covered by patents; check your jurisdiction before distributing builds. Drop the `vocoder` feature (and `pnpm wasm:build:vocoder`) to ship without it — DMR metadata still decodes. |
+| sherpa-onnx | [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) v1.13.2 | Apache-2.0 | Browser speech-to-text only: the streaming-ASR WASM target built with emsdk (`pnpm wasm:build:sherpa`, onnxruntime prebuilt), streaming Zipformer EN-20M baked into the `.data`; JS glue patched for ESM. Provisioned by `scripts/bootstrap.sh`, not committed. Node-side transcription runs the same model in the Python `tools/sherpa-asr` sidecar. |
+| whisper.cpp | [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp) v1.8.6 | MIT | Native only: the in-process engine for a `VoiceTranscribe` block placed node-side, behind a small `shim/` C ABI (`blocks/native/whisper`) — the auto-injected server-side tap uses the sherpa sidecar instead; the crate's pure-Rust transcription core (VAD, resample, ham cleanup) is shared by both sides. Provisioned by `scripts/bootstrap.sh`. |
 
 Vendored data: the spectrum band-allocation overlay
 (`web/src/lib/presets/bandplan-usa.json`) is Arrin Clark (KN1E)'s
@@ -304,8 +314,8 @@ pnpm install && ./build.sh
 ./run.sh
 ```
 
-Dev UI with HMR at <http://localhost:10000>; production bundle served by
-`ferrited` at <http://localhost:10001>. Any change to a `blocks/` or
+Dev UI with HMR at <http://localhost:12000> (via `./run.sh`); production
+bundle served by `ferrited` on its `--bind` port. Any change to a `blocks/` or
 `runtime/` crate needs **both** `cargo build` *and* `pnpm wasm:build`
 (`./build.sh` does both) — a native-only rebuild leaves the browser half
 stale.
@@ -317,7 +327,7 @@ stale.
 | Script | Does |
 |---|---|
 | `./build.sh` | Sources `soapysdr/env.sh`; `cargo build --release` (workspace) + `pnpm install --frozen-lockfile` + `pnpm --filter @ferrite/web build` (WASM + web bundle). Refuses if `ferrited` is running (`BUILD_FORCE=1` overrides). Outputs `target/release/ferrited`, `web/build/`, `web/src/lib/wasm/`. |
-| `./run.sh` | Foreground dev stack: `ferrited` on `0.0.0.0:10001`, `ferrite-ai` on `:10002`, vite (HTTPS) on `0.0.0.0:10000`. Sources `soapysdr/env.sh`; needs `./build.sh` first. Ctrl-C stops all three. |
+| `./run.sh` | Foreground dev stack (ports env-overridable): `ferrited` on `0.0.0.0:12001` (+ MQTT on 12002 TCP / 12003 WS), `ferrite-ai` on `:10002`, the `sherpa-asr` sidecar on `:10003` (if provisioned), vite on `0.0.0.0:12000` (HTTP; `FERRITE_HTTPS=1` for TLS). Sources `soapysdr/env.sh`; needs `./build.sh` first. Ctrl-C stops them all. |
 | `./stop.sh [--no-sdr]` | Kills `ferrited` / `ferrite-ai` / vite by port and restarts the SDRplay API service (`--no-sdr` skips the SDR recycle). Run before `build.sh`/`run.sh` if a previous `ferrited` is holding the radio. |
 
 ### Standalone (run a piece by hand)
@@ -407,12 +417,15 @@ files. Details in [docs/05-testing.md](docs/05-testing.md).
 
 **0.9.0 — pre-release.** User-facing surface is feature-complete and
 stable for daily listening. The mode-specific decoder panels (FT8/FT4/
-WSPR table+map, ADS-B map, APRS map+console, fldigi text console) and
-browser-side decode with the live node↔browser swap have **shipped**.
-Before 1.0: broader `rtl_433` device coverage; `Mode A/C`; sigidwiki
-sample/thumbnail backfill for the newest fldigi presets. Out of scope
+WSPR table+map, ADS-B map, APRS map+console, fldigi text console),
+browser-side decode with the live node↔browser swap, DMR, and the MQTT
+event plane have **shipped**. Before 1.0: scan/survey jobs, an
+MCP/CLI/UI conformance harness, `Mode A/C`, broader `rtl_433`,
+sigidwiki backfill for the newer fldigi presets, multi-channel →
+P25/NXDN framing → trunking, and a handful of DSP deferreds (full list
+in [08-roadmap.md](docs/08-roadmap.md#forward-work--10)). Out of scope
 for 1.0 by design: multi-listener/multi-device, auth (LAN-trust),
-transmit, mobile-first UI, DMR/DSD (AMBE patent).
+transmit, mobile-first UI.
 
 Live tally in [docs/08-roadmap.md](docs/08-roadmap.md);
 [docs/12-shipped-vs-planned.md](docs/12-shipped-vs-planned.md) tracks
@@ -433,6 +446,8 @@ deltas against the master plan.
 - [10 — Commit-level history](docs/10-commits.md)
 - [11 — BrowSDR-inspired follow-ups](docs/11-browsdr-inspired-plan.md)
 - [12 — Shipped vs. planned](docs/12-shipped-vs-planned.md)
+- [13 — AI notes migration](docs/13-ai-notes-migration.md)
+- [14 — Catalog variants, bandplan hard-refs, config validator](docs/14-fldigi-catalog-variants.md)
 - [Decoder roadmap](docs/decoder-roadmap/README.md) — phased decoder plan
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 

@@ -4,9 +4,11 @@ Forward-looking plan for growing Ferrite's decode/demod breadth into a
 broad SDR/ham decoder suite. Organised **capability-first**: each phase
 ships a set of user-facing capabilities, not a set of project ports.
 
-**Where we are (April 2026):** Phases 1 and 2 are shipped. Phase 3 is
-half-shipped — ADS-B and APRS work end-to-end against live RF; rtl_433,
-AIS, and Mode A/C remain. Phases 4–6 are still sketches.
+**Where we are (October 2026):** Phases 1, 2 and 5 are shipped. Phase 3
+is shipped bar Mode A/C and broader rtl_433 coverage. Phase 4's
+weak-signal half (FT8/FT4/WSPR) shipped; satellite imagery has not
+started. Phase 6 shipped DMR (metadata + voice) and the dsd-fme helper;
+native P25/NXDN framing, trunking and Codec2/M17 remain.
 
 ## Why a separate roadmap
 
@@ -52,10 +54,10 @@ once so subsequent C-vendor ports are cheap.
 |-------|----------------------------------------------------|-------------|
 | 1     | [Analog listening](01-phase-1-analog-listening.md) | ✓ shipped   |
 | 2     | [First C-vendor wave — multimon-ng umbrella](02-phase-2-multimon-vendor.md) | ✓ shipped (with scope creep) |
-| 3     | [Aviation, APRS, ISM bulk](03-phase-3-aviation-aprs-ism.md) | partial — ADS-B + APRS shipped; rtl_433, AIS, Mode A/C open |
-| 4     | [Weak-signal + satellite imagery](04-phase-4-weak-signal-sat.md) | sketch / not started |
-| 5     | [Ham digital modes](05-phase-5-ham-digital.md)     | sketch / not started (RDS shipped early in Phase 1) |
-| 6     | [Digital voice + native-helper protocol](06-phase-6-digital-voice.md) | sketch / not started |
+| 3     | [Aviation, APRS, ISM bulk](03-phase-3-aviation-aprs-ism.md) | mostly shipped — ADS-B, APRS, AIS, rtl_433 (433.92 MHz preset); Mode A/C + broader rtl_433 open |
+| 4     | [Weak-signal + satellite imagery](04-phase-4-weak-signal-sat.md) | weak-signal shipped (FT8/FT4 `ft8_lib`, WSPR `wsprd`); satellite imagery / sondes / ACARS not started |
+| 5     | [Ham digital modes](05-phase-5-ham-digital.md)     | ✓ shipped via vendored fldigi (RTTY, PSK31, CW, MT63, Olivia, Contestia, DominoEX, Throb, NAVTEX, RSID); RDS shipped in Phase 1. Not shipped: SSTV, WEFAX, Hell, MFSK, DSC |
+| 6     | [Digital voice + native-helper protocol](06-phase-6-digital-voice.md) | partial — DMR shipped (`DmrDecode` + mbelib voice, D34) + `DsdHelper` (operator-installed dsd-fme for P25/NXDN/D-STAR/YSF); native P25/NXDN framing, multi-channel, trunking, Codec2/M17 open |
 
 Plus the mechanics reference:
 
@@ -69,7 +71,7 @@ Plus the mechanics reference:
 - Block trait / port types / build split: `docs/03-blocks.md`
 - Flowgraph JSON schema: `docs/04-flowgraphs.md`
 - Roadmap through Phase G: `docs/08-roadmap.md`
-- Decisions: `docs/09-decisions.md` (append D20+ here as this plan ripens)
+- Decisions: `docs/09-decisions.md` (decoder-related: D15/D34, D28)
 
 ## Sequencing principle
 

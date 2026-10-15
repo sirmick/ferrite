@@ -268,6 +268,44 @@ restricted to `[A-Za-z0-9_-]+` so lookups can't escape the presets dir.
 
 Response: `{ name: "wbfm", reconfigure: ReconfigureResponse }`.
 
+### Other routes
+
+One line each; the handler doc comments in
+[`server/src/routes.rs`](../server/src/routes.rs) /
+[`analysis.rs`](../server/src/analysis.rs) /
+[`sigwiki.rs`](../server/src/sigwiki.rs) are the detail.
+
+- `GET /api/flowgraph/browser-half` — the composed doc carved for the
+  browser; the WASM runtime runs it verbatim (stream ids line up with
+  the node half by construction).
+- `GET /api/presets/:name` · `POST /api/presets/:name` — read / save a
+  preset; `GET /api/presets/:name/reference-image` — its catalog
+  thumbnail.
+- `GET /api/profile` · `PATCH /api/profile` — the runtime `Profile`
+  (audio on/off, transcribe, `audio_split` placement…); a patch
+  re-composes the active preset.
+- `GET /api/state` · `POST /api/state/:kind/reset` — store snapshot /
+  clear one kind (see [Event plane](#event-plane-mqtt)).
+- `GET /api/captures` — replayable fixtures under `samples/`;
+  `POST /api/capture/{iq,fft,audio}` — start an async capture job
+  (tracked in the `jobs` kind).
+- `POST /api/analysis/{snapshot,spectrum,spectrogram,envelope,spot_map}`
+  (`/api/spectrum` = alias of `analysis/spectrum`) — live measurements;
+  see the MCP tool table below.
+- `GET /api/sigwiki/{identify,search,page,image}` — sigidwiki lookup
+  against a locally cached index.
+- `GET /api/band-plan/at?hz=` — US allocations covering a frequency.
+- `GET /api/decoder/recent?since=&category=` — recent log lines by
+  tracing-target prefix (CLI log recall).
+- `GET /api/ui-views/:pane` · `GET /api/view` · `POST /api/ui-view/set`
+  · `WS /ws/ui-views` — pane snapshots and view state, served by the
+  connected browser.
+- `POST /api/screenshot` — persist a browser canvas PNG under
+  `FERRITE_SCREENSHOTS_DIR`. `POST /api/debug/log` — dev-only browser
+  log forwarder.
+- `/api/ai/*` — passed through verbatim to the `ferrite-ai` sidecar
+  (`hello`, `prompt`, `cancel`, `reset`, `setup`, `sessions`).
+
 ## Error model
 
 Failures return non-2xx + a JSON body:
@@ -505,8 +543,8 @@ The control surface for AI clients — and the single operations layer the
 human `ferrite-ctl` CLI drives too. The REST API documented above is
 wrapped as [Model Context Protocol](https://modelcontextprotocol.io)
 tools, dispatched over **stdio JSON-RPC**. Any MCP-enabled client —
-Claude Desktop, Claude Code CLI, the bundled `ferrite-ai` sidecar via
-the Agent SDK's `mcpServers` config — can drive a running `ferrited`
+Claude Desktop, Claude Code CLI, the bundled `ferrite-ai` sidecar (it
+hands `ferrite-ctl mcp` to `claude-agent-acp` as its only MCP server) — can drive a running `ferrited`
 with no shell-exec and no per-tool prompt engineering.
 
 Each verb is implemented exactly once, as a `FerriteServer::*_op` method

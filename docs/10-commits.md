@@ -18,18 +18,19 @@ Done:
       right-click cancels. Wired in `web/src/lib/viz/Spectrum.svelte`.
 - [x] Catalog ↔ bands split (D27) — catalog entries carry topology only,
       bands entries carry frequency + optional `vfo_offset_hz`.
+- [x] Sample-rate dropdowns driven by `GET /api/source/capabilities`
+      (`fullRateChoices` / `quickRateChoices` in
+      `web/src/lib/controls/optionsModel.ts`: the probe's ranges plus the
+      driver preset's curated list).
 
-Pending:
-
-- [ ] `feat(server): GET /api/source/capabilities sample-rate dropdown wiring`
-      — endpoint exists; web-side dropdown still hard-codes choices.
+Remaining 1.0 work is listed in [`08-roadmap.md`](08-roadmap.md#forward-work--10).
 
 ## Decoder-side
 
-See [`docs/decoder-roadmap/`](decoder-roadmap/). Phase 1 (analog
-listening) and Phase 2 (multimon-ng vendor) shipped. Phase 3 partially
-shipped — ADS-B and APRS land end-to-end against live RF; rtl_433, AIS,
-and Mode A/C remain. Commits land in those phase docs as they open.
+See [`docs/decoder-roadmap/`](decoder-roadmap/) for per-phase status
+(Phases 1, 2 and 5 shipped; 3, 4 and 6 mostly shipped — Mode A/C,
+broader rtl_433, satellite imagery, native P25/NXDN framing and
+Codec2/M17 remain). Commits land in those phase docs as they open.
 
 ## How this file stays honest
 

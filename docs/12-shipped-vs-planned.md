@@ -2,7 +2,7 @@
 
 A short audit of what the original master plan (kept locally; the gist is
 echoed in [`09-decisions.md`](09-decisions.md)) called for vs. what
-landed by 0.9.0. This doc is here so newcomers can tell at a glance which
+landed by 0.9.0 (current as of 2026-10-14). This doc is here so newcomers can tell at a glance which
 parts of the codebase match the design intent and which parts were
 redirected mid-flight.
 
@@ -33,13 +33,18 @@ PNG + metadata, server composes a vision prompt with RAG context from
 sigidwiki, calls an LLM, returns a structured guess card.
 
 Shipped instead: a **persistent chat sidecar** (`tools/ferrite-ai/`)
-that wraps the Claude Agent SDK and gives the model a Bash shell with
-`ferrite-ctl` and the capture-analysis tools on the PATH. The AI can
-tune the rig, change presets, take captures, and read PNG renders — not
-just classify a static image. Subscription billing via the local
-`claude` CLI login (no API key in config). Reverse-log via
-`X-Ferrite-Command` header → `ai::activity` events surfaces every
-command back in the UI activity panel.
+that runs Claude Code as an ACP client of `claude-agent-acp`, behind
+one REST front door (`/api/ai/*`, proxied by `ferrited`). The model has
+no shell or file access — its whole surface is the `ferrite` MCP server
+(`ferrite-ctl mcp`, the same ops as the CLI verbs). The AI can tune the
+rig, change presets, take captures, measure live IQ (`spectrum` /
+`spectrogram` / `envelope`), read view snapshots and look up sigidwiki —
+not just classify a static image. Subscription billing via the local
+`claude` CLI login (no API key in config). The conversation is the
+`ai` kind on the event plane, so every tab renders the same turns.
+Reverse-log via the `X-Ferrite-Command` / `X-Ferrite-Note` headers →
+`ai::activity` events surfaces every command back in the UI activity
+panel.
 
 The original `/api/identify` shape is *not* implemented; the chat
 sidecar is the user-facing identification path. The sigidwiki catalog
@@ -49,7 +54,8 @@ classification entrypoint changed.
 ## Decoder roster vs. plan
 
 Plan called for ADS-B, FT8 / WSPR, Codec2 / M17, APRS as the v0.1
-subset; DMR/DSD deferred for AMBE patent reasons.
+subset; DMR/DSD deferred for AMBE patent reasons (D15, since
+superseded by D34).
 
 | Decoder | Planned? | Shipped? | Source |
 | --- | --- | --- | --- |
@@ -165,18 +171,25 @@ trivial, but the topology editor doesn't exist.
   flowgraph runner).
 - The `/api/identify` one-shot endpoint (replaced by persistent AI
   chat).
+- "No DMR/DSD" (D15) — DMR shipped in-tree with an mbelib vocoder,
+  the rest via an operator-installed dsd-fme (D34).
 - M17 / Codec2 (no blocker, just unprioritised). WSPR did ship
   (dedicated `wsprd`, not the `ft8_lib`-hosted route the plan guessed).
 - Mobile UI (still desktop-first by design).
 
-## Pending for 1.0 — see [08-roadmap.md](08-roadmap.md)
+## Pending for 1.0 — see [08-roadmap.md](08-roadmap.md#forward-work--10)
 
-- Broader `rtl_433` ISM-device coverage.
-- `Mode A/C` follow-up to dump1090.
-- sigidwiki sample/thumbnail backfill for the newest fldigi presets.
+The authoritative list lives there. In short: scan/survey jobs on the
+event plane, a three-surface (MCP/CLI/UI) conformance harness, Mode
+A/C, broader `rtl_433`, sigidwiki backfill for the newer fldigi
+presets, multi-channel → P25/NXDN framing → trunking, a sherpa
+live-partials view, a live AGC-gain readout, and the runtime/DSP
+deferreds.
 
 Shipped since the original plan: the fldigi keyboard-mode family +
-RSID, FT8/FT4/WSPR, browser-side decode with the live node↔browser
-swap, and the mode-specific decoder panels — ADS-B aircraft map,
-APRS station map + packet console, FT8/FT4/WSPR decode table +
-station map, and the fldigi text console.
+RSID, FT8/FT4/WSPR, DMR (+ dsd-fme helper), browser-side decode with
+the live node↔browser swap, the event plane (embedded MQTT), the live
+analysis toolkit + SignalList, browser STT on sherpa-onnx (D33), and
+the mode-specific decoder panels — ADS-B aircraft map, APRS station
+map + packet console, FT8/FT4/WSPR decode table + station map, and the
+fldigi text console.

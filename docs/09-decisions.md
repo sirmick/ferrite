@@ -149,6 +149,9 @@ re-probe on every change.
 
 ## D15 — DMR / DSD ruled out
 
+> **Superseded by [D34](#d34--digital-voice-in-tree-dmr-decode--mbelib-vocoder-operator-installed-dsd-fme-for-the-rest)**
+> — DMR now ships (metadata in pure Rust, voice via vendored mbelib).
+
 **Decision.** AMBE is patent-encumbered; DMR/DSD aren't on the decoder
 list. M17 (Codec2, open) covers the digital-voice slot if/when that lands.
 
@@ -232,7 +235,8 @@ capability-first.
    `Squelch`, `Agc`, `Resample`) and the listening presets.
 3. The first C-vendor port is `multimon-ng` (smallest clean codebase,
    delivers POCSAG/FLEX/DTMF/EAS/CTCSS in one lift) — not dump1090.
-4. Patent-encumbered digital voice (DMR/P25/NXDN) is out (D15).
+4. Patent-encumbered digital voice (DMR/P25/NXDN) is out (D15 — since
+   superseded by D34).
 5. Patent-free digital voice (M17, FreeDV) ships in-WASM via Codec2.
 
 **Consequence.** [`docs/decoder-roadmap/`](decoder-roadmap/) is the
@@ -572,6 +576,62 @@ The live param surface (gain, antenna, AGC, DC-offset) deliberately
 *doesn't* live in this dialog — it's already in the bottom Settings
 panel via `InputControls`. Duplicating it here would add visual
 weight back without changing what the dialog is *for*.
+
+## D33 — Browser speech-to-text: sherpa-onnx replaces whisper.cpp
+
+**Context.** In-browser transcription first shipped as whisper.cpp
+compiled to WASM (pinned `968eebe7`, `tdrz` model). It was heavy: a
+large model download, batch (not streaming) inference on closed
+utterances, and a long emsdk build of whisper + ggml.
+
+**Decision.** The browser STT engine is sherpa-onnx's streaming
+Zipformer transducer (EN-20M, int8), vendored at v1.13.2 in
+[`blocks/native/sherpa/`](../blocks/native/sherpa/) and built with
+emsdk (`pnpm wasm:build:sherpa`; ~3 min — onnxruntime arrives
+prebuilt, only sherpa compiles; the `.data` bakes the model). Node-side
+placement uses the same model in the
+[`tools/sherpa-asr/`](../tools/sherpa-asr/) sidecar via
+`SherpaTranscribe`, so both sides transcribe alike. The browser
+whisper.cpp engine was deleted (2026-10-10, `8a1bc17`).
+`ferrite-whisper` (`blocks/native/whisper`) stays: it is the shared
+Rust transcription core (resample / VAD / queue / ham cleanup, both
+sides) plus a native whisper.cpp FFI engine for `VoiceTranscribe`.
+
+**Consequence.** Light, streaming model with rolling partials (a
+live-partials view is still to come); a missing build degrades
+gracefully ("engine not built", audio untouched). `sherpaGoldenE2E`
+is the STT gate in CI.
+
+## D34 — Digital voice: in-tree DMR decode + mbelib vocoder; operator-installed dsd-fme for the rest
+
+(Supersedes [D15](#d15--dmr--dsd-ruled-out).)
+
+**Context.** D15 ruled DMR/DSD out over AMBE patent encumbrance. In
+practice the call *metadata* (talkgroup, radio id, colour code, talker
+alias) is plain framing + FEC with no codec involved, and mbelib is
+ISC-licensed (GPL-compatible) with only a patent notice for compiled
+decoders.
+
+**Decision.**
+- `DmrDecode` ([`blocks/src/dmr_decode.rs`](../blocks/src/dmr_decode.rs))
+  — pure-Rust DMR framing (4FSK sync/timing, CACH, slot type, BPTC/RS
+  full LC, embedded LC late entry, talker alias) and AMBE+2 frame
+  extraction. Runs node-side and in the browser. Preset `dmr`.
+- Voice synthesis via vendored mbelib
+  ([`blocks/native/mbelib`](../blocks/native/mbelib)) behind a separate
+  `vocoder` feature: static link natively, a lazily loaded sibling
+  Emscripten module in the browser. Drop the feature and metadata
+  still decodes; voice goes silent.
+- `DsdHelper` ([`blocks/src/dsd_helper.rs`](../blocks/src/dsd_helper.rs))
+  drives an *operator-installed* `dsd-fme` subprocess for P25 / NXDN /
+  D-STAR / YSF / dPMR (preset `dsd-fme`); nothing of dsd-fme ships
+  in-tree. Native only.
+
+**Consequence.** Both paths emit the same `ui:dsd` record shape, so the
+journal and the AI treat them identically. Next steps (multi-channel,
+native P25/NXDN framing, trunking) are in
+[Phase 6](decoder-roadmap/06-phase-6-digital-voice.md). M17 / Codec2
+remains the patent-free track, still unbuilt.
 
 ## Revisiting decisions
 
