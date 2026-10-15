@@ -2680,21 +2680,22 @@ const INSTRUCTIONS: &str = r#"Ferrite is a software-defined radio: a running `fe
 
 Orient
 - `status` — first call: pipeline state + `ready`, source (driver/freq/rate/gain/antenna), active preset, `health` (radio liveness, rate/LO mismatches, decoder warnings).
+- Two radio tools own the SDR, one at a time: the **receiver** (any streaming preset — tune, demodulate, decode) and the **spectrum analyzer** (preset `panorama` — steps the radio across a wide range). The operator switches them in the UI; `sweep` switches to the analyzer. While the analyzer runs, `tune` answers 409 `RADIO_BUSY` unless `force` (which puts the receiver preset back, then tunes).
 - `view_state` — what the operator is looking at; `view_snapshot` — a picture of a spectrum/waterfall canvas as they see it; `set_view_state` — put them on the right pane.
 - `band_at` — which allocation (ham sub-band, broadcast, aviation, …) a frequency is in.
 
 Set up the radio
 - `list_devices` → `select_device`; `source_capabilities` (antennas, gain ladder, driver settings); `source_readback` (what the hardware actually applied); `reload_drivers` (recover a wedged SoapySDR).
 - `list_presets` / `preset_detail` (ai_notes, block graph, canonical frequencies) → `load_preset`; `start` / `stop`.
-- `tune` — move the listen frequency (dodge-aware; `carrier_hz` lands a CW/digital carrier on the decoder's tone; also gain/bw/rate).
+- `tune` — move the listen frequency (dodge-aware; `carrier_hz` lands a CW/digital carrier on the decoder's tone; also gain/bw/rate; `force` leaves the spectrum analyzer first).
 - `set_block_param` — any live block parameter (`src` gain/antenna/AGC/settings, demod, filters, decoders).
 
 Find and measure signals — every result is drawn in the AI tab
 - `signals` — coarse strongest-signal watchlist over the whole span (live, ~146 Hz bins).
 - `snapshot` — record a few seconds of live IQ, kept by id, so several measurements look at the same moment.
 - `spectrum` — Hz-accurate peaks over a ≤400 kHz range: level over the floor, width, duty, `keyed`.
-- `emitters` / `label_emitter` — the station's persisted emitter list (both detectors merged, numbered, with band, level, first/last seen, status new/identified/ignored); label what you identify, ignore spurs.
 - `sweep` — spectrum analyzer over ANY range (steps the radio ~7.6 MHz at a time): per-step floor, emitters (freq, level, width, duty, bursty), max-hold profile. Takes the radio: `force` to preempt a running receiver, `restore` to give it back; `tune(force=true)` leaves it.
+- `emitters` / `label_emitter` — the station's memory of the band: every transmitter the receiver's detector or a sweep has seen, merged, numbered and persisted (band, level, width, first/last seen, status new / identified / ignored). Your work queue is `emitters(status="new")`; record what you find with `label_emitter` (label + confidence + evidence), and ignore spurs so they stop coming back.
 - `spectrogram` — time × frequency of a range: read the mode off its shape (CW dashes, RTTY's two tones, FT8 tone blocks, PSK31's thin line).
 - `envelope` — on/off timeline at one frequency: Morse elements, beacon slots, bursts.
 - `reference_image` — a preset's sigidwiki reference waterfall, to compare by eye.
@@ -2721,6 +2722,8 @@ Record and replay
 
 Conversation
 - `chat_post` — mirror a headless agent's turn into the operator's AI panel.
+
+Wideband search (wider than one span): `sweep(lo_hz, hi_hz, passes=3, force, restore)` → `emitters(status="new", lo_hz, hi_hz)` → for the interesting ones `tune(freq_hz, force=true)` and look (`view_snapshot`, `snapshot` + `spectrum` / `spectrogram` / `envelope`, a decoder preset + `await_events`) → `sigwiki_identify` → `label_emitter(id, label, confidence, evidence)`. Ask before taking the radio from an operator who is listening.
 
 Habits: `status` before acting; `snapshot` once, then measure it several ways; unknown signal → `spectrum` + `spectrogram` → `sigwiki_identify` with everything you measured → `sigwiki_page` on the best candidates; tune with `carrier_hz` from a `spectrum` peak; confirm hardware changes with `source_readback`; wait with `await_events`, never sleep. Source: tools/ferrite-ctl/src/mcp.rs; REST in docs/02-protocol.md."#;
 
