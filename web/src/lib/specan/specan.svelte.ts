@@ -11,9 +11,11 @@ class SpecAnState {
   traceMode = $state<TraceMode>('live');
   /** Bumped to reset the holds. */
   clearToken = $state(0);
-  autoDb = $state(true);
-  dbLo = $state(-110);
-  dbHi = $state(-30);
+  /** Manual scale by default: a fixed scale keeps passes and holds
+   *  comparable at a glance; auto is one click away. */
+  autoDb = $state(false);
+  dbLo = $state(-100);
+  dbHi = $state(-20);
   /** Marker frequency (click), Hz. */
   marker = $state<number | null>(null);
 

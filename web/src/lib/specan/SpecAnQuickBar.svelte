@@ -132,10 +132,10 @@
     </div>
     <button
       type="button"
-      class="rounded border border-slate-700 p-0.5 hover:border-sky-400"
-      title="Clear holds"
-      aria-label="Clear holds"
-      onclick={() => specan.clearToken++}><IconEraser size={14} /></button
+      class="flex items-center gap-1 rounded border border-slate-700 px-1.5 py-0.5 hover:border-sky-400 disabled:opacity-40"
+      title="Reset the max / min / average holds (they also reset when the range changes)"
+      disabled={specan.traceMode === 'live'}
+      onclick={() => specan.clearToken++}><IconEraser size={14} /> Reset hold</button
     >
     <label class="flex items-center gap-1" title="Auto-scale the dB axis">
       <input type="checkbox" bind:checked={specan.autoDb} /> auto dB

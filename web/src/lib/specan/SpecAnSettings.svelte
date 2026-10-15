@@ -3,7 +3,7 @@
   // as the receiver) and the sweep block's set-and-forget knobs, rendered
   // from its BlockSpec like every other block.
   import BlockParams from '$lib/controls/BlockParams.svelte';
-  import LiveControls from '$lib/controls/LiveControls.svelte';
+  import InputControls from '$lib/controls/InputControls.svelte';
   import { pipeline } from '$lib/pipeline.svelte';
 
   let src = $derived(pipeline.blocks.src);
@@ -24,12 +24,13 @@
     <h3 class="mb-1 text-[10px] font-bold uppercase tracking-wider text-[color:var(--color-muted)]">
       Radio input
     </h3>
-    <div class="flex flex-wrap items-center gap-2 text-[11px]"><LiveControls /></div>
-    <p class="mt-1 text-[10px] text-slate-500">
-      AGC is held off while sweeping so levels compare across steps. The sweep runs the radio at its
-      own rate ({((src?.values as Record<string, number>)?.sample_rate_hz ?? 0) / 1e6} MS/s) with the
-      widest IF filter; your receiver settings come back when you leave.
+    <p class="mb-2 text-[10px] text-slate-500">
+      The receiver's own radio settings — gain, antenna and the driver's band-stop notches — shared
+      as-is; changing one restarts the sweep. AGC is held off while sweeping so levels compare
+      across steps, and the sweep runs its own rate ({((src?.values as Record<string, number>)
+        ?.sample_rate_hz ?? 0) / 1e6} MS/s) with the widest IF filter.
     </p>
+    <InputControls spectrum />
   </section>
   {#if src}
     <section>

@@ -359,11 +359,29 @@ pub struct SweepShared {
     pub last_pass_ms: AtomicU64,
 }
 
+/// Config generations are unique across block instances, not just within
+/// one: a rebuilt sweep (a driver-setting change restarts the block) must
+/// out-rank rows an earlier instance left in the store, since consumers
+/// keep the rows of the *highest* `cfg`. Seeded from the clock, ×1000 so
+/// each instance has room for its own live re-aims.
+fn next_cfg_base() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let seed = now_ms().saturating_mul(1000);
+    let mut cur = NEXT.load(Ordering::Relaxed);
+    loop {
+        let base = cur.max(seed);
+        match NEXT.compare_exchange(cur, base + 1000, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return base,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
 impl SweepShared {
     #[must_use]
     pub fn new(params: SweepParams) -> Self {
         Self {
-            cfg: Mutex::new((1, params)),
+            cfg: Mutex::new((next_cfg_base(), params)),
             ..Self::default()
         }
     }
@@ -1198,6 +1216,16 @@ mod tests {
     }
 
     #[test]
+    fn cfg_outranks_earlier_instances() {
+        let a = SweepShared::new(SweepParams::default());
+        let b = SweepShared::new(SweepParams::default());
+        let ca = a.cfg.lock().unwrap().0;
+        let cb = b.cfg.lock().unwrap().0;
+        assert!(cb >= ca + 1000, "a rebuilt sweep's rows win: {ca} → {cb}");
+        assert!(ca > 1_000_000_000_000_000, "clock-seeded: {ca}");
+    }
+
+    #[test]
     fn dc_spur_is_interpolated_over() {
         let p = SweepPlan::new(&params(100e6, 101e6), 10e6).unwrap();
         let n = p.fft_size;
@@ -1224,11 +1252,12 @@ mod tests {
             );
         });
         std::thread::sleep(Duration::from_millis(50));
-        {
+        let new_cfg = {
             let mut c = shared.cfg.lock().unwrap();
             c.0 += 1;
             c.1 = params(400e6, 401e6);
-        }
+            c.0
+        };
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut seen = false;
         while Instant::now() < deadline && !seen {
@@ -1237,7 +1266,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|l| l.contains("\"cfg\":2"));
+                .any(|l| l.contains(&format!("\"cfg\":{new_cfg}")));
             std::thread::sleep(Duration::from_millis(5));
         }
         stop.store(true, Ordering::Relaxed);
