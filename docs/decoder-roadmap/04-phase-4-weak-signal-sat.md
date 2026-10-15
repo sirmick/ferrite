@@ -1,7 +1,10 @@
 # Phase 4 — Weak-signal + satellite imagery
 
-**Status:** not started. Sketch only — detail to follow as Phase 3 closes
-(rtl_433 + AIS + Mode A/C still open).
+**Status:** weak-signal half shipped — FT8/FT4 (`Ft8Demod`, vendored
+`ft8_lib`) and WSPR (`WsprDemod`, vendored `wsprd`), presets `ft8`
+(variants) and `wspr`, decoding node *and* browser-side with a
+table + station-map view. Satellite imagery, radiosondes and ACARS
+below are still a sketch, not started.
 
 ## Goal
 

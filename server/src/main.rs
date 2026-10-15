@@ -411,6 +411,8 @@ async fn main() -> Result<()> {
         "device cache warm-up complete"
     );
 
+    analysis::sweep_stale_snapshots();
+
     // Restore persisted history before anything publishes, so the event
     // plane's boot-time retained republish and the first `/api/state`
     // snapshot both include it. Live kinds (graph/status/…) are rebuilt

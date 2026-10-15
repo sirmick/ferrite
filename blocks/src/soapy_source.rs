@@ -458,9 +458,7 @@ pub struct SoapySource {
     // `ManuallyDrop` so `Drop` can *skip* `SoapySDRDevice_unmake` when the
     // driver is hung — see the `Drop` impl. Derefs to `Device`, so call
     // sites (`self.device.frequency(..)`, `&self.device`) are unchanged.
-    #[allow(dead_code)]
     device: ManuallyDrop<Device>,
-    #[allow(dead_code)]
     channel: usize,
     sample_rate_hz: f64,
     center_freq_hz: f64,

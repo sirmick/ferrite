@@ -195,6 +195,11 @@ explicit `placement` for clarity.
 
 ## Shipped presets
 
+40 files. Files with `variants` are families: the catalog and
+`GET /api/presets` list each variant as `<slug>-<id>` (e.g. `psk31-63`),
+and the bare base is not loadable (see
+[14-fldigi-catalog-variants.md](14-fldigi-catalog-variants.md)).
+
 Catalog (browser-visible, picked from the Signal Catalog panel):
 
 | file                                                                                  | shape                                                                                  |
@@ -205,13 +210,27 @@ Catalog (browser-visible, picked from the Signal Catalog panel):
 | [`flowgraphs/nbfm.json`](../flowgraphs/nbfm.json)                                     | Narrowband FM (marine, FRS/GMRS, ham 2m FM)                                            |
 | [`flowgraphs/lsb.json`](../flowgraphs/lsb.json)                                       | SSB lower sideband                                                                     |
 | [`flowgraphs/usb.json`](../flowgraphs/usb.json)                                       | SSB upper sideband                                                                     |
-| [`flowgraphs/cw.json`](../flowgraphs/cw.json)                                         | CW with multimon-ng Morse decoder                                                      |
-| [`flowgraphs/packet.json`](../flowgraphs/packet.json)                                 | AX.25 packet — AFSK1200 + 2400 variants + FSK9600 in parallel; APRS at 144.39 MHz is the typical payload |
-| [`flowgraphs/packet-debug.json`](../flowgraphs/packet-debug.json)                     | Packet with audio fan-out to WAV for offline A/B against `analyze-packet-wav`          |
-| [`flowgraphs/pager.json`](../flowgraphs/pager.json)                                   | POCSAG (3 baud) + FLEX (multimon's `FLEX_NEXT`) in parallel; main pane: Pager Journal  |
 | [`flowgraphs/nwr.json`](../flowgraphs/nwr.json)                                       | NOAA Weather Radio (NBFM + EAS)                                                        |
+| [`flowgraphs/packet.json`](../flowgraphs/packet.json)                                 | AX.25 packet — AFSK1200 + 2400 variants + FSK9600 in parallel; APRS at 144.39 MHz is the typical payload |
+| [`flowgraphs/pager.json`](../flowgraphs/pager.json)                                   | POCSAG (3 baud) + FLEX (multimon's `FLEX_NEXT`) in parallel; main pane: Pager Journal  |
 | [`flowgraphs/adsb.json`](../flowgraphs/adsb.json)                                     | ADS-B / Mode S — vendored dump1090, 1090 MHz                                           |
-| [`flowgraphs/dtmf-e2e.json`](../flowgraphs/dtmf-e2e.json)                             | DTMF events-bridge canary across the server/browser split                              |
+| [`flowgraphs/ais.json`](../flowgraphs/ais.json)                                       | Marine AIS — vendored rtl-ais aisdecoder, 161.975 / 162.025 MHz                        |
+| [`flowgraphs/rtl433-433.json`](../flowgraphs/rtl433-433.json)                         | ISM 433.92 MHz — vendored rtl_433 (~320 protocols)                                     |
+| [`flowgraphs/ft8.json`](../flowgraphs/ft8.json)                                       | FT8 / FT4 — vendored ft8_lib; variants `ft8`, `ft4`                                    |
+| [`flowgraphs/wspr.json`](../flowgraphs/wspr.json)                                     | WSPR — vendored wsprd, 2-minute slots                                                  |
+| [`flowgraphs/digital-hf-20m.json`](../flowgraphs/digital-hf-20m.json)                 | FT8 + FT4 + WSPR decoded at once from one wideband 20 m capture                        |
+| [`flowgraphs/cw.json`](../flowgraphs/cw.json)                                         | CW — fldigi `CwDemod` behind SSB                                                       |
+| [`flowgraphs/rtty.json`](../flowgraphs/rtty.json)                                     | RTTY — fldigi; variants by baud/shift (`45-170` … `75-850`)                            |
+| [`flowgraphs/psk31.json`](../flowgraphs/psk31.json)                                   | PSK — fldigi; variants `31`, `63`, `125`                                               |
+| [`flowgraphs/mt63.json`](../flowgraphs/mt63.json)                                     | MT63 — fldigi; variants `1000L`, `1000S`, `500L`, `2000L`                              |
+| [`flowgraphs/olivia.json`](../flowgraphs/olivia.json)                                 | Olivia — fldigi; variants by tones/bandwidth                                           |
+| [`flowgraphs/contestia.json`](../flowgraphs/contestia.json)                           | Contestia — fldigi; variants by tones/bandwidth                                        |
+| [`flowgraphs/dominoex.json`](../flowgraphs/dominoex.json)                             | DominoEX — fldigi; variants `16`, `8`, `11`, `22`                                      |
+| [`flowgraphs/throb.json`](../flowgraphs/throb.json)                                   | Throb — fldigi; variants `4`, `2`, `1`, `x4`                                           |
+| [`flowgraphs/navtex.json`](../flowgraphs/navtex.json)                                 | NAVTEX — fldigi SITOR-B, 518 kHz                                                       |
+| [`flowgraphs/rsid.json`](../flowgraphs/rsid.json)                                     | RSID — fldigi's RSID detector hot-swaps the inner modem (`FldigiAuto`)                 |
+| [`flowgraphs/dmr.json`](../flowgraphs/dmr.json)                                       | DMR — pure-Rust `DmrDecode` (call metadata) + mbelib AMBE+2 voice; node or browser     |
+| [`flowgraphs/dsd-fme.json`](../flowgraphs/dsd-fme.json)                               | P25 / NXDN / D-STAR / YSF / dPMR via the operator-installed `dsd-fme` (`DsdHelper`, native only) |
 
 Headless / capture (node-only, launched with `--run-for-secs N`):
 
@@ -222,7 +241,17 @@ Headless / capture (node-only, launched with `--run-for-secs N`):
 | [`flowgraphs/capture_fm.json`](../flowgraphs/capture_fm.json)                         | Wideband IQ capture → FileIqSink (no demod)                                            |
 | [`flowgraphs/capture-aprs.json`](../flowgraphs/capture-aprs.json)                     | APRS-specific audio capture (packet chain tuned to 144.39 MHz) for offline analyzer fixtures |
 | [`flowgraphs/capture-pager.json`](../flowgraphs/capture-pager.json)                   | POCSAG / FLEX audio capture for offline analyzer fixtures                              |
-| [`flowgraphs/morse-e2e.json`](../flowgraphs/morse-e2e.json)                           | Morse round-trip canary (synthesise → decode)                                          |
+
+Hidden (`"catalog_visible": false` — loadable by name, never listed):
+the e2e canaries below, plus the `_`-prefixed ad-hoc live-RF / record
+graphs (`_cw_live`, `_rtty_live`, `_nwr_record`, `_usb_record`,
+`_wwv_record`); the leading `_` is the convention for those.
+
+| file                                                                                  | shape                                                                                  |
+|---------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+| [`flowgraphs/dtmf-e2e.json`](../flowgraphs/dtmf-e2e.json)                             | DTMF events-bridge canary across the server/browser split                              |
+| [`flowgraphs/morse-e2e.json`](../flowgraphs/morse-e2e.json)                           | Morse round-trip canary (synthesise → multimon decode)                                 |
+| [`flowgraphs/packet-debug.json`](../flowgraphs/packet-debug.json)                     | Packet with audio fan-out to WAV for offline A/B against `analyze-packet-wav`          |
 
 Catalog entries carry topology only (no `src.center_freq_hz` /
 `chan.freq_shift_hz`); per-band tuning lives in

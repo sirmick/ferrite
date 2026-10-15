@@ -9,9 +9,11 @@ end runs in any modern desktop browser and does demodulation in WASM. The
 wire between them carries a wideband spectrum tap plus narrowband IQ slices
 for any active VFO.
 
-An optional Node sidecar (`ferrite-ai`, wrapping the Claude Agent SDK) sits
-beside `ferrited` and exposes a chat surface that drives the radio through
-the same REST API a human would use — same tools, no privileged path.
+An optional Node sidecar (`ferrite-ai`, Claude Code over ACP via
+`claude-agent-acp`) sits beside `ferrited` behind `/api/ai/*` and exposes
+a chat surface that drives the radio through the `ferrite` MCP server —
+the same ops the human `ferrite-ctl` CLI uses, over the same REST API; no
+privileged path, no shell.
 
 Source layout that mirrors this split:
 
@@ -98,7 +100,10 @@ Not multi-tenant web-SDR station operators. Single-listener, LAN-trust
 - **Authentication.** LAN-trust; remote access is the user's tunnel
   problem.
 - **Mobile / tablet.** Desktop-first.
-- **DMR / DSD.** AMBE patent encumbrance, deferred.
+- **In-tree vocoders beyond mbelib.** DMR voice ships via vendored
+  mbelib (separable `vocoder` feature); other patent-encumbered digital
+  voice (P25 / NXDN / D-STAR / YSF) goes through an operator-installed
+  `dsd-fme` (D34, superseding D15).
 
 ## Hardware scope
 

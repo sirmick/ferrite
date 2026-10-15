@@ -1,6 +1,6 @@
 # 08 — Roadmap
 
-## Where we are — 0.9.0
+## Where we are — 0.9.0 (current state, 2026-10-14)
 
 End-to-end, working today against live RF:
 
@@ -33,6 +33,31 @@ End-to-end, working today against live RF:
   `agc=false` against AM AGC pumping.
 - Postcard `Frame` transport on `/ws/preset`; encoder + decoder both
   come from `ferrite_blocks`, so wire-format drift is a build break.
+  Every frame carries the graph `epoch`.
+- **Event plane** ([`server/src/event_plane.rs`](../server/src/event_plane.rs),
+  plan: [`plans/event-plane.md`](plans/event-plane.md)) — every
+  observable change is one record in a server store kind
+  ([`server/src/decoder_store.rs`](../server/src/decoder_store.rs):
+  `graph`, `status`, `health`, `readback`, `signals`, decodes,
+  `activity`, `ai`, `jobs`, `log/<target>`, …), published by an embedded
+  MQTT broker (`rumqttd`) on `ferrite/state/<kind>[/<key>]`; browsers
+  reach it as `/mqtt` (WS reverse-proxy), anyone can publish raw events
+  to `ferrite/ingest/<kind>`. `GET /api/state` is the snapshot;
+  `await_events` (MCP) / `ferrite-ctl await` is the subscription.
+  The graph `epoch` bumps once per topology rebuild. The old `/ws/state`
+  and `/ws/logs` sockets are gone. Non-live kinds persist across
+  daemon restarts (`--state-dir`); a radio supervisor restarts a lost
+  source and reports through the `health` kind.
+- **SignalList** ([`blocks/src/signal_list.rs`](../blocks/src/signal_list.rs))
+  — auto-injected tap on the wideband FFT that tracks the strongest
+  carriers (passband-p10 floor, DC mask) → `ui:signals` → the `signals`
+  store kind; a right-pane view in the UI and the MCP `signals` tool.
+- **Analysis toolkit** — `POST /api/analysis/{snapshot,spectrum,spectrogram,envelope}`
+  measure live IQ (crate [`ferrite-analysis`](../analysis/); the
+  offline Python `ferrite-analyze` in [`tools/analysis/`](../tools/analysis/)
+  is a numpy port of the same definitions), and `spot_map` places
+  FT8/FT4/WSPR decodes on a map by grid. Each measurement also folds an
+  `analysis` record into the store; the UI, CLI and MCP share it.
 - Source placeholder + `compose_source`
   ([`runtime/src/compose.rs`](../runtime/src/compose.rs)).
 - Reverse-log middleware (`ai_activity_layer`) emits
@@ -42,12 +67,17 @@ End-to-end, working today against live RF:
 - SoapySDR C-side log handler hooked into Rust `tracing` under target
   `driver` ([`server/src/soapy_log.rs`](../server/src/soapy_log.rs)) so
   driver warnings reach the operator and the AI.
-- Native vendor crates under [`blocks/native/`](../blocks/native): five
-  of them — `liquid-dsp` (FIR / NCO / FEC), `multimon-ng` (POCSAG /
-  FLEX / AFSK / FSK9600 / Morse / EAS / DTMF), `dump1090` (Mode S /
-  ADS-B), `rtl-ais`, `ft8` (kgoba `ft8_lib`), and `libc-stubs` (WASM
-  substrate). All build native into `ferrited` *and* into the
-  browser WASM bundle.
+- Native vendor crates under [`blocks/native/`](../blocks/native):
+  `liquid-dsp` (FIR / NCO / FEC), `multimon-ng` (POCSAG / FLEX / AFSK /
+  FSK9600 / Morse / EAS / DTMF), `dump1090` (Mode S / ADS-B), `rtl-ais`,
+  `rtl_433`, `ft8` (kgoba `ft8_lib`), `wsprd`, `fldigi` (curated v4.2.11
+  modem cores), `mbelib` (AMBE+2 / IMBE voice, `vocoder` feature),
+  `sherpa` (sherpa-onnx streaming ASR, browser STT), `whisper`
+  (whisper.cpp + the shared transcript post-processor), plus
+  `libc-stubs` (WASM substrate) and `hello` (substrate smoke test).
+  The decoders build native into `ferrited` *and* into the browser
+  (wasm32 directly, or — fldigi, mbelib, sherpa — a sibling Emscripten
+  module).
 
 ### Browser
 - Browser runtime in a Worker
@@ -77,18 +107,22 @@ End-to-end, working today against live RF:
   offset. Searchable Signal Catalog panel with sigidwiki-derived
   thumbnails inlined.
 - US band-allocation ribbon under the spectrum (toggleable).
-- HTTPS dev server (`run.sh` flips `FERRITE_HTTPS=1`) for LAN/mobile
+- Opt-in HTTPS dev server (`FERRITE_HTTPS=1 ./run.sh`) for LAN/mobile
   testing where AudioWorklet + SharedArrayBuffer require a secure
   context.
 
 ### AI operator (optional)
-- `tools/ferrite-ai/` — Node sidecar wrapping
-  `@anthropic-ai/claude-agent-sdk`, exposes `/ws/chat` (reverse-proxied
-  by `ferrited`). Auth via the local `claude` CLI subscription login;
-  no API key in config.
-- `tools/ferrite-ctl/` — thin Rust CLI driving `ferrited` via REST,
-  used by the AI (and by humans). Atomic `--gain` implies
-  `agc=false` so the SDR side doesn't reject a manual gain.
+- `tools/ferrite-ai/` — Node sidecar that runs Claude Code as an ACP
+  client of `claude-agent-acp` ([`acp.ts`](../tools/ferrite-ai/acp.ts)).
+  One REST front door, `/api/ai/*` (`hello`, `prompt`, `cancel`,
+  `reset`, `setup`, `sessions`), reverse-proxied by `ferrited`; there is
+  no `/ws/chat`. No built-in tools (no shell, no file access): the AI's
+  whole surface is the `ferrite` MCP server (`ferrite-ctl mcp`). Auth
+  via the local `claude` CLI subscription login; no API key in config.
+- `tools/ferrite-ctl/` — thin Rust CLI driving `ferrited` via REST;
+  every CLI verb is the same op as its MCP tool (`ferrite-ctl mcp`).
+  Atomic `--gain` implies `agc=false` so the SDR side doesn't reject a
+  manual gain.
 - `tools/analysis/` (`ferrite-analyze`) — offline capture analysis for
   operators / CI; the in-app AI measures live via the MCP `spectrum`
   tools (same definitions).
@@ -99,21 +133,34 @@ End-to-end, working today against live RF:
 - Operator-supplied "describe your radio setup" textbox merged into
   every prompt so the AI routes around physical layout.
 - Reverse-log surfaces every AI command in the UI activity panel.
-- Conversation state is single-authority: the sidecar persists the
-  per-session raw transcript next to its SDK session and replays a
-  `conversation_snapshot` (or honest `session_reset`) on connect, so
-  the browser view can no longer silently diverge from the LLM
-  context. See *Structural simplifications* below.
+- Conversation state lives on the event plane: the sidecar publishes
+  each turn (`user`, `thought`, `text`, `tool_use`, `tool_result`,
+  `plan`, `turn_end`, `reset`) as the `ai` store kind, forming text on
+  `ai_live`; every AI panel (any tab) renders from there, and a
+  headless driver can mirror its own turns in with `chat_post`.
 
-### Shipped flowgraph presets — 21 in [`flowgraphs/`](../flowgraphs/)
+### Shipped flowgraph presets — 40 files in [`flowgraphs/`](../flowgraphs/)
 
-Voice / music: `wbfm`, `wbfm_stereo`, `wbam`, `nbfm`, `lsb`, `usb`,
-`cw`.
-Digital: `adsb`, `ais`, `packet` (AX.25; APRS is the most common payload), `packet-debug`, `pager`, `ft8`.
-Tones / canaries: `dtmf-e2e`, `morse-e2e`.
+Voice / music: `wbfm`, `wbfm_stereo`, `wbam`, `nbfm`, `lsb`, `usb`.
+Digital: `adsb`, `ais`, `packet` (AX.25; APRS is the most common
+payload), `pager`, `rtl433-433`, `ft8`, `wspr`, `dmr`, `dsd-fme`;
+fldigi modes `cw`, `rtty`, `psk31`, `mt63`, `olivia`, `contestia`,
+`dominoex`, `throb`, `navtex`, `rsid` (auto-detect), `digital-hf-20m`.
 Weather / hazard: `nwr`.
 Capture / record: `capture_fm`, `capture-aprs`, `capture-pager`,
 `fm-audio-record`, `am-audio-record`.
+Canaries / debug (hidden): `dtmf-e2e`, `morse-e2e`, `packet-debug`.
+
+Files with `variants` (`rtty`, `psk31`, `mt63`, `olivia`, `contestia`,
+`dominoex`, `throb`, `ft8`) are families: the catalog and
+`GET /api/presets` list each variant as `<slug>-<id>` (e.g.
+`ft8-ft4`) and the bare base is not loadable
+([14-fldigi-catalog-variants.md](14-fldigi-catalog-variants.md)), so
+the 40 files list as 53 presets. Presets marked
+`"catalog_visible": false` stay loadable by name but are never listed;
+by convention a leading `_` (`_cw_live`, `_rtty_live`, `_nwr_record`,
+`_usb_record`, `_wwv_record`) marks an ad-hoc live-RF / record graph,
+always hidden.
 
 ### Audio NR (5-stage chain)
 
@@ -146,14 +193,16 @@ don't halt the matrix; PASS/FAIL summary at the end. Output lands in
 
 ### Tracing & UI logs
 
-Every tracing target is visible in stdout *and* in the UI logs panel:
+Every tracing target is visible in stdout *and* in the UI logs panel
+(via the event plane's `log/<target>` kinds):
 `decoder::pocsag`, `decoder::flex`, `decoder::packet`, `decoder::adsb`,
-`decoder::ais`, `decoder::cw`, `decoder::eas`, `decoder::ft8`,
-`decoder::rds`, `ai::activity`, `driver`, `flowdiag::node`,
-`flowdiag::browser`, …
+`decoder::ais`, `decoder::rtl_433`, `decoder::cw`, `decoder::eas`,
+`decoder::ft8`, `decoder::wspr`, `decoder::fldigi`, `decoder::rsid`,
+`decoder::dmr`, `decoder::dsd`, `decoder::transcribe`, `ai::activity`,
+`driver`, `flowdiag::node`, `flowdiag::browser`, …
 
 The historical record of how we got here is in
-[`09-decisions.md`](09-decisions.md) (D01–D27) and the milestone tally
+[`09-decisions.md`](09-decisions.md) (D01–D34) and the milestone tally
 in [`10-commits.md`](10-commits.md); plan→ship deltas live in
 [`12-shipped-vs-planned.md`](12-shipped-vs-planned.md).
 
@@ -161,23 +210,36 @@ in [`10-commits.md`](10-commits.md); plan→ship deltas live in
 
 Concrete tracks remaining before we cut 1.0:
 
-- **Broader `rtl_433` ISM-device coverage** — 200+ device flavours. See
-  [`docs/decoder-roadmap/03-phase-3-aviation-aprs-ism.md`](decoder-roadmap/03-phase-3-aviation-aprs-ism.md).
-- **`Mode A/C` follow-up to dump1090** — adds non-Mode-S transponder
-  support.
-- **sigidwiki sample/thumbnail backfill** for the newest fldigi
-  presets (per the per-mode ship gate).
+- **Scan / survey jobs** — Phase 5 of the event plane
+  ([`plans/event-plane.md`](plans/event-plane.md)); resilience shipped,
+  survey + scan not started.
+- **Packaging: a systemd unit** — the `.deb` / `.rpm` ship
+  `/usr/bin/ferrited` but no unit yet, so the
+  [00-context](00-context.md) "enable --now" install path isn't real.
+- **Three-surface conformance harness** — one test asserting MCP, CLI
+  and UI see the same state for the same action.
+- **Decoder breadth** — `Mode A/C` follow-up to dump1090; broader
+  `rtl_433` coverage (only the 433.92 MHz preset ships; see
+  [Phase 3](decoder-roadmap/03-phase-3-aviation-aprs-ism.md)).
+- **sigidwiki sample/thumbnail backfill** for the newer fldigi presets
+  (per the per-mode ship gate).
+- **Digital voice, next steps** — multi-channel (several channelizers
+  on one wide span) → native P25 / NXDN framing → trunk following
+  ([Phase 6](decoder-roadmap/06-phase-6-digital-voice.md)).
+- **UI** — sherpa live-partials view in the transcript; live AGC-gain
+  readout (see *Audio NR* above).
+- **Runtime / DSP deferreds** — H6 per-tick `PortMeta` gap flags; RDS
+  H3 symbol timing; from the July audit: decimator cutoff validation,
+  stereo shared-gain AGC, FFT window-gain calibration, denormals, FIR
+  tap scaling.
 
 **Shipped** (was on this list): the decoder UI panels — ADS-B aircraft
 map, APRS station map + packet console, FT8/FT4/WSPR decode table +
 station map, and the fldigi text console — plus the fldigi keyboard
-modes + RSID, FT8/FT4/WSPR, and browser-side decode with the live
-node↔browser swap (D28).
-
-Other UX leftovers tracked in [`10-commits.md`](10-commits.md):
-
-- Sample-rate dropdown driven by `/api/source/capabilities` (the
-  endpoint exists; the web side still hard-codes choices).
+modes + RSID, FT8/FT4/WSPR, browser-side decode with the live
+node↔browser swap (D28), DMR (D34), and the capability-driven
+sample-rate dropdown (`GET /api/source/capabilities` →
+`fullRateChoices` / `quickRateChoices`).
 
 ### Structural simplifications (from the 2026-05-17 cleanup audit) — shipped 2026-05-18
 
@@ -188,8 +250,9 @@ rather than an instance. Shipped as one conventional commit each:
   ladder lived in the Rust CLI (self-flagged `DUPLICATE-OF`) *and* the
   web `sdr-presets` JSON — and the CLI copy only knew `sdrplay`, so a
   HackRF rate change via `ferrite-ctl` silently skipped the bandwidth
-  the web UI set. Now defined once in
-  [`tools/ferrite-ctl/src/sdr_tables.rs`](../tools/ferrite-ctl/src/sdr_tables.rs);
+  the web UI set. Now defined once in the `ferrite-sdr-tables` leaf
+  crate ([`sdr-tables/src/lib.rs`](../sdr-tables/src/lib.rs), moved out
+  of `ferrite-ctl` so `ferrited`'s source policy shares it too);
   the web copy is generated by `cargo run -p ferrite-ctl -- gen-tables`
   and a workspace `cargo test` fails if it drifts. No `DUPLICATE-OF`
   markers remain. (The separate **sample-slug** duplication —
@@ -203,7 +266,11 @@ rather than an instance. Shipped as one conventional commit each:
   only when stopped); `stop()` folds the final live state back once, in
   canonical lock order. Browser blocks keep authored params, so the
   node+browser `pipeline.blocks` merge is unchanged.
-- **Single-authority AI conversation state.** The sidecar persists the
+- **Single-authority AI conversation state.** *Superseded (2026-10-11)
+  by the ACP sidecar + event plane: `/ws/chat`, `conversation_snapshot`
+  and `resume_session_id` are gone; the conversation is the `ai` store
+  kind and `/api/ai/*` is the only front door (see* AI operator *above).
+  Kept as history:* The sidecar persisted the
   raw browser-bound event stream per session to
   `${FERRITE_AI_STATE_DIR}/<session_id>.jsonl` (co-located with the SDK
   session; env mirrors `FERRITE_SCREENSHOTS_DIR`, run.sh + gitignored).
@@ -224,15 +291,18 @@ rather than an instance. Shipped as one conventional commit each:
 Captured in [`11-browsdr-inspired-plan.md`](11-browsdr-inspired-plan.md):
 
 - ~~Audio transcription panel (Whisper-tiny WASM on the post-demod PCM
-  stream).~~ **Shipped** — whisper.cpp compiled to WASM
-  ([`web/src/lib/wasm/whisper/`](../web/src/lib/wasm/whisper/),
-  pinned upstream `968eebe7`), runs in a Worker against the
-  post-demod PCM. Picks up tinydiarize via the `tdrz` model for
-  speaker turns. Ham-vocabulary prompt + tail-loop / call-sign
-  post-processing in
-  [`web/src/lib/transcribe/hamPostProcess.ts`](../web/src/lib/transcribe/hamPostProcess.ts).
-  Mounted as a `Main → Transcript` advanced view on every audio
-  preset; the AI sidecar reads the same store.
+  stream).~~ **Shipped** — first as whisper.cpp WASM, since replaced
+  in the browser by sherpa-onnx's streaming Zipformer (EN-20M, int8;
+  [`blocks/native/sherpa/`](../blocks/native/sherpa/), pinned v1.13.2,
+  [D33](09-decisions.md#d33--browser-speech-to-text-sherpa-onnx-replaces-whispercpp)),
+  run in a Worker against the post-demod PCM. Node-side placement
+  (`audio_split=server`) streams to the same model in the
+  [`tools/sherpa-asr/`](../tools/sherpa-asr/) sidecar
+  (`SherpaTranscribe`). Ham post-processing (call-sign cleanup,
+  tail-loop scrub) is the shared Rust core in `ferrite-whisper`.
+  Transcription is opt-in per receiver (Audio: Off | On | Transcribe)
+  and lands in the `transcribe` store kind / `Main → Transcript`
+  view; the AI reads the same store.
 - Frequency bookmarks with categories.
 - Multi-VFO (static N=2 first, then dynamic spawn).
 
@@ -248,7 +318,10 @@ Captured in [`09-decisions.md`](09-decisions.md):
 - **Authentication / remote access** — D07 (LAN-trust; user's tunnel
   problem).
 - **Mobile UI** — desktop-first.
-- **DMR / DSD** — D15 (AMBE patent encumbrance).
+- **In-tree vocoders beyond mbelib** — D15 as revised by D34: DMR
+  voice ships via vendored mbelib (separable `vocoder` feature);
+  P25 / NXDN / D-STAR / YSF voice goes through the operator-installed
+  `dsd-fme` (`DsdHelper`).
 - **Transmit** — receive only.
 - **Whole-spectrum explorer (0 Hz → 300 GHz log axis)** — sketched
   in the original plan, parked behind 1.0 priorities.

@@ -101,3 +101,6 @@ blocks/native/sherpa/vendor/sherpa-onnx/build-wasm-simd-asr/
 
 # Dev-stack logs + ad-hoc drivers (`.run/stack.log` grows to GBs)
 /.run/
+
+# Scratch session-resume prompts (local only)
+/PROMPT.md

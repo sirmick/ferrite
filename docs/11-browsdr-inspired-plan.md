@@ -10,6 +10,12 @@ parking for future sessions; nothing committed to a milestone yet.
 
 ## 1. Audio transcription panel
 
+> **Shipped** — first as whisper.cpp WASM, now sherpa-onnx streaming
+> Zipformer in the browser and the `tools/sherpa-asr` sidecar node-side
+> ([D33](09-decisions.md#d33--browser-speech-to-text-sherpa-onnx-replaces-whispercpp));
+> transcripts land in the `transcribe` store kind. The sketch below is
+> the original idea, kept for history.
+
 **What.** Live audio-to-text of the currently-demodulated stream,
 displayed next to the waterfall. Same idea BrowSDR ships under "AI
 Transcription": a browser-side STT model running on the post-demod

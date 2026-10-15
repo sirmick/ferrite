@@ -1,7 +1,7 @@
 # Phase 3 — Aviation, APRS, ISM bulk
 
-**Status:** in progress (April 2026). Two of the planned capabilities
-already shipped, two outstanding.
+**Status:** mostly shipped (October 2026). ADS-B, APRS, AIS and rtl_433
+shipped; Mode A/C and broader rtl_433 coverage outstanding.
 
 What landed:
 
@@ -17,14 +17,21 @@ What landed:
   `adsb.json` preset, 1090 MHz, 2 MS/s. Validated against upstream's
   test fixture (DF 17 / DF 4 / DF 11 frames decode cleanly).
 
+- **AIS** (marine) — `AisDemod` (`blocks/src/ais.rs`), vendored
+  aisdecoder from rtl-ais (`blocks/native/rtl-ais/`); `ais.json`
+  preset; dual-compile (runs browser-side too).
+- **rtl_433** — `Rtl433Demod` (`blocks/src/rtl_433.rs`), vendored
+  rtl_433 (`blocks/native/rtl_433/`, ~320 device decoders, ~220 in the
+  default set); `rtl433-433.json` preset at 433.92 MHz, with an
+  `auto_level` AGC because the vendored decoder ignores pulses below
+  −12 dBFS. Live-validated on Acurite / Cotech sensors.
+
 What's outstanding:
 
 - **Mode A/C** (secondary radar transponder) — same `dump1090` vendor,
   separate `mode_ac.c` we didn't pull in. ~160 LOC follow-up.
-- **rtl_433** — 200+ ISM device decoders at 433/915 MHz. The big lift
-  in this phase; deferred.
-- **AIS** (marine) — separate vendor (rtl-ais or aisdecoder, not in
-  multimon-ng or dump1090). Deferred.
+- **Broader rtl_433** — presets for 315 / 868 / 915 MHz and validation
+  across more device families.
 
 The original plan called for direwolf as the APRS vendor. Multimon-ng's
 AFSK1200 turned out to be the same capability for ~10× less integration
@@ -47,8 +54,8 @@ whole APRS network, 200+ ISM sensors, marine AIS.
 | `ModeAcDecoder`  | dump1090          | iq_f32 @ 2 MS/s     | ✗ not shipped — `mode_ac.c` follow-up  |
 | `PacketDemod` (AFSK1200/2400) | multimon-ng | real_f32 @ 22050 Hz | ✓ shipped via Phase 2 lift            |
 | `PacketDemod` (FSK9600)       | multimon-ng | real_f32 @ 22050 Hz | ✓ shipped via Phase 2 lift            |
-| `Rtl433Decoder`  | rtl_433           | iq_f32 @ 1 MS/s     | ✗ not shipped — biggest remaining lift |
-| `AisDecoder`     | rtl-ais / aisdec  | real_f32 @ 48 kHz (or iq) | ✗ not shipped                    |
+| `Rtl433Demod`    | rtl_433           | iq_f32 @ 250 kS/s (or 1 MS/s) | ✓ shipped (`blocks/native/rtl_433/`) |
+| `AisDemod`       | rtl-ais / aisdec  | real_f32 @ 48 kHz (or iq) | ✓ shipped (`blocks/native/rtl-ais/`) |
 
 ## Flowgraph presets
 
