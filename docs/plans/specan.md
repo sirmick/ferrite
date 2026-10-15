@@ -80,6 +80,22 @@ per-step overhead ≈ 25 ms retune + 50 ms discard + dwell. With a
 ~13 ms dwell: **~90 ms/step** → FM band (88–108) ≈ 3 steps ≈ 0.3 s/pass;
 0–2 GHz ≈ 260 steps ≈ 23 s/pass.
 
+### Follow-up measurements (2026-10-15, step 1)
+
+7. **Rate change on an open device is safe once the stream is
+   *closed*** (dropped, not just deactivated): 9 switches 2.4 ↔ 10 MS/s,
+   0.6–0.8 s each, no crash (`rate_switch_spike`).
+8. **A live preset swap with a rate change already costs only
+   325–420 ms over SoapyRemote** (`POST /api/preset` wbfm ↔ adsb,
+   measured in the running daemon): the runtime builds the new source
+   first and SoapySDR's factory hands back the same cached device by
+   args, so there is no close → 1 s settle → reopen. The "2–8 s
+   restart" figure in older comments is stale (or local-USB only).
+   **⇒ No device-handle pool.** Step 1 became a pure extraction:
+   `soapy_device::RadioHandle` owns open / configure / live radio params
+   / readback / safe release; `SoapySource` and `SweepSource` both hold
+   one.
+
 ## Row format (`ui:panorama`) — the backend/UI contract
 
 One row per step:
@@ -98,12 +114,19 @@ PanoramaRow {
 }
 ```
 
-Rows travel as a new postcard `Frame` variant on `/ws/preset`; the
-server keeps the last full pass + a max-hold for MCP.
+**Transport (revised):** rows go out on an `Events` port →
+`ui:panorama` → `EventStore` → store kind `panorama`, **keyed by step**
+(retained per key), so the event plane gives every tab, MCP
+(`await_events` / state) and late joiners the *last full pass* for free.
+`power_db` is base64 of little-endian `i16` centi-dB (`i16::MIN` =
+masked) — ~9 KB/row at the default RBW, ≤ ~11 rows/s. `panorama` is a
+live kind (never persisted). A max-hold summary for MCP is folded
+server-side from the same rows.
 
 ## Build order
 
-1. Shared device layer (handle survives preset swap).
+1. ~~Shared device layer~~ — done as the `RadioHandle` extraction (no
+   pool; see finding 8).
 2. `SweepSource` + `panorama.json`, tested with a fake band source.
 3. Lease v1 + MCP `sweep`.
 4. UI: Tabler icons → tool registry → `SpecAnQuickBar` → Panorama
