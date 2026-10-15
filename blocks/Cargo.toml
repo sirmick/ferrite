@@ -132,3 +132,7 @@ required-features = ["soapysdr"]
 [[example]]
 name              = "passband_spike"
 required-features = ["soapysdr"]
+
+[[example]]
+name              = "rate_switch_spike"
+required-features = ["soapysdr"]

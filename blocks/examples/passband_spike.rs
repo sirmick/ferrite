@@ -78,8 +78,8 @@ fn main() {
     let c = N / 2;
     let bin = rate / N as f64;
     print!("DC ±8 bins ({bin:.0} Hz/bin):");
-    for i in c - 8..=c + 8 {
-        print!(" {:+.0}", db[i] - floor);
+    for v in &db[c - 8..=c + 8] {
+        print!(" {:+.0}", v - floor);
     }
     println!();
 }

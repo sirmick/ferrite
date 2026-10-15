@@ -73,6 +73,8 @@ pub mod sherpa_transcribe;
 pub mod signal_list;
 pub mod sine;
 #[cfg(feature = "soapysdr")]
+pub mod soapy_device;
+#[cfg(feature = "soapysdr")]
 pub mod soapy_retry;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_source;
