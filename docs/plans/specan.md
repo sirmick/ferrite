@@ -127,9 +127,25 @@ server-side from the same rows.
 
 1. ~~Shared device layer~~ — done as the `RadioHandle` extraction (no
    pool; see finding 8).
-2. `SweepSource` + `panorama.json`, tested with a fake band source.
-3. Lease v1 + MCP `sweep`.
-4. UI: Tabler icons → tool registry → `SpecAnQuickBar` → Panorama
-   renderer (peak-preserving reduction, stitched waterfall, markers,
-   drag-zoom, double-click-listen), developed against a fake row source.
-5. Live integration on the RSPdx; local CI matrix; merge.
+2. ✅ `SweepSource` / `SweepSim` + `panorama.json` (bd27c77).
+3. ◐ Lease v1 done (stash + `POST /api/preset/return`, tune 409
+   `RADIO_BUSY` unless `force`); MCP `sweep` summary tool not yet —
+   agents read the `panorama` kind via state / `await_events` today.
+4. ✅ UI (e899cba): Tabler icons, tool registry, `SpecAnQuickBar`,
+   Panorama (Canvas 2D, not WebGL — enough at ≤ 11 rows/s).
+5. ◐ Live on the RSPdx ✓ (headless-Chromium walkthrough); full local CI
+   matrix + merge pending.
+
+### Known gaps / next
+
+- **LNA-band floor steps** (RSPdx gain ladder changes at band edges —
+  visible at ~50 and ~225 MHz in a 30–300 MHz sweep). Compensate from
+  the true-dB readback tables, or mark the edges.
+- **Detector choice**: peak-preserving reduction lifts the apparent
+  floor when zoomed out (max of ~300 bins/pixel); add a sample/average
+  detector option.
+- **Listen picks the stashed preset** (e.g. `wbfm` even on NOAA) — pick
+  a mode from the band plan instead.
+- MCP `sweep` tool (pass summary + max hold), the three-surface test.
+- The AGC checkbox still shows in the Spectrum quick bar (forced off by
+  the preset; harmless but misleading).
