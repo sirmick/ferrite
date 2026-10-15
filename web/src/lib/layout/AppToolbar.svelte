@@ -20,6 +20,20 @@
   import { browserRuntime } from '$lib/runner/browserRuntime.svelte';
   import { snapshotView, dataUrlToBase64 } from '$lib/viz/viewRegistry';
   import { logs } from '$lib/logs/store.svelte';
+  import { tools, TOOLS, type ToolId } from '$lib/tools/tools.svelte';
+  import IconPlayerPlay from '@tabler/icons-svelte-runes/icons/player-play';
+  import IconPlayerStop from '@tabler/icons-svelte-runes/icons/player-stop';
+  import IconCamera from '@tabler/icons-svelte-runes/icons/camera';
+  import IconAntenna from '@tabler/icons-svelte-runes/icons/antenna';
+  import IconTopology from '@tabler/icons-svelte-runes/icons/topology-star-3';
+  import IconRadio from '@tabler/icons-svelte-runes/icons/radio';
+  import IconChartArea from '@tabler/icons-svelte-runes/icons/chart-area-line';
+
+  const TOOL_ICON: Record<ToolId, typeof IconRadio> = {
+    receiver: IconRadio,
+    spectrum: IconChartArea,
+  };
+  let spectrumMode = $derived(tools.active === 'spectrum');
 
   // Right (channel-detail) pane selector. Disabled when the active
   // preset has no Channelizer (no runtime-injected `ui:fft_narrow`
@@ -292,90 +306,131 @@
            digital-voice call log), defaulting per preset.
          Per-dropdown words hide on narrow screens (the shapes are
          self-evident). -->
-    <div class="flex items-center gap-2 text-[11px] text-[color:var(--color-muted)]">
-      <label class="flex items-center gap-1">
-        <span class="hidden lg:inline">Main</span>
-        <select
-          class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-1 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:text-slate-50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
-          disabled={leftViews.length === 0}
-          value={leftSel}
-          onchange={(e) => {
-            const v = (e.target as HTMLSelectElement).value;
-            void applyControl('client.workspace.mainPane', v);
-            // Picking Transcript turns transcription on (it isn't paid
-            // for until someone looks): the server re-composes with the
-            // transcriber(s) and the view fills as speech arrives.
-            if (v === 'transcript' && !pipeline.profile.transcribe) {
-              void pipeline.setProfile({ ...pipeline.profile, transcribe: true });
-            }
-          }}
-          title={leftViews.length
-            ? `Main column: FFT/Waterfall or ${leftViews.map((v) => v.label).join(' / ')}.`
-            : 'Active preset has no main-column view'}
+    <!-- Radio-tool switch: which tool owns the SDR. Server-derived (the
+         loaded preset), so every tab and the AI see the same mode. -->
+    <div
+      class="flex overflow-hidden rounded border border-slate-600"
+      role="group"
+      aria-label="Tool"
+    >
+      {#each TOOLS.filter((t) => t.kind === 'radio') as t (t.id)}
+        {@const Icon = TOOL_ICON[t.id]}
+        <button
+          type="button"
+          class="flex items-center gap-1 px-2 py-0.5 text-[11px] text-slate-300 hover:bg-slate-700 disabled:opacity-50"
+          class:tool-on={tools.active === t.id}
+          title={t.hint}
+          aria-label={t.label}
+          aria-pressed={tools.active === t.id}
+          disabled={tools.switching}
+          onclick={() => void tools.enter(t.id)}
         >
-          <option value="wide">FFT / Waterfall</option>
-          {#each leftViews as v (v.id)}
-            <option value={v.id}>{v.label}</option>
-          {/each}
-        </select>
-      </label>
-      <label class="flex items-center gap-1" class:opacity-40={!rightAvailable}>
-        <span class="hidden lg:inline">Right</span>
-        <select
-          class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-1 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:text-slate-50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
-          disabled={!rightAvailable}
-          value={rightSel}
-          onchange={(e) =>
-            void applyControl('client.workspace.rightPane', (e.target as HTMLSelectElement).value)}
-          title={rightAvailable
-            ? 'Right column: channel FFT/Waterfall, strongest signals, a companion log, or off'
-            : 'Active preset has no right-column view'}
-        >
-          <option value="off">Off</option>
-          {#if hasNarrow}
-            <option value="channel">FFT / Waterfall</option>
-          {/if}
-          {#if hasSignals}
-            <option value="signals">Strongest Signals</option>
-          {/if}
-          {#each rightViews as v (v.id)}
-            <option value={v.id}>{v.label}</option>
-          {/each}
-        </select>
-      </label>
+          <Icon size={15} stroke={1.75} />
+          <span class="hidden xl:inline">{t.label}</span>
+        </button>
+      {/each}
     </div>
+    {#if !spectrumMode}
+      <div class="flex items-center gap-2 text-[11px] text-[color:var(--color-muted)]">
+        <label class="flex items-center gap-1">
+          <span class="hidden lg:inline">Main</span>
+          <select
+            class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-1 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:text-slate-50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={leftViews.length === 0}
+            value={leftSel}
+            onchange={(e) => {
+              const v = (e.target as HTMLSelectElement).value;
+              void applyControl('client.workspace.mainPane', v);
+              // Picking Transcript turns transcription on (it isn't paid
+              // for until someone looks): the server re-composes with the
+              // transcriber(s) and the view fills as speech arrives.
+              if (v === 'transcript' && !pipeline.profile.transcribe) {
+                void pipeline.setProfile({ ...pipeline.profile, transcribe: true });
+              }
+            }}
+            title={leftViews.length
+              ? `Main column: FFT/Waterfall or ${leftViews.map((v) => v.label).join(' / ')}.`
+              : 'Active preset has no main-column view'}
+          >
+            <option value="wide">FFT / Waterfall</option>
+            {#each leftViews as v (v.id)}
+              <option value={v.id}>{v.label}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="flex items-center gap-1" class:opacity-40={!rightAvailable}>
+          <span class="hidden lg:inline">Right</span>
+          <select
+            class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-1 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:text-slate-50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!rightAvailable}
+            value={rightSel}
+            onchange={(e) =>
+              void applyControl(
+                'client.workspace.rightPane',
+                (e.target as HTMLSelectElement).value,
+              )}
+            title={rightAvailable
+              ? 'Right column: channel FFT/Waterfall, strongest signals, a companion log, or off'
+              : 'Active preset has no right-column view'}
+          >
+            <option value="off">Off</option>
+            {#if hasNarrow}
+              <option value="channel">FFT / Waterfall</option>
+            {/if}
+            {#if hasSignals}
+              <option value="signals">Strongest Signals</option>
+            {/if}
+            {#each rightViews as v (v.id)}
+              <option value={v.id}>{v.label}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+    {/if}
     <button
       type="button"
-      class="rounded border px-2 py-0.5 text-[11px] font-semibold disabled:opacity-50"
+      class="flex items-center rounded border px-1.5 py-0.5 text-[11px] font-semibold disabled:opacity-50"
       class:running={pipeline.status === 'running'}
       class:stopped={pipeline.status !== 'running'}
       disabled={startStopBusy || pipeline.phase === 'loading'}
       onclick={togglePipeline}
+      title={pipeline.status === 'running' ? 'Stop the pipeline' : 'Start the pipeline'}
+      aria-label={pipeline.status === 'running' ? 'Stop' : 'Start'}
     >
-      {pipeline.status === 'running' ? 'Stop' : 'Start'}
+      {#if pipeline.status === 'running'}<IconPlayerStop
+          size={15}
+          stroke={2}
+        />{:else}<IconPlayerPlay size={15} stroke={2} />{/if}
     </button>
     <button
       type="button"
-      class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:bg-slate-700 hover:text-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+      class="flex cursor-pointer items-center rounded border border-slate-500 bg-slate-800/60 px-1.5 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:bg-slate-700 hover:text-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
       disabled={shotBusy}
-      title="Capture the current spectrum/waterfall and store it on the server"
+      title={shotBusy
+        ? 'Saving…'
+        : 'Screenshot — capture the spectrum/waterfall and store it on the server'}
+      aria-label="Screenshot"
       onclick={takeScreenshot}
     >
-      {shotBusy ? 'Saving…' : 'Screenshot'}
+      <IconCamera size={15} stroke={1.75} />
     </button>
     <button
       type="button"
-      class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:bg-slate-700 hover:text-slate-50"
+      class="flex cursor-pointer items-center rounded border border-slate-500 bg-slate-800/60 px-1.5 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:bg-slate-700 hover:text-slate-50"
+      title="Source — pick the radio, antenna, rate"
+      aria-label="Source"
       onclick={() => (showSource = true)}
     >
-      Source…
+      <IconAntenna size={15} stroke={1.75} />
     </button>
     <button
       type="button"
-      class="cursor-pointer rounded border border-slate-500 bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:bg-slate-700 hover:text-slate-50"
+      class="flex cursor-pointer items-center rounded border border-slate-500 bg-slate-800/60 px-1.5 py-0.5 text-[11px] text-slate-200 hover:border-sky-400 hover:bg-slate-700 hover:text-slate-50"
+      title="Flowgraph — the running blocks and their params"
+      aria-label="Flowgraph"
       onclick={() => (showFlowgraph = true)}
     >
-      Flowgraph…
+      <IconTopology size={15} stroke={1.75} />
     </button>
   </div>
 </div>
@@ -394,6 +449,10 @@
 <FlowgraphDialog bind:open={showFlowgraph} onClose={() => (showFlowgraph = false)} />
 
 <style>
+  .tool-on {
+    background: rgba(125, 211, 252, 0.15);
+    color: #f1f5f9;
+  }
   /* Lifted verbatim from the old +page.svelte top header so the
      start/stop button keeps its existing colour cue. */
   .running {

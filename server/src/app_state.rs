@@ -125,6 +125,10 @@ struct Inner {
     /// each load, REST/MCP read snapshots, WS mirrors stream its deltas.
     decoder_store: Arc<crate::decoder_store::DecoderStore>,
     preset_doc: RwLock<FlowgraphDoc>,
+    /// The receiver preset to go back to when the spectrum analyzer (a
+    /// stepped preset) is left — stashed when it is entered. The v1
+    /// "radio lease": the analyzer remembers whose radio it borrowed.
+    return_preset: std::sync::Mutex<Option<String>>,
     source_config: RwLock<SourceConfig>,
     /// Serialises [`AppState::patch_source`] end to end. The patch
     /// reads `source_config`, probes caps (async), computes a delta,
@@ -217,6 +221,7 @@ impl AppState {
                 frames,
                 decoder_store,
                 preset_doc: RwLock::new(preset),
+                return_preset: std::sync::Mutex::new(None),
                 source_config: RwLock::new(source),
                 patch_gate: Mutex::new(()),
                 profile: RwLock::new(Profile::default()),
@@ -1010,9 +1015,46 @@ impl AppState {
         let doc = tokio::task::spawn_blocking(move || resolve_preset_doc(&dir, &slug))
             .await
             .map_err(|e| anyhow!("preset resolve task panicked: {e}"))??;
-        self.adopt_preset_source_rate(&doc).await;
+        let stepped = ferrite_runtime::wants_stepped(&doc);
+        let current = self.inner.preset_doc.read().await.clone();
+        if stepped && !ferrite_runtime::wants_stepped(&current) {
+            // Entering the analyzer: remember the receiver to return to.
+            *self
+                .inner
+                .return_preset
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(current.name.clone());
+        }
+        // A sweep pins its own rate (force_params); adopting it would
+        // leave the operator's radio at 10 MS/s when they come back.
+        if !stepped {
+            self.adopt_preset_source_rate(&doc).await;
+        }
         let plan = self.patch_flowgraph(doc.clone()).await?;
         Ok((doc, plan))
+    }
+
+    /// Leave the spectrum analyzer: load the receiver preset that was
+    /// running when it was entered (`wbfm` if none was recorded). A no-op
+    /// returning the current doc when no stepped preset is loaded.
+    pub async fn return_from_stepped(&self) -> Result<(FlowgraphDoc, Option<ReconfigurePlan>)> {
+        let current = self.inner.preset_doc.read().await.clone();
+        if !ferrite_runtime::wants_stepped(&current) {
+            return Ok((current, None));
+        }
+        let name = self
+            .inner
+            .return_preset
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| "wbfm".to_string());
+        self.load_preset_by_name(&name).await
+    }
+
+    /// True while a stepped preset (the spectrum analyzer) owns the radio.
+    pub async fn stepped_active(&self) -> bool {
+        ferrite_runtime::wants_stepped(&*self.inner.preset_doc.read().await)
     }
 
     /// A preset's `src.sample_rate_hz` is a *requirement* of its DSP

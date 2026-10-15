@@ -600,6 +600,11 @@ pub struct TuneRequest {
     /// no node-side worker reload. Falls back to a normal tune out-of-span.
     #[serde(default)]
     pub keep_lo: bool,
+    /// The spectrum analyzer owns the radio while it runs; a tune is
+    /// refused (409 `RADIO_BUSY`) unless `force`, which leaves the
+    /// analyzer (back to the receiver preset) and then tunes.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// `POST /api/tune` — single tuning intent. Every caller that "asks to
@@ -621,6 +626,19 @@ pub async fn post_tune(
         keep_lo = req.keep_lo,
         "POST /api/tune"
     );
+    if state.stepped_active().await {
+        if !req.force {
+            return Err(AppError::conflict(
+                "RADIO_BUSY",
+                "the spectrum analyzer owns the radio — leave it first \
+                 (POST /api/preset/return) or tune with force",
+            ));
+        }
+        state
+            .return_from_stepped()
+            .await
+            .map_err(|e| AppError::radio_or_bad_request("TUNE_FAILED", &e))?;
+    }
     let (freq_hz, tuned) = match (req.freq_hz, req.carrier_hz) {
         (_, Some(carrier)) => {
             let t = state
@@ -974,6 +992,21 @@ pub async fn load_preset(
             "POST /api/preset ok"
         );
     }
+    Ok(Json(LoadPresetResponse {
+        name: doc.name,
+        reconfigure: reconfigure_response(plan),
+    }))
+}
+
+/// `POST /api/preset/return` — leave the spectrum analyzer: reload the
+/// receiver preset that was running when it was entered.
+pub async fn return_preset(
+    State(state): State<AppState>,
+) -> Result<Json<LoadPresetResponse>, AppError> {
+    let (doc, plan) = state
+        .return_from_stepped()
+        .await
+        .map_err(|e| AppError::radio_or_bad_request("LOAD_PRESET_FAILED", &e))?;
     Ok(Json(LoadPresetResponse {
         name: doc.name,
         reconfigure: reconfigure_response(plan),

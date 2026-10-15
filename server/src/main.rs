@@ -530,6 +530,7 @@ async fn main() -> Result<()> {
         .route("/api/sigwiki/page", get(sigwiki::get_page))
         .route("/api/sigwiki/image", get(sigwiki::get_image))
         .route("/api/preset", post(routes::load_preset))
+        .route("/api/preset/return", post(routes::return_preset))
         .route(
             "/api/profile",
             get(routes::get_profile).patch(routes::patch_profile),
