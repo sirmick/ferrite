@@ -98,6 +98,49 @@ fn remove_files(p: &Path) {
     let _ = std::fs::remove_file(crate::capture::sidecar_path_for(p));
 }
 
+/// Delete snapshot files left in the temp dir by daemons that are gone.
+/// The ring only evicts within one process, so every restart orphaned
+/// up to [`SNAPSHOT_KEEP`] recordings (~190 MB each on a wide span) —
+/// 3.5 GB once filled a tmpfs. Called at boot.
+pub fn sweep_stale_snapshots() {
+    sweep_stale_snapshots_in(&std::env::temp_dir(), |pid| {
+        Path::new("/proc").join(pid.to_string()).exists() || !Path::new("/proc").exists()
+    });
+}
+
+/// `ferrite-snap-…-<pid>.{cf32,json}` whose `<pid>` isn't `alive` (a
+/// live daemon in another worktree keeps its own) is removed.
+fn sweep_stale_snapshots_in(dir: &Path, alive: impl Fn(u32) -> bool) -> usize {
+    let me = std::process::id();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for e in rd.flatten() {
+        let p = e.path();
+        let ext_ok = matches!(
+            p.extension().and_then(|x| x.to_str()),
+            Some("cf32" | "json")
+        );
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !ext_ok || !stem.starts_with("ferrite-snap-") {
+            continue;
+        }
+        let Some(pid) = stem.rsplit('-').next().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid != me && !alive(pid) && std::fs::remove_file(&p).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "removed snapshot files left by earlier daemons");
+    }
+    removed
+}
+
 /// Who asked: an agent over MCP, a person on the CLI, or the UI.
 fn caller(headers: &HeaderMap) -> String {
     headers
@@ -565,4 +608,42 @@ pub async fn post_spot_map(
     let mut out = body;
     out["analysis_id"] = json!(id);
     Ok(Json(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_removes_only_dead_daemons_snapshots() {
+        let d = tempfile::tempdir().unwrap();
+        let me = std::process::id();
+        let names = [
+            "ferrite-snap-1-111.cf32".to_string(),
+            "ferrite-snap-1-111.json".to_string(),
+            "ferrite-snap-qm0t-2-222.cf32".to_string(),
+            format!("ferrite-snap-r3bc-1-{me}.cf32"),
+            "ferrite-snap-1-333.cf32".to_string(),     // alive
+            "ferrite-captures-1-111.cf32".to_string(), // not a snapshot
+            "ferrite-snap-1-111.txt".to_string(),
+        ];
+        for n in &names {
+            std::fs::write(d.path().join(n), b"x").unwrap();
+        }
+        let removed = sweep_stale_snapshots_in(d.path(), |pid| pid == 333);
+        assert_eq!(removed, 3);
+        let mut left: Vec<String> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let mut want = vec![
+            "ferrite-captures-1-111.cf32".to_string(),
+            "ferrite-snap-1-111.txt".to_string(),
+            "ferrite-snap-1-333.cf32".to_string(),
+            format!("ferrite-snap-r3bc-1-{me}.cf32"),
+        ];
+        want.sort();
+        assert_eq!(left, want);
+    }
 }
