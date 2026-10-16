@@ -117,6 +117,10 @@ describe('transcriptOf', () => {
       records: [{ record: { record: { seq: 7, at_ms: 1, data: { text: 'x', t0: 0, t1: 1 } } } }],
     });
     expect(transcriptOf(res)?.[0].id).toBe(7);
+    const flat = JSON.stringify({
+      records: [{ kind: 'transcribe', seq: 9, at_ms: 1, data: { text: 'y', t0: 0, t1: 1 } }],
+    });
+    expect(transcriptOf(flat)?.[0].id).toBe(9);
     expect(transcriptOf(JSON.stringify({ signals: [] }))).toBeNull();
     expect(transcriptOf(undefined)).toBeNull();
   });

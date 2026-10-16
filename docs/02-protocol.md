@@ -658,7 +658,7 @@ the Claude Code MCP config (`~/.config/claude/mcp.json` or per-project
     "ferrite": {
       "command": "/usr/bin/ferrite-ctl",
       "args": ["mcp"],
-      "env": { "FERRITE_CTL_CONNECT": "http://127.0.0.1:10001" }
+      "env": { "FERRITE_CTL_CONNECT": "http://127.0.0.1:12001" }
     }
   }
 }

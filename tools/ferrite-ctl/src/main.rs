@@ -10,7 +10,7 @@
 //! Output is JSON: pretty-printed by default, one-line compact under
 //! `--json` (friendly for `jq -c` / line consumers). Drives the same
 //! running ferrited the browser UI uses (`--connect`, defaults to
-//! `http://127.0.0.1:10001`).
+//! `http://127.0.0.1:12001`).
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -28,7 +28,8 @@ use mcp::{
     ViewSnapshotArgs,
 };
 
-const DEFAULT_CONNECT: &str = "http://127.0.0.1:10001";
+/// `run.sh`'s ferrited port (the 12000 family: vite 12000, ferrited 12001).
+const DEFAULT_CONNECT: &str = "http://127.0.0.1:12001";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -314,8 +315,28 @@ enum Cmd {
         status: Option<String>,
         #[arg(long)]
         confidence: Option<f32>,
+        /// What it's based on: JSON (`'{"decoder":"dsd-fme"}'`) or plain
+        /// text, or an analysis id (`an-zfjj-20`).
+        #[arg(long)]
+        evidence: Option<String>,
         #[arg(long)]
         notes: Option<String>,
+    },
+    /// The station profile: grid, callsign and the per-band front-end
+    /// table `listen` / `sweep` apply. No flags prints it.
+    Station {
+        /// Maidenhead grid (`CM87`); `""` clears.
+        #[arg(long)]
+        grid: Option<String>,
+        #[arg(long)]
+        callsign: Option<String>,
+        /// Replace the band table from a JSON file (`[{lo_hz, hi_hz,
+        /// label, antenna, gain_db, agc}]`, or `{bands:[…]}`).
+        #[arg(long)]
+        bands_file: Option<std::path::PathBuf>,
+        /// Show which row applies at this frequency (`7.074M`).
+        #[arg(long)]
+        at: Option<String>,
     },
     /// Record a few seconds of live IQ and keep it by id (no retune).
     Snapshot {
@@ -363,7 +384,7 @@ enum Cmd {
         /// Look back this many minutes.
         #[arg(long, default_value_t = 30.0)]
         minutes: f64,
-        /// Receive grid (default: the daemon's FERRITE_RX_GRID).
+        /// Receive grid (default: the station profile's grid).
         #[arg(long)]
         rx_grid: Option<String>,
     },
@@ -1195,6 +1216,7 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             label,
             status,
             confidence,
+            evidence,
             notes,
         } => emit(
             &server
@@ -1203,7 +1225,10 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                     label,
                     status,
                     confidence,
-                    evidence: None,
+                    evidence: evidence.map(|e| {
+                        serde_json::from_str::<serde_json::Value>(&e)
+                            .unwrap_or(serde_json::Value::String(e))
+                    }),
                     notes,
                 })
                 .await
@@ -1310,6 +1335,35 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 eprintln!("picture → {path}");
             }
             print_text_or_json(&v, json)
+        }
+        Cmd::Station {
+            grid,
+            callsign,
+            bands_file,
+            at,
+        } => {
+            let bands = match bands_file {
+                Some(path) => {
+                    let text = std::fs::read_to_string(&path)
+                        .with_context(|| format!("reading {}", path.display()))?;
+                    let v: serde_json::Value = serde_json::from_str(&text)
+                        .with_context(|| format!("parsing {}", path.display()))?;
+                    Some(v.get("bands").cloned().unwrap_or(v))
+                }
+                None => None,
+            };
+            emit(
+                &server
+                    .station_op(mcp::StationArgs {
+                        grid,
+                        callsign,
+                        bands,
+                        at_hz: parse_si_opt(at.as_deref())?,
+                    })
+                    .await
+                    .map_err(op_err)?,
+                json,
+            )
         }
         Cmd::SpotMap {
             kind,
@@ -1591,7 +1645,7 @@ async fn capture(cmd: CaptureCmd, server: &FerriteServer, json: bool) -> Result<
         })
         .await
         .map_err(op_err)?;
-    match v.pointer("/records/0/record/record/data") {
+    match v.pointer("/records/0/data") {
         Some(job) => emit(job, json),
         None => {
             // Timed out: report the job's current record from the store.
@@ -1653,10 +1707,11 @@ async fn follow_records(
             if !ferrite_ctl_record_matches(&rec.value, filter) {
                 return true;
             }
+            let flat = mcp::flatten_record(&rec.value, rec.retain);
             let line = if json {
-                serde_json::json!({ "topic": rec.topic, "record": rec.value }).to_string()
+                flat.to_string()
             } else {
-                serde_json::to_string_pretty(&rec.value).unwrap_or_default()
+                serde_json::to_string_pretty(&flat).unwrap_or_default()
             };
             println!("{line}");
             true

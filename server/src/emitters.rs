@@ -468,6 +468,13 @@ impl Tracker {
         now_ms: u64,
     ) -> Option<Emitter> {
         let e = self.emitters.get_mut(&id)?;
+        // A new name starts a new identification; re-stating the same
+        // label (or only adjusting confidence) keeps what was recorded.
+        let relabelled = patch
+            .label
+            .as_deref()
+            .is_some_and(|l| e.label.as_deref() != Some(l.trim()));
+        let prior = if relabelled { None } else { e.ident.clone() };
         if let Some(l) = &patch.label {
             let l = l.trim();
             e.label = (!l.is_empty()).then(|| l.to_string());
@@ -487,11 +494,12 @@ impl Tracker {
             e.notes = (!n.trim().is_empty()).then(|| n.clone());
         }
         if patch.label.is_some() || patch.confidence.is_some() || patch.evidence.is_some() {
+            let kept = |k: &str| prior.as_ref().and_then(|p| p.get(k)).cloned();
             e.ident = Some(json!({
                 "by": by,
                 "at_ms": now_ms,
-                "confidence": patch.confidence,
-                "evidence": patch.evidence,
+                "confidence": patch.confidence.map(|c| json!(c)).or_else(|| kept("confidence")),
+                "evidence": patch.evidence.clone().or_else(|| kept("evidence")),
             }));
         }
         self.last_pub.insert(id, now_ms);
@@ -1134,6 +1142,37 @@ mod tests {
         let e = t.edit(id, &p, "ui", 6).unwrap();
         assert_eq!(e.status, "ignored");
         assert_eq!(e.label.as_deref(), Some("local spur"));
+    }
+
+    /// A later edit that only adjusts confidence (or re-states the same
+    /// label, as a CLI relabel does) keeps the evidence an agent stored;
+    /// a different label starts over.
+    #[test]
+    fn edits_keep_evidence_until_the_label_changes() {
+        let mut t = fresh();
+        let id = put(t.observe(obs(454.344e6, 12e3, -40.0, "sweep"), 0)).id;
+        let p = EmitterPatch {
+            label: Some("Connect Plus CC".into()),
+            confidence: Some(0.9),
+            evidence: Some(json!({"decoder": "dsd-fme", "site": 28})),
+            ..Default::default()
+        };
+        t.edit(id, &p, "mcp", 1);
+        let p = EmitterPatch {
+            label: Some("Connect Plus CC".into()),
+            confidence: Some(0.95),
+            ..Default::default()
+        };
+        let ident = t.edit(id, &p, "cli", 2).unwrap().ident.unwrap();
+        assert_eq!(ident["evidence"]["site"], 28);
+        assert!((ident["confidence"].as_f64().unwrap() - 0.95).abs() < 1e-6);
+        let p = EmitterPatch {
+            label: Some("DMR Tier III CC".into()),
+            ..Default::default()
+        };
+        let ident = t.edit(id, &p, "cli", 3).unwrap().ident.unwrap();
+        assert!(ident["evidence"].is_null());
+        assert!(ident["confidence"].is_null());
     }
 
     #[test]
