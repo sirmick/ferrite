@@ -111,7 +111,7 @@ fn policy_for(kind: &str) -> Policy {
         // state) and `params/<block>` (last live param set per block) are
         // the coherence kinds: whole-document, retained, no reducer.
         "rssi" | "signals" | "readback" | "flowdiag" | "graph" | "status" | "health" | "blocks"
-        | "emitter_config" => Policy::Replace,
+        | "emitter_config" | "station" => Policy::Replace,
         k if k.starts_with("params/") => Policy::Replace,
         // Capture / survey / scan jobs — keyed by id, never expire (the
         // registry caps its own list), no track.
@@ -201,7 +201,7 @@ pub fn is_decode_kind(kind: &str) -> bool {
     !is_live_kind(kind)
         && !matches!(
             kind,
-            "activity" | "ai" | "jobs" | "analysis" | "emitter" | "emitter_config"
+            "activity" | "ai" | "jobs" | "analysis" | "emitter" | "emitter_config" | "station"
         )
         && !kind.starts_with("ai/")
 }

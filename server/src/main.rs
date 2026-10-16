@@ -52,6 +52,7 @@ mod routes;
 mod sigwiki;
 mod soapy_log;
 mod source_policy;
+mod station;
 mod store_persist;
 mod sweep_api;
 mod view_bridge;
@@ -554,6 +555,11 @@ async fn main() -> Result<()> {
         )
         .route("/api/emitters/prune", post(emitters::post_prune))
         .route("/api/emitters/:id", post(emitters::post_emitter))
+        .route(
+            "/api/station",
+            get(station::get_station).post(station::post_station),
+        )
+        .route("/api/station/at", get(station::get_at))
         .route(
             "/api/profile",
             get(routes::get_profile).patch(routes::patch_profile),

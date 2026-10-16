@@ -563,7 +563,7 @@ pub async fn post_spot_map(
     let minutes = req.minutes.unwrap_or(30.0).clamp(1.0, 24.0 * 60.0);
     let rx_grid = req
         .rx_grid
-        .or_else(|| std::env::var("FERRITE_RX_GRID").ok())
+        .or_else(|| crate::station::grid(&state.decoder_store()))
         .filter(|g| fa::geo::grid_to_latlon(g).is_some());
     let rx = rx_grid.as_deref().and_then(fa::geo::grid_to_latlon);
     let now = u64::try_from(crate::capture::now_ms()).unwrap_or(0);
