@@ -191,7 +191,8 @@ pub struct ParseState {
     /// call or system record changes.
     pub sync_lines: u64,
     pub frames: std::collections::BTreeMap<String, u64>,
-    /// `at_ms` (wall clock) of the latest sync line.
+    /// `at_ms` (wall clock) of the latest sync line — stamped by the
+    /// helper's reader thread (the parser itself is clock-free).
     pub last_sync_ms: Option<u64>,
 }
 
@@ -334,7 +335,6 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Option<DsdEvent> {
             .to_string();
         st.sync_lines += 1;
         *st.frames.entry(frame_kind(rest)).or_insert(0) += 1;
-        st.last_sync_ms = Some(crate::sweep::now_ms());
         let mut cc_changed = false;
         if let Some(cc) = value_after(rest, "Color Code", true).and_then(|v| v.parse().ok()) {
             cc_changed = st.cc != Some(cc);
@@ -653,7 +653,15 @@ mod native {
                         let Ok(line) = line else { break };
                         let clean = strip_ansi(&line);
                         tracing::debug!(target: "decoder::dsd::term", "{}", clean.trim_end());
-                        let parsed = parse_line(&clean, &mut parse.lock().unwrap());
+                        let parsed = {
+                            let mut st = parse.lock().unwrap();
+                            let syncs = st.sync_lines;
+                            let ev = parse_line(&clean, &mut st);
+                            if st.sync_lines != syncs {
+                                st.last_sync_ms = Some(crate::sweep::now_ms());
+                            }
+                            ev
+                        };
                         if let Some(ev) = parsed {
                             let extra = match ev.event {
                                 "alias" => ev.text.clone(),
@@ -1056,6 +1064,7 @@ impl Block for DsdHelper {
     }
 
     fn health(&self) -> Option<serde_json::Value> {
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut h = serde_json::json!({
             "input_dbfs": self.level.dbfs(),
             "samples_cum": self.level.samples(),

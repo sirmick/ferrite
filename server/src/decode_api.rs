@@ -196,13 +196,22 @@ fn offline_doc(
         .map_err(|e| format!("env_split: {e}"))
 }
 
+/// `(kind or block id, JSON)` pairs.
+type Tagged = Vec<(String, Value)>;
+
+/// What one offline run produced.
+struct OfflineRun {
+    /// `(kind, data)` per emitted record.
+    records: Tagged,
+    /// `(block id, health)` at the end.
+    health: Tagged,
+    /// Seconds of recording played.
+    secs: f64,
+}
+
 /// Play the file through `doc`; returns the emitted records and the
 /// final flowdiag health per block.
-fn run_offline(
-    doc: &FlowgraphDoc,
-    rate_hz: f64,
-    speed: f64,
-) -> anyhow::Result<(Vec<(String, Value)>, Vec<(String, Value)>, f64)> {
+fn run_offline(doc: &FlowgraphDoc, rate_hz: f64, speed: f64) -> anyhow::Result<OfflineRun> {
     let mut rt = Runtime::load_doc(
         doc,
         Environment::Node,
@@ -273,7 +282,11 @@ fn run_offline(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
-    Ok((records, health, secs))
+    Ok(OfflineRun {
+        records,
+        health,
+        secs,
+    })
 }
 
 /// `POST /api/decode`.
@@ -328,11 +341,14 @@ pub async fn post_decode(
         .map_err(|e| AppError::bad_request("DECODE_REJECTED", e))?;
     let speed = req.speed.unwrap_or(DEFAULT_SPEED).clamp(1.0, 50.0);
     let rate = rec.rate_hz;
-    let (records, health, secs) =
-        tokio::task::spawn_blocking(move || run_offline(&doc, rate, speed))
-            .await
-            .map_err(|e| AppError::internal("DECODE_FAILED", format!("{e}")))?
-            .map_err(|e| AppError::internal("DECODE_FAILED", format!("{e:#}")))?;
+    let OfflineRun {
+        records,
+        health,
+        secs,
+    } = tokio::task::spawn_blocking(move || run_offline(&doc, rate, speed))
+        .await
+        .map_err(|e| AppError::internal("DECODE_FAILED", format!("{e}")))?
+        .map_err(|e| AppError::internal("DECODE_FAILED", format!("{e:#}")))?;
     let mut by_kind = Map::new();
     for (k, _) in &records {
         let n = by_kind.get(k).and_then(Value::as_u64).unwrap_or(0);

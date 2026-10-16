@@ -257,7 +257,7 @@ mod tests {
                 *s = Complex::new(0.5, 0.0);
             }
         }
-        iq.extend(std::iter::repeat(Complex::new(0.0, 0.0)).take(100_000));
+        iq.extend(std::iter::repeat_n(Complex::new(0.0, 0.0), 100_000));
         d.push_iq(&iq);
         let st = d.stats();
         assert!(st.ook_packages + st.fsk_packages >= 1, "{st:?}");
