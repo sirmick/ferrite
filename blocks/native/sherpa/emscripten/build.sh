@@ -78,6 +78,18 @@ cp -f "$model_dir/tokens.txt" "$assets/tokens.txt"
 
 # --- Build (mirrors vendor/build-wasm-simd-asr.sh, parallelised) --------
 bld="$vendor/build-wasm-simd-asr"
+toolchain="$EMSCRIPTEN/cmake/Modules/Platform/Emscripten.cmake"
+# A build tree configured against a different emsdk (CI restores this
+# dir from cache, but setup-emsdk installs under a fresh _temp/<uuid>
+# each run) has a CMakeCache + depfiles pointing at compilers/headers
+# that no longer exist — CMake refuses to reconfigure. Start clean.
+if [[ -f "$bld/CMakeCache.txt" ]]; then
+	cached_tc="$(sed -n 's/^CMAKE_TOOLCHAIN_FILE:[A-Z]*=//p' "$bld/CMakeCache.txt")"
+	if [[ "$cached_tc" != "$toolchain" ]]; then
+		echo "sherpa/emscripten: build tree configured for another emsdk (${cached_tc:-none}) — wiping $bld."
+		rm -rf "$bld"
+	fi
+fi
 mkdir -p "$bld"
 # Stock sherpa emits a classic global-`Module` script (index.html loads it
 # with <script>). Our transcription Worker imports an ES module instead, so
@@ -94,7 +106,7 @@ cmake \
 	-DCMAKE_INSTALL_PREFIX="$bld/install" \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DCMAKE_EXE_LINKER_FLAGS="$sherpa_link_flags" \
-	-DCMAKE_TOOLCHAIN_FILE="$EMSCRIPTEN/cmake/Modules/Platform/Emscripten.cmake" \
+	-DCMAKE_TOOLCHAIN_FILE="$toolchain" \
 	-DSHERPA_ONNX_ENABLE_PYTHON=OFF \
 	-DSHERPA_ONNX_ENABLE_TESTS=OFF \
 	-DSHERPA_ONNX_ENABLE_CHECK=OFF \

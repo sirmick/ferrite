@@ -49,6 +49,12 @@ jobs:
         with:
           version: latest
 
+      - name: Cache emsdk
+        uses: actions/cache@v4
+        with:
+          path: ~/emsdk
+          key: emsdk-5.0.7-${{ runner.os }}
+
       - name: Install Emscripten
         # `wasm:build` includes `wasm:build:fldigi`, which compiles the
         # curated fldigi C++ to a sibling Emscripten module
@@ -56,11 +62,23 @@ jobs:
         # fldigi bridge. build.sh is emcc-gated and no-ops without it;
         # install emsdk so CI actually produces the artifact (svelte-
         # check + the browser-path fldigi e2e need it). Pinned to the
-        # dev-box emcc version for reproducibility; cached by the action.
-        uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: 5.0.7
-          actions-cache-folder: emsdk-cache
+        # dev-box emcc version for reproducibility. Installed at a fixed
+        # ~/emsdk (not setup-emsdk's per-run _temp/<uuid>) so the cached
+        # sherpa build tree's CMakeCache + depfiles stay valid across runs
+        # — a moving path made CMake fail to reconfigure, and even through
+        # a symlink emcc reports realpath'd sysroot headers.
+        run: |
+          if [ ! -x ~/emsdk/upstream/emscripten/emcc ]; then
+            git clone -q --depth 1 https://github.com/emscripten-core/emsdk ~/emsdk
+            ~/emsdk/emsdk install 5.0.7
+          fi
+          ~/emsdk/emsdk activate 5.0.7
+          source ~/emsdk/emsdk_env.sh
+          echo "$EMSDK" >> "$GITHUB_PATH"
+          echo "$EMSDK/upstream/emscripten" >> "$GITHUB_PATH"
+          echo "EMSDK=$EMSDK" >> "$GITHUB_ENV"
+          echo "EMSDK_NODE=$EMSDK_NODE" >> "$GITHUB_ENV"
+          emcc --version | head -1
 
       # --- In-browser speech-to-text: sherpa-onnx (replaced whisper.cpp) ---
       # `wasm:build:sherpa` is inert until the source is vendored, the
