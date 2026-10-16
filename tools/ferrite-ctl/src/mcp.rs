@@ -943,6 +943,28 @@ pub struct EmitterSettingsArgs {
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct DecodeArgs {
+    /// Decoder preset slug (`dsd-fme`, `dmr`, `rtl433-433`, `pager`,
+    /// `adsb`, …). FT8 / WSPR / fldigi modes are refused (wall-clock
+    /// slots / shared state) — `listen` to those live.
+    pub preset: String,
+    /// A kept snapshot id (`snap-…` from `snapshot` / `inspect`).
+    #[serde(default)]
+    pub snapshot: Option<String>,
+    /// Or a `.cf32` capture path (its sidecar `.json` gives rate and
+    /// centre) under the captures dir or /tmp/ferrite-captures — what
+    /// `start_capture_iq` writes.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Channel to decode, Hz (default: the recording's centre).
+    #[serde(default)]
+    pub freq_hz: Option<f64>,
+    /// Playback speed × real time (default 4).
+    #[serde(default)]
+    pub speed: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct ListenArgs {
     /// Frequency to listen at, Hz (the dial, as `tune`).
     pub freq_hz: f64,
@@ -1719,6 +1741,22 @@ impl FerriteServer {
                 .await?;
         }
         Ok(out)
+    }
+
+    /// Run a decoder preset over a recording (`POST /api/decode`).
+    pub(crate) async fn decode_op(&self, args: DecodeArgs) -> Result<Value, McpError> {
+        self.http
+            .post_slow(
+                "/api/decode",
+                json!({
+                    "preset": args.preset, "snapshot": args.snapshot, "path": args.path,
+                    "freq_hz": args.freq_hz, "speed": args.speed,
+                }),
+                "decode",
+                None,
+                Duration::from_secs(180),
+            )
+            .await
     }
 
     /// Preset + front end + tune + start, then optionally listen and
@@ -2735,6 +2773,16 @@ impl FerriteServer {
     }
 
     #[tool(
+        description = "Run a decoder preset over recorded IQ instead of the live radio — a kept `snapshot` (from `snapshot` / `inspect`) or a capture `path` (`start_capture_iq` output). Capture once, then try decoder after decoder on the same seconds (dsd-fme, dmr, rtl433-433, pager, packet, adsb, ais, …) without retuning or waiting for the next burst. `freq_hz` picks the channel inside a wideband recording (default its centre). Returns `{decodes:{count, by_kind, records:[{kind, data}]}, health, verdict}` like `listen`. The live receiver keeps running untouched. FT8 / WSPR / fldigi modes are refused — listen to those live."
+    )]
+    async fn decode(
+        &self,
+        Parameters(args): Parameters<DecodeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.decode_op(args).await?)
+    }
+
+    #[tool(
         description = "Listen at a frequency with a decoder, in one call: loads `preset` (if it changes), sets antenna / gain / AGC from the station profile's row for the frequency (overrides: `antenna`, `gain_db`, `agc`; `station:false` skips the profile), tunes, starts. With `secs`, it then listens and reports `{decodes:{count, by_kind, recent:[{kind, seq, at_ms, data}]}, health:{block_id: {...}}, verdict, readback}` — `health` is what each decoder saw over the window (input level, sync / candidate / pulse counts, decodes; `_cum` counters as deltas) and `verdict` says which case you're in: decoding, nothing above the floor, a signal the decoder can't sync, or syncs that never decode (e.g. a DMR control channel: dsd-fme syncs, CSBKs, and the network's `system` identity, but no calls). FT8 needs `secs` ≥ 16 (one slot). Use instead of load_preset + set_block_param + tune + start + await_events. While the spectrum analyzer holds the radio: 409 RADIO_BUSY unless `force`."
     )]
     async fn listen(
@@ -3033,6 +3081,7 @@ Find and measure signals — every result is drawn in the AI tab
 - `sweep` — spectrum analyzer over ANY range (steps the radio ~7.6 MHz at a time): per-step floor, emitters (freq, level, width, duty, bursty), max-hold profile. Takes the radio: `force` to preempt a running receiver, `restore` to give it back; `tune(force=true)` leaves it.
 - `inspect` — characterise one emitter / frequency: tunes the receiver there, records a few seconds, returns the feature bundle (centre, occupied width, SNR, tones + FSK shift, keying / bursts / period, constant-envelope) with a one-line hint AND the spectrogram as an image. The measurement between "found it" and "named it"; its headline is stored on the emitter.
 - `listen` — the one-call way to hear something: preset + station front end + tune + start, and with `secs` the decodes, each decoder's health and a verdict (silence vs can't-sync vs syncs-but-no-decodes). Prefer it to chaining load_preset / set_block_param / tune / await_events.
+- `decode` — run a decoder over a snapshot / capture instead of live RF: capture a burst once, then try dsd-fme, dmr, rtl433, pager, … on the same seconds.
 - `station` — the station profile: receiver `grid` (spot-map origin) and the per-band front-end table (antenna / gain / AGC) that `listen` and `sweep` apply on their own; `at_hz` shows the row for one frequency.
 - `emitters` / `label_emitter` — the station's memory of the band: every transmitter the receiver's detector or a sweep has seen, merged, numbered and persisted (band, level, width, first/last seen, status new / identified / ignored). Your work queue is `emitters(status="new")`; record what you find with `label_emitter` (label + confidence + evidence), and ignore spurs so they stop coming back. `emitter_settings` reads / sets the SNR cutoff and prunes the noise (never labelled ones).
 - `spectrogram` — time × frequency of a range: read the mode off its shape (CW dashes, RTTY's two tones, FT8 tone blocks, PSK31's thin line).

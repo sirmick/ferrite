@@ -103,7 +103,7 @@ fn health_now(state: &AppState) -> BTreeMap<String, Value> {
 /// `after` with every `*_cum` counter replaced by its increase since
 /// `before` (keys renamed without `_cum`; `frames_cum` maps diffed per
 /// frame type).
-fn health_delta(before: Option<&Value>, after: &Value) -> Value {
+pub(crate) fn health_delta(before: Option<&Value>, after: &Value) -> Value {
     let mut out = Map::new();
     for (k, v) in after.as_object().into_iter().flatten() {
         let Some(name) = k.strip_suffix("_cum") else {
@@ -144,7 +144,7 @@ fn u(h: &Value, k: &str) -> u64 {
 }
 
 /// One line per decoder about what it saw over the window.
-fn decoder_verdict(id: &str, h: &Value, secs: f64) -> Option<String> {
+pub(crate) fn decoder_verdict(id: &str, h: &Value, secs: f64) -> Option<String> {
     let level = h
         .get("input_dbfs")
         .and_then(Value::as_f64)

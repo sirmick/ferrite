@@ -333,6 +333,22 @@ enum Cmd {
         #[arg(long)]
         notes: Option<String>,
     },
+    /// Run a decoder preset over a snapshot or capture (not the live
+    /// radio): `decode dsd-fme --snapshot snap-zfjj-17`.
+    Decode {
+        /// Preset slug.
+        preset: String,
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// A `.cf32` capture (with its sidecar `.json`).
+        #[arg(long)]
+        path: Option<String>,
+        /// Channel inside the recording (`454.3443M`).
+        #[arg(long)]
+        freq: Option<String>,
+        #[arg(long)]
+        speed: Option<f64>,
+    },
     /// Listen at a frequency with a decoder: preset + the station's
     /// antenna / gain for the band + tune + start; `--secs N` then
     /// listens and prints what was decoded and a verdict.
@@ -1377,6 +1393,34 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 eprintln!("picture → {path}");
             }
             print_text_or_json(&v, json)
+        }
+        Cmd::Decode {
+            preset,
+            snapshot,
+            path,
+            freq,
+            speed,
+        } => {
+            let v = server
+                .decode_op(mcp::DecodeArgs {
+                    preset,
+                    snapshot,
+                    path,
+                    freq_hz: parse_si_opt(freq.as_deref())?,
+                    speed,
+                })
+                .await
+                .map_err(op_err)?;
+            match v.get("verdict").and_then(Value::as_str) {
+                Some(text) if !json => {
+                    println!("{text}");
+                    for r in v["decodes"]["records"].as_array().into_iter().flatten() {
+                        println!("  [{}] {}", r["kind"].as_str().unwrap_or(""), r["data"]);
+                    }
+                    Ok(())
+                }
+                _ => emit(&v, json),
+            }
         }
         Cmd::Listen {
             freq,

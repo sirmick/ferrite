@@ -38,6 +38,7 @@ mod band_plan;
 mod block_schema;
 mod bridge_sink;
 mod capture;
+mod decode_api;
 mod decoder_store;
 mod device;
 mod device_cache;
@@ -550,6 +551,7 @@ async fn main() -> Result<()> {
         .route("/api/sweep", post(sweep_api::post_sweep))
         .route("/api/inspect", post(inspect_api::post_inspect))
         .route("/api/listen", post(listen_api::post_listen))
+        .route("/api/decode", post(decode_api::post_decode))
         .route("/api/emitters", get(emitters::get_emitters))
         .route(
             "/api/emitters/config",
