@@ -1895,6 +1895,7 @@ const SWEEP_KEYS: &[&str] = &[
     "usable_fraction",
     "overlap",
     "dc_mask_hz",
+    "bands",
 ];
 
 const HW_CHECKED_KEYS: &[&str] = &["gain_db", "agc", "antenna"];

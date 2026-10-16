@@ -243,6 +243,17 @@ enum Cmd {
         threshold: Option<f32>,
         #[arg(long, default_value_t = 20)]
         peaks: usize,
+        /// Antenna for the whole sweep (default: the station profile's
+        /// per band).
+        #[arg(long)]
+        antenna: Option<String>,
+        /// Gain dial for the whole sweep, dB (default: the station
+        /// profile's per band).
+        #[arg(long)]
+        gain: Option<f64>,
+        /// Ignore the station profile's band table.
+        #[arg(long)]
+        no_station: bool,
         #[arg(long)]
         force: bool,
         #[arg(long)]
@@ -1063,11 +1074,17 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             passes,
             threshold,
             peaks,
+            antenna,
+            gain,
+            no_station,
             force,
             restore,
         } => {
             let mut v = server
                 .sweep_op(mcp::SweepArgs {
+                    antenna,
+                    gain_db: gain,
+                    station: Some(!no_station),
                     lo_hz: lo.as_deref().map(parse_si).transpose()?,
                     hi_hz: hi.as_deref().map(parse_si).transpose()?,
                     rbw_hz: rbw,

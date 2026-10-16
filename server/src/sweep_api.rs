@@ -52,6 +52,16 @@ pub struct SweepReq {
     /// Give up after this long (default 120 s, max 600).
     #[serde(default)]
     pub timeout_s: Option<f64>,
+    /// Antenna for the whole sweep (overrides the station profile).
+    #[serde(default)]
+    pub antenna: Option<String>,
+    /// Gain dial for the whole sweep, dB (overrides the station profile).
+    #[serde(default)]
+    pub gain_db: Option<f64>,
+    /// Apply the station profile's per-band antenna / gain (default
+    /// true; ignored for whatever `antenna` / `gain_db` override).
+    #[serde(default)]
+    pub station: Option<bool>,
     /// Take the radio from a running receiver.
     #[serde(default)]
     pub force: bool,
@@ -410,6 +420,17 @@ pub async fn post_sweep(
     if let Some(v) = req.averages {
         aim.insert("averages".into(), json!(v));
     }
+    // Always restate the front-end table: it stays staged on the
+    // analyzer, and a previous sweep's override mustn't linger.
+    aim.insert(
+        "bands".into(),
+        crate::station::sweep_bands(
+            &crate::station::load(&state.decoder_store()),
+            req.station.unwrap_or(true),
+            req.antenna.as_deref(),
+            req.gain_db,
+        ),
+    );
     if let (Some(lo), Some(hi)) = (req.lo_hz, req.hi_hz) {
         if !(hi > lo) {
             return Err(AppError::bad_request(
@@ -435,12 +456,14 @@ pub async fn post_sweep(
     let mut steps_total = 0usize;
     let mut range = [0.0f64; 2];
     let mut cfg_seen = None;
+    let mut front_ends: BTreeMap<u64, StepFrontEnd> = BTreeMap::new();
     let complete = loop {
         let (cfg, rows) = fresh_rows(&state, since);
         if cfg != cfg_seen {
             // A config change mid-collection (someone re-aimed): restart.
             accs.clear();
             seen.clear();
+            front_ends.clear();
             cfg_seen = cfg;
         }
         for r in rows {
@@ -469,6 +492,15 @@ pub async fn post_sweep(
             }
             let f_lo = r.get("f_lo_hz").and_then(Value::as_f64).unwrap_or(0.0);
             let bin = r.get("bin_hz").and_then(Value::as_f64).unwrap_or(1.0);
+            front_ends.insert(
+                step,
+                (
+                    f_lo,
+                    f_lo + bin * db.len() as f64,
+                    r.get("antenna").and_then(Value::as_str).map(str::to_string),
+                    r.get("gain_db").and_then(Value::as_f64),
+                ),
+            );
             let acc = accs
                 .entry(step)
                 .or_insert_with(|| StepAcc::new(f_lo, bin, db.len()));
@@ -501,7 +533,19 @@ pub async fn post_sweep(
         req.max_peaks.unwrap_or(20).clamp(1, 200),
         req.profile_points.unwrap_or(64).min(512),
     );
-    let text = render_text(&summary);
+    let front_end = front_end_segments(&front_ends);
+    let mut text = render_text(&summary);
+    for seg in &front_end {
+        text.push_str(&format!(
+            "\nfront end {:.3}–{:.3} MHz: {} · gain {}",
+            seg["lo_hz"].as_f64().unwrap_or(0.0) / 1e6,
+            seg["hi_hz"].as_f64().unwrap_or(0.0) / 1e6,
+            seg["antenna"].as_str().unwrap_or("radio's antenna"),
+            seg["gain_db"]
+                .as_f64()
+                .map_or_else(|| "radio's".to_string(), |g| format!("{g} dB")),
+        ));
+    }
     // 4. Visible in the AI panel, whoever asked.
     let id = format!("sweep-{}", crate::capture::now_ms());
     state.decoder_store().apply(
@@ -534,9 +578,31 @@ pub async fn post_sweep(
         o.insert("entered".into(), json!(entered));
         o.insert("restored".into(), json!(restored));
         o.insert("analysis_id".into(), json!(id));
+        o.insert("front_end".into(), json!(front_end));
         o.insert("text".into(), json!(text));
     }
     Ok(Json(out))
+}
+
+/// (own_lo_hz, own_hi_hz, antenna, gain_db) of one step's row.
+type StepFrontEnd = (f64, f64, Option<String>, Option<f64>);
+
+/// Adjacent steps measured with the same antenna / gain, merged:
+/// `[{lo_hz, hi_hz, antenna?, gain_db?}]` in frequency order.
+fn front_end_segments(steps: &BTreeMap<u64, StepFrontEnd>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut sorted: Vec<&StepFrontEnd> = steps.values().collect();
+    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (lo, hi, ant, gain) in sorted {
+        if let Some(last) = out.last_mut() {
+            if last["antenna"].as_str() == ant.as_deref() && last["gain_db"].as_f64() == *gain {
+                last["hi_hz"] = json!(hi);
+                continue;
+            }
+        }
+        out.push(json!({ "lo_hz": lo, "hi_hz": hi, "antenna": ant, "gain_db": gain }));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -613,5 +679,47 @@ mod tests {
             "{:?}",
             s.peaks[0]
         );
+    }
+
+    #[test]
+    fn sweep_bands_follow_the_station_unless_overridden() {
+        let st: crate::station::Station = serde_json::from_value(json!({
+            "bands": [
+                { "lo_hz": 0.0, "hi_hz": 30e6, "antenna": "Antenna C", "gain_db": 40.0 },
+                { "lo_hz": 400e6, "hi_hz": 1e9, "antenna": "Antenna A" },
+                { "lo_hz": 88e6, "hi_hz": 108e6, "label": "nothing to set" }
+            ]
+        }))
+        .unwrap();
+        let b = crate::station::sweep_bands(&st, true, None, None);
+        assert_eq!(
+            b.as_array().unwrap().len(),
+            2,
+            "rows that set nothing are skipped"
+        );
+        assert_eq!(b[0]["antenna"], "Antenna C");
+        let b = crate::station::sweep_bands(&st, true, None, Some(25.0));
+        assert_eq!(b[0]["gain_db"], 25.0, "override wins on station rows");
+        assert_eq!(b[0]["antenna"], "Antenna C");
+        assert_eq!(
+            b[2]["lo_hz"], 0.0,
+            "plus a catch-all for steps outside them"
+        );
+        assert_eq!(
+            crate::station::sweep_bands(&st, false, None, None),
+            json!([])
+        );
+    }
+
+    #[test]
+    fn front_end_segments_merge_adjacent_equal_steps() {
+        let mut m = BTreeMap::new();
+        m.insert(0, (1.8e6, 9.4e6, Some("Antenna C".into()), Some(40.0)));
+        m.insert(1, (9.4e6, 17e6, Some("Antenna C".into()), Some(40.0)));
+        m.insert(2, (17e6, 24.6e6, None, None));
+        let segs = front_end_segments(&m);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0]["hi_hz"], 17e6);
+        assert!(segs[1]["antenna"].is_null());
     }
 }

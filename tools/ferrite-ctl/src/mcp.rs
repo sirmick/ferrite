@@ -840,6 +840,18 @@ pub struct SweepArgs {
     /// Points in the max-hold profile (default 64; 0 = none).
     #[serde(default)]
     pub profile_points: Option<usize>,
+    /// Antenna for the whole sweep (default: the station profile's per
+    /// band, see `station`).
+    #[serde(default)]
+    pub antenna: Option<String>,
+    /// Gain dial for the whole sweep, dB (default: the station profile's
+    /// per band; a sweep is always AGC-off).
+    #[serde(default)]
+    pub gain_db: Option<f64>,
+    /// `false` = ignore the station profile's band table (use the radio's
+    /// current antenna / gain except where overridden). Default true.
+    #[serde(default)]
+    pub station: Option<bool>,
     /// Take the radio from a running receiver (409 RADIO_BUSY otherwise).
     #[serde(default)]
     pub force: bool,
@@ -1742,6 +1754,7 @@ impl FerriteServer {
                     "passes": args.passes, "threshold_db": args.threshold_db,
                     "max_peaks": args.max_peaks, "profile_points": args.profile_points,
                     "force": args.force, "restore": args.restore, "timeout_s": timeout,
+                    "antenna": args.antenna, "gain_db": args.gain_db, "station": args.station,
                 }),
                 "sweep",
                 args.note.as_deref(),
@@ -2623,7 +2636,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Spectrum analyzer: sweep the radio across ANY range (wider than one span — it retunes in ~7.6 MHz steps, ~55 ms each) and get a summary instead of raw bins: `{range_hz, rbw_hz, steps, passes, floor_dbfs, floor_range_dbfs, peaks:[{freq_hz, level_dbfs, peak_db, avg_db, width_hz, duty, bursty}], profile:[[freq_hz, maxhold_dbfs]], complete, text}`. `peak_db`/`avg_db` are over the *local* (per-step) floor and `width_hz` is the occupied span above the threshold, so the radio's gain-band steps don't read as signals; `floor_range_dbfs` shows that spread. Use `passes` ≥ 3 to catch intermittent transmitters (max-hold) and get `duty`/`bursty`. This takes the radio: if a receiver preset is running it answers 409 RADIO_BUSY unless `force=true`; pass `restore=true` to put the receiver back after. The sweep is visible in the UI (Spectrum tool) and the summary lands in the AI panel. Then `tune(freq_hz)` (force if the analyzer is still up) or `spectrum` for a few-Hz look inside the span."
+        description = "Spectrum analyzer: sweep the radio across ANY range (wider than one span — it retunes in ~7.6 MHz steps, ~55 ms each) and get a summary instead of raw bins: `{range_hz, rbw_hz, steps, passes, floor_dbfs, floor_range_dbfs, peaks:[{freq_hz, level_dbfs, peak_db, avg_db, width_hz, duty, bursty}], profile:[[freq_hz, maxhold_dbfs]], front_end:[{lo_hz, hi_hz, antenna, gain_db}], complete, text}`. Each step is measured on the station profile's antenna / gain for its band (see `station`) — so an HF sweep uses the HF antenna without you setting it; `antenna` / `gain_db` override for the whole sweep, `station:false` ignores the profile. `front_end` says what measured which range. `peak_db`/`avg_db` are over the *local* (per-step) floor and `width_hz` is the occupied span above the threshold, so the radio's gain-band steps don't read as signals; `floor_range_dbfs` shows that spread. Use `passes` ≥ 3 to catch intermittent transmitters (max-hold) and get `duty`/`bursty`. This takes the radio: if a receiver preset is running it answers 409 RADIO_BUSY unless `force=true`; pass `restore=true` to put the receiver back after. The sweep is visible in the UI (Spectrum tool) and the summary lands in the AI panel. Then `tune(freq_hz)` (force if the analyzer is still up) or `spectrum` for a few-Hz look inside the span."
     )]
     async fn sweep(
         &self,

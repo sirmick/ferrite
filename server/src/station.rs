@@ -206,6 +206,44 @@ pub async fn get_at(State(state): State<AppState>, Query(q): Query<AtQuery>) -> 
     }))
 }
 
+/// The sweep's `bands` param: one catch-all row for an explicit
+/// antenna / gain override, else the station profile's rows (when
+/// `use_station`), the override's fields winning on every row.
+pub fn sweep_bands(
+    station: &Station,
+    use_station: bool,
+    antenna: Option<&str>,
+    gain_db: Option<f64>,
+) -> Value {
+    let mut rows: Vec<Value> = if use_station {
+        station
+            .bands
+            .iter()
+            .filter(|b| b.antenna.is_some() || b.gain_db.is_some())
+            .map(|b| {
+                json!({
+                    "lo_hz": b.lo_hz, "hi_hz": b.hi_hz,
+                    "antenna": antenna.map(str::to_string).or_else(|| b.antenna.clone()),
+                    "gain_db": gain_db.or(b.gain_db),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if antenna.is_some() || gain_db.is_some() {
+        rows.push(json!({
+            "lo_hz": 0.0, "hi_hz": 1e12, "antenna": antenna, "gain_db": gain_db,
+        }));
+    }
+    Value::Array(rows)
+}
+
+/// The station profile's band table as sweep `bands` (no override).
+pub fn station_bands(station: &Station) -> Value {
+    sweep_bands(station, true, None, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
