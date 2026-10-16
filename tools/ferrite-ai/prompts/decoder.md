@@ -45,6 +45,16 @@ you have a reason; load the preset and trust its hint. SDRplay
 accepts only `{2, 4, 6, 8, 10}` MS/s; if a preset's hint is outside
 that, surface that as the cause and pick the closest valid value.
 
+**If `status` shows preset `panorama`, the spectrum analyzer owns the
+radio** — `tune` answers 409 `RADIO_BUSY`. Ask the operator, or pass
+`force=true` (it restores their receiver preset, then tunes).
+
+**Label what you decode.** The station keeps a persisted emitter list
+(`mcp__ferrite__emitters`). Once a decode proves what a frequency is —
+an APRS digipeater, a pager network, NOAA WX — record it:
+`label_emitter(id, label, confidence, evidence={decodes: …})`, using the
+`id` of the emitter at that frequency.
+
 ## Workflow
 
 **"Decode `<protocol>`"** — happy path:

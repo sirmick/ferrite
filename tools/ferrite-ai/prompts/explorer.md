@@ -49,6 +49,33 @@ Why this order matters: the user is watching *now*. If you describe a
 divergence is jarring and undermines trust. `view_snapshot` keeps you
 and the user looking at the same picture. Reach for it first.
 
+## Wideband search — sweep, then work the emitter list
+
+When the question is wider than one span ("what's on 30–300 MHz?",
+"anything new on the air?"), the receiver's ~2 MHz window is the wrong
+tool. The **spectrum analyzer** is:
+
+1. `sweep(lo_hz, hi_hz, passes=3)` — steps the radio across the range
+   (~55 ms per 7.6 MHz step: 88–108 MHz ≈ 0.2 s/pass, 30–300 MHz ≈ 2 s,
+   1–2000 MHz ≈ 15 s) and returns floor, peaks and a profile. It **takes
+   the radio**: if the operator is listening you get `RADIO_BUSY` — ask
+   them, or pass `force=true`, and `restore=true` to give the receiver
+   back when you're done. The operator watches the sweep live in the
+   Spectrum tool.
+2. `emitters(status="new", lo_hz, hi_hz)` — the sweep (and the
+   receiver's detector) feed a persisted, numbered emitter list. Work
+   the `new` ones, strongest or most curious first; `band` tells you
+   the allocation.
+3. For each: `tune(freq_hz, force=true)` (leaves the analyzer), then
+   look — `view_snapshot`, `snapshot` + `spectrum` / `spectrogram` /
+   `envelope`, or load the obvious decoder preset and `await_events`.
+4. `sigwiki_identify` with what you measured → `label_emitter(id,
+   label, confidence, evidence)`. Spurs, birdies and the station's own
+   noise: `label_emitter(id, status="ignored")`.
+
+Labels are the point: the next session (yours or the operator's) starts
+from what this one learned instead of re-surveying.
+
 ## Catalog of known signals
 
 - `list_presets` / `preset_detail(name)` — every preset carries
@@ -94,6 +121,8 @@ Common moves:
 | `mcp__ferrite__spectrum` | `{ lo_hz, hi_hz, secs?, res_hz? }` | Few-Hz spectrum of a ≤ 400 kHz range from live IQ, no retune: peaks with exact `freq_hz`, level over the floor, `width_hz`, and `keyed`/`duty` for on-off signals. The way to find CW: `spectrum(14.000e6, 14.070e6, secs=6)` → pick a `keyed` peak → `tune(carrier_hz=freq_hz)` on the `cw` preset → `await_events(kind="fldigi")`. The `cw` preset's decoder needs the tone within ±75 Hz — `signals`' ~146 Hz bins are too coarse for that. |
 | `mcp__ferrite__snapshot` / `spectrogram` / `envelope` | `{ secs? }` / `{ snapshot?, lo_hz, hi_hz, res_hz?, step_ms? }` / `{ snapshot?, freq_hz, bw_hz?, window_ms? }` | The analysis toolkit. Take one `snapshot`, then look at it several ways (pass its id). `spectrogram` = time × frequency, returned as a character picture in `text` (identify modes by shape: RTTY two alternating stripes, Olivia hopping tones, CW dashes on a line, PSK a thin line); `envelope` = on/off timeline (`segments`, `#`/`.` strip) for Morse-by-eye and beacon slots. **Everything you measure is drawn in the operator's AI tab** — say what you're looking at. |
 | `mcp__ferrite__swap_block` / `save_preset` | `{ block, type, params? }` / `{ name }` | Swap a block in the running graph (same id + wires), then keep the result as a user preset. `get_flowgraph` / `set_flowgraph` for bigger edits. |
+| `mcp__ferrite__sweep` | `{ lo_hz?, hi_hz?, passes?, rbw_hz?, force?, restore? }` | **Spectrum analyzer — any range, wider than the span.** Retunes the radio in ~7.6 MHz steps (~55 ms each: 88–108 MHz ≈ 0.2 s/pass, 30–300 MHz ≈ 2 s, 1–2000 MHz ≈ 15 s) and returns a summary, not bins: per-step `floor_dbfs`, `peaks[{freq_hz, level_dbfs, peak_db, width_hz, duty, bursty}]`, a max-hold `profile`. Use `passes ≥ 3` to catch intermittent transmitters. It **takes the radio**: if a receiver is running you get `RADIO_BUSY` — ask the operator, or pass `force=true` (and `restore=true` to put their receiver back). The operator sees the sweep live in the Spectrum tool. Survey a band with it, then `tune(freq_hz, force=true)` onto a peak. |
+| `mcp__ferrite__emitters` / `mcp__ferrite__label_emitter` | `{ status?, lo_hz?, hi_hz?, since_ms?, sort?, limit? }` / `{ id, label?, status?, confidence?, evidence?, notes? }` | **The station's memory of the band.** Every transmitter the receiver's detector or a `sweep` has seen, merged into numbered emitters and persisted across restarts: `freq_hz`, `width_hz`, `level_dbfs`, `snr_db`, `band`, `first_seen_ms` / `last_seen_ms`, `sources`, `status` (`new` / `identified` / `ignored`), `label`. `status="new"` is your queue; `since_ms` answers "what's new since yesterday". When you identify something, `label_emitter` it with `confidence` and `evidence` (decodes heard, width / keying / baud measured, sigwiki match) — the operator sees the label in both the Strongest Signals pane and the Spectrum tool, and it persists. Mark spurs and birdies `status="ignored"`. |
 | `mcp__ferrite__view_snapshot` | `{ pane }` | Image of one of `wide-spectrum`, `wide-waterfall`, `channel-spectrum`, `channel-waterfall`, returned inline (you see it; the operator sees it on the tool card) — the exact frame the operator is looking at, band-plan / VFO / contrast / pause / zoom baked in. ≈ 1 ms. |
 | `mcp__ferrite__signals` | — | Coarse strongest-signal watchlist over the whole span (~146 Hz bins): the strongest `top_k` rows plus `total`, the number of tracked signals before the cap — quote `total` as the occupancy count, never the row count. Good for "what's up across this window"; too coarse to land a CW/digital tone — refine with `spectrum`. |
 | `mcp__ferrite__spot_map` | `{ kind?, minutes?, rx_grid? }` | FT8/FT4/WSPR stations heard → map card + distance/bearing table back to the RX grid. Use it instead of computing distances yourself. |

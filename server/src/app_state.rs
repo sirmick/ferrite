@@ -125,6 +125,10 @@ struct Inner {
     /// each load, REST/MCP read snapshots, WS mirrors stream its deltas.
     decoder_store: Arc<crate::decoder_store::DecoderStore>,
     preset_doc: RwLock<FlowgraphDoc>,
+    /// The receiver preset to go back to when the spectrum analyzer (a
+    /// stepped preset) is left — stashed when it is entered. The v1
+    /// "radio lease": the analyzer remembers whose radio it borrowed.
+    return_preset: std::sync::Mutex<Option<String>>,
     source_config: RwLock<SourceConfig>,
     /// Serialises [`AppState::patch_source`] end to end. The patch
     /// reads `source_config`, probes caps (async), computes a delta,
@@ -217,6 +221,7 @@ impl AppState {
                 frames,
                 decoder_store,
                 preset_doc: RwLock::new(preset),
+                return_preset: std::sync::Mutex::new(None),
                 source_config: RwLock::new(source),
                 patch_gate: Mutex::new(()),
                 profile: RwLock::new(Profile::default()),
@@ -638,6 +643,21 @@ impl AppState {
         &self,
         mut delta: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(Option<ReconfigurePlan>, Vec<String>)> {
+        // Sweep knobs belong to the stepped preset, not to the operator's
+        // radio config: stage them in the placeholder (so a recompose keeps
+        // them) and hand them to the running sweep live.
+        let sweep: serde_json::Map<String, serde_json::Value> = delta
+            .iter()
+            .filter(|(k, _)| SWEEP_KEYS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !sweep.is_empty() {
+            delta.retain(|k, _| !SWEEP_KEYS.contains(&k.as_str()));
+            let plan = self.apply_sweep_params(sweep).await?;
+            if delta.is_empty() {
+                return Ok((plan, Vec::new()));
+            }
+        }
         let current = self.inner.source_config.read().await.clone();
         let mut notes = Vec::new();
         if let Some(new_settings) = delta.remove("settings") {
@@ -704,6 +724,40 @@ impl AppState {
         let merged = merge_into_params(current, delta);
         let plan = self.patch_source(merged).await?;
         Ok((plan, notes))
+    }
+
+    /// Stage sweep knobs in the preset's `src` placeholder and, while a
+    /// stepped source runs, apply them to it live (the pass restarts).
+    async fn apply_sweep_params(
+        &self,
+        sweep: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Option<ReconfigurePlan>> {
+        {
+            let mut doc = self.inner.preset_doc.write().await;
+            if !ferrite_runtime::wants_stepped(&doc) {
+                bail!("sweep parameters need the spectrum analyzer (a stepped preset) loaded");
+            }
+            if let Some(block) = doc.blocks.get_mut(SOURCE_ID) {
+                let mut merged = match block.params.take() {
+                    Some(serde_json::Value::Object(m)) => m,
+                    _ => serde_json::Map::new(),
+                };
+                for (k, v) in &sweep {
+                    merged.insert(k.clone(), v.clone());
+                }
+                block.params = Some(serde_json::Value::Object(merged));
+            }
+        }
+        let pipeline = self.inner.pipeline.lock().await;
+        let Some(mount) = pipeline.as_ref() else {
+            return Ok(None);
+        };
+        let plan = mount
+            .live_reconfigure_block(SOURCE_ID, serde_json::Value::Object(sweep.clone()))
+            .await?;
+        drop(pipeline);
+        self.publish_params(SOURCE_ID, &sweep);
+        Ok(Some(plan))
     }
 
     /// Notes for settings the hardware no longer honours: a stored setting
@@ -961,9 +1015,46 @@ impl AppState {
         let doc = tokio::task::spawn_blocking(move || resolve_preset_doc(&dir, &slug))
             .await
             .map_err(|e| anyhow!("preset resolve task panicked: {e}"))??;
-        self.adopt_preset_source_rate(&doc).await;
+        let stepped = ferrite_runtime::wants_stepped(&doc);
+        let current = self.inner.preset_doc.read().await.clone();
+        if stepped && !ferrite_runtime::wants_stepped(&current) {
+            // Entering the analyzer: remember the receiver to return to.
+            *self
+                .inner
+                .return_preset
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(current.name.clone());
+        }
+        // A sweep pins its own rate (force_params); adopting it would
+        // leave the operator's radio at 10 MS/s when they come back.
+        if !stepped {
+            self.adopt_preset_source_rate(&doc).await;
+        }
         let plan = self.patch_flowgraph(doc.clone()).await?;
         Ok((doc, plan))
+    }
+
+    /// Leave the spectrum analyzer: load the receiver preset that was
+    /// running when it was entered (`wbfm` if none was recorded). A no-op
+    /// returning the current doc when no stepped preset is loaded.
+    pub async fn return_from_stepped(&self) -> Result<(FlowgraphDoc, Option<ReconfigurePlan>)> {
+        let current = self.inner.preset_doc.read().await.clone();
+        if !ferrite_runtime::wants_stepped(&current) {
+            return Ok((current, None));
+        }
+        let name = self
+            .inner
+            .return_preset
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| "wbfm".to_string());
+        self.load_preset_by_name(&name).await
+    }
+
+    /// True while a stepped preset (the spectrum analyzer) owns the radio.
+    pub async fn stepped_active(&self) -> bool {
+        ferrite_runtime::wants_stepped(&*self.inner.preset_doc.read().await)
     }
 
     /// A preset's `src.sample_rate_hz` is a *requirement* of its DSP
@@ -1768,6 +1859,19 @@ fn overlay_live_params(base: &mut FlowgraphDoc, applied: &FlowgraphDoc) {
 
 /// Source keys whose stored value can drift from the hardware (see
 /// [`hardware_differs`]).
+/// Sweep knobs (`SweepSource` / `SweepSim`) — routed to the stepped
+/// preset's placeholder, never into the operator's `SourceConfig`.
+const SWEEP_KEYS: &[&str] = &[
+    "sweep_start_hz",
+    "sweep_stop_hz",
+    "rbw_hz",
+    "averages",
+    "discard_ms",
+    "usable_fraction",
+    "overlap",
+    "dc_mask_hz",
+];
+
 const HW_CHECKED_KEYS: &[&str] = &["gain_db", "agc", "antenna"];
 
 /// Does the driver readback disagree with `v` for source key `k`? Only

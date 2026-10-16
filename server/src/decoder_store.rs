@@ -122,6 +122,25 @@ fn policy_for(kind: &str) -> Policy {
             track: false,
             merge: false,
         },
+        // Spectrum-analyzer rows (`SweepSource` / `SweepSim`), one per
+        // sweep step: keyed by step so the current set *is* the last full
+        // pass (late joiners and MCP read it whole). A stale range's rows
+        // age out; consumers also filter on the row's `cfg`.
+        "panorama" => Policy::Upsert {
+            key_field: "step",
+            ttl_ms: 300_000,
+            track: false,
+            merge: false,
+        },
+        // The emitter list (`emitters.rs`): every transmitter seen by the
+        // receiver's SignalList or the spectrum analyzer, keyed by its
+        // number, persisted — the station's memory of the band.
+        "emitter" => Policy::Upsert {
+            key_field: "id",
+            ttl_ms: 0,
+            track: false,
+            merge: false,
+        },
         // AI session bus — every conversation, whichever client drives
         // it (the ferrite-ai sidecar, a Claude Code session's hooks):
         // one record per user prompt / finished text block / tool use /
@@ -171,6 +190,7 @@ pub fn is_live_kind(kind: &str) -> bool {
             | "health"
             | "blocks"
             | "ai_live"
+            | "panorama"
     ) || kind.starts_with("params/")
 }
 
@@ -180,7 +200,7 @@ pub fn is_live_kind(kind: &str) -> bool {
 #[must_use]
 pub fn is_decode_kind(kind: &str) -> bool {
     !is_live_kind(kind)
-        && !matches!(kind, "activity" | "ai" | "jobs" | "analysis")
+        && !matches!(kind, "activity" | "ai" | "jobs" | "analysis" | "emitter")
         && !kind.starts_with("ai/")
 }
 
@@ -540,9 +560,13 @@ impl DecoderStore {
                 // Tables also keep a capped frame log in `recent`, so
                 // consumers can derive history the latest-per-key `current`
                 // can't (APRS packet console, ADS-B trails, per-key counts).
-                entry.recent.push_back(record.clone());
-                while entry.recent.len() > LOG_CAP {
-                    entry.recent.pop_front();
+                // Not panorama rows: ~10 KB each, and `current` already is
+                // the whole pass.
+                if kind != "panorama" && kind != "emitter" {
+                    entry.recent.push_back(record.clone());
+                    while entry.recent.len() > LOG_CAP {
+                        entry.recent.pop_front();
+                    }
                 }
                 DeltaOp::Upsert { record }
             }
@@ -614,6 +638,32 @@ impl DecoderStore {
             seq,
             epoch,
             op: DeltaOp::Reset,
+        });
+    }
+
+    /// Drop one keyed entity (an explicit removal — e.g. an emitter merged
+    /// into another). Broadcasts the same `expire` delta TTL expiry does,
+    /// so every mirror drops it.
+    pub fn remove(&self, kind: &str, key: &str) {
+        let epoch = self.epoch();
+        let mut g = self.guard();
+        let removed = g
+            .kinds
+            .get_mut(kind)
+            .is_some_and(|k| k.current.remove(key).is_some());
+        if !removed {
+            return;
+        }
+        g.seq += 1;
+        let seq = g.seq;
+        drop(g);
+        let _ = self.tx.send(StateDelta {
+            kind: kind.to_string(),
+            seq,
+            epoch,
+            op: DeltaOp::Expire {
+                key: key.to_string(),
+            },
         });
     }
 

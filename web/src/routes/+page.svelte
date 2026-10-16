@@ -17,6 +17,10 @@
   import { wsUrlFor } from '$lib/api/errors';
   import { applyControl } from '$lib/control/dispatch';
   import { viewState, type LeftTab } from '$lib/viz/viewState.svelte';
+  import { tools } from '$lib/tools/tools.svelte';
+  import SpecAnWorkspace from '$lib/specan/SpecAnWorkspace.svelte';
+  import SweepBandsPanel from '$lib/specan/SweepBandsPanel.svelte';
+  import SpecAnSettings from '$lib/specan/SpecAnSettings.svelte';
   import { onMount } from 'svelte';
 
   // Default the tab on mount so ViewBridge ships a meaningful `left_tab`
@@ -24,7 +28,21 @@
   // read it via `GET /api/view`, and (next commit) write to it via the
   // command channel so the AI can switch tabs.
   if (viewState.leftTab === null) viewState.leftTab = 'bands';
-  let leftTab = $derived<LeftTab>(viewState.leftTab ?? 'bands');
+  // Each radio tool shows its own subset of sidebar tabs; a tab the
+  // active tool doesn't have falls back to its first (Bands).
+  let tabs = $derived(tools.def().sidebarTabs);
+  let leftTab = $derived<LeftTab>(
+    viewState.leftTab && tabs.includes(viewState.leftTab) ? viewState.leftTab : tabs[0],
+  );
+  let spectrum = $derived(tools.active === 'spectrum');
+  const TAB_LABEL: Record<LeftTab, string> = {
+    bands: 'Bands',
+    catalog: 'Catalog',
+    settings: 'Settings',
+    logs: 'Logs',
+    flow: 'Flow',
+    ai: 'AI',
+  };
 
   // Opening the Logs tab acks the error badge. While the tab is open,
   // unreadErrors changes also re-fire this effect (it reads both reactive
@@ -166,54 +184,30 @@
                 />
               </svg>
             </span>
-            <button
-              type="button"
-              class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
-              class:tab-active={leftTab === 'bands'}
-              onclick={() => (viewState.leftTab = 'bands')}>Bands</button
-            >
-            <button
-              type="button"
-              class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
-              class:tab-active={leftTab === 'catalog'}
-              onclick={() => (viewState.leftTab = 'catalog')}>Catalog</button
-            >
-            <button
-              type="button"
-              class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
-              class:tab-active={leftTab === 'settings'}
-              onclick={() => (viewState.leftTab = 'settings')}>Settings</button
-            >
-            <button
-              type="button"
-              class="relative flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
-              class:tab-active={leftTab === 'logs'}
-              onclick={() => (viewState.leftTab = 'logs')}
-            >
-              Logs
-              {#if logs.unreadErrors > 0 && leftTab !== 'logs'}
-                <span
-                  class="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-rose-500"
-                  title="{logs.unreadErrors} unread error{logs.unreadErrors === 1 ? '' : 's'}"
-                  aria-label="{logs.unreadErrors} unread errors"
-                ></span>
-              {/if}
-            </button>
-            <button
-              type="button"
-              class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
-              class:tab-active={leftTab === 'flow'}
-              onclick={() => (viewState.leftTab = 'flow')}>Flow</button
-            >
-            <button
-              type="button"
-              class="flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
-              class:tab-active={leftTab === 'ai'}
-              onclick={() => (viewState.leftTab = 'ai')}>AI</button
-            >
+            {#each tabs as t (t)}
+              <button
+                type="button"
+                class="relative flex-1 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[color:var(--color-muted)] hover:bg-slate-900 hover:text-[color:var(--color-fg)]"
+                class:tab-active={leftTab === t}
+                onclick={() => (viewState.leftTab = t)}
+              >
+                {TAB_LABEL[t]}
+                {#if t === 'logs' && logs.unreadErrors > 0 && leftTab !== 'logs'}
+                  <span
+                    class="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-rose-500"
+                    title="{logs.unreadErrors} unread error{logs.unreadErrors === 1 ? '' : 's'}"
+                    aria-label="{logs.unreadErrors} unread errors"
+                  ></span>
+                {/if}
+              </button>
+            {/each}
           </div>
           <div class="min-h-0 flex-1">
-            {#if leftTab === 'bands'}
+            {#if leftTab === 'bands' && spectrum}
+              <SweepBandsPanel />
+            {:else if leftTab === 'settings' && spectrum}
+              <SpecAnSettings />
+            {:else if leftTab === 'bands'}
               <BandsPanel />
             {:else if leftTab === 'catalog'}
               <SignalCatalog
@@ -234,7 +228,9 @@
       {/snippet}
       {#snippet b()}
         <div class="h-full min-w-0 w-full">
-          {#if pipeline.client}
+          {#if pipeline.client && spectrum}
+            <SpecAnWorkspace />
+          {:else if pipeline.client}
             <Workspace client={pipeline.client} />
           {:else}
             <div

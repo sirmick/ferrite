@@ -26,6 +26,15 @@
   } from './optionsModel';
   import { applyControl } from '$lib/control/dispatch';
 
+  interface Props {
+    /** Spectrum-analyzer mode: the sweep owns the LO, rate, IF filter and
+     *  AGC (forced off), so those controls are hidden; gain, antenna, DC
+     *  and the driver settings (SDRplay band-stop notches, bias-T, …) are
+     *  the receiver's own, shared as-is. */
+    spectrum?: boolean;
+  }
+  let { spectrum = false }: Props = $props();
+
   let caps = $derived(
     pipeline.sourceCaps?.kind === 'hardware' ? pipeline.sourceCaps.capabilities : null,
   );
@@ -233,7 +242,7 @@
       <header class="text-[10px] uppercase tracking-wide text-[color:var(--color-muted)]">
         analog
       </header>
-      {#if freqRange}
+      {#if freqRange && !spectrum}
         <label class="row" title={rangeTooltip(freqRange, 'Hz')}>
           <span class="label">centre freq</span>
           <input
@@ -251,7 +260,7 @@
           />
         </label>
       {/if}
-      {#if rateChoices.length > 0}
+      {#if rateChoices.length > 0 && !spectrum}
         <label
           class="row"
           title={`curated list from preset; ${rateChoices.length} choices${
@@ -271,7 +280,7 @@
           </select>
         </label>
       {/if}
-      {#if bwChoices.length > 0}
+      {#if bwChoices.length > 0 && !spectrum}
         <label
           class="row"
           title={`IF filter width; — auto — lets the driver pick. Preset ladder has ${bwChoices.length} entries.`}
@@ -401,7 +410,7 @@
           {/each}
         </details>
       {/if}
-      {#if hasAgc}
+      {#if hasAgc && !spectrum}
         <label class="row" title="set_gain_mode(true) — driver's internal AGC loop">
           <span class="label">AGC</span>
           <input

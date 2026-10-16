@@ -190,6 +190,19 @@ pub fn all_block_schemas() -> Vec<BlockSchemaDto> {
 /// SoapySource row against drift.
 const EXTRA_ACCEPTED_KEYS: &[(&str, &[&str])] = &[
     ("SoapySource", &["settings", "gain_elements"]),
+    // The sweep shares SoapySource's radio params; the receiver-side
+    // knobs it overrides (AGC off, own filter, its own LO) still arrive
+    // in the composed params and are accepted (and ignored).
+    (
+        "SweepSource",
+        &[
+            "settings",
+            "gain_elements",
+            "agc",
+            "bandwidth_hz",
+            "center_freq_hz",
+        ],
+    ),
     ("SineSource", &["throttle"]),
     (
         "ModulatedFileSource",

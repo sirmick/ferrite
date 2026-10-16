@@ -33,6 +33,36 @@ pub const SOURCE_ID: &str = "src";
 /// registry-dependent validation with a clear "not registered" error.
 pub const SOURCE_SENTINEL_TYPE: &str = "Source";
 
+/// Placeholder param asking for a *stepped* source (a sweep that hops the
+/// LO itself and emits panorama rows) instead of a streaming one. Value
+/// [`STEPPED`]. Stripped from the composed params.
+pub const SOURCE_KIND_PARAM: &str = "source_kind";
+pub const STEPPED: &str = "stepped";
+
+/// The stepped counterpart of a streaming source type: the hardware
+/// sweep for `SoapySource`, the simulated band for anything else (so the
+/// spectrum analyzer runs — on synthetic data — with no radio attached).
+#[must_use]
+pub fn stepped_type_for(streaming: &str) -> &'static str {
+    if streaming == "SoapySource" {
+        "SweepSource"
+    } else {
+        "SweepSim"
+    }
+}
+
+/// True when a preset's `src` placeholder asks for a stepped source.
+#[must_use]
+pub fn wants_stepped(preset: &FlowgraphDoc) -> bool {
+    preset
+        .blocks
+        .get(SOURCE_ID)
+        .and_then(|b| b.params.as_ref())
+        .and_then(|p| p.get(SOURCE_KIND_PARAM))
+        .and_then(Value::as_str)
+        == Some(STEPPED)
+}
+
 /// The source picked for a running preset. `type_name` names a real
 /// registered block type (`"SoapySource"`, `"SineSource"`,
 /// `"FileSource"`, …); `params` carries device-specific fields that
@@ -88,12 +118,20 @@ pub fn compose_source(
         });
     }
     let hinted = merge_params(placeholder.params.as_ref(), &source.params);
-    let merged_params = apply_force_params(hinted, placeholder.force_params.as_ref());
+    let mut merged_params = apply_force_params(hinted, placeholder.force_params.as_ref());
+    let type_name = if wants_stepped(preset) {
+        if let Value::Object(m) = &mut merged_params {
+            m.remove(SOURCE_KIND_PARAM);
+        }
+        stepped_type_for(&source.type_name).to_string()
+    } else {
+        source.type_name.clone()
+    };
     let mut composed = preset.clone();
     composed.blocks.insert(
         SOURCE_ID.to_string(),
         BlockInstanceDecl {
-            type_name: source.type_name.clone(),
+            type_name,
             params: Some(merged_params),
             placement: placeholder.placement,
             ..Default::default()
@@ -142,6 +180,40 @@ fn merge_params(hints: Option<&Value>, source: &Value) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stepped_placeholder_composes_to_the_sweep_counterpart() {
+        let preset: FlowgraphDoc = serde_json::from_value(json!({
+            "name": "panorama",
+            "environments": ["node"],
+            "blocks": {"src": {"type": "Source", "placement": "node",
+                "params": {"source_kind": "stepped", "sweep_start_hz": 88e6},
+                "force_params": {"sample_rate_hz": 10e6, "agc": false}}},
+            "wires": [["src.events", "ui:panorama"]]
+        }))
+        .unwrap();
+        let hw = SourceConfig {
+            type_name: "SoapySource".into(),
+            params: json!({"args": "driver=sdrplay", "sample_rate_hz": 2.4e6, "antenna": "Antenna A"}),
+        };
+        let c = compose_source(&preset, &hw).unwrap();
+        let src = &c.blocks["src"];
+        assert_eq!(src.type_name, "SweepSource");
+        let p = src.params.as_ref().unwrap();
+        assert!(p.get("source_kind").is_none(), "marker stripped");
+        assert_eq!(p["sample_rate_hz"], 10e6, "preset pins the sweep rate");
+        assert_eq!(p["antenna"], "Antenna A", "operator's antenna inherited");
+        assert_eq!(p["sweep_start_hz"], 88e6);
+
+        let sw = SourceConfig {
+            type_name: "SineSource".into(),
+            params: json!({}),
+        };
+        assert_eq!(
+            compose_source(&preset, &sw).unwrap().blocks["src"].type_name,
+            "SweepSim"
+        );
+    }
 
     fn preset(src_type: &str, src_params: Value) -> FlowgraphDoc {
         serde_json::from_value(json!({

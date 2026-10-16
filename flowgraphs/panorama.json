@@ -1,0 +1,36 @@
+{
+  "$schema": "https://ferrite.example/flowgraph-v1.json",
+  "name": "panorama",
+  "category": "Tools",
+  "label": "Spectrum analyzer",
+  "description": "Stepped sweep across a range wider than one span — the spectrum analyzer tool's engine.",
+  "catalog_visible": false,
+  "ai_notes": "Spectrum analyzer (stepped sweep). The `src` block hops the LO across [sweep_start_hz, sweep_stop_hz] (~7.6 MHz per step at 10 MS/s, ~90 ms/step) and emits one row per step to the `panorama` store kind (keyed by step: the current records are the last full pass; `power` = base64 little-endian i16 centi-dBFS from `f_lo_hz` in `bin_hz` steps). Change the range / resolution live with set_block_param(block='src', params={sweep_start_hz, sweep_stop_hz, rbw_hz, averages}). Gain/antenna are the operator's radio settings; AGC is forced off. There is no audio or receiver chain in this preset — load a receiver preset to listen.",
+  "environments": [
+    "node",
+    "browser"
+  ],
+  "blocks": {
+    "src": {
+      "type": "Source",
+      "placement": "node",
+      "params": {
+        "source_kind": "stepped",
+        "sweep_start_hz": 88000000.0,
+        "sweep_stop_hz": 108000000.0,
+        "rbw_hz": 2500.0,
+        "averages": 16
+      },
+      "force_params": {
+        "sample_rate_hz": 10000000.0,
+        "agc": false
+      }
+    }
+  },
+  "wires": [
+    [
+      "src.events",
+      "ui:panorama"
+    ]
+  ]
+}

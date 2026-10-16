@@ -41,6 +41,7 @@ mod capture;
 mod decoder_store;
 mod device;
 mod device_cache;
+mod emitters;
 mod error;
 mod event_plane;
 mod frame_bus;
@@ -51,6 +52,7 @@ mod sigwiki;
 mod soapy_log;
 mod source_policy;
 mod store_persist;
+mod sweep_api;
 mod view_bridge;
 
 /// Ferrite SDR daemon.
@@ -424,6 +426,17 @@ async fn main() -> Result<()> {
         store_persist::spawn_saver(state.decoder_store(), store_persist::store_path(dir));
     }
 
+    // The emitter list: seed from the (restored) store, then follow the
+    // receiver's SignalList and the spectrum analyzer's rows.
+    emitters::tracker()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .reseed(&state.decoder_store());
+    emitters::spawn(
+        state.decoder_store(),
+        std::sync::Arc::clone(emitters::tracker()),
+    );
+
     // Seed the coherence records before the first client connects: a
     // browser that subscribes must find a retained `graph` record even
     // when nothing has mutated yet (`start()` re-publishes anyway).
@@ -530,6 +543,10 @@ async fn main() -> Result<()> {
         .route("/api/sigwiki/page", get(sigwiki::get_page))
         .route("/api/sigwiki/image", get(sigwiki::get_image))
         .route("/api/preset", post(routes::load_preset))
+        .route("/api/preset/return", post(routes::return_preset))
+        .route("/api/sweep", post(sweep_api::post_sweep))
+        .route("/api/emitters", get(emitters::get_emitters))
+        .route("/api/emitters/:id", post(emitters::post_emitter))
         .route(
             "/api/profile",
             get(routes::get_profile).patch(routes::patch_profile),

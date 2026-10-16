@@ -32,7 +32,7 @@ import {
 } from '$lib/api/pipeline';
 import { fetchUiSinks, type UiSink } from '$lib/api/uiSinks';
 import { fetchPipelineBlocks, patchBlockParams, type PipelineBlock } from '$lib/api/pipelineBlocks';
-import { fetchPresets, loadPreset, type PresetEntry } from '$lib/api/presets';
+import { fetchPresets, loadPreset, returnPreset, type PresetEntry } from '$lib/api/presets';
 import { DEFAULT_PROFILE, fetchProfile, patchProfile, type Profile } from '$lib/api/profile';
 import { replaceState } from '$app/navigation';
 import { fetchSourceCapabilities, type SourceCapabilitiesResponse } from '$lib/api/sourceCaps';
@@ -592,6 +592,18 @@ class PipelineStore {
       await this.refreshComposed();
       return resp;
     }, 'patch flowgraph');
+  }
+
+  /** Leave the spectrum analyzer (a stepped preset): the server reloads
+   *  the receiver preset it stashed on entry. */
+  async returnPreset(): Promise<ReconfigureResponse | null> {
+    return this.withBusy(async () => {
+      const resp = await returnPreset();
+      this.flowgraph = await fetchFlowgraph();
+      await this.refreshComposed();
+      clientControls.set('client.workspace.mainPane', 'wide');
+      return resp.reconfigure;
+    }, 'return to receiver');
   }
 
   /** Load preset `name` from the server-side presets dir and swap it

@@ -36,6 +36,7 @@ mcp__ferrite__source_capabilities()                                   # antennas
 mcp__ferrite__source_readback()                                       # what the hardware actually applied
 mcp__ferrite__view_state()                                            # what the operator is looking at
 mcp__ferrite__view_snapshot(pane="wide-spectrum")                     # the operator's canvas, inline image
+mcp__ferrite__emitters(status="all", sort="recent")                  # every transmitter seen (numbered, band, last seen, label)
 ```
 
 Measurements — no state change, drawn as cards in the AI tab:
@@ -83,6 +84,9 @@ reply first** so the user knows you're about to change their session.
 
 ## Common gotchas to check first
 
+- **`tune` fails with 409 `RADIO_BUSY`** — the spectrum analyzer (preset
+  `panorama`) owns the radio. Not a fault: leave it with
+  `tune(force=true)` or ask the operator to switch back to the receiver.
 - SDRplay rate must be one of `{2, 4, 6, 8, 10}` MS/s — non-conforming
   rates surface as `PIPELINE_START_FAILED`.
 - A wedged SDRplay can be recovered by the operator with the repo's

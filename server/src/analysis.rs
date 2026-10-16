@@ -238,6 +238,16 @@ impl AppState {
                 "analysis taps the running pipeline — start it first",
             ));
         }
+        // The spectrum analyzer's sweep has no IQ tee to record from;
+        // say so instead of failing with "wrote no sidecar".
+        if self.stepped_active().await {
+            return Err(AppError::conflict(
+                "RADIO_BUSY",
+                "the spectrum analyzer owns the radio — snapshot / spectrum / spectrogram / \
+                 envelope measure the receiver's IQ; `tune(freq_hz, force=true)` first (or \
+                 use `sweep` for a wideband view)",
+            ));
+        }
         let block = if self.get_source().await.type_name == "SoapySource" {
             "src".to_string()
         } else {

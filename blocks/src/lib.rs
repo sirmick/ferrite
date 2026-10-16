@@ -73,6 +73,8 @@ pub mod sherpa_transcribe;
 pub mod signal_list;
 pub mod sine;
 #[cfg(feature = "soapysdr")]
+pub mod soapy_device;
+#[cfg(feature = "soapysdr")]
 pub mod soapy_retry;
 #[cfg(feature = "soapysdr")]
 pub mod soapy_source;
@@ -81,6 +83,10 @@ pub mod squelch;
 pub mod ssb_demod;
 pub mod ssb_modulator;
 pub mod stereo_decoder;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod sweep;
+#[cfg(feature = "soapysdr")]
+pub mod sweep_source;
 pub mod tee_iq_f32;
 pub mod tee_real_f32;
 #[cfg(test)]
@@ -163,6 +169,10 @@ pub use squelch::{Squelch, SquelchParams};
 pub use ssb_demod::{Sideband, SsbDemod, SsbDemodParams};
 pub use ssb_modulator::{SsbModulator, SsbModulatorParams};
 pub use stereo_decoder::{StereoDecoder, StereoDecoderParams};
+#[cfg(not(target_arch = "wasm32"))]
+pub use sweep::{SweepSim, SweepSimParams};
+#[cfg(feature = "soapysdr")]
+pub use sweep_source::{SweepSource, SweepSourceParams};
 pub use tee_iq_f32::TeeIqF32;
 pub use tee_real_f32::TeeRealF32;
 pub use voice_transcribe::{VoiceTranscribe, VoiceTranscribeParams};

@@ -110,6 +110,9 @@ enum Cmd {
         /// worker reload). Ideal for hopping stations during a survey.
         #[arg(long)]
         keep_lo: bool,
+        /// Leave the spectrum analyzer if it holds the radio, then tune.
+        #[arg(long)]
+        force: bool,
     },
     /// Patch parameter(s) on a pipeline block — the advanced/direct
     /// surface. `key=value` pairs; values parse as JSON when possible
@@ -219,6 +222,59 @@ enum Cmd {
         /// Analyse a kept snapshot instead of taking a fresh one.
         #[arg(long)]
         snapshot: Option<String>,
+    },
+    /// Spectrum-analyzer sweep across any range (steps the radio ~7.6 MHz
+    /// at a time): floor, emitters, max-hold profile. Takes the radio —
+    /// `--force` if a receiver is running, `--restore` to give it back.
+    Sweep {
+        /// Range start (Hz; `88M` shorthand ok). Omit to keep the current.
+        lo: Option<String>,
+        /// Range end.
+        hi: Option<String>,
+        #[arg(long)]
+        rbw: Option<f64>,
+        #[arg(long)]
+        averages: Option<u32>,
+        /// Fresh passes to fold (max-hold, duty).
+        #[arg(long, default_value_t = 1)]
+        passes: u32,
+        #[arg(long)]
+        threshold: Option<f32>,
+        #[arg(long, default_value_t = 20)]
+        peaks: usize,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        restore: bool,
+    },
+    /// Clear the AI transcript (every AI panel empties; also resets the
+    /// in-app assistant's conversation context).
+    ClearAi,
+    /// The emitter list (both detectors merged, numbered, persisted).
+    Emitters {
+        /// new | identified | ignored | all (default: all but ignored).
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        lo: Option<String>,
+        #[arg(long)]
+        hi: Option<String>,
+        /// level | freq | recent | new
+        #[arg(long)]
+        sort: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Label an emitter (sets it identified), or `--status ignored`.
+    LabelEmitter {
+        id: u64,
+        label: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        confidence: Option<f32>,
+        #[arg(long)]
+        notes: Option<String>,
     },
     /// Record a few seconds of live IQ and keep it by id (no retune).
     Snapshot {
@@ -813,6 +869,7 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             span,
             offset,
             keep_lo,
+            force,
         } => {
             if freq.is_none() && carrier.is_none() {
                 bail!("give a frequency or --carrier");
@@ -827,6 +884,7 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 bandwidth_hz: parse_si_opt(bw.as_deref())?,
                 sample_rate_hz: parse_si_opt(rate.as_deref())?,
                 keep_lo,
+                force,
                 note: None,
             };
             emit(&server.tune_op(args).await.map_err(op_err)?, json)
@@ -935,6 +993,116 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             }
             emit(&v, json)
         }
+        Cmd::Sweep {
+            lo,
+            hi,
+            rbw,
+            averages,
+            passes,
+            threshold,
+            peaks,
+            force,
+            restore,
+        } => {
+            let mut v = server
+                .sweep_op(mcp::SweepArgs {
+                    lo_hz: lo.as_deref().map(parse_si).transpose()?,
+                    hi_hz: hi.as_deref().map(parse_si).transpose()?,
+                    rbw_hz: rbw,
+                    averages,
+                    passes: Some(passes),
+                    threshold_db: threshold,
+                    max_peaks: Some(peaks),
+                    profile_points: Some(64),
+                    force,
+                    restore,
+                    timeout_s: None,
+                    note: None,
+                })
+                .await
+                .map_err(op_err)?;
+            if !json {
+                if let Some(text) = v.get("text").and_then(Value::as_str) {
+                    print!("{text}");
+                    return Ok(());
+                }
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("profile");
+                }
+            }
+            emit(&v, json)
+        }
+        Cmd::ClearAi => emit(
+            &server
+                .clear_ai_op(mcp::ClearAiArgs::default())
+                .await
+                .map_err(op_err)?,
+            json,
+        ),
+        Cmd::Emitters {
+            status,
+            lo,
+            hi,
+            sort,
+            limit,
+        } => {
+            let v = server
+                .emitters_op(mcp::EmittersArgs {
+                    status,
+                    lo_hz: lo.as_deref().map(parse_si).transpose()?,
+                    hi_hz: hi.as_deref().map(parse_si).transpose()?,
+                    since_ms: None,
+                    sort,
+                    limit: Some(limit),
+                })
+                .await
+                .map_err(op_err)?;
+            if json {
+                return emit(&v, json);
+            }
+            for e in v
+                .get("emitters")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let f = |k: &str| e.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                println!(
+                    "#{:<4} {:>12.4} MHz {:>8.1} kHz {:>6.1} dBFS  {:<9} {}{}",
+                    e.get("id").and_then(Value::as_u64).unwrap_or(0),
+                    f("freq_hz") / 1e6,
+                    f("width_hz") / 1e3,
+                    f("level_dbfs"),
+                    e.get("status").and_then(Value::as_str).unwrap_or(""),
+                    e.get("label").and_then(Value::as_str).unwrap_or(""),
+                    e.get("band")
+                        .and_then(Value::as_str)
+                        .map(|b| format!("  [{b}]"))
+                        .unwrap_or_default(),
+                );
+            }
+            Ok(())
+        }
+        Cmd::LabelEmitter {
+            id,
+            label,
+            status,
+            confidence,
+            notes,
+        } => emit(
+            &server
+                .label_emitter_op(mcp::LabelEmitterArgs {
+                    id,
+                    label,
+                    status,
+                    confidence,
+                    evidence: None,
+                    notes,
+                })
+                .await
+                .map_err(op_err)?,
+            json,
+        ),
         Cmd::Snapshot { secs } => emit(
             &server
                 .snapshot_op(mcp::SnapshotArgs { secs: Some(secs) })

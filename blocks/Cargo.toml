@@ -97,6 +97,7 @@ nnnoiseless           = { version = "0.5", default-features = false }
 num-complex           = { version = "0.4", default-features = false, features = ["std"] }
 postcard              = { version = "1", default-features = false, features = ["alloc"] }
 rustfft               = { version = "6", default-features = false }
+base64                = "0.22"
 serde                 = { version = "1", features = ["derive"] }
 serde_bytes           = { version = "0.11", optional = true }
 serde_json            = "1"
@@ -123,3 +124,16 @@ wasm-opt = false
 # Used by integration tests that want to capture lines a block emits via
 # `tracing::info!(target: "decoder::…", …)` without a global subscriber.
 tracing-subscriber    = { version = "0.3", default-features = false, features = ["fmt"] }
+
+# Hand-run hardware spike (stepped-sweep latency numbers); needs a radio.
+[[example]]
+name              = "sweep_spike"
+required-features = ["soapysdr"]
+
+[[example]]
+name              = "passband_spike"
+required-features = ["soapysdr"]
+
+[[example]]
+name              = "rate_switch_spike"
+required-features = ["soapysdr"]

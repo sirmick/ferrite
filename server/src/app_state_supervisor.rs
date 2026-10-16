@@ -404,6 +404,9 @@ impl AppState {
             .and_then(|k| k.current.get("current").map(|r| r.data.clone()));
 
         let hw = cfg.type_name == "SoapySource";
+        // A stepped source (spectrum analyzer) runs its own rate and LO;
+        // the receiver's configured rate / centre don't apply to it.
+        let stepped = ferrite_runtime::wants_stepped(&self.get_flowgraph().await);
         let lost = match &src {
             Some(h) if self.wants_running() => lost_reason(h),
             // Wanted running, nothing running, hardware source: a start
@@ -480,7 +483,7 @@ impl AppState {
                 Some(h) => radio.state == RadioPhase::Ok && delivering(h),
                 None => radio.state != RadioPhase::Recovering,
             };
-        if hw {
+        if hw && !stepped {
             if let (Some(d), Some(c)) = (declared, cfg_rate) {
                 if (d - c).abs() > 0.5 {
                     issues.push(format!(

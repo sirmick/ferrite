@@ -36,3 +36,14 @@ export async function loadPreset(name: string): Promise<LoadPresetResponse> {
   }
   return (await r.json()) as LoadPresetResponse;
 }
+
+/** `POST /api/preset/return` — leave the spectrum analyzer: the server
+ *  reloads the receiver preset it stashed when the analyzer was entered. */
+export async function returnPreset(): Promise<LoadPresetResponse> {
+  const r = await fetch('/api/preset/return', { method: 'POST' });
+  if (!r.ok) {
+    const text = await r.text();
+    throw new ApiError(r.status, `return to receiver failed (${r.status}): ${text}`);
+  }
+  return (await r.json()) as LoadPresetResponse;
+}
