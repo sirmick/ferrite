@@ -169,6 +169,9 @@ pub struct Rtl433Demod {
     level: Option<LevelTracker>,
     /// Scaled copy of the input chunk handed to the shim.
     scaled: Vec<Complex<f32>>,
+    /// Health: input level before auto-level, decodes emitted.
+    input_meter: crate::health::LevelMeter,
+    events_cum: u64,
 }
 
 impl Rtl433Demod {
@@ -194,6 +197,8 @@ impl Rtl433Demod {
                 .auto_level
                 .then(|| LevelTracker::new(params.sample_rate_hz)),
             scaled: Vec::new(),
+            input_meter: crate::health::LevelMeter::new(f64::from(params.sample_rate_hz)),
+            events_cum: 0,
         })
     }
 
@@ -300,6 +305,7 @@ impl Block for Rtl433Demod {
             return Ok(Work::new());
         }
 
+        self.input_meter.push_iq(src);
         if let Some(tracker) = self.level.as_mut() {
             let gain = tracker.gain_for(src);
             self.scaled.clear();
@@ -310,6 +316,7 @@ impl Block for Rtl433Demod {
         }
         while let Some(event) = self.dec.drain_event() {
             tracing::info!(target: "decoder::rtl_433", "{event}");
+            self.events_cum += 1;
             // `event` is already a JSON record — emit it verbatim (one
             // newline-delimited line) rather than re-wrapping it.
             self.events_out.extend_from_slice(event.as_bytes());
@@ -320,6 +327,18 @@ impl Block for Rtl433Demod {
         w.consumed[0] = consumed;
         drain_events_port(io, &mut self.events_out, &mut w);
         Ok(w)
+    }
+
+    fn health(&self) -> Option<serde_json::Value> {
+        let st = self.dec.stats();
+        Some(serde_json::json!({
+            "input_dbfs": self.input_meter.dbfs(),
+            "samples_cum": self.input_meter.samples(),
+            "ook_packages_cum": st.ook_packages,
+            "fsk_packages_cum": st.fsk_packages,
+            "decodes_cum": self.events_cum,
+            "dropped_cum": st.dropped,
+        }))
     }
 }
 

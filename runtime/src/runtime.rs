@@ -93,6 +93,10 @@ pub struct DiagBlock {
     pub process_ns_cum: u64,
     pub inputs: Vec<DiagPort>,
     pub outputs: Vec<DiagPort>,
+    /// The block's own report ([`ferrite_blocks::Block::health`]) —
+    /// decoders say what they see (level, syncs, candidates, decodes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<serde_json::Value>,
 }
 
 /// What `Runtime::diag_snapshot` returns. One entry per block, in
@@ -654,6 +658,7 @@ impl Runtime {
                 process_ns_cum: e.process_ns_cum,
                 inputs,
                 outputs,
+                health: e.block.health(),
             });
         }
         DiagSnapshot { blocks }

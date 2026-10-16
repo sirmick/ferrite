@@ -125,6 +125,12 @@ pub struct DsdEvent {
     pub cc: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enc: Option<bool>,
+    /// `system` records: what the control / site signalling says about
+    /// the network (`system` type, `net_id`, `site_id`, `adjacent`,
+    /// `wacn`, `sysid`, `nac`, `rfss`, `rest_lsn`) — merged across
+    /// lines, re-sent whenever it changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<serde_json::Map<String, serde_json::Value>>,
     pub text: String,
 }
 
@@ -155,7 +161,7 @@ pub fn strip_ansi(s: &str) -> String {
 /// `Voice`; with `numeric` only an all-digit token counts.
 fn value_after(line: &str, key: &str, numeric: bool) -> Option<String> {
     for (idx, _) in line.match_indices(key) {
-        let rest = line[idx + key.len()..].trim_start_matches([' ', '=', ':']);
+        let rest = line[idx + key.len()..].trim_start_matches([' ', '=', ':', '[']);
         let tok: String = rest
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -178,6 +184,111 @@ fn value_after(line: &str, key: &str, numeric: bool) -> Option<String> {
 pub struct ParseState {
     pub protocol: Option<String>,
     pub cc: Option<u16>,
+    /// Merged control / site identity (see [`DsdEvent::system`]).
+    pub system: serde_json::Map<String, serde_json::Value>,
+    /// Health: `Sync:` lines seen, and by frame type (`IDLE`, `CSBK`,
+    /// `VC`, `err`, …) — "the helper hears a protocol" even when no
+    /// call or system record changes.
+    pub sync_lines: u64,
+    pub frames: std::collections::BTreeMap<String, u64>,
+    /// `at_ms` (wall clock) of the latest sync line.
+    pub last_sync_ms: Option<u64>,
+}
+
+/// Frame type named at the end of a `Sync:` line (`… | Color Code=03 |
+/// CSBK` → `CSBK`, `VC3` → `VC`, any `… ERR` → `err`).
+fn frame_kind(rest: &str) -> String {
+    let last = rest.rsplit('|').next().unwrap_or("").trim();
+    if last.contains("ERR") || last.contains("Err") {
+        return "err".into();
+    }
+    let tok: String = last
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect();
+    if tok.is_empty() || tok.starts_with("slot") || tok.starts_with("SLOT") {
+        "sync".into()
+    } else {
+        tok
+    }
+}
+
+/// Network type a control / site line belongs to.
+fn system_kind(line: &str, protocol: Option<&str>) -> Option<&'static str> {
+    let l = line;
+    if l.contains("Connect Plus") {
+        Some("Connect Plus")
+    } else if l.contains("Capacity Plus") || l.contains("Cap+") {
+        Some("Capacity Plus")
+    } else if l.contains("Hytera XPT") || l.contains("XPT") {
+        Some("Hytera XPT")
+    } else if l.contains("C_ALOHA_SYS_PARMS") || l.contains("Tier III") {
+        Some("DMR Tier III")
+    } else if l.contains("WACN") || l.contains("SYSID") || l.contains("RFSS") {
+        Some("P25")
+    } else if protocol.is_some_and(|p| p.starts_with("NXDN")) && l.contains("Site") {
+        Some("NXDN")
+    } else {
+        None
+    }
+}
+
+/// Control / site identity on one line, or `None` if it carries none.
+/// Lines about *adjacent* sites only contribute the neighbour list.
+fn parse_system(
+    line: &str,
+    protocol: Option<&str>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    use serde_json::json;
+    let mut m = serde_json::Map::new();
+    if let Some(idx) = line.find("Adjacent Sites:") {
+        let list: Vec<u32> = line[idx + "Adjacent Sites:".len()..]
+            .split([';', ',', ' '])
+            .filter_map(|t| t.trim().parse().ok())
+            .collect();
+        if !list.is_empty() {
+            m.insert("adjacent".into(), json!(list));
+        }
+    } else if !line.contains("Adjacent") {
+        let num = |k: &str| value_after(line, k, true).and_then(|v| v.parse::<u32>().ok());
+        let hex = |k: &str| {
+            value_after(line, k, false).filter(|v| v.chars().all(|c| c.is_ascii_hexdigit()))
+        };
+        if let Some(v) = num("Net ID") {
+            m.insert("net_id".into(), json!(v));
+        }
+        if let Some(v) = num("Site ID")
+            .or_else(|| num("SITE ID"))
+            .or_else(|| num("SITE"))
+        {
+            m.insert("site_id".into(), json!(v));
+        }
+        if let Some(v) = num("RFSS ID").or_else(|| num("RFSS")) {
+            m.insert("rfss".into(), json!(v));
+        }
+        if let Some(v) = hex("WACN") {
+            m.insert("wacn".into(), json!(v));
+        }
+        if let Some(v) = hex("SYSID") {
+            m.insert("sysid".into(), json!(v));
+        }
+        if let Some(v) = hex("NAC") {
+            m.insert("nac".into(), json!(v));
+        }
+        if let Some(v) = num("Rest LSN") {
+            m.insert("rest_lsn".into(), json!(v));
+        }
+    }
+    if m.is_empty() {
+        return None;
+    }
+    if let Some(k) = system_kind(line, protocol) {
+        m.insert("system".into(), json!(k));
+    }
+    Some(m)
 }
 
 /// Parse one (ANSI-stripped) terminal line. Lines carry a leading
@@ -206,6 +317,7 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Option<DsdEvent> {
         src: None,
         cc: st.cc,
         enc: None,
+        system: None,
         text: line.to_string(),
     };
     if let Some(idx) = line.find("Sync:") {
@@ -220,18 +332,40 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Option<DsdEvent> {
             .unwrap_or("")
             .trim_start_matches(['+', '-'])
             .to_string();
+        st.sync_lines += 1;
+        *st.frames.entry(frame_kind(rest)).or_insert(0) += 1;
+        st.last_sync_ms = Some(crate::sweep::now_ms());
+        let mut cc_changed = false;
         if let Some(cc) = value_after(rest, "Color Code", true).and_then(|v| v.parse().ok()) {
+            cc_changed = st.cc != Some(cc);
             st.cc = Some(cc);
         }
         if proto.is_empty() {
             return None;
         }
-        let changed = st.protocol.as_deref() != Some(proto.as_str());
+        // Re-announce when the colour code first shows up too: the first
+        // sync line often has none (`CACH/Burst FEC ERR`).
+        let changed = st.protocol.as_deref() != Some(proto.as_str()) || cc_changed;
         st.protocol = Some(proto.clone());
         return changed.then(|| DsdEvent {
             protocol: Some(proto),
             text: head.trim().to_string(),
             ..ev("sync", st)
+        });
+    }
+    if let Some(sys) = parse_system(line, st.protocol.as_deref()) {
+        let mut merged = st.system.clone();
+        for (k, v) in sys {
+            merged.insert(k, v);
+        }
+        if merged == st.system {
+            return None;
+        }
+        st.system = merged;
+        return Some(DsdEvent {
+            system: Some(st.system.clone()),
+            text: line.to_string(),
+            ..ev("system", st)
         });
     }
     if let Some(idx) = line.find("Talker Alias:") {
@@ -327,6 +461,9 @@ mod native {
         pub events: Arc<Mutex<Vec<String>>>,
         pub dropped: Arc<AtomicU64>,
         pub alive: Arc<AtomicBool>,
+        /// The stderr parser's state (protocol, CC, system, sync counts) —
+        /// read by the block's `health`.
+        pub parse: Arc<Mutex<super::ParseState>>,
         stop: Arc<AtomicBool>,
         handles: Vec<JoinHandle<()>>,
         child: Arc<Mutex<Option<Child>>>,
@@ -394,6 +531,7 @@ mod native {
                 src: None,
                 cc: None,
                 enc: None,
+                system: None,
                 text,
             },
         );
@@ -406,6 +544,7 @@ mod native {
             let events = Arc::new(Mutex::new(Vec::new()));
             let dropped = Arc::new(AtomicU64::new(0));
             let alive = Arc::new(AtomicBool::new(false));
+            let parse = Arc::new(Mutex::new(super::ParseState::default()));
             let stop = Arc::new(AtomicBool::new(false));
             let child = Arc::new(Mutex::new(None));
             let mut handles = Vec::new();
@@ -421,6 +560,7 @@ mod native {
                     events,
                     dropped,
                     alive,
+                    parse,
                     stop,
                     handles,
                     child,
@@ -485,6 +625,7 @@ mod native {
                         events,
                         dropped,
                         alive,
+                        parse,
                         stop,
                         handles,
                         child,
@@ -497,9 +638,9 @@ mod native {
 
             // stderr: the terminal output → events. stdout: drained, logged at debug.
             if let Some(stderr) = proc.stderr.take() {
-                let (events, stop) = (Arc::clone(&events), Arc::clone(&stop));
+                let (events, stop, parse) =
+                    (Arc::clone(&events), Arc::clone(&stop), Arc::clone(&parse));
                 handles.push(thread::spawn(move || {
-                    let mut st = super::ParseState::default();
                     // dsd-fme repeats call / alias lines every frame and
                     // the two TDMA slots interleave: one record per
                     // change *per slot*.
@@ -512,8 +653,14 @@ mod native {
                         let Ok(line) = line else { break };
                         let clean = strip_ansi(&line);
                         tracing::debug!(target: "decoder::dsd::term", "{}", clean.trim_end());
-                        if let Some(ev) = parse_line(&clean, &mut st) {
-                            let key = format!("{:?}{:?}{:?}{}", ev.protocol, ev.tgt, ev.src, if ev.event == "alias" { ev.text.as_str() } else { "" });
+                        let parsed = parse_line(&clean, &mut parse.lock().unwrap());
+                        if let Some(ev) = parsed {
+                            let extra = match ev.event {
+                                "alias" => ev.text.clone(),
+                                "system" => serde_json::to_string(&ev.system).unwrap_or_default(),
+                                _ => String::new(),
+                            };
+                            let key = format!("{:?}{:?}{:?}{:?}{extra}", ev.protocol, ev.cc, ev.tgt, ev.src);
                             if last.get(&(ev.event, ev.slot)) != Some(&key) {
                                 last.insert((ev.event, ev.slot), key);
                                 tracing::info!(target: "decoder::dsd", event = ev.event, "{}", ev.text);
@@ -664,6 +811,7 @@ mod native {
                 events,
                 dropped,
                 alive,
+                parse,
                 stop,
                 handles,
                 child,
@@ -697,6 +845,8 @@ pub struct DsdHelper {
     #[cfg(not(target_arch = "wasm32"))]
     worker: Option<native::Worker>,
     warned_off_rate: bool,
+    /// Discriminator level into the helper (health).
+    level: crate::health::LevelMeter,
 }
 
 impl DsdHelper {
@@ -711,6 +861,7 @@ impl DsdHelper {
             #[cfg(not(target_arch = "wasm32"))]
             worker: None,
             warned_off_rate: false,
+            level: crate::health::LevelMeter::new(HELPER_IN_RATE_HZ),
         })
     }
 
@@ -780,7 +931,7 @@ impl Block for DsdHelper {
                     ai_notes: "Appended to the dsd-fme command line verbatim, e.g. `-V 1` (voice from TDMA slot 1 only), `-q` (reverse mute), `-K <key>` / `-b <bits>` for basic privacy keys. Leave empty normally.",
                 },
             ],
-            ai_notes: "Digital voice via the operator-installed dsd-fme helper subprocess: feed it a 48 kHz FmDemod discriminator output (max_deviation_hz 5000, no de-emphasis, no audio shaping before it), it returns synthesised 8 kHz speech on `out` (resample before AudioSink) and call events on `events` → `ui:dsd` ({event: call|sync|helper, protocol, slot, tgt, src, cc, enc, text}). Encrypted calls show events, no audio. Needs the tuner on-centre of a 12.5 kHz channel; a `helper` event with 'failed to start' means dsd-fme is not installed. Output: `tail decoder --category dsd`; `await dsd`.",
+            ai_notes: "Digital voice via the operator-installed dsd-fme helper subprocess: feed it a 48 kHz FmDemod discriminator output (max_deviation_hz 5000, no de-emphasis, no audio shaping before it), it returns synthesised 8 kHz speech on `out` (resample before AudioSink) and call events on `events` → `ui:dsd` ({event: call|sync|system|helper, protocol, slot, tgt, src, cc, enc, system, text}). `system` records carry the control / site identity the signalling announces (Connect Plus / Capacity Plus / Tier III / Hytera XPT / P25: `net_id`, `site_id`, `adjacent`, `wacn`, `sysid`, `nac`, `rfss`, `rest_lsn`), re-sent when it changes — a control channel with no calls still identifies itself. `flowdiag` health: `sync_lines_cum`, `frames_cum` (IDLE/CSBK/VC/err…), `protocol`, `cc`, `secs_since_sync`. Encrypted calls show events, no audio. Needs the tuner on-centre of a 12.5 kHz channel; a `helper` event with 'failed to start' means dsd-fme is not installed. Output: `tail decoder --category dsd`; `await dsd`.",
         }
     }
 
@@ -827,7 +978,10 @@ impl Block for DsdHelper {
             .iter()
             .find(|p| p.name == "in")
             .and_then(InputPort::as_real_f32)
-            .map_or(0, <[f32]>::len);
+            .map_or(0, |src| {
+                self.level.push_real(src);
+                src.len()
+            });
         #[allow(clippy::cast_precision_loss)]
         {
             self.carry = (self.carry + consumed as f64 * HELPER_OUT_RATE_HZ / self.input_rate_hz)
@@ -854,8 +1008,13 @@ impl Block for DsdHelper {
             }
             let mut q = worker.events.lock().unwrap();
             let metadata = self.params.metadata;
+            // Site / control-channel identity comes only from dsd-fme, so
+            // it passes even when a native decoder owns call metadata.
             for line in q.drain(..).filter(|l| {
-                metadata || l.contains("\"event\":\"helper\"") || l.contains("\"event\":\"voice\"")
+                metadata
+                    || l.contains("\"event\":\"helper\"")
+                    || l.contains("\"event\":\"voice\"")
+                    || l.contains("\"event\":\"system\"")
             }) {
                 self.events_out.extend_from_slice(line.as_bytes());
                 self.events_out.push(b'\n');
@@ -894,6 +1053,31 @@ impl Block for DsdHelper {
         }
         drain_events_port(io, &mut self.events_out, &mut w);
         Ok(w)
+    }
+
+    fn health(&self) -> Option<serde_json::Value> {
+        let mut h = serde_json::json!({
+            "input_dbfs": self.level.dbfs(),
+            "samples_cum": self.level.samples(),
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(worker) = self.worker.as_ref() {
+            let st = worker.parse.lock().unwrap().clone();
+            let now = crate::sweep::now_ms();
+            h["helper_alive"] =
+                serde_json::json!(worker.alive.load(std::sync::atomic::Ordering::Relaxed));
+            h["sync_lines_cum"] = serde_json::json!(st.sync_lines);
+            h["frames_cum"] = serde_json::json!(st.frames);
+            h["protocol"] = serde_json::json!(st.protocol);
+            h["cc"] = serde_json::json!(st.cc);
+            h["secs_since_sync"] = serde_json::json!(st
+                .last_sync_ms
+                .map(|t| now.saturating_sub(t) as f64 / 1000.0));
+            if !st.system.is_empty() {
+                h["system"] = serde_json::Value::Object(st.system);
+            }
+        }
+        Some(h)
     }
 }
 
@@ -957,11 +1141,73 @@ mod tests {
         assert_eq!(st.protocol.as_deref(), Some("DMR"));
     }
 
+    /// Live 454.3443 MHz (2026-10-16): a MOTOTRBO Connect Plus control
+    /// channel. The first sync has no colour code; the CC re-announces
+    /// once known; the site identity merges across lines and is sent
+    /// only when it changes.
+    #[test]
+    fn connect_plus_control_channel_yields_system_records() {
+        let lines = [
+            "05:17:53 Sync: +DMR  [slot1]  slot2  | CACH/Burst FEC ERR",
+            "05:17:53 Sync: +DMR   slot1  [slot2] | Color Code=03 | IDLE ",
+            "05:17:53 Sync: +DMR  [slot1]  slot2  | Color Code=03 | CSBK",
+            " Connect Plus Adjacent Sites: 29; 58; 42; 26; 27;",
+            " SLCO CRC ERR",
+            "05:17:53 Sync: +DMR   slot1  [slot2] | Color Code=03 | IDLE ",
+            " Connect Plus Adjacent Sites: 29; 58; 42; 26; 27;",
+            " SLCO Connect Plus Control Channel - Net ID: 119 Site ID: 28",
+            "05:17:53 Sync: +DMR  [slot1]  slot2  | Color Code=03 | CSBK",
+            " SLCO Connect Plus Control Channel - Net ID: 119 Site ID: 28",
+        ];
+        let mut st = ParseState::default();
+        let evs: Vec<_> = lines
+            .iter()
+            .filter_map(|l| parse_line(l, &mut st))
+            .collect();
+        let kinds: Vec<_> = evs.iter().map(|e| e.event).collect();
+        assert_eq!(kinds, ["sync", "sync", "system", "system"]);
+        assert_eq!(evs[1].cc, Some(3), "CC re-announced once it shows up");
+        let sys = evs[3].system.as_ref().unwrap();
+        assert_eq!(sys["system"], "Connect Plus");
+        assert_eq!(sys["net_id"], 119);
+        assert_eq!(sys["site_id"], 28);
+        assert_eq!(sys["adjacent"], serde_json::json!([29, 58, 42, 26, 27]));
+        assert_eq!(st.sync_lines, 5);
+        assert_eq!(st.frames.get("CSBK"), Some(&2));
+        assert_eq!(st.frames.get("IDLE"), Some(&2));
+        assert_eq!(st.frames.get("err"), Some(&1));
+    }
+
+    /// P25 network status as dsd-fme prints it (bracketed hex fields).
+    #[test]
+    fn p25_network_status_yields_wacn_sysid_nac() {
+        let mut st = ParseState {
+            protocol: Some("P25p1".into()),
+            ..ParseState::default()
+        };
+        let ev = parse_line("  LRA [00] WACN [BEE00] SYSID [5E4] NAC [5E1]", &mut st).unwrap();
+        let sys = ev.system.unwrap();
+        assert_eq!(sys["system"], "P25");
+        assert_eq!(sys["wacn"], "BEE00");
+        assert_eq!(sys["sysid"], "5E4");
+        assert_eq!(sys["nac"], "5E1");
+        let ev = parse_line(
+            "  LRA [00] RFSS[001] SITE [002] SYSID [5E4] CHAN-T [1234] SSC [00]",
+            &mut st,
+        )
+        .unwrap();
+        let sys = ev.system.unwrap();
+        assert_eq!(sys["rfss"], 1);
+        assert_eq!(sys["site_id"], 2);
+        assert_eq!(sys["wacn"], "BEE00", "merged with the earlier line");
+    }
+
     #[test]
     fn dmr_call_line_yields_tg_src_slot() {
         let mut st = ParseState {
             protocol: Some("DMR".into()),
             cc: Some(1),
+            ..ParseState::default()
         };
         let ev = parse_line(" SLOT 2 TGT=31068 SRC=3214431 Group Call", &mut st).unwrap();
         assert_eq!(ev.event, "call");
@@ -996,7 +1242,7 @@ mod tests {
     fn p25_group_voice_line_and_frame_noise() {
         let mut st = ParseState {
             protocol: Some("P25p1".into()),
-            cc: None,
+            ..ParseState::default()
         };
         let ev = parse_line(
             " Group Voice Channel User - Group 1201 Source 7001234",

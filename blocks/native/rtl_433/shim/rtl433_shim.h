@@ -64,6 +64,14 @@ void rtl433_push_iq(rtl433_state_t *state, const float *iq, size_t n_complex);
  * at push time. */
 int rtl433_drain_event(rtl433_state_t *state, char *dst, size_t cap);
 
+/* Health counters since init: out[0] OOK pulse packages detected,
+ * out[1] FSK pulse packages, out[2] decoder events (successful
+ * decodes, before output dedupe), out[3] events dropped (ring full or
+ * oversize). "Packages but no events" = something pulsed that no
+ * enabled decoder recognised; "no packages" = nothing above the
+ * detector's threshold. */
+void rtl433_stats(const rtl433_state_t *state, uint64_t out[4]);
+
 #ifdef __cplusplus
 }
 #endif

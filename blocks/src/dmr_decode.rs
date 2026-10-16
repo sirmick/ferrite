@@ -787,6 +787,7 @@ impl DmrDecoder {
                 src: None,
                 cc: self.cc.map(u16::from),
                 enc: None,
+                system: None,
                 text: format!(
                     "DMR verified (native decoder), colour code {}",
                     self.cc.map_or_else(|| "?".into(), |c| c.to_string())
@@ -911,6 +912,7 @@ impl DmrDecoder {
             src: Some(lc.src.to_string()),
             cc: self.cc.map(u16::from),
             enc,
+            system: None,
             text: format!(
                 "SLOT {} TGT={} SRC={} {}{}",
                 slot + 1,
@@ -940,6 +942,7 @@ impl DmrDecoder {
             src: Some(lc.src.to_string()),
             cc: self.cc.map(u16::from),
             enc: None,
+            system: None,
             text: format!(
                 "SLOT {} call end TGT={} SRC={} ({secs:.1} s)",
                 slot + 1,
@@ -1010,6 +1013,7 @@ impl DmrDecoder {
             src: st.call.map(|(_, s, _)| s.to_string()),
             cc: self.cc.map(u16::from),
             enc: None,
+            system: None,
             text,
         });
     }
@@ -1231,6 +1235,18 @@ impl Block for DmrDecode {
         }
         drain_events_port(io, &mut self.events_out, &mut w);
         Ok(w)
+    }
+
+    fn health(&self) -> Option<serde_json::Value> {
+        let st = self.dec.stats;
+        Some(serde_json::json!({
+            "syncs_cum": st.syncs,
+            "bursts_cum": st.bursts,
+            "lc_ok_cum": st.lc_ok,
+            "lc_bad_cum": st.lc_bad,
+            "voice_frames_cum": st.voice_frames,
+            "voice_errs_cum": st.voice_errs,
+        }))
     }
 }
 

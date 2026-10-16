@@ -68,6 +68,12 @@ struct rtl433_state {
     int  dropped_full;                     /* events dropped because ring was full */
     int  dropped_oversize;                 /* events dropped because JSON > MAX */
 
+    /* Health counters (rtl433_stats): pulse packages the detector found
+     * (OOK / FSK) and what the decoders made of them. */
+    uint64_t ook_packages;
+    uint64_t fsk_packages;
+    uint64_t demod_events;
+
     /* IQ scratch — interleaved int16 CS16 chunks ≤ MAXIMAL_BUF_LENGTH. */
     int16_t *iq_i16;
     size_t   iq_i16_cap;                   /* in complex samples */
@@ -321,15 +327,28 @@ void rtl433_push_iq(rtl433_state_t *state, const float *iq, size_t n_complex)
                     state->cfg->fsk_pulse_detect_mode);
 
             if (package_type == PULSE_DATA_OOK) {
-                run_ook_demods(&demod->r_devs, &demod->pulse_data);
+                state->ook_packages++;
+                int ev = run_ook_demods(&demod->r_devs, &demod->pulse_data);
+                if (ev > 0) state->demod_events += (uint64_t)ev;
             } else if (package_type == PULSE_DATA_FSK) {
-                run_fsk_demods(&demod->r_devs, &demod->fsk_pulse_data);
+                state->fsk_packages++;
+                int ev = run_fsk_demods(&demod->r_devs, &demod->fsk_pulse_data);
+                if (ev > 0) state->demod_events += (uint64_t)ev;
             }
         } while (package_type);
 
         state->cfg->input_pos += n_samples;
         consumed += chunk;
     }
+}
+
+void rtl433_stats(const rtl433_state_t *state, uint64_t out[4])
+{
+    if (!state || !out) return;
+    out[0] = state->ook_packages;
+    out[1] = state->fsk_packages;
+    out[2] = state->demod_events;
+    out[3] = (uint64_t)(state->dropped_full + state->dropped_oversize);
 }
 
 int rtl433_drain_event(rtl433_state_t *state, char *dst, size_t cap)

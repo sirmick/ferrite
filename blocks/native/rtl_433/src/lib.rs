@@ -182,6 +182,34 @@ impl Rtl433Demod {
         let s = CStr::from_bytes_with_nul(&buf[..=n]).ok()?;
         Some(s.to_string_lossy().into_owned())
     }
+
+    /// Counters since construction: pulse packages the detector found
+    /// and what the decoders made of them.
+    #[must_use]
+    pub fn stats(&self) -> Rtl433Stats {
+        let mut out = [0u64; 4];
+        // SAFETY: state is valid; `out` has the 4 slots the shim writes.
+        unsafe { sys::rtl433_stats(self.state.as_ptr(), out.as_mut_ptr()) };
+        Rtl433Stats {
+            ook_packages: out[0],
+            fsk_packages: out[1],
+            decoder_events: out[2],
+            dropped: out[3],
+        }
+    }
+}
+
+/// [`Rtl433Demod::stats`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Rtl433Stats {
+    /// OOK pulse packages detected (something keyed above threshold).
+    pub ook_packages: u64,
+    /// FSK pulse packages detected.
+    pub fsk_packages: u64,
+    /// Successful decoder outputs.
+    pub decoder_events: u64,
+    /// Events dropped by the shim's ring (full / oversize).
+    pub dropped: u64,
 }
 
 impl Drop for Rtl433Demod {
@@ -212,6 +240,27 @@ mod tests {
         let zeros = vec![Complex::new(0.0_f32, 0.0_f32); 25_000];
         d.push_iq(&zeros);
         assert!(d.drain_event().is_none());
+        assert_eq!(d.stats(), super::Rtl433Stats::default());
+    }
+
+    /// A keyed carrier nobody's protocol matches still counts as a pulse
+    /// package — "something pulsed, nothing decoded" is visible.
+    #[test]
+    fn keyed_bursts_count_as_packages() {
+        use num_complex::Complex;
+        let mut d = Rtl433Demod::new(250_000, DecoderSet::Default).unwrap();
+        let mut iq = vec![Complex::new(0.0_f32, 0.0); 25_000];
+        for p in 0..24 {
+            let on = if p % 3 == 0 { 250 } else { 125 }; // 1 ms / 0.5 ms
+            let start = 2_500 + p * 500;
+            for s in &mut iq[start..start + on] {
+                *s = Complex::new(0.5, 0.0);
+            }
+        }
+        iq.extend(std::iter::repeat(Complex::new(0.0, 0.0)).take(100_000));
+        d.push_iq(&iq);
+        let st = d.stats();
+        assert!(st.ook_packages + st.fsk_packages >= 1, "{st:?}");
     }
 
     #[test]
