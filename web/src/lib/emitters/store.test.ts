@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmCell, matches, type Emitter } from './store.svelte';
+import { aboveCutoff, fmCell, matches, type Emitter } from './store.svelte';
 
 const em = (freq_hz: number, width_hz: number, peak_dbfs = -40): Emitter => ({
   id: 1,
@@ -34,5 +34,18 @@ describe('emitter matching (server rules)', () => {
   it('narrowband neighbours 25 kHz apart stay separate', () => {
     expect(matches(em(462.5625e6, 11e3), 462.5875e6, 11e3, -60)).toBe(false);
     expect(matches(em(462.5625e6, 11e3), 462.564e6, 11e3, -45)).toBe(true);
+  });
+});
+
+describe('SNR cutoff', () => {
+  it('compares best-ever SNR; labelled emitters always show', () => {
+    const e = { ...em(150e6, 10e3), snr_db: 12, peak_snr_db: 18, seen: 3 };
+    expect(aboveCutoff(e, 15)).toBe(true);
+    expect(aboveCutoff(e, 20)).toBe(false);
+    expect(aboveCutoff({ ...e, label: 'NOAA WX' }, 20)).toBe(true);
+    // Records from before peak_snr_db fall back to snr_db.
+    expect(aboveCutoff({ ...em(150e6, 10e3), snr_db: 16, seen: 2 }, 15)).toBe(true);
+    // Seen once = tentative.
+    expect(aboveCutoff({ ...e, seen: 1 }, 15)).toBe(false);
   });
 });

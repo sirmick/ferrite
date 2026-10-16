@@ -33,10 +33,10 @@ use crate::app_state::AppState;
 use crate::error::AppError;
 
 /// Widest range one call may analyse.
-const MAX_RANGE_HZ: f64 = 400_000.0;
+pub(crate) const MAX_RANGE_HZ: f64 = 400_000.0;
 /// DC spur guard on a raw source tap (live: the RSPdx's LO spur
 /// flickered as a dozen "keyed" peaks within ±1 kHz).
-const DC_GUARD_HZ: f64 = 1_500.0;
+pub(crate) const DC_GUARD_HZ: f64 = 1_500.0;
 /// Snapshots kept (each is rate × secs × 8 bytes on disk).
 const SNAPSHOT_KEEP: usize = 4;
 /// How long a snapshot waits for a just-(re)started source to deliver.
@@ -142,7 +142,7 @@ fn sweep_stale_snapshots_in(dir: &Path, alive: impl Fn(u32) -> bool) -> usize {
 }
 
 /// Who asked: an agent over MCP, a person on the CLI, or the UI.
-fn caller(headers: &HeaderMap) -> String {
+pub(crate) fn caller(headers: &HeaderMap) -> String {
     headers
         .get("x-ferrite-via")
         .and_then(|v| v.to_str().ok())
@@ -222,7 +222,7 @@ fn bad(e: &anyhow::Error) -> AppError {
     AppError::bad_request("ANALYSIS_REJECTED", format!("{e:#}"))
 }
 
-fn open(path: &Path) -> anyhow::Result<std::io::BufReader<std::fs::File>> {
+pub(crate) fn open(path: &Path) -> anyhow::Result<std::io::BufReader<std::fs::File>> {
     Ok(std::io::BufReader::new(
         std::fs::File::open(path).context("open snapshot")?,
     ))
@@ -326,7 +326,7 @@ impl AppState {
 
     /// The snapshot to measure: `id` if given (must still be kept), else
     /// a fresh one.
-    async fn snapshot_for(
+    pub(crate) async fn snapshot_for(
         &self,
         id: Option<&str>,
         secs: Option<f64>,
@@ -358,7 +358,13 @@ impl AppState {
     }
 
     /// Fold an `analysis` record (what the AI panel draws); returns its id.
-    fn publish_analysis(&self, tool: &str, by: &str, snap: &SnapshotInfo, body: Value) -> String {
+    pub(crate) fn publish_analysis(
+        &self,
+        tool: &str,
+        by: &str,
+        snap: &SnapshotInfo,
+        body: Value,
+    ) -> String {
         let id = mint_id("an");
         let mut rec = json!({
             "id": id,
@@ -381,7 +387,7 @@ fn meta(s: &SnapshotInfo) -> fa::IqMeta {
     }
 }
 
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
 ) -> Result<T, AppError> {
     tokio::task::spawn_blocking(f)

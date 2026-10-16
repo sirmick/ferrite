@@ -164,5 +164,26 @@ union only ever grows — a 2.4 MHz detection once became a black hole).
 The browser's matcher mirrors the rules (`emitters/store.test.ts`). UI:
 `EmitterTable` shared by both panes (number, MHz, level, SNR, width,
 band / label, ✎ label, ⊘ ignore); numbered ticks on the panorama.
-MCP: `emitters`, `label_emitter`. Next: `inspect`.
+MCP: `emitters`, `label_emitter`.
+
+**Hygiene** (the first live hunt left ~1,800 emitters, mostly one-off
+noise): an SNR cutoff (`emitter_config.min_snr_db`, default 15 dB, UI
+control in both panes) gates founding and listing on each emitter's best
+SNR; seen-once emitters expire after 10 min, unseen ones after 7 days
+(pruned once a minute); `prune` drops below-cutoff ones on demand.
+Labelled / ignored emitters are knowledge and never pruned. Rows whose
+median floor is below −130 dBFS (the L-band LNA-off collapse) found
+nothing.
+
+**Inspect** (`POST /api/inspect`, MCP/CLI `inspect`, ⌕ on any emitter
+row): the step between finding and naming. Tunes the receiver to the
+emitter (leaving the analyzer with `force`, back with `restore`),
+records a few seconds, and `ferrite_analysis::inspect` measures it —
+short-time FFT for floor / occupied region / centre / lines, a
+second short-frame STFT sized to the closest full-level lines to tell
+FSK (two lines taking turns) and MFSK, the occupied region's envelope
+for keying / bursts / periodicity, |x| spread for constant envelope.
+The spectrogram goes back as a PNG (dependency-free palette encoder,
+the UI's heat ramp) so the agent sees it; the headline lands on the
+emitter.
 

@@ -10,7 +10,8 @@
 
   import { currentAxes, pipeline } from '$lib/pipeline.svelte';
   import { signals } from '$lib/signals/store.svelte';
-  import { emitters } from '$lib/emitters/store.svelte';
+  import { aboveCutoff, emitters } from '$lib/emitters/store.svelte';
+  import SnrCutoff from '$lib/emitters/SnrCutoff.svelte';
   import EmitterTable, { type EmitterRow } from '$lib/emitters/EmitterTable.svelte';
   import BlockParams from '$lib/controls/BlockParams.svelte';
 
@@ -22,12 +23,17 @@
   // fragments) collapse onto the emitter they belong to — strongest
   // detection's frequency and level. Detections not (yet) tied to an
   // emitter show as themselves.
+  // The emitter list's SNR cutoff applies here too: below-cutoff loose
+  // detections and emitters are left out (labelled ones always show).
   let joined = $derived.by<EmitterRow[]>(() => {
     const byEmitter = new Map<number, EmitterRow>();
     const loose: EmitterRow[] = [];
+    const cut = emitters.config.min_snr_db;
     for (const s of signals.signals) {
       const e = emitters.match(s.freq_hz, s.bw_hz, s.power_db);
+      if (e && !aboveCutoff(e, cut) && s.snr_db < cut) continue;
       if (!e) {
+        if (s.snr_db < cut) continue;
         loose.push({
           key: `s${s.id}`,
           freq_hz: s.freq_hz,
@@ -50,6 +56,7 @@
         label: e.label,
         status: e.status,
         last_seen_ms: e.last_seen_ms,
+        hint: e.inspect?.hint,
       });
     }
     return [...byEmitter.values(), ...loose].sort((a, b) => b.level_dbfs - a.level_dbfs);
@@ -67,6 +74,18 @@
   });
 
   const tuneTo = (r: EmitterRow) => void pipeline.tune(r.freq_hz);
+  let inspecting = $state<number | null>(null);
+  async function inspect(r: EmitterRow) {
+    if (r.id === undefined) return;
+    inspecting = r.id;
+    try {
+      await emitters.inspect(r.id, false);
+    } catch (e) {
+      console.warn('inspect', e);
+    } finally {
+      inspecting = null;
+    }
+  }
 </script>
 
 <div
@@ -92,6 +111,8 @@
       {rows}
       onPick={tuneTo}
       onListen={tuneTo}
+      onInspect={(r) => void inspect(r)}
+      busy={inspecting}
       activeHz={vfo}
       empty="scanning the wideband FFT for signals…"
     />
@@ -100,6 +121,7 @@
   {#if signalsBlock}
     <footer class="border-t border-slate-800 p-2">
       <BlockParams block={signalsBlock} only={['threshold_db', 'top_k']} />
+      <div class="mt-1 flex justify-end"><SnrCutoff label="emitter list: SNR ≥" /></div>
     </footer>
   {/if}
 </div>

@@ -45,6 +45,7 @@ mod emitters;
 mod error;
 mod event_plane;
 mod frame_bus;
+mod inspect_api;
 mod log_stream;
 mod preset_pipeline;
 mod routes;
@@ -545,7 +546,13 @@ async fn main() -> Result<()> {
         .route("/api/preset", post(routes::load_preset))
         .route("/api/preset/return", post(routes::return_preset))
         .route("/api/sweep", post(sweep_api::post_sweep))
+        .route("/api/inspect", post(inspect_api::post_inspect))
         .route("/api/emitters", get(emitters::get_emitters))
+        .route(
+            "/api/emitters/config",
+            get(emitters::get_config).post(emitters::post_config),
+        )
+        .route("/api/emitters/prune", post(emitters::post_prune))
         .route("/api/emitters/:id", post(emitters::post_emitter))
         .route(
             "/api/profile",

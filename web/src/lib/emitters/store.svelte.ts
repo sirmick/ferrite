@@ -13,6 +13,8 @@ export interface Emitter {
   level_dbfs: number;
   peak_dbfs: number;
   snr_db: number;
+  /** Best SNR ever seen — what the cutoff compares (older records: snr_db). */
+  peak_snr_db?: number;
   band?: string | null;
   first_seen_ms: number;
   last_seen_ms: number;
@@ -22,6 +24,38 @@ export interface Emitter {
   label?: string | null;
   notes?: string | null;
   ident?: { by?: string; at_ms?: number; confidence?: number | null } | null;
+  /** The last `inspect` (server/src/inspect_api.rs). */
+  inspect?: { at_ms: number; analysis_id: string; hint: string; occupied_hz?: number } | null;
+}
+
+/** The list's hygiene policy (server `emitter_config` kind). */
+export interface EmitterConfig {
+  min_snr_db: number;
+  tentative_ttl_ms: number;
+  forget_after_ms: number;
+}
+
+export const DEFAULT_CONFIG: EmitterConfig = {
+  min_snr_db: 15,
+  tentative_ttl_ms: 10 * 60_000,
+  forget_after_ms: 7 * 86_400_000,
+};
+
+/** Shown under the cutoff? Labelled emitters always are (knowledge);
+ *  the rest need to have cleared it once and been seen more than once
+ *  (a seen-once emitter is tentative — mostly noise peaks, expiring). */
+export function aboveCutoff(e: Emitter, minSnrDb: number): boolean {
+  return !!e.label || ((e.peak_snr_db || e.snr_db) >= minSnrDb && e.seen >= 2);
+}
+
+async function post(url: string, body: unknown): Promise<Response> {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${url}: ${r.status} ${await r.text()}`);
+  return r;
 }
 
 // The server tracker's matching rules (server/src/emitters.rs) — kept in
@@ -65,11 +99,34 @@ class EmitterStore {
       .filter((e) => e && typeof e.id === 'number'),
   );
 
-  /** Emitters in [lo, hi], ignored ones hidden unless asked for. */
+  config = $derived<EmitterConfig>({
+    ...DEFAULT_CONFIG,
+    ...((decoders.kind('emitter_config').current['current']?.data as
+      | Partial<EmitterConfig>
+      | undefined) ?? {}),
+  });
+
+  /** Emitters in [lo, hi] at or above the SNR cutoff; ignored ones hidden
+   *  unless asked for. */
   inRange(lo: number, hi: number, includeIgnored = false): Emitter[] {
+    const cut = this.config.min_snr_db;
     return this.all.filter(
-      (e) => e.freq_hz >= lo && e.freq_hz <= hi && (includeIgnored || e.status !== 'ignored'),
+      (e) =>
+        e.freq_hz >= lo &&
+        e.freq_hz <= hi &&
+        (includeIgnored || e.status !== 'ignored') &&
+        aboveCutoff(e, cut),
     );
+  }
+
+  /** Change the policy for every viewer (persisted server-side). */
+  async setConfig(patch: Partial<EmitterConfig>): Promise<void> {
+    await post('/api/emitters/config', patch);
+  }
+
+  /** Delete unlabelled emitters below the cutoff + stale / forgotten ones. */
+  async prune(): Promise<{ removed: number; remaining: number }> {
+    return (await post('/api/emitters/prune', {})).json();
   }
 
   /** The emitter a live detection belongs to (nearest within tolerance). */
@@ -82,18 +139,19 @@ class EmitterStore {
     return best;
   }
 
+  /** Characterise emitter `id` (tunes the receiver there). From the
+   *  analyzer, `force` leaves it and `restore` comes back after. */
+  async inspect(id: number, fromAnalyzer: boolean): Promise<void> {
+    await post('/api/inspect', { emitter_id: id, force: fromAnalyzer, restore: fromAnalyzer });
+  }
+
   /** Label (→ identified), or set the status (`ignored` hides it). The
    *  server publishes the change; every tab and the AI see it. */
   async edit(
     id: number,
     patch: { label?: string; status?: string; notes?: string },
   ): Promise<void> {
-    const r = await fetch(`/api/emitters/${id}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(patch),
-    });
-    if (!r.ok) throw new Error(`emitter #${id}: ${r.status} ${await r.text()}`);
+    await post(`/api/emitters/${id}`, patch);
   }
 }
 

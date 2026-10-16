@@ -17,13 +17,16 @@
 
 pub mod envelope;
 pub mod geo;
+pub mod inspect;
 pub mod iq;
+pub mod png;
 pub mod slice;
 pub mod spectrogram;
 pub mod spectrum;
 pub mod text;
 
 pub use envelope::{envelope, Envelope, EnvelopeParams, Segment};
+pub use inspect::{inspect, Bursts, Features, InspectParams, InspectResult, Tone};
 pub use iq::IqMeta;
 pub use slice::{slice, Slice};
 pub use spectrogram::{spectrogram, Spectrogram, SpectrogramParams};

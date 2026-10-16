@@ -875,6 +875,61 @@ pub struct EmittersArgs {
     /// Max rows (default 50).
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Hide unlabelled emitters whose best SNR is below this, dB
+    /// (default: the station's cutoff from `emitter_settings`).
+    #[serde(default)]
+    pub min_snr_db: Option<f32>,
+    /// Also list tentative emitters (seen once, unlabelled — mostly noise
+    /// peaks that expire unless seen again). Default false.
+    #[serde(default)]
+    pub tentative: bool,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct InspectArgs {
+    /// Emitter number (`id` from `emitters`) — its frequency and width.
+    #[serde(default)]
+    pub emitter_id: Option<u64>,
+    /// Or a frequency, Hz.
+    #[serde(default)]
+    pub freq_hz: Option<f64>,
+    /// Expected width, Hz (default: the emitter's; unknown → 25 kHz span).
+    #[serde(default)]
+    pub width_hz: Option<f64>,
+    /// Seconds of IQ to record (default 3, 1–15). Longer for slow
+    /// beacons / bursts.
+    #[serde(default)]
+    pub secs: Option<f64>,
+    /// Measure an existing snapshot (`snapshot` id) instead of tuning.
+    #[serde(default)]
+    pub snapshot: Option<String>,
+    /// Take the radio from the spectrum analyzer.
+    #[serde(default)]
+    pub force: bool,
+    /// Give it back to the analyzer (same sweep range) afterwards.
+    #[serde(default)]
+    pub restore: bool,
+    /// Optional "why" note for the activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct EmitterSettingsArgs {
+    /// SNR cutoff, dB: detections below it found no emitter, and
+    /// unlabelled emitters whose best SNR is below it are hidden.
+    #[serde(default)]
+    pub min_snr_db: Option<f32>,
+    /// Drop an unlabelled emitter seen only once after this long, ms.
+    #[serde(default)]
+    pub tentative_ttl_ms: Option<u64>,
+    /// Drop an unlabelled emitter not seen for this long, ms.
+    #[serde(default)]
+    pub forget_after_ms: Option<u64>,
+    /// Prune now: delete unlabelled emitters below the cutoff, stale
+    /// tentative ones, and forgotten ones (labelled / ignored are kept).
+    #[serde(default)]
+    pub prune: bool,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -1511,10 +1566,72 @@ impl FerriteServer {
         if let Some(v) = &args.sort {
             q.push(format!("sort={v}"));
         }
+        if let Some(v) = args.min_snr_db {
+            q.push(format!("min_snr_db={v}"));
+        }
+        if args.tentative {
+            q.push("tentative=true".into());
+        }
         q.push(format!("limit={}", args.limit.unwrap_or(50)));
         self.http
             .get(&format!("/api/emitters?{}", q.join("&")))
             .await
+    }
+
+    /// Characterise one signal (`POST /api/inspect`).
+    pub(crate) async fn inspect_op(&self, args: InspectArgs) -> Result<Value, McpError> {
+        let secs = args.secs.unwrap_or(3.0).clamp(1.0, 15.0);
+        self.http
+            .post_slow(
+                "/api/inspect",
+                json!({
+                    "emitter_id": args.emitter_id, "freq_hz": args.freq_hz,
+                    "width_hz": args.width_hz, "secs": secs, "snapshot": args.snapshot,
+                    "force": args.force, "restore": args.restore,
+                }),
+                "inspect",
+                args.note.as_deref(),
+                Duration::from_secs_f64(secs + 60.0),
+            )
+            .await
+    }
+
+    /// Read / change the emitter-list policy, optionally prune
+    /// (`/api/emitters/config`, `/api/emitters/prune`).
+    pub(crate) async fn emitter_settings_op(
+        &self,
+        args: EmitterSettingsArgs,
+    ) -> Result<Value, McpError> {
+        let mut patch = serde_json::Map::new();
+        if let Some(v) = args.min_snr_db {
+            patch.insert("min_snr_db".into(), json!(v));
+        }
+        if let Some(v) = args.tentative_ttl_ms {
+            patch.insert("tentative_ttl_ms".into(), json!(v));
+        }
+        if let Some(v) = args.forget_after_ms {
+            patch.insert("forget_after_ms".into(), json!(v));
+        }
+        let config = if patch.is_empty() {
+            self.http.get("/api/emitters/config").await?
+        } else {
+            self.http
+                .post(
+                    "/api/emitters/config",
+                    Value::Object(patch),
+                    "emitter-settings",
+                    None,
+                )
+                .await?
+        };
+        let mut out = json!({ "config": config });
+        if args.prune {
+            out["pruned"] = self
+                .http
+                .post("/api/emitters/prune", json!({}), "prune-emitters", None)
+                .await?;
+        }
+        Ok(out)
     }
 
     /// Label / ignore an emitter (`POST /api/emitters/:id`).
@@ -2438,13 +2555,43 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "The emitter list — every transmitter this station has seen, from the receiver's strongest-signal detector and from spectrum-analyzer sweeps alike, merged into numbered emitters and persisted across restarts: `{count, emitters:[{id, freq_hz, width_hz, level_dbfs, peak_dbfs, snr_db, band, first_seen_ms, last_seen_ms, seen, sources, status, label, notes, ident}]}`. `status` is `new` (unidentified — your queue), `identified` (labelled), or `ignored` (spurs, hidden by default). Filter by `status`, `lo_hz`/`hi_hz`, `since_ms` (what's new since yesterday), `sort` (`level`/`freq`/`recent`/`new`). Feed it by running `sweep` over a range (or just letting the receiver run); then investigate the `new` ones and record what you found with `label_emitter`."
+        description = "The emitter list — every transmitter this station has seen, from the receiver's strongest-signal detector and from spectrum-analyzer sweeps alike, merged into numbered emitters and persisted across restarts: `{count, emitters:[{id, freq_hz, width_hz, level_dbfs, peak_dbfs, snr_db, band, first_seen_ms, last_seen_ms, seen, sources, status, label, notes, ident}]}`. `status` is `new` (unidentified — your queue), `identified` (labelled), or `ignored` (spurs, hidden by default). Filter by `status`, `lo_hz`/`hi_hz`, `since_ms` (what's new since yesterday), `sort` (`level`/`freq`/`recent`/`new`); unlabelled emitters below the station's SNR cutoff are hidden (`min_snr_db` overrides, see `emitter_settings`), and so are tentative ones seen only once (`tentative:true` shows them). Each also carries `peak_snr_db` (best SNR ever seen). Feed it by running `sweep` over a range (or just letting the receiver run); then investigate the `new` ones and record what you found with `label_emitter`."
     )]
     async fn emitters(
         &self,
         Parameters(args): Parameters<EmittersArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_json(&self.emitters_op(args).await?)
+    }
+
+    #[tool(
+        description = "Characterise ONE signal — the step between finding it (`sweep` / `emitters`) and naming it. Points the receiver at `emitter_id` (or `freq_hz`), records `secs` of IQ (default 3), and measures what an operator reads off a waterfall: refined centre (`freq_hz`, `offset_hz`), 99 % occupied width, peak / power / floor / SNR, distinct spectral lines (`tones`, with how often each dominates) → `fsk_shift_hz` when two take turns (MFSK when more), keying (`keyed`, `duty`, `bursts` count / on-ms / gap / regular `period_s`), envelope periodicity (`envelope_period_s` — catches fast pulse trains), `envelope_cv` / `constant_envelope` (FM / FSK / PSK flat vs AM / SSB / OFDM / noise), and a one-line `hint`. Returns the spectrogram of the span as an IMAGE (time runs down, frequency left → right) — look at it. The result is an `analysis` card in the AI panel and its headline is stored on the emitter (`emitters` shows `inspect`). Lease like `tune`: while the spectrum analyzer runs it's `RADIO_BUSY` unless `force`; `restore:true` goes back to the sweep after. Then: `sigwiki_identify` with the measured width / shift / keying, a decoder preset + `await_events` if it's a known mode, and `label_emitter` with the features as evidence."
+    )]
+    async fn inspect(
+        &self,
+        Parameters(args): Parameters<InspectArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        use base64::Engine as _;
+        let mut v = self.inspect_op(args).await?;
+        let png = v
+            .as_object_mut()
+            .and_then(|o| o.remove("png_b64"))
+            .and_then(|p| p.as_str().map(str::to_string))
+            .and_then(|p| base64::engine::general_purpose::STANDARD.decode(p).ok());
+        match png {
+            Some(bytes) => ok_json_image(&v, &bytes, "image/png"),
+            None => ok_json(&v),
+        }
+    }
+
+    #[tool(
+        description = "The emitter list's hygiene policy: `min_snr_db` (the SNR cutoff — weaker detections found no emitter and unlabelled emitters whose best SNR is below it are hidden; default 15 dB, the operator can also set it in the UI), `tentative_ttl_ms` (an unlabelled emitter seen only once is dropped after this; default 10 min), `forget_after_ms` (unlabelled emitters not seen for this long are dropped; default 7 days). No args reads it; any arg changes it for every viewer. `prune:true` deletes, now, the unlabelled emitters below the cutoff plus the stale and forgotten ones — labelled and ignored emitters (the station's knowledge) are never pruned. Returns `{config, pruned?:{removed, remaining}}`."
+    )]
+    async fn emitter_settings(
+        &self,
+        Parameters(args): Parameters<EmitterSettingsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.emitter_settings_op(args).await?)
     }
 
     #[tool(
@@ -2724,7 +2871,8 @@ Find and measure signals — every result is drawn in the AI tab
 - `snapshot` — record a few seconds of live IQ, kept by id, so several measurements look at the same moment.
 - `spectrum` — Hz-accurate peaks over a ≤400 kHz range: level over the floor, width, duty, `keyed`.
 - `sweep` — spectrum analyzer over ANY range (steps the radio ~7.6 MHz at a time): per-step floor, emitters (freq, level, width, duty, bursty), max-hold profile. Takes the radio: `force` to preempt a running receiver, `restore` to give it back; `tune(force=true)` leaves it.
-- `emitters` / `label_emitter` — the station's memory of the band: every transmitter the receiver's detector or a sweep has seen, merged, numbered and persisted (band, level, width, first/last seen, status new / identified / ignored). Your work queue is `emitters(status="new")`; record what you find with `label_emitter` (label + confidence + evidence), and ignore spurs so they stop coming back.
+- `inspect` — characterise one emitter / frequency: tunes the receiver there, records a few seconds, returns the feature bundle (centre, occupied width, SNR, tones + FSK shift, keying / bursts / period, constant-envelope) with a one-line hint AND the spectrogram as an image. The measurement between "found it" and "named it"; its headline is stored on the emitter.
+- `emitters` / `label_emitter` — the station's memory of the band: every transmitter the receiver's detector or a sweep has seen, merged, numbered and persisted (band, level, width, first/last seen, status new / identified / ignored). Your work queue is `emitters(status="new")`; record what you find with `label_emitter` (label + confidence + evidence), and ignore spurs so they stop coming back. `emitter_settings` reads / sets the SNR cutoff and prunes the noise (never labelled ones).
 - `spectrogram` — time × frequency of a range: read the mode off its shape (CW dashes, RTTY's two tones, FT8 tone blocks, PSK31's thin line).
 - `envelope` — on/off timeline at one frequency: Morse elements, beacon slots, bursts.
 - `reference_image` — a preset's sigidwiki reference waterfall, to compare by eye.
@@ -2753,7 +2901,7 @@ Conversation
 - `chat_post` — mirror a headless agent's turn into the operator's AI panel.
 - `clear_ai_transcript` — empty the AI panel's conversation log for every viewer (also resets the in-app assistant's context).
 
-Wideband search (wider than one span): `sweep(lo_hz, hi_hz, passes=3, force, restore)` → `emitters(status="new", lo_hz, hi_hz)` → for the interesting ones `tune(freq_hz, force=true)` and look (`view_snapshot`, `snapshot` + `spectrum` / `spectrogram` / `envelope`, a decoder preset + `await_events`) → `sigwiki_identify` → `label_emitter(id, label, confidence, evidence)`. Ask before taking the radio from an operator who is listening.
+Wideband search (wider than one span): `sweep(lo_hz, hi_hz, passes=3, force, restore)` → `emitters(status="new", lo_hz, hi_hz)` → for the interesting ones `inspect(emitter_id, force=true)` (features + spectrogram image; dig deeper with `snapshot` + `spectrum` / `spectrogram` / `envelope`, or a decoder preset + `await_events`) → `sigwiki_identify` → `label_emitter(id, label, confidence, evidence)`. Ask before taking the radio from an operator who is listening.
 
 Habits: `status` before acting; `snapshot` once, then measure it several ways; unknown signal → `spectrum` + `spectrogram` → `sigwiki_identify` with everything you measured → `sigwiki_page` on the best candidates; tune with `carrier_hz` from a `spectrum` peak; confirm hardware changes with `source_readback`; wait with `await_events`, never sleep. Source: tools/ferrite-ctl/src/mcp.rs; REST in docs/02-protocol.md."#;
 

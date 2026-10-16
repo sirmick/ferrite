@@ -19,6 +19,7 @@
   const title = $derived.by(() => {
     const p = rec.params ?? {};
     if (rec.tool === 'envelope') return `envelope @ ${mhz(p.freq_hz ?? 0)} MHz`;
+    if (rec.tool === 'inspect') return `inspect @ ${mhz(p.freq_hz ?? 0)} MHz`;
     if (rec.tool === 'sigwiki') {
       const q = (rec.params ?? {}) as Record<string, unknown>;
       if (q['title']) return `sigidwiki · ${q['title']}`;
@@ -56,10 +57,12 @@
     }).catch(() => {});
   }
 
-  // ── spectrogram ───────────────────────────────────────────────────
+  // ── spectrogram (and inspect, which carries one) ──────────────────
+  const isPicture = $derived(rec.tool === 'spectrogram' || rec.tool === 'inspect');
+  const feat = $derived(rec.tool === 'inspect' ? rec.result?.features : null);
   let canvas: HTMLCanvasElement | undefined = $state();
   $effect(() => {
-    if (rec.tool !== 'spectrogram' || !canvas || !rec.cells_b64) return;
+    if (!isPicture || !canvas || !rec.cells_b64) return;
     const { rows, cols } = rec.result ?? { rows: 0, cols: 0 };
     const cells = decodeCells(rec.cells_b64);
     if (!rows || !cols || cells.length < rows * cols) return;
@@ -202,7 +205,7 @@
     </span>
   </div>
 
-  {#if showText || (!spec && !env && !map && !sig && !(rec.tool === 'spectrogram' && rec.cells_b64))}
+  {#if showText || (!spec && !env && !map && !sig && !(isPicture && rec.cells_b64))}
     <pre class="overflow-x-auto text-[9px] leading-[10px] text-slate-300">{rec.text ?? ''}</pre>
   {:else if spec}
     <svg viewBox="0 0 {W} {H}" class="h-24 w-full" preserveAspectRatio="none">
@@ -238,7 +241,17 @@
         {/each}
       </tbody>
     </table>
-  {:else if rec.tool === 'spectrogram'}
+  {:else if isPicture}
+    {#if feat}
+      <div class="mb-1 text-[11px] text-amber-200">{feat.hint}</div>
+      <div class="mb-1 font-mono text-[10px] text-slate-400">
+        {mhz(feat.freq_hz)} MHz · {Math.round(feat.occupied_hz)} Hz wide · SNR {feat.snr_db.toFixed(
+          0,
+        )} dB · duty {feat.duty.toFixed(2)}{feat.fsk_shift_hz
+          ? ` · shift ${Math.round(feat.fsk_shift_hz)} Hz`
+          : ''}{feat.bursts?.period_s ? ` · every ${feat.bursts.period_s.toFixed(2)} s` : ''}
+      </div>
+    {/if}
     <canvas bind:this={canvas} class="h-40 w-full" style="image-rendering: pixelated"></canvas>
     <div class="flex justify-between text-[9px] text-[color:var(--color-muted)]">
       <span>{mhz(rec.result?.f0_hz ?? 0)}</span>

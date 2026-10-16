@@ -58,9 +58,40 @@ fn fm_cell(f: f64) -> Option<i64> {
         .then(|| ((f - FM_FIRST_HZ) / FM_GRID_HZ).round() as i64)
 }
 
-/// A detection must clear this to *found* a new emitter (weaker ones
-/// still refresh a known one).
-const NEW_MIN_SNR_DB: f32 = 10.0;
+/// Sweep rows whose median floor is below this come from a step where
+/// the radio's front end is attenuated hard (the RSPdx gain ladder above
+/// 1 GHz reads −140…−158 dBFS there); "peaks" over such a floor are
+/// artefacts, not emitters.
+const MIN_ROW_FLOOR_DBFS: f32 = -130.0;
+
+/// The store kind holding [`EmitterConfig`] (persisted).
+pub const CONFIG_KIND: &str = "emitter_config";
+
+/// Operator-tunable emitter-list policy, shared by every tab, the CLI and
+/// the AI (one server value, persisted in the store).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct EmitterConfig {
+    /// SNR cutoff, dB: a detection must clear it to *found* an emitter,
+    /// and lists hide emitters whose best SNR never reached it.
+    pub min_snr_db: f32,
+    /// Unlabelled emitters seen only once are dropped after this long
+    /// without a second sighting (ms; 0 = keep).
+    pub tentative_ttl_ms: u64,
+    /// Unlabelled emitters not seen for this long are forgotten (ms;
+    /// 0 = never).
+    pub forget_after_ms: u64,
+}
+
+impl Default for EmitterConfig {
+    fn default() -> Self {
+        Self {
+            min_snr_db: 15.0,
+            tentative_ttl_ms: 10 * 60_000,
+            forget_after_ms: 7 * 24 * 3_600_000,
+        }
+    }
+}
 
 /// Minimum interval between store updates for one emitter (new emitters,
 /// merges and label changes publish at once).
@@ -79,6 +110,9 @@ pub struct Emitter {
     pub peak_dbfs: f32,
     /// Last observed level over the local floor, dB.
     pub snr_db: f32,
+    /// Best SNR ever observed, dB (what the cutoff filters on).
+    #[serde(default)]
+    pub peak_snr_db: f32,
     /// Narrowest band-plan allocation containing it.
     #[serde(default)]
     pub band: Option<String>,
@@ -98,6 +132,10 @@ pub struct Emitter {
     /// Who labelled it, how sure, on what evidence.
     #[serde(default)]
     pub ident: Option<Value>,
+    /// The last `inspect` of it: when, the analysis id, and the headline
+    /// features (hint, width, SNR, keying, FSK shift, period).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspect: Option<Value>,
 }
 
 /// One detection from either detector.
@@ -225,6 +263,7 @@ pub struct Tracker {
     emitters: BTreeMap<u64, Emitter>,
     next_id: u64,
     last_pub: HashMap<u64, u64>,
+    pub config: EmitterConfig,
 }
 
 impl Tracker {
@@ -232,13 +271,49 @@ impl Tracker {
     pub fn reseed(&mut self, store: &DecoderStore) {
         if let Some(k) = store.snapshot_kind(KIND) {
             for r in k.current.into_values() {
-                if let Ok(e) = serde_json::from_value::<Emitter>(r.data) {
+                if let Ok(mut e) = serde_json::from_value::<Emitter>(r.data) {
+                    if e.peak_snr_db == 0.0 {
+                        e.peak_snr_db = e.snr_db; // records from before the field
+                    }
                     self.next_id = self.next_id.max(e.id + 1);
                     self.emitters.insert(e.id, e);
                 }
             }
         }
+        if let Some(c) = store
+            .snapshot_kind(CONFIG_KIND)
+            .and_then(|k| k.current.into_values().next())
+            .and_then(|r| serde_json::from_value::<EmitterConfig>(r.data).ok())
+        {
+            self.config = c;
+        }
         self.next_id = self.next_id.max(1);
+    }
+
+    /// Drop unlabelled emitters the policy no longer keeps: seen once and
+    /// not again within `tentative_ttl_ms`, or not seen for
+    /// `forget_after_ms`. With `below_cutoff`, also those whose best SNR
+    /// never reached the cutoff (the explicit "prune" action). Labelled
+    /// and ignored emitters are station knowledge and always stay.
+    pub fn prune(&mut self, now_ms: u64, below_cutoff: bool) -> Vec<Change> {
+        let c = self.config;
+        let doomed: Vec<u64> = self
+            .emitters
+            .values()
+            .filter(|e| e.label.is_none() && e.status == "new")
+            .filter(|e| {
+                let idle = now_ms.saturating_sub(e.last_seen_ms);
+                (c.tentative_ttl_ms > 0 && e.seen < 2 && idle >= c.tentative_ttl_ms)
+                    || (c.forget_after_ms > 0 && idle >= c.forget_after_ms)
+                    || (below_cutoff && e.peak_snr_db < c.min_snr_db)
+            })
+            .map(|e| e.id)
+            .collect();
+        for id in &doomed {
+            self.emitters.remove(id);
+            self.last_pub.remove(id);
+        }
+        doomed.into_iter().map(Change::Drop).collect()
     }
 
     /// Forget everything (the store kind was reset). Numbering carries on.
@@ -282,7 +357,7 @@ impl Tracker {
     /// Fold one observation; returns the store changes that are due.
     pub fn observe(&mut self, o: Obs, now_ms: u64) -> Vec<Change> {
         let Some(id) = self.find(&o) else {
-            if o.snr_db < NEW_MIN_SNR_DB {
+            if o.snr_db < self.config.min_snr_db {
                 return Vec::new();
             }
             let id = self.next_id;
@@ -294,6 +369,7 @@ impl Tracker {
                 level_dbfs: o.level_dbfs,
                 peak_dbfs: o.level_dbfs,
                 snr_db: o.snr_db,
+                peak_snr_db: o.snr_db,
                 band: band_for(o.freq_hz),
                 first_seen_ms: now_ms,
                 last_seen_ms: now_ms,
@@ -303,6 +379,7 @@ impl Tracker {
                 label: None,
                 notes: None,
                 ident: None,
+                inspect: None,
             };
             self.emitters.insert(id, e.clone());
             self.last_pub.insert(id, now_ms);
@@ -322,6 +399,7 @@ impl Tracker {
             e.level_dbfs = o.level_dbfs;
             e.peak_dbfs = e.peak_dbfs.max(o.level_dbfs);
             e.snr_db = o.snr_db;
+            e.peak_snr_db = e.peak_snr_db.max(o.snr_db);
             e.last_seen_ms = now_ms;
             e.seen += 1;
             if !e.sources.iter().any(|s| s == o.source) {
@@ -420,10 +498,30 @@ impl Tracker {
         Some(e.clone())
     }
 
-    #[cfg(test)]
     #[must_use]
     pub fn get(&self, id: u64) -> Option<&Emitter> {
         self.emitters.get(&id)
+    }
+
+    /// The emitter a frequency falls in (span + 5 kHz), nearest centre
+    /// first; ignored ones too.
+    #[must_use]
+    pub fn at(&self, freq_hz: f64) -> Option<&Emitter> {
+        self.emitters
+            .values()
+            .filter(|e| (freq_hz - e.freq_hz).abs() <= e.width_hz / 2.0 + 5_000.0)
+            .min_by(|a, b| {
+                (a.freq_hz - freq_hz)
+                    .abs()
+                    .total_cmp(&(b.freq_hz - freq_hz).abs())
+            })
+    }
+
+    /// Record an `inspect` on emitter `id`; the updated emitter to publish.
+    pub fn attach_inspect(&mut self, id: u64, summary: Value) -> Option<Emitter> {
+        let e = self.emitters.get_mut(&id)?;
+        e.inspect = Some(summary);
+        Some(e.clone())
     }
 
     /// Emitters, filtered: `status` (`new` / `identified` / `ignored`;
@@ -431,9 +529,14 @@ impl Tracker {
     /// since `since_ms`.
     #[must_use]
     pub fn list(&self, q: &EmitterQuery) -> Vec<Emitter> {
+        let cutoff = q.min_snr_db.unwrap_or(self.config.min_snr_db);
         let mut v: Vec<Emitter> = self
             .emitters
             .values()
+            // Labelled emitters always show; the rest must have cleared
+            // the cutoff at least once.
+            .filter(|e| e.label.is_some() || e.peak_snr_db >= cutoff)
+            .filter(|e| q.tentative || e.label.is_some() || e.seen >= 2)
             .filter(|e| match q.status.as_deref() {
                 None => e.status != "ignored",
                 Some("all") => true,
@@ -467,6 +570,7 @@ fn merge_into(k: &mut Emitter, g: Emitter) {
     }
     k.width_hz = k.width_hz.max(g.width_hz);
     k.peak_dbfs = k.peak_dbfs.max(g.peak_dbfs);
+    k.peak_snr_db = k.peak_snr_db.max(g.peak_snr_db);
     k.first_seen_ms = k.first_seen_ms.min(g.first_seen_ms);
     if g.last_seen_ms > k.last_seen_ms {
         k.last_seen_ms = g.last_seen_ms;
@@ -507,6 +611,14 @@ pub struct EmitterQuery {
     pub sort: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Hide unlabelled emitters whose best SNR is below this (default:
+    /// the configured cutoff; `0` shows everything).
+    #[serde(default)]
+    pub min_snr_db: Option<f32>,
+    /// Include tentative emitters (seen once, unlabelled — mostly noise
+    /// peaks; they expire after `tentative_ttl_ms` unless seen again).
+    #[serde(default)]
+    pub tentative: bool,
 }
 
 /// `POST /api/emitters/:id` body.
@@ -612,6 +724,14 @@ fn from_row(data: &Value) -> Vec<Obs> {
     let Ok(db) = ferrite_blocks::sweep::decode_power(power) else {
         return Vec::new();
     };
+    let mut finite: Vec<f32> = db.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() {
+        return Vec::new();
+    }
+    finite.sort_by(f32::total_cmp);
+    if finite[finite.len() / 2] < MIN_ROW_FLOOR_DBFS {
+        return Vec::new();
+    }
     let mut acc = StepAcc::new(f_lo, bin, db.len());
     acc.fold(&db, 10.0);
     let hi = f_lo + db.len() as f64 * bin;
@@ -628,17 +748,44 @@ fn from_row(data: &Value) -> Vec<Obs> {
         .collect()
 }
 
-/// Run the tracker off the store's delta stream until the store drops.
+/// Write tracker changes to the store (puts and merged-away drops).
+pub fn apply_changes(store: &DecoderStore, changes: Vec<Change>) {
+    for c in changes {
+        match c {
+            Change::Put(e) => {
+                if let Ok(v) = serde_json::to_value(&*e) {
+                    store.apply(KIND, v);
+                }
+            }
+            Change::Drop(id) => store.remove(KIND, &id.to_string()),
+        }
+    }
+}
+
+/// Run the tracker off the store's delta stream until the store drops;
+/// prune per the policy once a minute.
 pub fn spawn(store: Arc<DecoderStore>, tracker: Shared) {
     let mut rx = store.subscribe();
     tokio::spawn(async move {
         // `signals` arrives at ~4 Hz; one fold a second is plenty.
         let mut last_signals = 0u64;
+        let mut prune_tick = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
-            let delta = match rx.recv().await {
-                Ok(d) => d,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(_) => return,
+            let delta = tokio::select! {
+                d = rx.recv() => match d {
+                    Ok(d) => d,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                },
+                _ = prune_tick.tick() => {
+                    let now = crate::capture::now_ms() as u64;
+                    let changes = tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .prune(now, false);
+                    apply_changes(&store, changes);
+                    continue;
+                }
             };
             if delta.kind == KIND && matches!(delta.op, DeltaOp::Reset) {
                 tracker
@@ -663,18 +810,73 @@ pub fn spawn(store: Arc<DecoderStore>, tracker: Shared) {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .observe_frame(obs, now);
-            for c in changes {
-                match c {
-                    Change::Put(e) => {
-                        if let Ok(v) = serde_json::to_value(&*e) {
-                            store.apply(KIND, v);
-                        }
-                    }
-                    Change::Drop(id) => store.remove(KIND, &id.to_string()),
-                }
-            }
+            apply_changes(&store, changes);
         }
     });
+}
+
+/// `GET /api/emitters/config` — the emitter-list policy.
+pub async fn get_config() -> axum::Json<EmitterConfig> {
+    axum::Json(
+        tracker()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config,
+    )
+}
+
+/// `POST /api/emitters/config {min_snr_db?, tentative_ttl_ms?,
+/// forget_after_ms?}` — change it (merge); persisted in the store and
+/// mirrored to every tab.
+pub async fn post_config(
+    axum::extract::State(state): axum::extract::State<crate::app_state::AppState>,
+    axum::Json(patch): axum::Json<serde_json::Map<String, Value>>,
+) -> Result<axum::Json<EmitterConfig>, crate::error::AppError> {
+    let next = {
+        let mut t = tracker()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut v = serde_json::to_value(t.config).unwrap_or_default();
+        if let Some(m) = v.as_object_mut() {
+            for (k, val) in patch {
+                m.insert(k, val);
+            }
+        }
+        let next: EmitterConfig = serde_json::from_value(v).map_err(|e| {
+            crate::error::AppError::bad_request("EMITTER_CONFIG_REJECTED", format!("{e}"))
+        })?;
+        if !(0.0..=80.0).contains(&next.min_snr_db) {
+            return Err(crate::error::AppError::bad_request(
+                "EMITTER_CONFIG_REJECTED",
+                "min_snr_db must be 0–80",
+            ));
+        }
+        t.config = next;
+        next
+    };
+    state
+        .decoder_store()
+        .apply(CONFIG_KIND, serde_json::to_value(next).unwrap_or_default());
+    Ok(axum::Json(next))
+}
+
+/// `POST /api/emitters/prune` — drop unlabelled emitters that never
+/// cleared the cutoff, were seen only once and not since the tentative
+/// window, or have been forgotten. Labelled / ignored ones stay.
+pub async fn post_prune(
+    axum::extract::State(state): axum::extract::State<crate::app_state::AppState>,
+) -> axum::Json<Value> {
+    let now = crate::capture::now_ms() as u64;
+    let (changes, left) = {
+        let mut t = tracker()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let c = t.prune(now, true);
+        (c, t.emitters.len())
+    };
+    let removed = changes.len();
+    apply_changes(&state.decoder_store(), changes);
+    axum::Json(json!({ "removed": removed, "remaining": left }))
 }
 
 #[cfg(test)]
@@ -830,6 +1032,70 @@ mod tests {
     fn marine_channels_get_a_readable_band() {
         assert_eq!(band_for(161.5054e6).as_deref(), Some("Marine VHF Ch 18"));
         assert_eq!(band_for(162.425e6).as_deref(), Some("NOAA Radio"));
+    }
+
+    #[test]
+    fn prune_drops_tentative_and_below_cutoff_but_keeps_knowledge() {
+        let mut t = fresh();
+        let once = put(t.observe(obs(300e6, 10e3, -60.0, "sweep"), 0));
+        let twice = put(t.observe(obs(400e6, 10e3, -60.0, "sweep"), 0));
+        t.observe(obs(400e6, 10e3, -60.0, "sweep"), 1_000);
+        let mut weak = obs(500e6, 10e3, -80.0, "sweep");
+        weak.snr_db = 16.0;
+        let weak = put(t.observe(weak, 0));
+        let labelled = put(t.observe(obs(600e6, 10e3, -60.0, "sweep"), 0));
+        t.edit(
+            labelled.id,
+            &EmitterPatch {
+                label: Some("x".into()),
+                ..Default::default()
+            },
+            "ui",
+            1,
+        );
+        // Within the tentative window nothing goes.
+        assert!(t.prune(60_000, false).is_empty());
+        // After it, the seen-once emitters go (labelled stays).
+        let gone = t.prune(11 * 60_000, false);
+        assert!(gone.contains(&Change::Drop(once.id)) && gone.contains(&Change::Drop(weak.id)));
+        assert!(t.get(twice.id).is_some() && t.get(labelled.id).is_some());
+        // Raising the cutoff + an explicit prune drops below-cutoff ones.
+        t.config.min_snr_db = 25.0;
+        assert!(t.prune(11 * 60_000, true).contains(&Change::Drop(twice.id)));
+        assert!(t.get(labelled.id).is_some());
+    }
+
+    #[test]
+    fn cutoff_gates_founding_and_listing() {
+        let mut t = fresh();
+        t.config.min_snr_db = 20.0;
+        let mut o = obs(200e6, 10e3, -70.0, "sweep");
+        o.snr_db = 18.0;
+        assert!(t.observe(o, 0).is_empty(), "below cutoff founds nothing");
+        o.snr_db = 22.0;
+        put(t.observe(o, 0));
+        let q = EmitterQuery::default();
+        assert!(t.list(&q).is_empty(), "seen once = tentative, hidden");
+        t.observe(o, 1_000);
+        assert_eq!(t.list(&q).len(), 1);
+        t.config.min_snr_db = 30.0;
+        assert!(t.list(&q).is_empty(), "list hides below the cutoff");
+        let all = EmitterQuery {
+            min_snr_db: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(t.list(&all).len(), 1);
+    }
+
+    #[test]
+    fn rows_from_a_collapsed_floor_yield_nothing() {
+        let mut db = vec![-145.0f32; 400];
+        db[200] = -113.0; // the L-band "comb" artefact
+        let row = json!({
+            "power": ferrite_blocks::sweep::encode_power(&db),
+            "f_lo_hz": 1380e6, "bin_hz": 2500.0,
+        });
+        assert!(from_row(&row).is_empty());
     }
 
     #[test]

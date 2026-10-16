@@ -247,6 +247,29 @@ enum Cmd {
         #[arg(long)]
         restore: bool,
     },
+    /// Characterise one signal: tune there, record, measure (width, SNR,
+    /// tones / FSK shift, keying, bursts, envelope). Prints the features +
+    /// a text spectrogram; `--png` saves the picture.
+    Inspect {
+        /// Frequency (Hz; `162.55M` ok). Omit with `--emitter`.
+        freq: Option<String>,
+        #[arg(long)]
+        emitter: Option<u64>,
+        #[arg(long)]
+        width: Option<String>,
+        #[arg(long)]
+        secs: Option<f64>,
+        /// Measure a kept snapshot instead of tuning.
+        #[arg(long)]
+        snapshot: Option<String>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        restore: bool,
+        /// Write the spectrogram PNG here.
+        #[arg(long)]
+        png: Option<std::path::PathBuf>,
+    },
     /// Clear the AI transcript (every AI panel empties; also resets the
     /// in-app assistant's conversation context).
     ClearAi,
@@ -264,6 +287,24 @@ enum Cmd {
         sort: Option<String>,
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        /// Hide unlabelled emitters below this best SNR, dB (default:
+        /// the station cutoff).
+        #[arg(long)]
+        min_snr: Option<f32>,
+    },
+    /// Read / set the emitter-list policy (SNR cutoff, expiry); `--prune`
+    /// deletes the noise now (labelled / ignored are kept).
+    EmitterSettings {
+        #[arg(long)]
+        min_snr: Option<f32>,
+        /// Seen-once emitters expire after this many minutes.
+        #[arg(long)]
+        tentative_min: Option<u64>,
+        /// Unseen emitters are forgotten after this many days.
+        #[arg(long)]
+        forget_days: Option<u64>,
+        #[arg(long)]
+        prune: bool,
     },
     /// Label an emitter (sets it identified), or `--status ignored`.
     LabelEmitter {
@@ -1032,6 +1073,52 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             }
             emit(&v, json)
         }
+        Cmd::Inspect {
+            freq,
+            emitter,
+            width,
+            secs,
+            snapshot,
+            force,
+            restore,
+            png,
+        } => {
+            use base64::Engine as _;
+            let mut v = server
+                .inspect_op(mcp::InspectArgs {
+                    emitter_id: emitter,
+                    freq_hz: freq.as_deref().map(parse_si).transpose()?,
+                    width_hz: width.as_deref().map(parse_si).transpose()?,
+                    secs,
+                    snapshot,
+                    force,
+                    restore,
+                    note: None,
+                })
+                .await
+                .map_err(op_err)?;
+            let image = v
+                .as_object_mut()
+                .and_then(|o| o.remove("png_b64"))
+                .and_then(|p| p.as_str().map(str::to_string));
+            if let (Some(path), Some(b)) = (&png, image) {
+                let bytes = base64::engine::general_purpose::STANDARD.decode(b)?;
+                std::fs::write(path, bytes)?;
+                eprintln!("spectrogram → {}", path.display());
+            }
+            if json {
+                return emit(&v, json);
+            }
+            if let Some(e) = v.get("emitter").filter(|e| !e.is_null()) {
+                println!(
+                    "emitter #{} {}",
+                    e.get("id").and_then(Value::as_u64).unwrap_or(0),
+                    e.get("label").and_then(Value::as_str).unwrap_or("")
+                );
+            }
+            print!("{}", v.get("text").and_then(Value::as_str).unwrap_or(""));
+            Ok(())
+        }
         Cmd::ClearAi => emit(
             &server
                 .clear_ai_op(mcp::ClearAiArgs::default())
@@ -1045,6 +1132,7 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             hi,
             sort,
             limit,
+            min_snr,
         } => {
             let v = server
                 .emitters_op(mcp::EmittersArgs {
@@ -1054,6 +1142,8 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                     since_ms: None,
                     sort,
                     limit: Some(limit),
+                    min_snr_db: min_snr,
+                    tentative: false,
                 })
                 .await
                 .map_err(op_err)?;
@@ -1083,6 +1173,23 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             }
             Ok(())
         }
+        Cmd::EmitterSettings {
+            min_snr,
+            tentative_min,
+            forget_days,
+            prune,
+        } => emit(
+            &server
+                .emitter_settings_op(mcp::EmitterSettingsArgs {
+                    min_snr_db: min_snr,
+                    tentative_ttl_ms: tentative_min.map(|m| m * 60_000),
+                    forget_after_ms: forget_days.map(|d| d * 86_400_000),
+                    prune,
+                })
+                .await
+                .map_err(op_err)?,
+            json,
+        ),
         Cmd::LabelEmitter {
             id,
             label,

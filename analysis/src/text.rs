@@ -73,3 +73,73 @@ pub fn spectrum(s: &SpectrumResult) -> String {
         .map(|p| BARS[((p[1].max(0.0) / max) * 7.0).round() as usize])
         .collect()
 }
+
+/// The inspect feature bundle + a small spectrogram.
+#[must_use]
+pub fn inspect(f: &crate::Features, sg: &Spectrogram) -> String {
+    use std::fmt::Write;
+    let mut o = String::new();
+    let _ = writeln!(o, "{}", f.hint);
+    let _ = writeln!(
+        o,
+        "centre {:.4} MHz ({:+.0} Hz)  occupied {:.0} Hz  peak {:.1} dBFS  power {:.1} dBFS  floor {:.1} dBFS/{:.0} Hz  SNR {:.1} dB",
+        f.freq_hz / 1e6,
+        f.offset_hz,
+        f.occupied_hz,
+        f.peak_dbfs,
+        f.power_dbfs,
+        f.floor_dbfs,
+        f.res_hz,
+        f.snr_db
+    );
+    let _ = writeln!(
+        o,
+        "duty {:.2}  keyed {}  swing {:.1} dB  bursts {} (on {:.0} ms{}{})  envelope cv {}{}",
+        f.duty,
+        f.keyed,
+        f.swing_db,
+        f.bursts.count,
+        f.bursts.on_ms_median,
+        f.bursts
+            .gap_ms_median
+            .map(|g| format!(", gap {g:.0} ms"))
+            .unwrap_or_default(),
+        f.bursts
+            .period_s
+            .map(|p| format!(", every {p:.3} s"))
+            .unwrap_or_default(),
+        f.envelope_cv
+            .map_or_else(|| "–".to_string(), |c| format!("{c:.2}")),
+        f.envelope_period_s
+            .map(|p| format!(
+                "  envelope period {:.1} ms (r={:.2})",
+                p * 1e3,
+                f.envelope_period_strength
+            ))
+            .unwrap_or_default(),
+    );
+    if !f.tones.is_empty() {
+        let t: Vec<String> = f
+            .tones
+            .iter()
+            .map(|t| {
+                format!(
+                    "{:+.0} Hz {:.0} dB {:.0}%",
+                    t.freq_hz - f.freq_hz,
+                    t.rel_db,
+                    t.share * 100.0
+                )
+            })
+            .collect();
+        let _ = writeln!(
+            o,
+            "tones: {}{}",
+            t.join(" | "),
+            f.fsk_shift_hz
+                .map(|s| format!("  → FSK shift {s:.0} Hz"))
+                .unwrap_or_default()
+        );
+    }
+    o.push_str(&spectrogram(sg, 64, 16));
+    o
+}

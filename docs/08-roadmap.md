@@ -58,6 +58,15 @@ End-to-end, working today against live RF:
   is a numpy port of the same definitions), and `spot_map` places
   FT8/FT4/WSPR decodes on a map by grid. Each measurement also folds an
   `analysis` record into the store; the UI, CLI and MCP share it.
+- **Spectrum analyzer + emitter list** ([`plans/specan.md`](plans/specan.md))
+  — a second tool beside the receiver (tool registry, full-screen
+  Spectrum mode): `SweepSource` steps the radio across any range
+  (lease: `RADIO_BUSY` / `force` / `restore`), max/min holds, markers,
+  band-stop notches. Every detection (receiver SignalList + sweeps)
+  folds into one persisted, numbered emitter list with labels, an SNR
+  cutoff and expiry. MCP / CLI: `sweep`, `emitters`, `label_emitter`,
+  `emitter_settings`, and `inspect` (one emitter's feature bundle +
+  spectrogram image).
 - Source placeholder + `compose_source`
   ([`runtime/src/compose.rs`](../runtime/src/compose.rs)).
 - Reverse-log middleware (`ai_activity_layer`) emits
@@ -211,8 +220,10 @@ in [`10-commits.md`](10-commits.md); plan→ship deltas live in
 Concrete tracks remaining before we cut 1.0:
 
 - **Scan / survey jobs** — Phase 5 of the event plane
-  ([`plans/event-plane.md`](plans/event-plane.md)); resilience shipped,
-  survey + scan not started.
+  ([`plans/event-plane.md`](plans/event-plane.md)); resilience shipped.
+  The building blocks exist (sweep, emitter list, inspect); the survey
+  job that alternates them on its own, and the classic scanner, are not
+  started.
 - **Packaging: a systemd unit** — the `.deb` / `.rpm` ship
   `/usr/bin/ferrited` but no unit yet, so the
   [00-context](00-context.md) "enable --now" install path isn't real.

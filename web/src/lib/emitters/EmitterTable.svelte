@@ -14,6 +14,8 @@
     last_seen_ms?: number;
     /** Dim rows not seen recently (spectrum mode). */
     stale?: boolean;
+    /** The last `inspect` reading of it. */
+    hint?: string | null;
   }
 </script>
 
@@ -26,16 +28,28 @@
   import IconPencil from '@tabler/icons-svelte-runes/icons/pencil';
   import IconEyeOff from '@tabler/icons-svelte-runes/icons/eye-off';
   import IconEye from '@tabler/icons-svelte-runes/icons/eye';
+  import IconZoomScan from '@tabler/icons-svelte-runes/icons/zoom-scan';
 
   interface Props {
     rows: EmitterRow[];
     onPick?: (r: EmitterRow) => void;
     onListen?: (r: EmitterRow) => void;
+    /** Characterise it (the `inspect` measurement); `busy` = id running. */
+    onInspect?: (r: EmitterRow) => void;
+    busy?: number | null;
     /** Highlighted row (e.g. the analyzer's marker). */
     activeHz?: number | null;
     empty?: string;
   }
-  let { rows, onPick, onListen, activeHz = null, empty = 'no emitters yet' }: Props = $props();
+  let {
+    rows,
+    onPick,
+    onListen,
+    onInspect,
+    busy = null,
+    activeHz = null,
+    empty = 'no emitters yet',
+  }: Props = $props();
 
   let editing = $state<number | null>(null);
   let draft = $state('');
@@ -99,7 +113,7 @@
           class:row-active={near(r)}
           title="{fmtMhz(r.freq_hz)} MHz{r.band ? ` · ${r.band}` : ''}{r.last_seen_ms
             ? ` · seen ${ago(r.last_seen_ms)} ago`
-            : ''} — click to pick, double-click to listen"
+            : ''}{r.hint ? `\ninspect: ${r.hint}` : ''} — click to pick, double-click to listen"
           onclick={() => onPick?.(r)}
           ondblclick={() => onListen?.(r)}
         >
@@ -134,6 +148,21 @@
             {/if}
           </td>
           <td class="whitespace-nowrap px-1 py-1 text-right">
+            {#if onInspect && r.id !== undefined}
+              <button
+                type="button"
+                class={busy === r.id
+                  ? 'animate-pulse text-sky-300'
+                  : 'opacity-0 group-hover:opacity-100'}
+                title="Inspect #{r.id}: tune there, record a few seconds, measure width / SNR / tones / keying (result in the AI panel)"
+                aria-label="Inspect emitter {r.id}"
+                disabled={busy !== null}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  onInspect(r);
+                }}><IconZoomScan size={12} /></button
+              >
+            {/if}
             {#if r.id !== undefined}
               <button
                 type="button"
