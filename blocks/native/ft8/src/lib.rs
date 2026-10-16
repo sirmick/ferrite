@@ -330,9 +330,16 @@ impl Monitor {
     // i32→f32 conversions in the freq/time formula are exact here.
     #[allow(clippy::cast_precision_loss)]
     pub fn decode_slot(&self, max_candidates: usize) -> Vec<Decoded> {
+        self.decode_slot_counted(max_candidates).0
+    }
+
+    /// [`Self::decode_slot`] plus how many sync candidates the search
+    /// found — `candidates > 0, decodes == 0` reads "something FT8-shaped
+    /// is there but nothing decoded", the decoder-health signal.
+    pub fn decode_slot_counted(&self, max_candidates: usize) -> (Vec<Decoded>, usize) {
         let wf = unsafe { ferrite_monitor_waterfall(self.inner.as_ptr().cast_const()) };
         if wf.is_null() {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         // Min-heap of candidates ranked by Costas-sync score.
         let mut heap: Vec<ftx_candidate_t> = vec![
@@ -358,7 +365,7 @@ impl Monitor {
             )
         };
         if n_found <= 0 {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
 
         let mut out = Vec::with_capacity(n_found as usize);
@@ -425,16 +432,25 @@ impl Monitor {
                 ldpc_errors: status.ldpc_errors,
             });
         }
-        // Drop duplicate hashes (multiple candidates can decode to the
-        // same message body); we'd rather emit each text once per slot.
-        out.sort_by(|a, b| {
-            b.snr_db
-                .partial_cmp(&a.snr_db)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        out.dedup_by(|a, b| a.text == b.text);
-        out
+        (dedupe_by_text(out), n_found as usize)
     }
+}
+
+/// One decode per message text, the strongest copy, strongest first.
+/// The 2× time/frequency oversampled waterfall turns one signal into
+/// several candidates on neighbouring sub-bins (±3 Hz, one time sub-step
+/// apart) that all decode to the same text. Sorting by SNR then
+/// `dedup_by` would only merge *adjacent* copies — and copies aren't
+/// adjacent once sorted by SNR among other messages.
+fn dedupe_by_text(mut out: Vec<Decoded>) -> Vec<Decoded> {
+    out.sort_by(|a, b| {
+        b.snr_db
+            .partial_cmp(&a.snr_db)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|d| seen.insert(d.text.clone()));
+    out
 }
 
 impl Drop for Monitor {
@@ -450,7 +466,40 @@ impl Drop for Monitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{version, Monitor, MonitorConfig, Protocol};
+    use super::{dedupe_by_text, version, Decoded, Monitor, MonitorConfig, Protocol};
+
+    fn dec(text: &str, snr_db: f32) -> Decoded {
+        Decoded {
+            freq_hz: 1500.0,
+            time_offset_s: 0.5,
+            snr_db,
+            text: text.into(),
+            ldpc_errors: 0,
+        }
+    }
+
+    /// Live 40 m: `CT2GQA K5RJM -16` came out four times in one slot
+    /// (-12/-13/-15/-17 dB) interleaved with other messages.
+    #[test]
+    fn dedupe_keeps_the_strongest_copy_of_each_text() {
+        let out = dedupe_by_text(vec![
+            dec("CT2GQA K5RJM -16", -15.0),
+            dec("CQ KI7LPT DN36", -10.0),
+            dec("CT2GQA K5RJM -16", -12.0),
+            dec("PD3AL K8OCN EN83", -11.0),
+            dec("CT2GQA K5RJM -16", -17.0),
+            dec("CQ KI7LPT DN36", -13.0),
+        ]);
+        let got: Vec<_> = out.iter().map(|d| (d.text.as_str(), d.snr_db)).collect();
+        assert_eq!(
+            got,
+            [
+                ("CQ KI7LPT DN36", -10.0),
+                ("PD3AL K8OCN EN83", -11.0),
+                ("CT2GQA K5RJM -16", -12.0),
+            ]
+        );
+    }
 
     #[test]
     fn version_is_set() {
