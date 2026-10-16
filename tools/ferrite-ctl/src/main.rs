@@ -247,6 +247,9 @@ enum Cmd {
         #[arg(long)]
         restore: bool,
     },
+    /// Clear the AI transcript (every AI panel empties; also resets the
+    /// in-app assistant's conversation context).
+    ClearAi,
     /// The emitter list (both detectors merged, numbered, persisted).
     Emitters {
         /// new | identified | ignored | all (default: all but ignored).
@@ -1029,6 +1032,13 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
             }
             emit(&v, json)
         }
+        Cmd::ClearAi => emit(
+            &server
+                .clear_ai_op(mcp::ClearAiArgs::default())
+                .await
+                .map_err(op_err)?,
+            json,
+        ),
         Cmd::Emitters {
             status,
             lo,

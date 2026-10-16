@@ -973,6 +973,13 @@ pub fn record_matches(value: &Value, filter: &serde_json::Map<String, Value>) ->
     })
 }
 
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct ClearAiArgs {
+    /// Optional "why" note surfaced in the UI's activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DecodesResetArgs {
     /// Decoder kind to clear (e.g. `adsb`, `aprs`, `ft8`). Drops its
@@ -1687,6 +1694,18 @@ impl FerriteServer {
                 &format!("/api/state/{}/reset", args.kind),
                 json!({}),
                 "decodes-reset",
+                args.note.as_deref(),
+            )
+            .await
+    }
+
+    /// Clear the AI transcript (`POST /api/state/ai/reset`).
+    pub(crate) async fn clear_ai_op(&self, args: ClearAiArgs) -> Result<Value, McpError> {
+        self.http
+            .post(
+                "/api/state/ai/reset",
+                json!({}),
+                "clear-ai-transcript",
                 args.note.as_deref(),
             )
             .await
@@ -2469,6 +2488,16 @@ impl FerriteServer {
     }
 
     #[tool(
+        description = "Clear the AI transcript — the conversation log every AI panel shows (store kind `ai`). Every open panel empties at once and stays empty across reloads and restarts; the shared activity and analysis logs are kept, just hidden from the timeline before the clear. Use it when the operator asks for a clean slate, or before a fresh session. ⚠️ The in-app assistant rebuilds its conversation context from this log, so clearing it mid-conversation also wipes that assistant's memory of the conversation so far."
+    )]
+    async fn clear_ai_transcript(
+        &self,
+        Parameters(args): Parameters<ClearAiArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.clear_ai_op(args).await?)
+    }
+
+    #[tool(
         description = "Load a preset flowgraph by name. The daemon preserves the live source's centre freq across the swap, so a load-then-tune is two distinct steps. Match a name from `list_presets`."
     )]
     async fn load_preset(
@@ -2722,6 +2751,7 @@ Record and replay
 
 Conversation
 - `chat_post` — mirror a headless agent's turn into the operator's AI panel.
+- `clear_ai_transcript` — empty the AI panel's conversation log for every viewer (also resets the in-app assistant's context).
 
 Wideband search (wider than one span): `sweep(lo_hz, hi_hz, passes=3, force, restore)` → `emitters(status="new", lo_hz, hi_hz)` → for the interesting ones `tune(freq_hz, force=true)` and look (`view_snapshot`, `snapshot` + `spectrum` / `spectrogram` / `envelope`, a decoder preset + `await_events`) → `sigwiki_identify` → `label_emitter(id, label, confidence, evidence)`. Ask before taking the radio from an operator who is listening.
 
