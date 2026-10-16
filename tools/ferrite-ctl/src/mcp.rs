@@ -220,7 +220,6 @@ fn http_err(ctx: &str, msg: String) -> McpError {
 /// One message off the event plane, as delivered to a `subscribe_records`
 /// callback. `seq` is present for store deltas (not for log lines).
 pub(crate) struct EventRecord {
-    pub topic: String,
     pub retain: bool,
     pub seq: Option<u64>,
     pub value: Value,
@@ -380,7 +379,6 @@ impl Http {
                         }
                     }
                     let rec = EventRecord {
-                        topic: p.topic.clone(),
                         retain: p.retain,
                         seq,
                         value,
@@ -945,6 +943,38 @@ pub struct EmitterSettingsArgs {
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct ListenArgs {
+    /// Frequency to listen at, Hz (the dial, as `tune`).
+    pub freq_hz: f64,
+    /// Preset slug (`nbfm`, `ft8-ft8`, `dsd-fme`, `rtl433-433`, …; see
+    /// `list_presets`). Omit to keep the running receiver preset.
+    #[serde(default)]
+    pub preset: Option<String>,
+    /// Antenna override (default: the station profile's row for the
+    /// frequency).
+    #[serde(default)]
+    pub antenna: Option<String>,
+    /// Gain dial override, dB (implies AGC off unless `agc` is given).
+    #[serde(default)]
+    pub gain_db: Option<f64>,
+    #[serde(default)]
+    pub agc: Option<bool>,
+    /// `false` = don't apply the station profile's row.
+    #[serde(default)]
+    pub station: Option<bool>,
+    /// Listen this long after tuning, then report decodes + decoder
+    /// health + a verdict (default 0 = return once tuned; max 300).
+    #[serde(default)]
+    pub secs: Option<f64>,
+    /// Leave the spectrum analyzer if it holds the radio.
+    #[serde(default)]
+    pub force: bool,
+    /// Optional "why" note for the activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct StationArgs {
     /// Set the receiver's Maidenhead grid (`CM87`); `""` clears it.
     #[serde(default)]
@@ -1039,10 +1069,6 @@ pub struct AwaitArgs {
     pub filter: Option<serde_json::Map<String, Value>>,
 }
 
-/// Does this event-plane payload's `record.data` (the wire shape, before
-/// [`flatten_record`]) satisfy `filter`?
-/// Records without data (resets, expiries) never match a non-empty one.
-#[must_use]
 /// One event-plane message as `await` hands it out: the store record's
 /// fields at the top (`kind, seq, at_ms, data, ctx?, key?`), plus `op`
 /// (`add` / `upsert` / `expire` / `reset`) and `retained` — instead of
@@ -1069,6 +1095,10 @@ pub fn flatten_record(value: &Value, retained: bool) -> Value {
     Value::Object(out)
 }
 
+/// Does this event-plane payload's `record.data` (the wire shape, before
+/// [`flatten_record`]) satisfy `filter`?
+/// Records without data (resets, expiries) never match a non-empty one.
+#[must_use]
 pub fn record_matches(value: &Value, filter: &serde_json::Map<String, Value>) -> bool {
     if filter.is_empty() {
         return true;
@@ -1689,6 +1719,25 @@ impl FerriteServer {
                 .await?;
         }
         Ok(out)
+    }
+
+    /// Preset + front end + tune + start, then optionally listen and
+    /// report (`POST /api/listen`).
+    pub(crate) async fn listen_op(&self, args: ListenArgs) -> Result<Value, McpError> {
+        let secs = args.secs.unwrap_or(0.0).clamp(0.0, 300.0);
+        self.http
+            .post_slow(
+                "/api/listen",
+                json!({
+                    "freq_hz": args.freq_hz, "preset": args.preset,
+                    "antenna": args.antenna, "gain_db": args.gain_db, "agc": args.agc,
+                    "station": args.station, "secs": secs, "force": args.force,
+                }),
+                "listen",
+                args.note.as_deref(),
+                Duration::from_secs_f64(secs + 90.0),
+            )
+            .await
     }
 
     /// Read / change the station profile (`/api/station`), or look up the
@@ -2686,6 +2735,16 @@ impl FerriteServer {
     }
 
     #[tool(
+        description = "Listen at a frequency with a decoder, in one call: loads `preset` (if it changes), sets antenna / gain / AGC from the station profile's row for the frequency (overrides: `antenna`, `gain_db`, `agc`; `station:false` skips the profile), tunes, starts. With `secs`, it then listens and reports `{decodes:{count, by_kind, recent:[{kind, seq, at_ms, data}]}, health:{block_id: {...}}, verdict, readback}` — `health` is what each decoder saw over the window (input level, sync / candidate / pulse counts, decodes; `_cum` counters as deltas) and `verdict` says which case you're in: decoding, nothing above the floor, a signal the decoder can't sync, or syncs that never decode (e.g. a DMR control channel: dsd-fme syncs, CSBKs, and the network's `system` identity, but no calls). FT8 needs `secs` ≥ 16 (one slot). Use instead of load_preset + set_block_param + tune + start + await_events. While the spectrum analyzer holds the radio: 409 RADIO_BUSY unless `force`."
+    )]
+    async fn listen(
+        &self,
+        Parameters(args): Parameters<ListenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.listen_op(args).await?)
+    }
+
+    #[tool(
         description = "The station profile — where the receiver is and how to set its front end per band: `{grid?, callsign?, bands:[{lo_hz, hi_hz, label?, antenna?, gain_db?, agc?}]}`. `listen` and `sweep` apply the matching row automatically (narrowest range containing the frequency; `gain_db` without `agc` means AGC off), and `spot_map` measures from `grid`. No args reads it; `grid` / `callsign` / `bands` change it for every surface (`bands` replaces the whole table; `\"\"` clears grid / callsign). `at_hz` instead answers which row applies at one frequency: `{freq_hz, band, src}`."
     )]
     async fn station(
@@ -2973,6 +3032,7 @@ Find and measure signals — every result is drawn in the AI tab
 - `spectrum` — Hz-accurate peaks over a ≤400 kHz range: level over the floor, width, duty, `keyed`.
 - `sweep` — spectrum analyzer over ANY range (steps the radio ~7.6 MHz at a time): per-step floor, emitters (freq, level, width, duty, bursty), max-hold profile. Takes the radio: `force` to preempt a running receiver, `restore` to give it back; `tune(force=true)` leaves it.
 - `inspect` — characterise one emitter / frequency: tunes the receiver there, records a few seconds, returns the feature bundle (centre, occupied width, SNR, tones + FSK shift, keying / bursts / period, constant-envelope) with a one-line hint AND the spectrogram as an image. The measurement between "found it" and "named it"; its headline is stored on the emitter.
+- `listen` — the one-call way to hear something: preset + station front end + tune + start, and with `secs` the decodes, each decoder's health and a verdict (silence vs can't-sync vs syncs-but-no-decodes). Prefer it to chaining load_preset / set_block_param / tune / await_events.
 - `station` — the station profile: receiver `grid` (spot-map origin) and the per-band front-end table (antenna / gain / AGC) that `listen` and `sweep` apply on their own; `at_hz` shows the row for one frequency.
 - `emitters` / `label_emitter` — the station's memory of the band: every transmitter the receiver's detector or a sweep has seen, merged, numbered and persisted (band, level, width, first/last seen, status new / identified / ignored). Your work queue is `emitters(status="new")`; record what you find with `label_emitter` (label + confidence + evidence), and ignore spurs so they stop coming back. `emitter_settings` reads / sets the SNR cutoff and prunes the noise (never labelled ones).
 - `spectrogram` — time × frequency of a range: read the mode off its shape (CW dashes, RTTY's two tones, FT8 tone blocks, PSK31's thin line).

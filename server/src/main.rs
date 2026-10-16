@@ -46,6 +46,7 @@ mod error;
 mod event_plane;
 mod frame_bus;
 mod inspect_api;
+mod listen_api;
 mod log_stream;
 mod preset_pipeline;
 mod routes;
@@ -548,6 +549,7 @@ async fn main() -> Result<()> {
         .route("/api/preset/return", post(routes::return_preset))
         .route("/api/sweep", post(sweep_api::post_sweep))
         .route("/api/inspect", post(inspect_api::post_inspect))
+        .route("/api/listen", post(listen_api::post_listen))
         .route("/api/emitters", get(emitters::get_emitters))
         .route(
             "/api/emitters/config",

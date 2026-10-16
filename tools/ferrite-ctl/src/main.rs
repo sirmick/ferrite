@@ -333,6 +333,31 @@ enum Cmd {
         #[arg(long)]
         notes: Option<String>,
     },
+    /// Listen at a frequency with a decoder: preset + the station's
+    /// antenna / gain for the band + tune + start; `--secs N` then
+    /// listens and prints what was decoded and a verdict.
+    Listen {
+        /// Frequency (`454.3443M`).
+        freq: String,
+        /// Preset slug (default: keep the running one).
+        #[arg(long)]
+        preset: Option<String>,
+        #[arg(long)]
+        antenna: Option<String>,
+        /// Gain dial, dB (AGC off unless `--agc`).
+        #[arg(long)]
+        gain: Option<f64>,
+        #[arg(long)]
+        agc: Option<bool>,
+        /// Don't apply the station profile's row.
+        #[arg(long)]
+        no_station: bool,
+        /// Listen this long and report.
+        #[arg(long)]
+        secs: Option<f64>,
+        #[arg(long)]
+        force: bool,
+    },
     /// The station profile: grid, callsign and the per-band front-end
     /// table `listen` / `sweep` apply. No flags prints it.
     Station {
@@ -1352,6 +1377,47 @@ async fn run(cmd: Cmd, server: &FerriteServer, json: bool) -> Result<()> {
                 eprintln!("picture → {path}");
             }
             print_text_or_json(&v, json)
+        }
+        Cmd::Listen {
+            freq,
+            preset,
+            antenna,
+            gain,
+            agc,
+            no_station,
+            secs,
+            force,
+        } => {
+            let v = server
+                .listen_op(mcp::ListenArgs {
+                    freq_hz: parse_si(&freq)?,
+                    preset,
+                    antenna,
+                    gain_db: gain,
+                    agc,
+                    station: Some(!no_station),
+                    secs,
+                    force,
+                    note: None,
+                })
+                .await
+                .map_err(op_err)?;
+            match v.get("verdict").and_then(Value::as_str) {
+                Some(text) if !json => {
+                    println!(
+                        "{} @ {:.4} MHz · {}",
+                        v["preset"].as_str().unwrap_or("?"),
+                        v["freq_hz"].as_f64().unwrap_or(0.0) / 1e6,
+                        v["front_end"]["applied"]
+                    );
+                    println!("{text}");
+                    for r in v["decodes"]["recent"].as_array().into_iter().flatten() {
+                        println!("  [{}] {}", r["kind"].as_str().unwrap_or(""), r["data"]);
+                    }
+                    Ok(())
+                }
+                _ => emit(&v, json),
+            }
         }
         Cmd::Station {
             grid,
