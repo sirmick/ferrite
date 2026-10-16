@@ -1103,15 +1103,28 @@ mod tests {
         }
         stop.store(true, Ordering::Relaxed);
         t.join().unwrap();
-        let rows: Vec<serde_json::Value> = shared
+        let all: Vec<serde_json::Value> = shared
             .rows
             .lock()
             .unwrap()
             .iter()
             .map(|l| serde_json::from_str(l).unwrap())
-            .filter(|r: &serde_json::Value| r["pass"] == 0)
             .collect();
-        rows
+        // The last *complete* pass: a release build sweeps the fake band
+        // so fast that the bounded queue may already have evicted pass 0.
+        let complete = |p: u64| {
+            let n = all.iter().filter(|r| r["pass"] == p).count();
+            all.iter()
+                .find(|r| r["pass"] == p)
+                .is_some_and(|r| r["steps"].as_u64() == Some(n as u64))
+        };
+        let last = all
+            .iter()
+            .filter_map(|r| r["pass"].as_u64())
+            .filter(|&p| complete(p))
+            .max()
+            .expect("a complete pass");
+        all.into_iter().filter(|r| r["pass"] == last).collect()
     }
 
     /// Stitch rows into (freq, dB) points.

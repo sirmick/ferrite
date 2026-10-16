@@ -457,7 +457,21 @@ mod native {
                     .collect::<Vec<_>>()
                     .join(" ")
             );
-            let mut proc = match cmd.spawn() {
+            // ETXTBSY ("Text file busy") is transient: another thread that
+            // forked while the helper binary was open for writing (an
+            // installer, or a test writing a stand-in script) holds the fd
+            // until its child execs. Retry briefly instead of giving up.
+            let mut spawned = cmd.spawn();
+            for _ in 0..20 {
+                match &spawned {
+                    Err(e) if e.raw_os_error() == Some(26) => {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        spawned = cmd.spawn();
+                    }
+                    _ => break,
+                }
+            }
+            let mut proc = match spawned {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(target: "decoder::dsd", error = %e, helper = %helper.display(), "dsd-fme helper failed to start; install dsd-fme (+ mbelib) and set FERRITE_DSD_FME or `helper_path`");
