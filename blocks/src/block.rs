@@ -649,6 +649,15 @@ pub trait Block: Send + AsAny {
     fn apply_live_params(&mut self, _delta: &serde_json::Value) -> Result<bool> {
         Ok(false)
     }
+
+    /// What a decoder is seeing, for "why is it silent?": input level,
+    /// sync / candidate counts, decodes — whatever it can tell cheaply.
+    /// Rides in the block's `flowdiag` entry (1 Hz) as `health`. Keep it
+    /// a small flat object; cumulative counters end in `_cum`, the rest
+    /// are latest values. Default `None` (nothing to say).
+    fn health(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// Construct an instance from a JSON params value. The runtime calls this

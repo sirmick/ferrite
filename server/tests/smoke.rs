@@ -80,6 +80,10 @@ mod view_bridge;
 #[allow(dead_code)]
 mod band_plan;
 
+#[path = "../src/station.rs"]
+#[allow(dead_code, clippy::unused_async)]
+mod station;
+
 #[path = "../src/routes.rs"]
 #[allow(dead_code, clippy::unused_async)]
 mod routes;

@@ -152,6 +152,12 @@ pub struct Ft8Demod {
     /// UTF-8 newline-delimited JSON spots queued for drain on the
     /// `events` output port (same transport as RDS).
     events_out: Vec<u8>,
+    /// Health: input level, slots decoded, candidates vs decodes.
+    level: crate::health::LevelMeter,
+    slots_cum: u64,
+    decodes_cum: u64,
+    last_candidates: usize,
+    last_decodes: usize,
 }
 
 /// 4-char Maidenhead locator test — `[A-R]{2}[0-9]{2}`. FT8/FT4
@@ -224,6 +230,11 @@ impl Ft8Demod {
             decoded_this_slot: false,
             input_rate_hz: f64::from(params.sample_rate_hz),
             events_out: Vec::new(),
+            level: crate::health::LevelMeter::new(f64::from(params.sample_rate_hz)),
+            slots_cum: 0,
+            decodes_cum: 0,
+            last_candidates: 0,
+            last_decodes: 0,
         })
     }
 
@@ -255,7 +266,11 @@ impl Ft8Demod {
         // *previous* slot's leftovers.
         let blocks_filled = mon.blocks_filled();
         let blocks_max = mon.blocks_max();
-        let messages = mon.decode_slot(self.params.max_candidates as usize);
+        let (messages, candidates) = mon.decode_slot_counted(self.params.max_candidates as usize);
+        self.slots_cum += 1;
+        self.decodes_cum += messages.len() as u64;
+        self.last_candidates = candidates;
+        self.last_decodes = messages.len();
         match self.params.mode {
             Ft8Mode::Ft8 => tracing::info!(
                 target: "decoder::ft8",
@@ -434,6 +449,7 @@ impl Block for Ft8Demod {
         // back-pressure upstream — even when we're in the dead zone
         // and dropping samples.
         work.consumed[0] = src.len();
+        self.level.push_real(src);
 
         let Some(mon) = self.monitor.as_mut() else {
             return Ok(work);
@@ -533,6 +549,17 @@ impl Block for Ft8Demod {
         }
 
         Ok(work)
+    }
+
+    fn health(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "input_dbfs": self.level.dbfs(),
+            "samples_cum": self.level.samples(),
+            "slots_cum": self.slots_cum,
+            "decodes_cum": self.decodes_cum,
+            "last_slot_candidates": self.last_candidates,
+            "last_slot_decodes": self.last_decodes,
+        }))
     }
 }
 

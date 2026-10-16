@@ -21,12 +21,12 @@ use crate::block::{
     Block, BlockFactory, BlockIo, BlockSpec, InitCtx, ParamSpec, Placement, Work, MAX_PORTS,
 };
 use crate::soapy_device::{
-    RadioHandle, RxReadError, RxStreamLike, SoapyReadback, SoapyRx, SoapySourceParams,
+    apply_gain, RadioHandle, RxReadError, RxStreamLike, SoapyReadback, SoapyRx, SoapySourceParams,
     SourceHealth, HUNG_STALL, RADIO_LIVE_KEYS,
 };
 use crate::sweep::{
-    events_hints, leak_params, sweep_params_with, SweepParams, SweepPlan, SweepRadio, SweepRead,
-    SweepRunner, PANORAMA_OUTPUTS,
+    events_hints, leak_params, sweep_params_with, StepFrontEnd, SweepParams, SweepPlan, SweepRadio,
+    SweepRead, SweepRunner, PANORAMA_OUTPUTS,
 };
 
 /// Radio params + sweep params, flat in the preset JSON.
@@ -45,6 +45,10 @@ struct SoapySweepRadio {
     device: Device,
     channel: usize,
     rate: f64,
+    /// The operator's antenna / gain dial when the sweep opened: what a
+    /// step outside every band row goes back to.
+    base_antenna: Option<String>,
+    base_gain_db: Option<f64>,
 }
 
 impl SweepRadio for SoapySweepRadio {
@@ -56,6 +60,27 @@ impl SweepRadio for SoapySweepRadio {
         self.device
             .set_frequency(Direction::Rx, self.channel, hz, ())
             .with_context(|| format!("sweep set_frequency={hz}"))
+    }
+
+    fn configure(&mut self, fe: &StepFrontEnd) -> Result<()> {
+        let dir = Direction::Rx;
+        if let Some(a) = fe.antenna.as_ref().or(self.base_antenna.as_ref()) {
+            self.device
+                .set_antenna(dir, self.channel, a.as_bytes())
+                .with_context(|| format!("sweep set_antenna={a}"))?;
+        }
+        if let Some(g) = fe.gain_db.or(self.base_gain_db) {
+            apply_gain(
+                &self.device,
+                dir,
+                self.channel,
+                false,
+                Some(g),
+                &std::collections::BTreeMap::new(),
+            )
+            .with_context(|| format!("sweep gain={g}"))?;
+        }
+        Ok(())
     }
 
     fn read(&mut self, buf: &mut [Complex<f32>]) -> SweepRead {
@@ -122,6 +147,8 @@ impl SweepSource {
                 device,
                 channel: ch,
                 rate,
+                base_antenna: params.radio.antenna.clone(),
+                base_gain_db: params.radio.gain_db,
             }),
             runner: SweepRunner::new(params.sweep.clone()),
             radio,

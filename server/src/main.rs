@@ -38,6 +38,7 @@ mod band_plan;
 mod block_schema;
 mod bridge_sink;
 mod capture;
+mod decode_api;
 mod decoder_store;
 mod device;
 mod device_cache;
@@ -46,12 +47,14 @@ mod error;
 mod event_plane;
 mod frame_bus;
 mod inspect_api;
+mod listen_api;
 mod log_stream;
 mod preset_pipeline;
 mod routes;
 mod sigwiki;
 mod soapy_log;
 mod source_policy;
+mod station;
 mod store_persist;
 mod sweep_api;
 mod view_bridge;
@@ -547,6 +550,8 @@ async fn main() -> Result<()> {
         .route("/api/preset/return", post(routes::return_preset))
         .route("/api/sweep", post(sweep_api::post_sweep))
         .route("/api/inspect", post(inspect_api::post_inspect))
+        .route("/api/listen", post(listen_api::post_listen))
+        .route("/api/decode", post(decode_api::post_decode))
         .route("/api/emitters", get(emitters::get_emitters))
         .route(
             "/api/emitters/config",
@@ -554,6 +559,11 @@ async fn main() -> Result<()> {
         )
         .route("/api/emitters/prune", post(emitters::post_prune))
         .route("/api/emitters/:id", post(emitters::post_emitter))
+        .route(
+            "/api/station",
+            get(station::get_station).post(station::post_station),
+        )
+        .route("/api/station/at", get(station::get_at))
         .route(
             "/api/profile",
             get(routes::get_profile).patch(routes::patch_profile),

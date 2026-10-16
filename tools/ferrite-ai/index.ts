@@ -48,7 +48,7 @@ const FERRITE_CTL =
   process.env.FERRITE_CTL ?? resolve(FERRITE_HOME, "target/release/ferrite-ctl");
 // The daemon this sidecar — and the MCP server it spawns — drives. Same
 // variable and default as `ferrite-ctl --connect`; run.sh sets it.
-const FERRITED = (process.env.FERRITE_CTL_CONNECT ?? "http://127.0.0.1:10001").replace(/\/$/, "");
+const FERRITED = (process.env.FERRITE_CTL_CONNECT ?? "http://127.0.0.1:12001").replace(/\/$/, "");
 
 console.log(`[ferrite-ai] FERRITE_HOME=${FERRITE_HOME}`);
 console.log(`[ferrite-ai] FERRITE_CTL=${FERRITE_CTL}`);

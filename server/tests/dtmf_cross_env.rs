@@ -92,6 +92,10 @@ mod device_cache;
 #[allow(dead_code)]
 mod block_schema;
 
+#[path = "../src/station.rs"]
+#[allow(dead_code, clippy::unused_async)]
+mod station;
+
 #[path = "../src/routes.rs"]
 #[allow(dead_code, clippy::unused_async)]
 mod routes;

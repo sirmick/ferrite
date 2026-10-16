@@ -129,6 +129,10 @@ struct Inner {
     /// stepped preset) is left — stashed when it is entered. The v1
     /// "radio lease": the analyzer remembers whose radio it borrowed.
     return_preset: std::sync::Mutex<Option<String>>,
+    /// The slug the running preset was loaded by (`ft8-ft8`). A variant
+    /// doc keeps its base `name` (`ft8`), which isn't loadable on its
+    /// own — so the analyzer stashes this, not `doc.name`.
+    loaded_slug: std::sync::Mutex<Option<String>>,
     source_config: RwLock<SourceConfig>,
     /// Serialises [`AppState::patch_source`] end to end. The patch
     /// reads `source_config`, probes caps (async), computes a delta,
@@ -222,6 +226,7 @@ impl AppState {
                 decoder_store,
                 preset_doc: RwLock::new(preset),
                 return_preset: std::sync::Mutex::new(None),
+                loaded_slug: std::sync::Mutex::new(None),
                 source_config: RwLock::new(source),
                 patch_gate: Mutex::new(()),
                 profile: RwLock::new(Profile::default()),
@@ -1019,11 +1024,15 @@ impl AppState {
         let current = self.inner.preset_doc.read().await.clone();
         if stepped && !ferrite_runtime::wants_stepped(&current) {
             // Entering the analyzer: remember the receiver to return to.
+            let back = self
+                .loaded_slug()
+                .filter(|slug| slug_names_doc(slug, &current.name))
+                .unwrap_or_else(|| current.name.clone());
             *self
                 .inner
                 .return_preset
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(current.name.clone());
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(back);
         }
         // A sweep pins its own rate (force_params); adopting it would
         // leave the operator's radio at 10 MS/s when they come back.
@@ -1031,7 +1040,23 @@ impl AppState {
             self.adopt_preset_source_rate(&doc).await;
         }
         let plan = self.patch_flowgraph(doc.clone()).await?;
+        *self
+            .inner
+            .loaded_slug
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(name.to_string());
         Ok((doc, plan))
+    }
+
+    /// The slug the running preset was loaded by, when it came through
+    /// [`Self::load_preset_by_name`] (`None` for a boot `--flowgraph` or
+    /// a hand-built graph — `doc.name` is the best name then).
+    pub fn loaded_slug(&self) -> Option<String> {
+        self.inner
+            .loaded_slug
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Leave the spectrum analyzer: load the receiver preset that was
@@ -1870,6 +1895,7 @@ const SWEEP_KEYS: &[&str] = &[
     "usable_fraction",
     "overlap",
     "dc_mask_hz",
+    "bands",
 ];
 
 const HW_CHECKED_KEYS: &[&str] = &["gain_db", "agc", "antenna"];
@@ -2002,6 +2028,16 @@ fn is_valid_preset_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Does a load slug still name this doc? `ft8-ft8` names a doc called
+/// `ft8` (variant of the base); anything else means the graph was
+/// replaced some other way since that load.
+fn slug_names_doc(slug: &str, doc_name: &str) -> bool {
+    slug == doc_name
+        || slug
+            .strip_prefix(doc_name)
+            .is_some_and(|rest| rest.starts_with('-'))
 }
 
 /// Resolve a catalog `slug` to its `FlowgraphDoc` (the runtime mirror
@@ -3194,6 +3230,57 @@ mod tests {
         let base = state.read_preset_doc("olivia").await.unwrap();
         assert_eq!(base["variants"].as_array().map(Vec::len), Some(2));
         assert!(state.read_preset_doc("olivia-9999").await.is_err());
+    }
+
+    /// Entering the analyzer from a variant preset stashes the variant
+    /// slug (`olivia-16-500`), not the doc's base name (`olivia`, which
+    /// has variants and so can't be loaded bare) — leaving goes back.
+    #[tokio::test]
+    async fn analyzer_returns_to_the_variant_slug() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("olivia.json"),
+            serde_json::to_vec(&json!({
+                "name": "olivia", "environments": ["node"],
+                "blocks": { "src": { "type": "Source", "placement": "node",
+                                     "params": { "sample_rate_hz": 48000.0 } } },
+                "wires": [],
+                "variants": [
+                    { "id": "8-500", "default": true, "patch": {} },
+                    { "id": "16-500", "patch": {} }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("pan.json"),
+            serde_json::to_vec(&json!({
+                "name": "pan", "environments": ["node"],
+                "blocks": { "src": { "type": "Source", "placement": "node",
+                                     "params": { "source_kind": "stepped" } } },
+                "wires": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let state = AppState::new(test_preset(), test_source(), Duration::from_millis(5))
+            .with_presets_dir(dir.path().to_path_buf());
+        state.load_preset_by_name("olivia-16-500").await.unwrap();
+        assert_eq!(state.loaded_slug().as_deref(), Some("olivia-16-500"));
+        state.load_preset_by_name("pan").await.unwrap();
+        assert!(state.stepped_active().await);
+        let (doc, _) = state.return_from_stepped().await.unwrap();
+        assert_eq!(doc.name, "olivia");
+        assert_eq!(state.loaded_slug().as_deref(), Some("olivia-16-500"));
+    }
+
+    #[test]
+    fn slug_names_doc_matches_base_and_variants_only() {
+        assert!(slug_names_doc("wbfm", "wbfm"));
+        assert!(slug_names_doc("ft8-ft8", "ft8"));
+        assert!(!slug_names_doc("ft8x", "ft8"));
+        assert!(!slug_names_doc("nbfm", "ft8"));
     }
 
     #[test]

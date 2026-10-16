@@ -974,6 +974,18 @@ pub async fn load_preset(
         .load_preset_by_name(&req.name)
         .await
         .map_err(|e| AppError::radio_or_bad_request("LOAD_PRESET_FAILED", &e))?;
+    // The Spectrum tool measures each band on the station profile's
+    // antenna / gain, same as an MCP / CLI `sweep`.
+    if ferrite_runtime::wants_stepped(&doc) {
+        let mut bands = serde_json::Map::new();
+        bands.insert(
+            "bands".into(),
+            crate::station::station_bands(&crate::station::load(&state.decoder_store())),
+        );
+        if let Err(e) = state.apply_src_params(bands).await {
+            tracing::warn!(error = %format!("{e:#}"), "analyzer: station bands not applied");
+        }
+    }
     let dt_ms = started.elapsed().as_millis();
     let scope = plan.as_ref().map_or("no-pipeline", |p| match p.overall {
         ferrite_blocks::ReconfigureScope::SelfBlock => "self-block",

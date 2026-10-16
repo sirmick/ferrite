@@ -19,6 +19,9 @@ export interface Emitter {
   first_seen_ms: number;
   last_seen_ms: number;
   seen: number;
+  /** Seen in two separate detector frames (two sweep passes / seconds);
+   *  absent on records from older daemons. */
+  confirmed?: boolean;
   sources: string[];
   status: 'new' | 'identified' | 'ignored' | string;
   label?: string | null;
@@ -42,10 +45,11 @@ export const DEFAULT_CONFIG: EmitterConfig = {
 };
 
 /** Shown under the cutoff? Labelled emitters always are (knowledge);
- *  the rest need to have cleared it once and been seen more than once
- *  (a seen-once emitter is tentative — mostly noise peaks, expiring). */
+ *  the rest need to have cleared it once and been confirmed — seen in two
+ *  separate passes / seconds (until then it's tentative — mostly noise
+ *  peaks, expiring). */
 export function aboveCutoff(e: Emitter, minSnrDb: number): boolean {
-  return !!e.label || ((e.peak_snr_db || e.snr_db) >= minSnrDb && e.seen >= 2);
+  return !!e.label || ((e.peak_snr_db || e.snr_db) >= minSnrDb && (e.confirmed ?? e.seen >= 2));
 }
 
 async function post(url: string, body: unknown): Promise<Response> {

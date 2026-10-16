@@ -96,7 +96,7 @@ fn main() {
 
     // --- 2. Generate Rust bindings ---------------------------------------
     //
-    // Tight allowlist: only the five shim ABI functions and the opaque
+    // Tight allowlist: only the shim ABI functions and the opaque
     // state struct. Internal vendor types stay invisible to Rust.
     //
     // Force bindgen's libclang to parse with the HOST triple even when
@@ -119,6 +119,7 @@ fn main() {
         .allowlist_function("rtl433_reset")
         .allowlist_function("rtl433_push_iq")
         .allowlist_function("rtl433_drain_event")
+        .allowlist_function("rtl433_stats")
         .layout_tests(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()

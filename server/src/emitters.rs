@@ -120,6 +120,15 @@ pub struct Emitter {
     pub last_seen_ms: u64,
     /// Observations folded in.
     pub seen: u64,
+    /// Seen in two separate detector frames — two sweep passes, or two
+    /// seconds of the receiver's detector — not just twice within one
+    /// pass (overlapping steps). Until then it's tentative: unlisted and
+    /// pruned after `tentative_ttl_ms`.
+    #[serde(default)]
+    pub confirmed: bool,
+    /// The detector frame it was last seen in (not persisted).
+    #[serde(skip)]
+    pub last_frame: u64,
     /// Detectors that have seen it: `signals` (receiver), `sweep`.
     #[serde(default)]
     pub sources: Vec<String>,
@@ -146,6 +155,10 @@ pub struct Obs {
     pub level_dbfs: f32,
     pub snr_db: f32,
     pub source: &'static str,
+    /// Which detector frame it came from: a sweep's `(cfg, pass)`, the
+    /// receiver detector's second. A sighting in a different frame
+    /// confirms an emitter.
+    pub frame: u64,
 }
 
 /// Store change the tracker asks for.
@@ -275,6 +288,8 @@ impl Tracker {
                     if e.peak_snr_db == 0.0 {
                         e.peak_snr_db = e.snr_db; // records from before the field
                     }
+                    // Records from before `confirmed`: twice seen counted.
+                    e.confirmed |= e.seen >= 2;
                     self.next_id = self.next_id.max(e.id + 1);
                     self.emitters.insert(e.id, e);
                 }
@@ -303,7 +318,7 @@ impl Tracker {
             .filter(|e| e.label.is_none() && e.status == "new")
             .filter(|e| {
                 let idle = now_ms.saturating_sub(e.last_seen_ms);
-                (c.tentative_ttl_ms > 0 && e.seen < 2 && idle >= c.tentative_ttl_ms)
+                (c.tentative_ttl_ms > 0 && !e.confirmed && idle >= c.tentative_ttl_ms)
                     || (c.forget_after_ms > 0 && idle >= c.forget_after_ms)
                     || (below_cutoff && e.peak_snr_db < c.min_snr_db)
             })
@@ -374,6 +389,8 @@ impl Tracker {
                 first_seen_ms: now_ms,
                 last_seen_ms: now_ms,
                 seen: 1,
+                confirmed: false,
+                last_frame: o.frame,
                 sources: vec![o.source.to_string()],
                 status: "new".into(),
                 label: None,
@@ -402,6 +419,11 @@ impl Tracker {
             e.peak_snr_db = e.peak_snr_db.max(o.snr_db);
             e.last_seen_ms = now_ms;
             e.seen += 1;
+            if !e.confirmed && o.frame != e.last_frame {
+                e.confirmed = true;
+                news = true; // it just joined the list
+            }
+            e.last_frame = o.frame;
             if !e.sources.iter().any(|s| s == o.source) {
                 e.sources.push(o.source.to_string());
                 news = true; // a new detector is news
@@ -468,6 +490,13 @@ impl Tracker {
         now_ms: u64,
     ) -> Option<Emitter> {
         let e = self.emitters.get_mut(&id)?;
+        // A new name starts a new identification; re-stating the same
+        // label (or only adjusting confidence) keeps what was recorded.
+        let relabelled = patch
+            .label
+            .as_deref()
+            .is_some_and(|l| e.label.as_deref() != Some(l.trim()));
+        let prior = if relabelled { None } else { e.ident.clone() };
         if let Some(l) = &patch.label {
             let l = l.trim();
             e.label = (!l.is_empty()).then(|| l.to_string());
@@ -487,11 +516,12 @@ impl Tracker {
             e.notes = (!n.trim().is_empty()).then(|| n.clone());
         }
         if patch.label.is_some() || patch.confidence.is_some() || patch.evidence.is_some() {
+            let kept = |k: &str| prior.as_ref().and_then(|p| p.get(k)).cloned();
             e.ident = Some(json!({
                 "by": by,
                 "at_ms": now_ms,
-                "confidence": patch.confidence,
-                "evidence": patch.evidence,
+                "confidence": patch.confidence.map(|c| json!(c)).or_else(|| kept("confidence")),
+                "evidence": patch.evidence.clone().or_else(|| kept("evidence")),
             }));
         }
         self.last_pub.insert(id, now_ms);
@@ -536,7 +566,7 @@ impl Tracker {
             // Labelled emitters always show; the rest must have cleared
             // the cutoff at least once.
             .filter(|e| e.label.is_some() || e.peak_snr_db >= cutoff)
-            .filter(|e| q.tentative || e.label.is_some() || e.seen >= 2)
+            .filter(|e| q.tentative || e.label.is_some() || e.confirmed)
             .filter(|e| match q.status.as_deref() {
                 None => e.status != "ignored",
                 Some("all") => true,
@@ -578,6 +608,7 @@ fn merge_into(k: &mut Emitter, g: Emitter) {
         k.snr_db = g.snr_db;
     }
     k.seen += g.seen;
+    k.confirmed |= g.confirmed;
     for s in g.sources {
         if !k.sources.contains(&s) {
             k.sources.push(s);
@@ -693,7 +724,7 @@ pub async fn post_emitter(
 }
 
 /// Observations in one `signals` snapshot.
-fn from_signals(data: &Value) -> Vec<Obs> {
+fn from_signals(data: &Value, now_ms: u64) -> Vec<Obs> {
     data.get("signals")
         .and_then(Value::as_array)
         .map(|a| {
@@ -705,6 +736,7 @@ fn from_signals(data: &Value) -> Vec<Obs> {
                         level_dbfs: s.get("power_db")?.as_f64()? as f32,
                         snr_db: s.get("snr_db").and_then(Value::as_f64).unwrap_or(0.0) as f32,
                         source: "signals",
+                        frame: now_ms / 1_000,
                     })
                 })
                 .collect()
@@ -732,6 +764,10 @@ fn from_row(data: &Value) -> Vec<Obs> {
     if finite[finite.len() / 2] < MIN_ROW_FLOOR_DBFS {
         return Vec::new();
     }
+    // One frame per pass of one sweep config: overlapping steps of the
+    // same pass don't confirm each other.
+    let frame = (data.get("cfg").and_then(Value::as_u64).unwrap_or(0) << 32)
+        | data.get("pass").and_then(Value::as_u64).unwrap_or(0);
     let mut acc = StepAcc::new(f_lo, bin, db.len());
     acc.fold(&db, 10.0);
     let hi = f_lo + db.len() as f64 * bin;
@@ -744,6 +780,7 @@ fn from_row(data: &Value) -> Vec<Obs> {
             level_dbfs: p.level_dbfs,
             snr_db: p.peak_db,
             source: "sweep",
+            frame,
         })
         .collect()
 }
@@ -801,7 +838,7 @@ pub fn spawn(store: Arc<DecoderStore>, tracker: Shared) {
             let obs = match delta.kind.as_str() {
                 "signals" if now.saturating_sub(last_signals) >= 1_000 => {
                     last_signals = now;
-                    from_signals(&record.data)
+                    from_signals(&record.data, now)
                 }
                 "panorama" => from_row(&record.data),
                 _ => continue,
@@ -883,13 +920,16 @@ pub async fn post_prune(
 mod tests {
     use super::*;
 
+    /// Each call is its own detector frame (a later pass / second).
     fn obs(f: f64, w: f64, lvl: f32, src: &'static str) -> Obs {
+        static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Obs {
             freq_hz: f,
             width_hz: w,
             level_dbfs: lvl,
             snr_db: 20.0,
             source: src,
+            frame: FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -1076,8 +1116,14 @@ mod tests {
         put(t.observe(o, 0));
         let q = EmitterQuery::default();
         assert!(t.list(&q).is_empty(), "seen once = tentative, hidden");
+        t.observe(o, 500);
+        assert!(
+            t.list(&q).is_empty(),
+            "again in the same pass (overlapping steps) doesn't confirm"
+        );
+        o.frame += 1;
         t.observe(o, 1_000);
-        assert_eq!(t.list(&q).len(), 1);
+        assert_eq!(t.list(&q).len(), 1, "a second pass confirms");
         t.config.min_snr_db = 30.0;
         assert!(t.list(&q).is_empty(), "list hides below the cutoff");
         let all = EmitterQuery {
@@ -1110,11 +1156,16 @@ mod tests {
     fn updates_are_throttled_but_new_ones_publish() {
         let mut t = fresh();
         assert!(!t.observe(obs(162.55e6, 12e3, -50.0, "sweep"), 0).is_empty());
+        assert!(
+            !t.observe(obs(162.55e6, 12e3, -50.0, "sweep"), 1_000)
+                .is_empty(),
+            "confirmation is news"
+        );
         assert!(t
-            .observe(obs(162.55e6, 12e3, -50.0, "sweep"), 1_000)
+            .observe(obs(162.55e6, 12e3, -50.0, "sweep"), 2_000)
             .is_empty());
         assert!(!t
-            .observe(obs(162.55e6, 12e3, -50.0, "sweep"), 6_000)
+            .observe(obs(162.55e6, 12e3, -50.0, "sweep"), 7_000)
             .is_empty());
     }
 
@@ -1134,6 +1185,37 @@ mod tests {
         let e = t.edit(id, &p, "ui", 6).unwrap();
         assert_eq!(e.status, "ignored");
         assert_eq!(e.label.as_deref(), Some("local spur"));
+    }
+
+    /// A later edit that only adjusts confidence (or re-states the same
+    /// label, as a CLI relabel does) keeps the evidence an agent stored;
+    /// a different label starts over.
+    #[test]
+    fn edits_keep_evidence_until_the_label_changes() {
+        let mut t = fresh();
+        let id = put(t.observe(obs(454.344e6, 12e3, -40.0, "sweep"), 0)).id;
+        let p = EmitterPatch {
+            label: Some("Connect Plus CC".into()),
+            confidence: Some(0.9),
+            evidence: Some(json!({"decoder": "dsd-fme", "site": 28})),
+            ..Default::default()
+        };
+        t.edit(id, &p, "mcp", 1);
+        let p = EmitterPatch {
+            label: Some("Connect Plus CC".into()),
+            confidence: Some(0.95),
+            ..Default::default()
+        };
+        let ident = t.edit(id, &p, "cli", 2).unwrap().ident.unwrap();
+        assert_eq!(ident["evidence"]["site"], 28);
+        assert!((ident["confidence"].as_f64().unwrap() - 0.95).abs() < 1e-6);
+        let p = EmitterPatch {
+            label: Some("DMR Tier III CC".into()),
+            ..Default::default()
+        };
+        let ident = t.edit(id, &p, "cli", 3).unwrap().ident.unwrap();
+        assert!(ident["evidence"].is_null());
+        assert!(ident["confidence"].is_null());
     }
 
     #[test]

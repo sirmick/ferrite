@@ -220,7 +220,6 @@ fn http_err(ctx: &str, msg: String) -> McpError {
 /// One message off the event plane, as delivered to a `subscribe_records`
 /// callback. `seq` is present for store deltas (not for log lines).
 pub(crate) struct EventRecord {
-    pub topic: String,
     pub retain: bool,
     pub seq: Option<u64>,
     pub value: Value,
@@ -380,7 +379,6 @@ impl Http {
                         }
                     }
                     let rec = EventRecord {
-                        topic: p.topic.clone(),
                         retain: p.retain,
                         seq,
                         value,
@@ -651,8 +649,8 @@ pub struct SpotMapArgs {
     /// How far back, minutes (default 30).
     #[serde(default)]
     pub minutes: Option<f64>,
-    /// The receive station's Maidenhead grid (default: the daemon's
-    /// `FERRITE_RX_GRID`). Gives distances + bearings.
+    /// The receive station's Maidenhead grid (default: the station
+    /// profile's `grid`, see `station`). Gives distances + bearings.
     #[serde(default)]
     pub rx_grid: Option<String>,
 }
@@ -840,6 +838,18 @@ pub struct SweepArgs {
     /// Points in the max-hold profile (default 64; 0 = none).
     #[serde(default)]
     pub profile_points: Option<usize>,
+    /// Antenna for the whole sweep (default: the station profile's per
+    /// band, see `station`).
+    #[serde(default)]
+    pub antenna: Option<String>,
+    /// Gain dial for the whole sweep, dB (default: the station profile's
+    /// per band; a sweep is always AGC-off).
+    #[serde(default)]
+    pub gain_db: Option<f64>,
+    /// `false` = ignore the station profile's band table (use the radio's
+    /// current antenna / gain except where overridden). Default true.
+    #[serde(default)]
+    pub station: Option<bool>,
     /// Take the radio from a running receiver (409 RADIO_BUSY otherwise).
     #[serde(default)]
     pub force: bool,
@@ -933,6 +943,78 @@ pub struct EmitterSettingsArgs {
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct DecodeArgs {
+    /// Decoder preset slug (`dsd-fme`, `dmr`, `rtl433-433`, `pager`,
+    /// `adsb`, …). FT8 / WSPR / fldigi modes are refused (wall-clock
+    /// slots / shared state) — `listen` to those live.
+    pub preset: String,
+    /// A kept snapshot id (`snap-…` from `snapshot` / `inspect`).
+    #[serde(default)]
+    pub snapshot: Option<String>,
+    /// Or a `.cf32` capture path (its sidecar `.json` gives rate and
+    /// centre) under the captures dir or /tmp/ferrite-captures — what
+    /// `start_capture_iq` writes.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Channel to decode, Hz (default: the recording's centre).
+    #[serde(default)]
+    pub freq_hz: Option<f64>,
+    /// Playback speed × real time (default 4).
+    #[serde(default)]
+    pub speed: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct ListenArgs {
+    /// Frequency to listen at, Hz (the dial, as `tune`).
+    pub freq_hz: f64,
+    /// Preset slug (`nbfm`, `ft8-ft8`, `dsd-fme`, `rtl433-433`, …; see
+    /// `list_presets`). Omit to keep the running receiver preset.
+    #[serde(default)]
+    pub preset: Option<String>,
+    /// Antenna override (default: the station profile's row for the
+    /// frequency).
+    #[serde(default)]
+    pub antenna: Option<String>,
+    /// Gain dial override, dB (implies AGC off unless `agc` is given).
+    #[serde(default)]
+    pub gain_db: Option<f64>,
+    #[serde(default)]
+    pub agc: Option<bool>,
+    /// `false` = don't apply the station profile's row.
+    #[serde(default)]
+    pub station: Option<bool>,
+    /// Listen this long after tuning, then report decodes + decoder
+    /// health + a verdict (default 0 = return once tuned; max 300).
+    #[serde(default)]
+    pub secs: Option<f64>,
+    /// Leave the spectrum analyzer if it holds the radio.
+    #[serde(default)]
+    pub force: bool,
+    /// Optional "why" note for the activity transcript.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct StationArgs {
+    /// Set the receiver's Maidenhead grid (`CM87`); `""` clears it.
+    #[serde(default)]
+    pub grid: Option<String>,
+    /// Set the station callsign; `""` clears it.
+    #[serde(default)]
+    pub callsign: Option<String>,
+    /// Replace the per-band front-end table: `[{lo_hz, hi_hz, label?,
+    /// antenna?, gain_db?, agc?}]`. The narrowest row containing a
+    /// frequency wins; `gain_db` without `agc` means AGC off.
+    #[serde(default)]
+    pub bands: Option<Value>,
+    /// Instead: which front-end row applies at this frequency, Hz.
+    #[serde(default)]
+    pub at_hz: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct LabelEmitterArgs {
     /// Emitter number (`id` from `emitters`).
     pub id: u64,
@@ -1000,7 +1082,7 @@ pub struct AwaitArgs {
     /// Default false: only what arrives *after* you subscribe.
     #[serde(default)]
     pub include_retained: Option<bool>,
-    /// Only records whose `record.data` matches every field here: a
+    /// Only records whose `data` matches every field here: a
     /// scalar must be equal, an array means "any of". E.g. wait for a
     /// capture to finish: `kind: "jobs/cap-3", include_retained: true,
     /// filter: {"status": ["done", "failed", "interrupted"]}`; or only
@@ -1009,7 +1091,34 @@ pub struct AwaitArgs {
     pub filter: Option<serde_json::Map<String, Value>>,
 }
 
-/// Does this event-plane payload's `record.data` satisfy `filter`?
+/// One event-plane message as `await` hands it out: the store record's
+/// fields at the top (`kind, seq, at_ms, data, ctx?, key?`), plus `op`
+/// (`add` / `upsert` / `expire` / `reset`) and `retained` — instead of
+/// the wire's `{topic, record: {kind, op, record: {…, data}}}` nesting.
+#[must_use]
+pub fn flatten_record(value: &Value, retained: bool) -> Value {
+    // Log lines (`{target, level, message, at_ms}`) and other bare
+    // payloads have no wrapper to lift.
+    let mut out = match value.get("record").and_then(Value::as_object) {
+        Some(r) => r.clone(),
+        None => value.as_object().cloned().unwrap_or_default(),
+    };
+    for k in ["kind", "op", "key"] {
+        if let Some(v) = value.get(k) {
+            out.entry(k.to_string()).or_insert_with(|| v.clone());
+        }
+    }
+    for k in ["seq", "epoch"] {
+        if let Some(v) = value.get(k) {
+            out.entry(k.to_string()).or_insert_with(|| v.clone());
+        }
+    }
+    out.insert("retained".into(), Value::Bool(retained));
+    Value::Object(out)
+}
+
+/// Does this event-plane payload's `record.data` (the wire shape, before
+/// [`flatten_record`]) satisfy `filter`?
 /// Records without data (resets, expiries) never match a non-empty one.
 #[must_use]
 pub fn record_matches(value: &Value, filter: &serde_json::Map<String, Value>) -> bool {
@@ -1634,6 +1743,76 @@ impl FerriteServer {
         Ok(out)
     }
 
+    /// Run a decoder preset over a recording (`POST /api/decode`).
+    pub(crate) async fn decode_op(&self, args: DecodeArgs) -> Result<Value, McpError> {
+        self.http
+            .post_slow(
+                "/api/decode",
+                json!({
+                    "preset": args.preset, "snapshot": args.snapshot, "path": args.path,
+                    "freq_hz": args.freq_hz, "speed": args.speed,
+                }),
+                "decode",
+                None,
+                Duration::from_secs(180),
+            )
+            .await
+    }
+
+    /// Preset + front end + tune + start, then optionally listen and
+    /// report (`POST /api/listen`).
+    pub(crate) async fn listen_op(&self, args: ListenArgs) -> Result<Value, McpError> {
+        let secs = args.secs.unwrap_or(0.0).clamp(0.0, 300.0);
+        self.http
+            .post_slow(
+                "/api/listen",
+                json!({
+                    "freq_hz": args.freq_hz, "preset": args.preset,
+                    "antenna": args.antenna, "gain_db": args.gain_db, "agc": args.agc,
+                    "station": args.station, "secs": secs, "force": args.force,
+                }),
+                "listen",
+                args.note.as_deref(),
+                Duration::from_secs_f64(secs + 90.0),
+            )
+            .await
+    }
+
+    /// Read / change the station profile (`/api/station`), or look up the
+    /// front-end row for one frequency (`/api/station/at`).
+    pub(crate) async fn station_op(&self, args: StationArgs) -> Result<Value, McpError> {
+        if let Some(hz) = args.at_hz {
+            return self
+                .http
+                .get(&format!("/api/station/at?freq_hz={hz}"))
+                .await;
+        }
+        let mut patch = serde_json::Map::new();
+        let clearable = |v: String| {
+            if v.trim().is_empty() {
+                Value::Null
+            } else {
+                json!(v.trim())
+            }
+        };
+        if let Some(g) = args.grid {
+            patch.insert("grid".into(), clearable(g));
+        }
+        if let Some(c) = args.callsign {
+            patch.insert("callsign".into(), clearable(c));
+        }
+        if let Some(b) = args.bands {
+            patch.insert("bands".into(), b);
+        }
+        if patch.is_empty() {
+            self.http.get("/api/station").await
+        } else {
+            self.http
+                .post("/api/station", Value::Object(patch), "station", None)
+                .await
+        }
+    }
+
     /// Label / ignore an emitter (`POST /api/emitters/:id`).
     pub(crate) async fn label_emitter_op(&self, args: LabelEmitterArgs) -> Result<Value, McpError> {
         self.http
@@ -1662,6 +1841,7 @@ impl FerriteServer {
                     "passes": args.passes, "threshold_db": args.threshold_db,
                     "max_peaks": args.max_peaks, "profile_points": args.profile_points,
                     "force": args.force, "restore": args.restore, "timeout_s": timeout,
+                    "antenna": args.antenna, "gain_db": args.gain_db, "station": args.station,
                 }),
                 "sweep",
                 args.note.as_deref(),
@@ -1790,9 +1970,7 @@ impl FerriteServer {
                 if !record_matches(&rec.value, &filter) {
                     return true;
                 }
-                records.push(
-                    json!({ "topic": rec.topic, "retained": rec.retain, "record": rec.value }),
-                );
+                records.push(flatten_record(&rec.value, rec.retain));
                 records.len() < max
             })
             .await?;
@@ -2545,7 +2723,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Spectrum analyzer: sweep the radio across ANY range (wider than one span — it retunes in ~7.6 MHz steps, ~55 ms each) and get a summary instead of raw bins: `{range_hz, rbw_hz, steps, passes, floor_dbfs, floor_range_dbfs, peaks:[{freq_hz, level_dbfs, peak_db, avg_db, width_hz, duty, bursty}], profile:[[freq_hz, maxhold_dbfs]], complete, text}`. `peak_db`/`avg_db` are over the *local* (per-step) floor and `width_hz` is the occupied span above the threshold, so the radio's gain-band steps don't read as signals; `floor_range_dbfs` shows that spread. Use `passes` ≥ 3 to catch intermittent transmitters (max-hold) and get `duty`/`bursty`. This takes the radio: if a receiver preset is running it answers 409 RADIO_BUSY unless `force=true`; pass `restore=true` to put the receiver back after. The sweep is visible in the UI (Spectrum tool) and the summary lands in the AI panel. Then `tune(freq_hz)` (force if the analyzer is still up) or `spectrum` for a few-Hz look inside the span."
+        description = "Spectrum analyzer: sweep the radio across ANY range (wider than one span — it retunes in ~7.6 MHz steps, ~55 ms each) and get a summary instead of raw bins: `{range_hz, rbw_hz, steps, passes, floor_dbfs, floor_range_dbfs, peaks:[{freq_hz, level_dbfs, peak_db, avg_db, width_hz, duty, bursty}], profile:[[freq_hz, maxhold_dbfs]], front_end:[{lo_hz, hi_hz, antenna, gain_db}], complete, text}`. Each step is measured on the station profile's antenna / gain for its band (see `station`) — so an HF sweep uses the HF antenna without you setting it; `antenna` / `gain_db` override for the whole sweep, `station:false` ignores the profile. `front_end` says what measured which range. `peak_db`/`avg_db` are over the *local* (per-step) floor and `width_hz` is the occupied span above the threshold, so the radio's gain-band steps don't read as signals; `floor_range_dbfs` shows that spread. Use `passes` ≥ 3 to catch intermittent transmitters (max-hold) and get `duty`/`bursty`. This takes the radio: if a receiver preset is running it answers 409 RADIO_BUSY unless `force=true`; pass `restore=true` to put the receiver back after. The sweep is visible in the UI (Spectrum tool) and the summary lands in the AI panel. Then `tune(freq_hz)` (force if the analyzer is still up) or `spectrum` for a few-Hz look inside the span."
     )]
     async fn sweep(
         &self,
@@ -2595,6 +2773,36 @@ impl FerriteServer {
     }
 
     #[tool(
+        description = "Run a decoder preset over recorded IQ instead of the live radio — a kept `snapshot` (from `snapshot` / `inspect`) or a capture `path` (`start_capture_iq` output). Capture once, then try decoder after decoder on the same seconds (dsd-fme, dmr, rtl433-433, pager, packet, adsb, ais, …) without retuning or waiting for the next burst. `freq_hz` picks the channel inside a wideband recording (default its centre). Returns `{decodes:{count, by_kind, records:[{kind, data}]}, health, verdict}` like `listen`. The live receiver keeps running untouched. FT8 / WSPR / fldigi modes are refused — listen to those live."
+    )]
+    async fn decode(
+        &self,
+        Parameters(args): Parameters<DecodeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.decode_op(args).await?)
+    }
+
+    #[tool(
+        description = "Listen at a frequency with a decoder, in one call: loads `preset` (if it changes), sets antenna / gain / AGC from the station profile's row for the frequency (overrides: `antenna`, `gain_db`, `agc`; `station:false` skips the profile), tunes, starts. With `secs`, it then listens and reports `{decodes:{count, by_kind, recent:[{kind, seq, at_ms, data}]}, health:{block_id: {...}}, verdict, readback}` — `health` is what each decoder saw over the window (input level, sync / candidate / pulse counts, decodes; `_cum` counters as deltas) and `verdict` says which case you're in: decoding, nothing above the floor, a signal the decoder can't sync, or syncs that never decode (e.g. a DMR control channel: dsd-fme syncs, CSBKs, and the network's `system` identity, but no calls). FT8 needs `secs` ≥ 16 (one slot). Use instead of load_preset + set_block_param + tune + start + await_events. While the spectrum analyzer holds the radio: 409 RADIO_BUSY unless `force`."
+    )]
+    async fn listen(
+        &self,
+        Parameters(args): Parameters<ListenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.listen_op(args).await?)
+    }
+
+    #[tool(
+        description = "The station profile — where the receiver is and how to set its front end per band: `{grid?, callsign?, bands:[{lo_hz, hi_hz, label?, antenna?, gain_db?, agc?}]}`. `listen` and `sweep` apply the matching row automatically (narrowest range containing the frequency; `gain_db` without `agc` means AGC off), and `spot_map` measures from `grid`. No args reads it; `grid` / `callsign` / `bands` change it for every surface (`bands` replaces the whole table; `\"\"` clears grid / callsign). `at_hz` instead answers which row applies at one frequency: `{freq_hz, band, src}`."
+    )]
+    async fn station(
+        &self,
+        Parameters(args): Parameters<StationArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.station_op(args).await?)
+    }
+
+    #[tool(
         description = "Record what an emitter is: `label` (sets status `identified`), or `status:\"ignored\"` for a spur / birdie / not interesting (hidden from lists). Give `confidence` (0–1) and `evidence` (decodes heard, width / keying / baud measured, sigwiki match, band plan) — the operator sees the label on the emitter panel and the panorama, and it persists as the station's knowledge. Use the `id` from `emitters`."
     )]
     async fn label_emitter(
@@ -2615,7 +2823,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Wait for the next record(s) of a kind on the event plane instead of polling. Subscribes to `ferrite/state/<kind>` on the daemon's embedded MQTT broker and returns once `max` records arrived (default 1) or `timeout_s` elapsed (default 30; `timed_out: true` with whatever came, never an error). `kind` is any store kind (`adsb`, `aprs`, `pager`, `ft8`, `transcribe`, `signals`, `activity`, `jobs`, `graph`, `status`) or a log subtree (`log/decoder`, `log/decoder/pocsag`). Each record is the same `{kind, seq, epoch, op, record:{at_ms, key?, data}}` delta `decodes` is built from; log lines are `{target, level, message, at_ms}`. Pass `since_seq` (the last `seq` you saw) to skip anything already known; `include_retained: true` to also get the current value first. Typical loop: `tune` → `await_events(kind='pager', max=5, timeout_s=60)` → read `records[*].record.data`."
+        description = "Wait for the next record(s) of a kind on the event plane instead of polling. Subscribes to `ferrite/state/<kind>` on the daemon's embedded MQTT broker and returns once `max` records arrived (default 1) or `timeout_s` elapsed (default 30; `timed_out: true` with whatever came, never an error). `kind` is any store kind (`adsb`, `aprs`, `pager`, `ft8`, `transcribe`, `signals`, `activity`, `jobs`, `graph`, `status`) or a log subtree (`log/decoder`, `log/decoder/pocsag`). Each record is flat: `{kind, seq, at_ms, op, key?, data, ctx?, retained}` (`data` is the decoder's own JSON, `ctx` the RF context it was heard in); log lines are `{target, level, message, at_ms, retained}`. Pass `since_seq` (the last `seq` you saw) to skip anything already known; `include_retained: true` to also get the current value first. Typical loop: `tune` → `await_events(kind='pager', max=5, timeout_s=60)` → read `records[*].data`."
     )]
     async fn await_events(
         &self,
@@ -2792,7 +3000,7 @@ impl FerriteServer {
     }
 
     #[tool(
-        description = "Where the stations an FT8 / FT4 / WSPR decoder heard are: one spot per callsign over the last `minutes` (default 30) — grid → lat/lon, distance (km) and bearing from the receive grid (`rx_grid`, default the daemon's `FERRITE_RX_GRID`), latest SNR, decode count; farthest first. The operator sees it drawn as a world map in the AI tab; you get `result.spots` and a `text` table. Needs decodes with grids — run the `ft8` / `wspr` preset for a few slots first."
+        description = "Where the stations an FT8 / FT4 / WSPR decoder heard are: one spot per callsign over the last `minutes` (default 30) — grid → lat/lon, distance (km) and bearing from the receive grid (`rx_grid`, default the station profile's `grid`), latest SNR, decode count; farthest first. The operator sees it drawn as a world map in the AI tab; you get `result.spots` and a `text` table. Needs decodes with grids — run the `ft8` / `wspr` preset for a few slots first."
     )]
     async fn spot_map(
         &self,
@@ -2872,6 +3080,9 @@ Find and measure signals — every result is drawn in the AI tab
 - `spectrum` — Hz-accurate peaks over a ≤400 kHz range: level over the floor, width, duty, `keyed`.
 - `sweep` — spectrum analyzer over ANY range (steps the radio ~7.6 MHz at a time): per-step floor, emitters (freq, level, width, duty, bursty), max-hold profile. Takes the radio: `force` to preempt a running receiver, `restore` to give it back; `tune(force=true)` leaves it.
 - `inspect` — characterise one emitter / frequency: tunes the receiver there, records a few seconds, returns the feature bundle (centre, occupied width, SNR, tones + FSK shift, keying / bursts / period, constant-envelope) with a one-line hint AND the spectrogram as an image. The measurement between "found it" and "named it"; its headline is stored on the emitter.
+- `listen` — the one-call way to hear something: preset + station front end + tune + start, and with `secs` the decodes, each decoder's health and a verdict (silence vs can't-sync vs syncs-but-no-decodes). Prefer it to chaining load_preset / set_block_param / tune / await_events.
+- `decode` — run a decoder over a snapshot / capture instead of live RF: capture a burst once, then try dsd-fme, dmr, rtl433, pager, … on the same seconds.
+- `station` — the station profile: receiver `grid` (spot-map origin) and the per-band front-end table (antenna / gain / AGC) that `listen` and `sweep` apply on their own; `at_hz` shows the row for one frequency.
 - `emitters` / `label_emitter` — the station's memory of the band: every transmitter the receiver's detector or a sweep has seen, merged, numbered and persisted (band, level, width, first/last seen, status new / identified / ignored). Your work queue is `emitters(status="new")`; record what you find with `label_emitter` (label + confidence + evidence), and ignore spurs so they stop coming back. `emitter_settings` reads / sets the SNR cutoff and prunes the noise (never labelled ones).
 - `spectrogram` — time × frequency of a range: read the mode off its shape (CW dashes, RTTY's two tones, FT8 tone blocks, PSK31's thin line).
 - `envelope` — on/off timeline at one frequency: Morse elements, beacon slots, bursts.
@@ -2995,5 +3206,32 @@ mod instructions_tests {
         for bad in SHELL_ONLY {
             assert!(!INSTRUCTIONS.contains(bad), "INSTRUCTIONS mention {bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod await_tests {
+    use super::flatten_record;
+    use serde_json::json;
+
+    #[test]
+    fn flatten_record_lifts_the_store_record_and_keeps_bare_payloads() {
+        let wire = json!({
+            "kind": "ft8", "seq": 7, "epoch": 3, "op": "add",
+            "record": { "seq": 7, "epoch": 3, "at_ms": 100,
+                        "data": { "msg": "CQ K1ABC FN42" },
+                        "ctx": { "listen_hz": 7_074_000.0 } }
+        });
+        let flat = flatten_record(&wire, false);
+        assert_eq!(flat["kind"], "ft8");
+        assert_eq!(flat["op"], "add");
+        assert_eq!(flat["seq"], 7);
+        assert_eq!(flat["data"]["msg"], "CQ K1ABC FN42");
+        assert_eq!(flat["ctx"]["listen_hz"], 7_074_000.0);
+        assert_eq!(flat["retained"], false);
+        let log = json!({ "target": "decoder::ft8", "level": "INFO", "message": "m", "at_ms": 1 });
+        let flat = flatten_record(&log, true);
+        assert_eq!(flat["message"], "m");
+        assert_eq!(flat["retained"], true);
     }
 }

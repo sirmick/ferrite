@@ -139,7 +139,8 @@ export function signalsOf(name: string, result: string | undefined): SignalRow[]
 
 /** Transcript lines in a tool result — `decodes(kind="transcribe")`
  *  (`{recent: [{seq, at_ms, data}]}`) or `await_events` (`{records:
- *  [{record: {record: {seq, at_ms, data}}}]}`) — for the card's compact
+ *  [{seq, at_ms, data}]}`; older sidecars nested it as `{record: {record:
+ *  …}}`) — for the card's compact
  *  transcript. A record counts when its `data` has the transcript entry
  *  shape (`text` + `t0`/`t1`); speakers ride along from the server. */
 export function transcriptOf(result: string | undefined, max = 8): TLine[] | null {

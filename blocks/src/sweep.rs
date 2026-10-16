@@ -81,6 +81,52 @@ pub struct SweepParams {
     /// Half-width around each step's LO that is interpolated over (the
     /// DC / LO-leakage spur), Hz.
     pub dc_mask_hz: f64,
+    /// Front end per frequency range (the station profile's band table,
+    /// or one row for a whole-sweep override): a step whose centre falls
+    /// in a row is measured on that antenna / gain; the narrowest row
+    /// wins; steps outside every row use the radio's own setting.
+    pub bands: Vec<SweepBand>,
+}
+
+/// One row of [`SweepParams::bands`].
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct SweepBand {
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub antenna: Option<String>,
+    /// Gain dial, dB (a sweep is always AGC-off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gain_db: Option<f64>,
+}
+
+/// The front end a step is measured with (`None` = the radio's own).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StepFrontEnd {
+    pub antenna: Option<String>,
+    pub gain_db: Option<f64>,
+}
+
+impl SweepParams {
+    /// The front end for a step centred at `hz`: the narrowest band row
+    /// containing it.
+    #[must_use]
+    pub fn front_end_at(&self, hz: f64) -> StepFrontEnd {
+        self.bands
+            .iter()
+            .filter(|b| (b.lo_hz..b.hi_hz).contains(&hz))
+            .min_by(|a, b| {
+                (a.hi_hz - a.lo_hz)
+                    .partial_cmp(&(b.hi_hz - b.lo_hz))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|b| StepFrontEnd {
+                antenna: b.antenna.clone(),
+                gain_db: b.gain_db,
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl Default for SweepParams {
@@ -94,6 +140,7 @@ impl Default for SweepParams {
             usable_fraction: 0.8,
             overlap: 0.05,
             dc_mask_hz: 5_000.0,
+            bands: Vec::new(),
         }
     }
 }
@@ -108,6 +155,7 @@ pub const SWEEP_LIVE_KEYS: &[&str] = &[
     "usable_fraction",
     "overlap",
     "dc_mask_hz",
+    "bands",
 ];
 
 /// One step: LO position and the slice of the range it owns.
@@ -338,6 +386,12 @@ pub trait SweepRadio: Send {
     fn rate_hz(&self) -> f64;
     /// Retune the LO; returns when the driver accepted it.
     fn tune(&mut self, hz: f64) -> Result<()>;
+    /// Switch antenna / gain for the next step (`None` fields go back to
+    /// the radio's own setting). Called only when it changes; the
+    /// post-retune discard covers the settling.
+    fn configure(&mut self, _fe: &StepFrontEnd) -> Result<()> {
+        Ok(())
+    }
     fn read(&mut self, buf: &mut [Complex<f32>]) -> SweepRead;
 }
 
@@ -496,9 +550,20 @@ pub fn run_sweep<R: SweepRadio>(
             params.sweep_start_hz.min(params.sweep_stop_hz),
             params.sweep_start_hz.max(params.sweep_stop_hz),
         ];
+        // The front end currently set (`None` until the first step).
+        let mut applied: Option<StepFrontEnd> = None;
         loop {
             let pass_t0 = Instant::now();
             for (i, step) in plan.steps.iter().enumerate() {
+                let fe = params.front_end_at(step.center_hz);
+                if applied.as_ref() != Some(&fe) {
+                    match radio.configure(&fe) {
+                        Ok(()) => applied = Some(fe.clone()),
+                        Err(e) => {
+                            tracing::warn!(error = %format!("{e:#}"), ?fe, "sweep front-end change failed");
+                        }
+                    }
+                }
                 if let Err(e) = radio.tune(step.center_hz) {
                     tracing::warn!(error = %format!("{e:#}"), hz = step.center_hz, "sweep tune failed");
                     std::thread::sleep(Duration::from_millis(100));
@@ -531,7 +596,7 @@ pub fn run_sweep<R: SweepRadio>(
                     }
                 }
                 let (f_lo, row) = crop_row(&spectrum.db_shifted(), &plan, step);
-                let line = serde_json::json!({
+                let mut line = serde_json::json!({
                     "cfg": gen,
                     "pass": pass,
                     "step": i,
@@ -547,9 +612,16 @@ pub fn run_sweep<R: SweepRadio>(
                     "fft_size": n,
                     "averages": params.averages.max(1),
                     "t_ms": crate::sweep::now_ms(),
-                })
-                .to_string();
-                shared.push_row(line);
+                });
+                // Which front end measured it (levels only compare within
+                // one antenna / gain).
+                if let Some(a) = &fe.antenna {
+                    line["antenna"] = serde_json::json!(a);
+                }
+                if let Some(g) = fe.gain_db {
+                    line["gain_db"] = serde_json::json!(g);
+                }
+                shared.push_row(line.to_string());
             }
             pass += 1;
             shared.passes.fetch_add(1, Ordering::Relaxed);
@@ -1086,6 +1158,48 @@ mod tests {
         assert!((back[0] + 100.0).abs() < 0.01);
         assert!((back[1] + 12.34).abs() < 0.01);
         assert!(back[3].is_nan());
+    }
+
+    #[test]
+    fn front_end_is_the_narrowest_band_row() {
+        let mut p = params(88e6, 108e6);
+        p.bands = vec![
+            SweepBand {
+                lo_hz: 0.0,
+                hi_hz: 1e9,
+                antenna: Some("A".into()),
+                gain_db: Some(30.0),
+            },
+            SweepBand {
+                lo_hz: 95e6,
+                hi_hz: 110e6,
+                antenna: Some("B".into()),
+                gain_db: None,
+            },
+        ];
+        assert_eq!(p.front_end_at(90e6).antenna.as_deref(), Some("A"));
+        let fe = p.front_end_at(100e6);
+        assert_eq!(fe.antenna.as_deref(), Some("B"));
+        assert_eq!(fe.gain_db, None);
+        assert_eq!(p.front_end_at(2e9), StepFrontEnd::default());
+    }
+
+    /// Rows say which antenna / gain measured them, per step.
+    #[test]
+    fn rows_carry_each_steps_front_end() {
+        let mut p = params(88e6, 108e6);
+        p.bands = vec![SweepBand {
+            lo_hz: 95e6,
+            hi_hz: 110e6,
+            antenna: Some("Antenna B".into()),
+            gain_db: Some(20.0),
+        }];
+        let rows = one_pass(FakeBand::new(10e6, Vec::new()), p);
+        assert_eq!(rows.len(), 3);
+        let by_step = |i: u64| rows.iter().find(|r| r["step"] == i).unwrap();
+        assert!(by_step(0).get("antenna").is_none());
+        assert_eq!(by_step(1)["antenna"], "Antenna B");
+        assert_eq!(by_step(2)["gain_db"], 20.0);
     }
 
     /// Run one pass over `band`; returns the decoded rows.
